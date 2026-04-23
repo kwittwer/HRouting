@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e3a5f"/>
+      <stop offset="100%" stop-color="#0d1f33"/>
+    </linearGradient>
+    <linearGradient id="roof" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e74c3c"/>
+      <stop offset="100%" stop-color="#c0392b"/>
+    </linearGradient>
+    <linearGradient id="pipe" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#e63946"/>
+      <stop offset="100%" stop-color="#f4a261"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="248" fill="url(#bg)" stroke="#2a9d8f" stroke-width="8"/>
+  <!-- House body -->
+  <rect x="140" y="240" width="232" height="160" rx="8" fill="#f5f5f5" stroke="#ddd" stroke-width="3"/>
+  <!-- Roof -->
+  <polygon points="120,248 256,140 392,248" fill="url(#roof)" stroke="#a93226" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Door -->
+  <rect x="230" y="310" width="52" height="90" rx="4" fill="#8B6914"/>
+  <circle cx="272" cy="360" r="4" fill="#d4a017"/>
+  <!-- Window left -->
+  <rect x="162" y="270" width="48" height="40" rx="3" fill="#87CEEB" stroke="#666" stroke-width="2"/>
+  <line x1="186" y1="270" x2="186" y2="310" stroke="#666" stroke-width="1.5"/>
+  <line x1="162" y1="290" x2="210" y2="290" stroke="#666" stroke-width="1.5"/>
+  <!-- Window right -->
+  <rect x="302" y="270" width="48" height="40" rx="3" fill="#87CEEB" stroke="#666" stroke-width="2"/>
+  <line x1="326" y1="270" x2="326" y2="310" stroke="#666" stroke-width="1.5"/>
+  <line x1="302" y1="290" x2="350" y2="290" stroke="#666" stroke-width="1.5"/>
+  <!-- Heating pipes (snail pattern) -->
+  <g fill="none" stroke="url(#pipe)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+    <!-- Pipe path - serpentine/snail underfloor heating pattern -->
+    <path d="M160,370 L160,390 L350,390 L350,370"/>
+    <path d="M350,370 L350,360 L175,360 L175,370"/>
+    <path d="M175,345 L340,345 L340,335 L175,335"/>
+    <path d="M175,345 L175,335"/>
+  </g>
+  <!-- Temperature indicator -->
+  <g transform="translate(380, 150)">
+    <rect x="-14" y="-30" width="28" height="70" rx="14" fill="#fff" stroke="#e63946" stroke-width="3"/>
+    <rect x="-8" y="-10" width="16" height="44" rx="8" fill="#e63946"/>
+    <circle cx="0" cy="34" r="12" fill="#e63946"/>
+  </g>
+  <!-- Text "H" badge -->
+  <circle cx="110" cy="420" r="36" fill="#2a9d8f"/>
+  <text x="110" y="432" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="bold" font-size="40" fill="white">H</text>
+</svg>

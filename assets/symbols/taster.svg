@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Taster / Klingeltaster nach DIN EN 60617 -->
+  <circle cx="15" cy="50" r="8" fill="#333"/>
+  <circle cx="85" cy="50" r="8" fill="none" stroke="#333" stroke-width="4"/>
+  <line x1="22" y1="47" x2="78" y2="47" stroke="#333" stroke-width="4" stroke-linecap="round"/>
+  <polygon points="70,37 78,47 70,47" fill="#333"/>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Kreuzschalter nach DIN EN 60617 -->
+  <circle cx="15" cy="65" r="8" fill="#333"/>
+  <circle cx="85" cy="25" r="8" fill="none" stroke="#333" stroke-width="4"/>
+  <circle cx="85" cy="65" r="8" fill="none" stroke="#333" stroke-width="4"/>
+  <line x1="22" y1="62" x2="78" y2="28" stroke="#333" stroke-width="4" stroke-linecap="round"/>
+  <line x1="22" y1="62" x2="78" y2="62" stroke="#333" stroke-width="4" stroke-linecap="round"/>
+  <line x1="48" y1="35" x2="48" y2="55" stroke="#333" stroke-width="3" stroke-linecap="round"/>
+</svg>
