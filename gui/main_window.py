@@ -824,6 +824,8 @@ class MainWindow(QMainWindow):
         if not path:
             return
         panel = self.param_panel.floorplan_panels.get(fp_id)
+        if panel is None:
+            panel = self.param_panel.furniture_panels.get(fp_id)
         if panel:
             panel.set_file_path(path)
         self.canvas.load_floor_plan_image(fp_id, path)
@@ -933,7 +935,7 @@ class MainWindow(QMainWindow):
         """Connect per-panel signals that need main_window slots (for load_project)."""
         pass  # All signals route through ParameterPanel aggregate signals
 
-    def _add_circuit(self):
+    def _add_circuit(self, fp_id: str = ""):
         if not self._svg_path and not self.canvas._floor_plans:
             QMessageBox.warning(self, "Kein Grundriss",
                                 "Bitte zuerst einen Grundriss hinzufügen.")
@@ -949,7 +951,7 @@ class MainWindow(QMainWindow):
         self._circuit_counter += 1
         cid = f"HK-{self._circuit_counter}"
         color = COLORS[(self._circuit_counter - 1) % len(COLORS)]
-        self._create_circuit_panel(cid, name=cid, color=color)
+        self._create_circuit_panel(cid, fp_id=fp_id or None, name=cid, color=color)
         self.canvas.start_drawing(cid)
         self.status.showMessage(
             f"{cid}: Polygon zeichnen  |  "
@@ -964,10 +966,11 @@ class MainWindow(QMainWindow):
         self._update_circuit_area(circuit_id)
 
     def _create_circuit_panel(self, circuit_id: str,
+                              fp_id: str | None = None,
                               name: str | None = None,
                               color: str | None = None):
         panel = self.param_panel.add_circuit_panel(
-            circuit_id, name=name, color=color
+            circuit_id, fp_id=fp_id, name=name, color=color
         )
         panel.draw_route_requested.connect(self._start_manual_route)
         panel.edit_polygon_requested.connect(self._on_edit_polygon_requested)
@@ -1199,17 +1202,18 @@ class MainWindow(QMainWindow):
 
     # ── Elektro ──────────────────────────────────────────────────────── #
 
-    def _add_elec_point(self):
+    def _add_elec_point(self, fp_id: str = ""):
         self._elec_point_counter += 1
         pid = f"AP-{self._elec_point_counter}"
-        panel = self._create_elec_point_panel(pid, name=pid)
+        panel = self._create_elec_point_panel(pid, fp_id=fp_id or None, name=pid)
         self.status.showMessage(
             f"{pid}: Klicke 'Platzieren' im Panel, dann auf den Plan klicken."
         )
 
     def _create_elec_point_panel(self, point_id: str,
+                                  fp_id: str | None = None,
                                   name: str | None = None):
-        panel = self.param_panel.add_elec_point_panel(point_id, name=name)
+        panel = self.param_panel.add_elec_point_panel(point_id, fp_id=fp_id, name=name)
         panel.place_requested.connect(self._on_place_elec_point)
         panel.size_changed.connect(self._on_elec_point_size_changed)
         panel.icon_changed.connect(self._on_elec_point_icon_changed)
@@ -1260,17 +1264,18 @@ class MainWindow(QMainWindow):
         self.param_panel.remove_elec_point_panel(point_id)
         self.status.showMessage(f"🗑️ Anschlusspunkt {point_id} gelöscht.")
 
-    def _add_elec_cable(self):
+    def _add_elec_cable(self, fp_id: str = ""):
         self._elec_cable_counter += 1
         cid = f"KV-{self._elec_cable_counter}"
-        panel = self._create_elec_cable_panel(cid, name=cid)
+        panel = self._create_elec_cable_panel(cid, fp_id=fp_id or None, name=cid)
         self.status.showMessage(
             f"{cid}: Klicke 'Kabel zeichnen' im Panel."
         )
 
     def _create_elec_cable_panel(self, cable_id: str,
+                                  fp_id: str | None = None,
                                   name: str | None = None):
-        panel = self.param_panel.add_elec_cable_panel(cable_id, name=name)
+        panel = self.param_panel.add_elec_cable_panel(cable_id, fp_id=fp_id, name=name)
         panel.draw_cable_requested.connect(self._on_draw_elec_cable)
         panel.edit_cable_requested.connect(self._on_edit_elec_cable)
         panel.name_changed.connect(self._on_elec_cable_name_changed)
@@ -1341,9 +1346,10 @@ class MainWindow(QMainWindow):
         if not src_panel:
             return
         src = src_panel.to_dict()
+        src_fp_id = self.param_panel._element_floorplan.get(source_id)
         self._elec_point_counter += 1
         new_id = f"AP-{self._elec_point_counter}"
-        panel = self._create_elec_point_panel(new_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel = self._create_elec_point_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
         panel.sb_width.setValue(src.get("width", 30.0) / 10)
         panel.sb_height.setValue(src.get("height", 30.0) / 10)
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
@@ -1370,9 +1376,10 @@ class MainWindow(QMainWindow):
         if not src_panel:
             return
         src = src_panel.to_dict()
+        src_fp_id = self.param_panel._element_floorplan.get(source_id)
         self._elec_cable_counter += 1
         new_id = f"KV-{self._elec_cable_counter}"
-        panel = self._create_elec_cable_panel(new_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel = self._create_elec_cable_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
         panel.le_type.setText(src.get("type", "5x1,5"))
         panel.te_comment.setPlainText(src.get("comment", ""))
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
@@ -1386,16 +1393,18 @@ class MainWindow(QMainWindow):
 
     # ── HKV (Heizkreisverteiler) ─────────────────────────────────────── #
 
-    def _add_hkv(self):
+    def _add_hkv(self, fp_id: str = ""):
         self._hkv_counter += 1
         hid = f"HKV-{self._hkv_counter}"
-        panel = self._create_hkv_panel(hid, name=hid)
+        panel = self._create_hkv_panel(hid, fp_id=fp_id or None, name=hid)
         self.param_panel.update_all_hkv_choices()
         self.status.showMessage(
             f"{hid}: Klicke 'Platzieren' im Panel, dann auf den Plan klicken.")
 
-    def _create_hkv_panel(self, hkv_id: str, name: str | None = None):
-        panel = self.param_panel.add_hkv_panel(hkv_id, name=name)
+    def _create_hkv_panel(self, hkv_id: str,
+                          fp_id: str | None = None,
+                          name: str | None = None):
+        panel = self.param_panel.add_hkv_panel(hkv_id, fp_id=fp_id, name=name)
         panel.place_requested.connect(self._on_place_hkv)
         panel.size_changed.connect(self._on_hkv_size_changed)
         panel.icon_changed.connect(self._on_hkv_icon_changed)
@@ -1448,15 +1457,17 @@ class MainWindow(QMainWindow):
 
     # ── HKV-Leitungen ────────────────────────────────────────────────── #
 
-    def _add_hkv_line(self):
+    def _add_hkv_line(self, fp_id: str = ""):
         self._hkv_line_counter += 1
         lid = f"HL-{self._hkv_line_counter}"
-        panel = self._create_hkv_line_panel(lid, name=lid)
+        panel = self._create_hkv_line_panel(lid, fp_id=fp_id or None, name=lid)
         self.status.showMessage(
             f"{lid}: Klicke 'Zeichnen' im Panel, dann auf den Plan klicken.")
 
-    def _create_hkv_line_panel(self, line_id: str, name: str | None = None):
-        panel = self.param_panel.add_hkv_line_panel(line_id, name=name)
+    def _create_hkv_line_panel(self, line_id: str,
+                               fp_id: str | None = None,
+                               name: str | None = None):
+        panel = self.param_panel.add_hkv_line_panel(line_id, fp_id=fp_id, name=name)
         panel.draw_line_requested.connect(self._on_draw_hkv_line)
         panel.edit_line_requested.connect(self._on_edit_hkv_line)
         panel.name_changed.connect(self._on_hkv_line_name_changed)
@@ -1680,17 +1691,24 @@ class MainWindow(QMainWindow):
 
         # Einrichtungsgegenstände
         for fur_id, panel in self.param_panel.furniture_panels.items():
-            abs_fp = panel._file_path or ""
+            layer = self.canvas._floor_plans.get(fur_id)
+            abs_fp = panel._file_path or (layer.file_path if layer else "") or ""
             if abs_fp:
                 rel = self._copy_to_images_folder(abs_fp, project_dir)
                 new_abs = str((project_dir / rel).resolve())
                 panel.set_file_path(new_abs)
-                layer = self.canvas._floor_plans.get(fur_id)
                 if layer:
                     layer.file_path = new_abs
 
         # Eigene Icons für Elektro-Anschlusspunkte
         for pid, panel in self.param_panel.elec_point_panels.items():
+            abs_icon = panel._icon_path or ""
+            if abs_icon and abs_icon not in _builtin_paths:
+                rel = self._copy_to_images_folder(abs_icon, project_dir)
+                panel._icon_path = str((project_dir / rel).resolve())
+
+        # Eigene Icons für HKV
+        for hid, panel in self.param_panel.hkv_panels.items():
             abs_icon = panel._icon_path or ""
             if abs_icon and abs_icon not in _builtin_paths:
                 rel = self._copy_to_images_folder(abs_icon, project_dir)
@@ -1731,6 +1749,15 @@ class MainWindow(QMainWindow):
                     pdata["icon_path"] = Path(abs_icon).relative_to(project_dir).as_posix()
                 except ValueError:
                     pdata["icon_path"] = abs_icon
+
+        # HKV-Icons: absoluten Pfad → relativ
+        for hid, hdata in params.get("hkv_points", {}).items():
+            abs_icon = hdata.get("icon_path", "")
+            if abs_icon and abs_icon not in _builtin_paths:
+                try:
+                    hdata["icon_path"] = Path(abs_icon).relative_to(project_dir).as_posix()
+                except ValueError:
+                    hdata["icon_path"] = abs_icon
 
         # Legacy svg_path relativ
         rel_svg = ""
@@ -1821,6 +1848,11 @@ class MainWindow(QMainWindow):
                 rel_icon = pdata.get("icon_path", "")
                 if rel_icon:
                     pdata["icon_path"] = self._to_absolute(rel_icon, project_dir)
+
+            for hid, hdata in params.get("hkv_points", {}).items():
+                rel_icon = hdata.get("icon_path", "")
+                if rel_icon:
+                    hdata["icon_path"] = self._to_absolute(rel_icon, project_dir)
 
             self.param_panel.from_dict(params)
 

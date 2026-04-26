@@ -1305,11 +1305,11 @@ class ParameterPanel(QWidget):
     floorplan_order_changed      = Signal()
     ref_line_requested          = Signal()
     ref_length_confirmed        = Signal(float)
-    add_circuit_requested       = Signal()
-    add_elec_point_requested    = Signal()
-    add_elec_cable_requested    = Signal()
-    add_hkv_requested           = Signal()
-    add_hkv_line_requested      = Signal()
+    add_circuit_requested       = Signal(str)   # fp_id
+    add_elec_point_requested    = Signal(str)   # fp_id
+    add_elec_cable_requested    = Signal(str)   # fp_id
+    add_hkv_requested           = Signal(str)   # fp_id
+    add_hkv_line_requested      = Signal(str)   # fp_id
     delete_elec_point_requested = Signal(str)
     delete_elec_cable_requested = Signal(str)
     delete_hkv_requested        = Signal(str)
@@ -1334,6 +1334,8 @@ class ParameterPanel(QWidget):
         self.furniture_panels: dict[str, FloorPlanPanel] = {}
         self._furniture_parent: dict[str, str] = {}  # furniture_id -> parent_fp_id
         self._tree_items: dict[str, QTreeWidgetItem] = {}
+        self._fp_sub_items: dict[str, dict] = {}      # fp_id -> {hk, hkv, hkv_line, ap, kv}
+        self._element_floorplan: dict[str, str] = {}  # element_id -> fp_id
         self._loading = False
         self._build_ui()
 
@@ -1361,21 +1363,24 @@ class ParameterPanel(QWidget):
         self.btn_add_circuit.setStyleSheet(
             "background:#457b9d; color:white; padding:4px;"
         )
-        self.btn_add_circuit.clicked.connect(self.add_circuit_requested)
+        self.btn_add_circuit.clicked.connect(
+            lambda: self.add_circuit_requested.emit(self.get_active_floorplan_id() or ""))
         btn_row.addWidget(self.btn_add_circuit)
 
         self.btn_add_point = QPushButton("\u2795 AP")
         self.btn_add_point.setStyleSheet(
             "background:#ff9800; color:white; padding:4px;"
         )
-        self.btn_add_point.clicked.connect(self.add_elec_point_requested)
+        self.btn_add_point.clicked.connect(
+            lambda: self.add_elec_point_requested.emit(self.get_active_floorplan_id() or ""))
         btn_row.addWidget(self.btn_add_point)
 
         self.btn_add_cable = QPushButton("\u2795 Kabel")
         self.btn_add_cable.setStyleSheet(
             "background:#ff9800; color:white; padding:4px;"
         )
-        self.btn_add_cable.clicked.connect(self.add_elec_cable_requested)
+        self.btn_add_cable.clicked.connect(
+            lambda: self.add_elec_cable_requested.emit(self.get_active_floorplan_id() or ""))
         btn_row.addWidget(self.btn_add_cable)
         layout.addLayout(btn_row)
 
@@ -1384,14 +1389,16 @@ class ParameterPanel(QWidget):
         self.btn_add_hkv.setStyleSheet(
             "background:#e53935; color:white; padding:4px;"
         )
-        self.btn_add_hkv.clicked.connect(self.add_hkv_requested)
+        self.btn_add_hkv.clicked.connect(
+            lambda: self.add_hkv_requested.emit(self.get_active_floorplan_id() or ""))
         btn_row2.addWidget(self.btn_add_hkv)
 
         self.btn_add_hkv_line = QPushButton("\u2795 HKV-Leitung")
         self.btn_add_hkv_line.setStyleSheet(
             "background:#e53935; color:white; padding:4px;"
         )
-        self.btn_add_hkv_line.clicked.connect(self.add_hkv_line_requested)
+        self.btn_add_hkv_line.clicked.connect(
+            lambda: self.add_hkv_line_requested.emit(self.get_active_floorplan_id() or ""))
         btn_row2.addWidget(self.btn_add_hkv_line)
         layout.addLayout(btn_row2)
 
@@ -1405,58 +1412,7 @@ class ParameterPanel(QWidget):
         self._tree.setRootIsDecorated(True)
         self._tree.setIndentation(16)
 
-        # Top-level: 🏠 Grundriss
-        self._tree_grundriss = QTreeWidgetItem(self._tree, ["\U0001f3e0 Grundriss"])
-        self._tree_grundriss.setFlags(
-            self._tree_grundriss.flags() | Qt.ItemIsUserCheckable
-        )
-        self._tree_grundriss.setCheckState(0, Qt.Checked)
-
-        # Top-level: 🔥 Heizung
-        self._tree_heizung = QTreeWidgetItem(self._tree, ["\U0001f525 Heizung"])
-        self._tree_heizung.setFlags(
-            self._tree_heizung.flags() | Qt.ItemIsUserCheckable
-        )
-        self._tree_heizung.setCheckState(0, Qt.Checked)
-
-        self._tree_hk = QTreeWidgetItem(self._tree_heizung, ["Heizkreise"])
-        self._tree_hk.setFlags(
-            self._tree_hk.flags() | Qt.ItemIsUserCheckable
-        )
-        self._tree_hk.setCheckState(0, Qt.Checked)
-
-        self._tree_hkv = QTreeWidgetItem(self._tree_heizung, ["Heizkreisverteiler"])
-        self._tree_hkv.setFlags(
-            self._tree_hkv.flags() | Qt.ItemIsUserCheckable
-        )
-        self._tree_hkv.setCheckState(0, Qt.Checked)
-
-        self._tree_hkv_line = QTreeWidgetItem(self._tree_heizung, ["HKV-Leitungen"])
-        self._tree_hkv_line.setFlags(
-            self._tree_hkv_line.flags() | Qt.ItemIsUserCheckable
-        )
-        self._tree_hkv_line.setCheckState(0, Qt.Checked)
-
-        # Top-level: ⚡ Elektro
-        self._tree_elektro = QTreeWidgetItem(self._tree, ["\u26a1 Elektro"])
-        self._tree_elektro.setFlags(
-            self._tree_elektro.flags() | Qt.ItemIsUserCheckable
-        )
-        self._tree_elektro.setCheckState(0, Qt.Checked)
-
-        self._tree_ap = QTreeWidgetItem(self._tree_elektro, ["Anschlusspunkte"])
-        self._tree_ap.setFlags(
-            self._tree_ap.flags() | Qt.ItemIsUserCheckable
-        )
-        self._tree_ap.setCheckState(0, Qt.Checked)
-
-        self._tree_kv = QTreeWidgetItem(self._tree_elektro, ["Kabelverbindungen"])
-        self._tree_kv.setFlags(
-            self._tree_kv.flags() | Qt.ItemIsUserCheckable
-        )
-        self._tree_kv.setCheckState(0, Qt.Checked)
-
-        self._tree.expandAll()
+        # Floor plan items are created dynamically via add_floorplan_panel()
         # Connect AFTER initial setup to avoid spurious signals
         self._tree.currentItemChanged.connect(self._on_tree_selection)
         self._tree.itemChanged.connect(self._on_tree_item_changed)
@@ -1562,6 +1518,10 @@ class ParameterPanel(QWidget):
             parent = item.parent()
             if parent:
                 parent.removeChild(item)
+            else:
+                idx = self._tree.indexOfTopLevelItem(item)
+                if idx >= 0:
+                    self._tree.takeTopLevelItem(idx)
 
     def _update_tree_item_name(self, item_id: str, name: str):
         item = self._tree_items.get(item_id)
@@ -1598,10 +1558,11 @@ class ParameterPanel(QWidget):
 
         item_id = current.data(0, Qt.UserRole)
         if not item_id:
-            # Top-level / sub-category headers
-            if current is self._tree_heizung:
-                self._heat_global_panel.show()
-                return
+            # Sub-category headers — show heat global panel for "🔥 Heizkreise"
+            for subs in self._fp_sub_items.values():
+                if current is subs.get("hk"):
+                    self._heat_global_panel.show()
+                    return
             self._empty_label.show()
             return
 
@@ -1621,125 +1582,76 @@ class ParameterPanel(QWidget):
         """Handle check-state changes on category items (group visibility)."""
         if self._loading:
             return
-        # Top-level group: Grundriss toggles all floor plan + furniture visibility
-        if item is self._tree_grundriss:
-            checked = item.checkState(0) == Qt.Checked
-            st = Qt.Checked if checked else Qt.Unchecked
+
+        item_id = item.data(0, Qt.UserRole)
+        checked = item.checkState(0) == Qt.Checked
+        st = Qt.Checked if checked else Qt.Unchecked
+
+        # Floor plan item toggled → cascade to all sub-categories and elements
+        if item_id and item_id in self.floorplan_panels:
             self._loading = True
             for i in range(item.childCount()):
-                fp_child = item.child(i)
-                fp_child.setCheckState(0, st)
-                for j in range(fp_child.childCount()):
-                    fp_child.child(j).setCheckState(0, st)
+                child = item.child(i)
+                child.setCheckState(0, st)
+                for j in range(child.childCount()):
+                    child.child(j).setCheckState(0, st)
             self._loading = False
-            for panel in self.floorplan_panels.values():
+            # Sync floor plan panel
+            self.floorplan_panels[item_id].chk_visible.setChecked(checked)
+            # Sync furniture children
+            for fur_id, par_id in self._furniture_parent.items():
+                if par_id == item_id:
+                    fur_panel = self.furniture_panels.get(fur_id)
+                    if fur_panel:
+                        fur_panel.chk_visible.setChecked(checked)
+            # Sync all elements belonging to this floor plan
+            for eid, fid in self._element_floorplan.items():
+                if fid == item_id:
+                    panel = (self.circuit_panels.get(eid)
+                             or self.elec_point_panels.get(eid)
+                             or self.elec_cable_panels.get(eid)
+                             or self.hkv_panels.get(eid)
+                             or self.hkv_line_panels.get(eid))
+                    if panel:
+                        panel.chk_visible.setChecked(checked)
+            return
+
+        # Sub-category item toggled → cascade to its element children only
+        for fp_id, subs in self._fp_sub_items.items():
+            if item in subs.values():
+                self._loading = True
+                for i in range(item.childCount()):
+                    item.child(i).setCheckState(0, st)
+                self._loading = False
+                # Sync panels for elements under this specific sub-category
+                for eid, fid in self._element_floorplan.items():
+                    if fid != fp_id:
+                        continue
+                    panel = None
+                    if item is subs["hk"]:
+                        panel = self.circuit_panels.get(eid)
+                    elif item is subs["hkv"]:
+                        panel = self.hkv_panels.get(eid)
+                    elif item is subs["hkv_line"]:
+                        panel = self.hkv_line_panels.get(eid)
+                    elif item is subs["ap"]:
+                        panel = self.elec_point_panels.get(eid)
+                    elif item is subs["kv"]:
+                        panel = self.elec_cable_panels.get(eid)
+                    if panel:
+                        panel.chk_visible.setChecked(checked)
+                return
+
+        # Individual leaf element (furniture or element) toggled
+        if item_id:
+            panel = (self.furniture_panels.get(item_id)
+                     or self.circuit_panels.get(item_id)
+                     or self.elec_point_panels.get(item_id)
+                     or self.elec_cable_panels.get(item_id)
+                     or self.hkv_panels.get(item_id)
+                     or self.hkv_line_panels.get(item_id))
+            if panel:
                 panel.chk_visible.setChecked(checked)
-            for panel in self.furniture_panels.values():
-                panel.chk_visible.setChecked(checked)
-        # Top-level group: Heizung toggles all heating sub-categories
-        elif item is self._tree_heizung:
-            checked = item.checkState(0) == Qt.Checked
-            st = Qt.Checked if checked else Qt.Unchecked
-            self._loading = True
-            for sub in (self._tree_hk, self._tree_hkv, self._tree_hkv_line):
-                sub.setCheckState(0, st)
-                for i in range(sub.childCount()):
-                    sub.child(i).setCheckState(0, st)
-            self._loading = False
-            for panel in self.circuit_panels.values():
-                panel.chk_visible.setChecked(checked)
-            for panel in self.hkv_panels.values():
-                panel.chk_visible.setChecked(checked)
-            for panel in self.hkv_line_panels.values():
-                panel.chk_visible.setChecked(checked)
-            self.all_hk_visibility_changed.emit(checked)
-        # Top-level group: Elektro toggles all elektro sub-categories
-        elif item is self._tree_elektro:
-            checked = item.checkState(0) == Qt.Checked
-            st = Qt.Checked if checked else Qt.Unchecked
-            self._loading = True
-            for sub in (self._tree_ap, self._tree_kv):
-                sub.setCheckState(0, st)
-                for i in range(sub.childCount()):
-                    sub.child(i).setCheckState(0, st)
-            self._loading = False
-            for panel in self.elec_point_panels.values():
-                panel.chk_visible.setChecked(checked)
-            for panel in self.elec_cable_panels.values():
-                panel.chk_visible.setChecked(checked)
-            self.all_elec_visibility_changed.emit(checked)
-        elif item is self._tree_hk:
-            checked = item.checkState(0) == Qt.Checked
-            self._loading = True
-            for i in range(item.childCount()):
-                item.child(i).setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
-            self._loading = False
-            for panel in self.circuit_panels.values():
-                panel.chk_visible.setChecked(checked)
-            self.all_hk_visibility_changed.emit(checked)
-        elif item is self._tree_ap:
-            checked = item.checkState(0) == Qt.Checked
-            self._loading = True
-            for i in range(item.childCount()):
-                item.child(i).setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
-            self._loading = False
-            for panel in self.elec_point_panels.values():
-                panel.chk_visible.setChecked(checked)
-            self.all_elec_visibility_changed.emit(checked)
-        elif item is self._tree_kv:
-            checked = item.checkState(0) == Qt.Checked
-            self._loading = True
-            for i in range(item.childCount()):
-                item.child(i).setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
-            self._loading = False
-            for panel in self.elec_cable_panels.values():
-                panel.chk_visible.setChecked(checked)
-            self.all_elec_visibility_changed.emit(checked)
-        elif item is self._tree_hkv:
-            checked = item.checkState(0) == Qt.Checked
-            self._loading = True
-            for i in range(item.childCount()):
-                item.child(i).setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
-            self._loading = False
-            for panel in self.hkv_panels.values():
-                panel.chk_visible.setChecked(checked)
-            self.all_hk_visibility_changed.emit(checked)
-        elif item is self._tree_hkv_line:
-            checked = item.checkState(0) == Qt.Checked
-            self._loading = True
-            for i in range(item.childCount()):
-                item.child(i).setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
-            self._loading = False
-            for panel in self.hkv_line_panels.values():
-                panel.chk_visible.setChecked(checked)
-            self.all_hk_visibility_changed.emit(checked)
-        else:
-            # Individual element checkbox
-            item_id = item.data(0, Qt.UserRole)
-            if item_id:
-                checked = item.checkState(0) == Qt.Checked
-                panel = (self.floorplan_panels.get(item_id)
-                         or self.furniture_panels.get(item_id)
-                         or self.circuit_panels.get(item_id)
-                         or self.elec_point_panels.get(item_id)
-                         or self.elec_cable_panels.get(item_id)
-                         or self.hkv_panels.get(item_id)
-                         or self.hkv_line_panels.get(item_id))
-                if panel:
-                    panel.chk_visible.setChecked(checked)
-                # If this is a floor plan, also toggle its furniture children
-                if item_id in self.floorplan_panels:
-                    self._loading = True
-                    for i in range(item.childCount()):
-                        item.child(i).setCheckState(
-                            0, Qt.Checked if checked else Qt.Unchecked
-                        )
-                    self._loading = False
-                    for fur_id, par_id in self._furniture_parent.items():
-                        if par_id == item_id:
-                            fur_panel = self.furniture_panels.get(fur_id)
-                            if fur_panel:
-                                fur_panel.chk_visible.setChecked(checked)
 
     def _sync_tree_checkbox(self, item_id: str, checked: bool):
         """Sync tree item checkbox when panel visibility changes."""
@@ -1783,7 +1695,40 @@ class ParameterPanel(QWidget):
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.floorplan_panels[fp_id] = panel
-        self._add_tree_item(self._tree_grundriss, fp_id, name or fp_id)
+        # Create top-level floor plan tree item with sub-categories
+        fp_item = QTreeWidgetItem(self._tree, [name or fp_id])
+        fp_item.setData(0, Qt.UserRole, fp_id)
+        fp_item.setFlags(fp_item.flags() | Qt.ItemIsUserCheckable)
+        fp_item.setCheckState(0, Qt.Checked)
+        self._tree_items[fp_id] = fp_item
+
+        hk_item = QTreeWidgetItem(fp_item, ["\U0001f525 Heizkreise"])
+        hk_item.setFlags(hk_item.flags() | Qt.ItemIsUserCheckable)
+        hk_item.setCheckState(0, Qt.Checked)
+
+        hkv_item = QTreeWidgetItem(fp_item, ["Heizkreisverteiler"])
+        hkv_item.setFlags(hkv_item.flags() | Qt.ItemIsUserCheckable)
+        hkv_item.setCheckState(0, Qt.Checked)
+
+        hkv_line_item = QTreeWidgetItem(fp_item, ["HKV-Leitungen"])
+        hkv_line_item.setFlags(hkv_line_item.flags() | Qt.ItemIsUserCheckable)
+        hkv_line_item.setCheckState(0, Qt.Checked)
+
+        ap_item = QTreeWidgetItem(fp_item, ["\u26a1 Anschlusspunkte"])
+        ap_item.setFlags(ap_item.flags() | Qt.ItemIsUserCheckable)
+        ap_item.setCheckState(0, Qt.Checked)
+
+        kv_item = QTreeWidgetItem(fp_item, ["Kabelverbindungen"])
+        kv_item.setFlags(kv_item.flags() | Qt.ItemIsUserCheckable)
+        kv_item.setCheckState(0, Qt.Checked)
+
+        self._fp_sub_items[fp_id] = {
+            "hk": hk_item, "hkv": hkv_item, "hkv_line": hkv_line_item,
+            "ap": ap_item, "kv": kv_item,
+        }
+        fp_item.setExpanded(True)
+        if not self._loading:
+            self._tree.setCurrentItem(fp_item)
         return panel
 
     def add_furniture_panel(self, fur_id: str, parent_fp_id: str,
@@ -1809,8 +1754,12 @@ class ParameterPanel(QWidget):
         panel.hide()
         self.furniture_panels[fur_id] = panel
         self._furniture_parent[fur_id] = parent_fp_id
-        parent_tree_item = self._tree_items.get(parent_fp_id, self._tree_grundriss)
-        self._add_tree_item(parent_tree_item, fur_id, name or fur_id)
+        parent_tree_item = self._tree_items.get(parent_fp_id)
+        if parent_tree_item is None and self.floorplan_panels:
+            first_fp = next(iter(self.floorplan_panels))
+            parent_tree_item = self._tree_items.get(first_fp)
+        if parent_tree_item:
+            self._add_tree_item(parent_tree_item, fur_id, name or fur_id)
         return panel
 
     def remove_furniture_panel(self, fur_id: str):
@@ -1823,6 +1772,7 @@ class ParameterPanel(QWidget):
         self._show_placeholder_if_empty()
 
     def remove_floorplan_panel(self, fp_id: str):
+        self._fp_sub_items.pop(fp_id, None)
         self._remove_tree_item(fp_id)
         panel = self.floorplan_panels.pop(fp_id, None)
         if panel:
@@ -1835,15 +1785,11 @@ class ParameterPanel(QWidget):
         item = self._tree_items.get(fp_id)
         if not item:
             return
-        parent = item.parent()
-        if not parent:
-            return
-        idx = parent.indexOfChild(item)
+        idx = self._tree.indexOfTopLevelItem(item)
         if idx <= 0:
             return
-        parent.removeChild(item)
-        parent.insertChild(idx - 1, item)
-        item.setCheckState(0, Qt.Checked if item.data(0, Qt.UserRole) else Qt.Unchecked)
+        self._tree.takeTopLevelItem(idx)
+        self._tree.insertTopLevelItem(idx - 1, item)
         # Restore check state from panel
         panel = self.floorplan_panels.get(fp_id)
         if panel:
@@ -1856,14 +1802,11 @@ class ParameterPanel(QWidget):
         item = self._tree_items.get(fp_id)
         if not item:
             return
-        parent = item.parent()
-        if not parent:
+        idx = self._tree.indexOfTopLevelItem(item)
+        if idx < 0 or idx >= self._tree.topLevelItemCount() - 1:
             return
-        idx = parent.indexOfChild(item)
-        if idx >= parent.childCount() - 1:
-            return
-        parent.removeChild(item)
-        parent.insertChild(idx + 1, item)
+        self._tree.takeTopLevelItem(idx)
+        self._tree.insertTopLevelItem(idx + 1, item)
         # Restore check state from panel
         panel = self.floorplan_panels.get(fp_id)
         if panel:
@@ -1874,9 +1817,9 @@ class ParameterPanel(QWidget):
     def get_floorplan_order(self) -> list[str]:
         """Return floorplan IDs in tree order (top→bottom = back→front)."""
         order = []
-        for i in range(self._tree_grundriss.childCount()):
-            child = self._tree_grundriss.child(i)
-            fid = child.data(0, Qt.UserRole)
+        for i in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(i)
+            fid = item.data(0, Qt.UserRole)
             if fid and fid in self.floorplan_panels:
                 order.append(fid)
         return order
@@ -1884,23 +1827,43 @@ class ParameterPanel(QWidget):
     def get_full_render_order(self) -> list[str]:
         """Return all layer IDs (floor plans + furniture) in render order."""
         order = []
-        for i in range(self._tree_grundriss.childCount()):
-            fp_item = self._tree_grundriss.child(i)
+        for i in range(self._tree.topLevelItemCount()):
+            fp_item = self._tree.topLevelItem(i)
             fp_id = fp_item.data(0, Qt.UserRole)
             if fp_id and fp_id in self.floorplan_panels:
                 order.append(fp_id)
                 for j in range(fp_item.childCount()):
-                    fur_item = fp_item.child(j)
-                    fur_id = fur_item.data(0, Qt.UserRole)
+                    child = fp_item.child(j)
+                    fur_id = child.data(0, Qt.UserRole)
                     if fur_id and fur_id in self.furniture_panels:
                         order.append(fur_id)
         return order
+
+    def get_active_floorplan_id(self) -> str | None:
+        """Return the floor plan ID of the currently selected item or its ancestor."""
+        current = self._tree.currentItem()
+        if not current:
+            return next(iter(self.floorplan_panels), None)
+        item = current
+        while item:
+            item_id = item.data(0, Qt.UserRole)
+            if item_id and item_id in self.floorplan_panels:
+                return item_id
+            item = item.parent()
+        return next(iter(self.floorplan_panels), None)
+
+    def _resolve_fp_id(self, fp_id: str | None) -> str | None:
+        """Return fp_id if valid, otherwise first available floor plan."""
+        if fp_id and fp_id in self._fp_sub_items:
+            return fp_id
+        return next(iter(self.floorplan_panels), None)
 
     # ──────────────────────────────────────────────────────────────── #
     #  Heizkreise                                                       #
     # ──────────────────────────────────────────────────────────────── #
 
     def add_circuit_panel(self, circuit_id: str,
+                          fp_id: str | None = None,
                           name: str | None = None,
                           color: str | None = None) -> HeatingCircuitPanel:
         panel = HeatingCircuitPanel(circuit_id, name=name, color=color)
@@ -1913,11 +1876,16 @@ class ParameterPanel(QWidget):
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.circuit_panels[circuit_id] = panel
-        self._add_tree_item(self._tree_hk, circuit_id, name or circuit_id)
+        resolved = self._resolve_fp_id(fp_id)
+        self._element_floorplan[circuit_id] = resolved or ""
+        parent_item = self._fp_sub_items.get(resolved or "", {}).get("hk") if resolved else None
+        if parent_item:
+            self._add_tree_item(parent_item, circuit_id, name or circuit_id)
         return panel
 
     def remove_circuit_panel(self, circuit_id: str):
         self._remove_tree_item(circuit_id)
+        self._element_floorplan.pop(circuit_id, None)
         panel = self.circuit_panels.pop(circuit_id, None)
         if panel:
             self._prop_layout.removeWidget(panel)
@@ -1957,6 +1925,7 @@ class ParameterPanel(QWidget):
     # ──────────────────────────────────────────────────────────────── #
 
     def add_elec_point_panel(self, point_id: str,
+                             fp_id: str | None = None,
                              name: str | None = None,
                              color: str | None = None) -> ElektroPointPanel:
         panel = ElektroPointPanel(point_id, name=name, color=color)
@@ -1969,11 +1938,16 @@ class ParameterPanel(QWidget):
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.elec_point_panels[point_id] = panel
-        self._add_tree_item(self._tree_ap, point_id, name or point_id)
+        resolved = self._resolve_fp_id(fp_id)
+        self._element_floorplan[point_id] = resolved or ""
+        parent_item = self._fp_sub_items.get(resolved or "", {}).get("ap") if resolved else None
+        if parent_item:
+            self._add_tree_item(parent_item, point_id, name or point_id)
         return panel
 
     def remove_elec_point_panel(self, point_id: str):
         self._remove_tree_item(point_id)
+        self._element_floorplan.pop(point_id, None)
         panel = self.elec_point_panels.pop(point_id, None)
         if panel:
             self._prop_layout.removeWidget(panel)
@@ -1989,6 +1963,7 @@ class ParameterPanel(QWidget):
     # ──────────────────────────────────────────────────────────────── #
 
     def add_elec_cable_panel(self, cable_id: str,
+                             fp_id: str | None = None,
                              name: str | None = None,
                              color: str | None = None) -> ElektroCablePanel:
         panel = ElektroCablePanel(cable_id, name=name, color=color)
@@ -2001,11 +1976,16 @@ class ParameterPanel(QWidget):
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.elec_cable_panels[cable_id] = panel
-        self._add_tree_item(self._tree_kv, cable_id, name or cable_id)
+        resolved = self._resolve_fp_id(fp_id)
+        self._element_floorplan[cable_id] = resolved or ""
+        parent_item = self._fp_sub_items.get(resolved or "", {}).get("kv") if resolved else None
+        if parent_item:
+            self._add_tree_item(parent_item, cable_id, name or cable_id)
         return panel
 
     def remove_elec_cable_panel(self, cable_id: str):
         self._remove_tree_item(cable_id)
+        self._element_floorplan.pop(cable_id, None)
         panel = self.elec_cable_panels.pop(cable_id, None)
         if panel:
             self._prop_layout.removeWidget(panel)
@@ -2019,6 +1999,7 @@ class ParameterPanel(QWidget):
     # ── HKV panels ──
 
     def add_hkv_panel(self, hkv_id: str,
+                      fp_id: str | None = None,
                       name: str | None = None,
                       color: str | None = None) -> HkvPanel:
         panel = HkvPanel(hkv_id, name=name, color=color)
@@ -2030,11 +2011,16 @@ class ParameterPanel(QWidget):
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.hkv_panels[hkv_id] = panel
-        self._add_tree_item(self._tree_hkv, hkv_id, name or hkv_id)
+        resolved = self._resolve_fp_id(fp_id)
+        self._element_floorplan[hkv_id] = resolved or ""
+        parent_item = self._fp_sub_items.get(resolved or "", {}).get("hkv") if resolved else None
+        if parent_item:
+            self._add_tree_item(parent_item, hkv_id, name or hkv_id)
         return panel
 
     def remove_hkv_panel(self, hkv_id: str):
         self._remove_tree_item(hkv_id)
+        self._element_floorplan.pop(hkv_id, None)
         panel = self.hkv_panels.pop(hkv_id, None)
         if panel:
             self._prop_layout.removeWidget(panel)
@@ -2046,6 +2032,7 @@ class ParameterPanel(QWidget):
         return panel.get_parameters() if panel else None
 
     def add_hkv_line_panel(self, line_id: str,
+                           fp_id: str | None = None,
                            name: str | None = None,
                            color: str | None = None) -> HkvLinePanel:
         panel = HkvLinePanel(line_id, name=name, color=color)
@@ -2057,11 +2044,16 @@ class ParameterPanel(QWidget):
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.hkv_line_panels[line_id] = panel
-        self._add_tree_item(self._tree_hkv_line, line_id, name or line_id)
+        resolved = self._resolve_fp_id(fp_id)
+        self._element_floorplan[line_id] = resolved or ""
+        parent_item = self._fp_sub_items.get(resolved or "", {}).get("hkv_line") if resolved else None
+        if parent_item:
+            self._add_tree_item(parent_item, line_id, name or line_id)
         return panel
 
     def remove_hkv_line_panel(self, line_id: str):
         self._remove_tree_item(line_id)
+        self._element_floorplan.pop(line_id, None)
         panel = self.hkv_line_panels.pop(line_id, None)
         if panel:
             self._prop_layout.removeWidget(panel)
@@ -2135,19 +2127,24 @@ class ParameterPanel(QWidget):
                 for fur_id, p in self.furniture_panels.items()
             },
             "circuits": {
-                cid: p.to_dict() for cid, p in self.circuit_panels.items()
+                cid: {**p.to_dict(), "floor_plan_id": self._element_floorplan.get(cid, "")}
+                for cid, p in self.circuit_panels.items()
             },
             "elec_points": {
-                pid: p.to_dict() for pid, p in self.elec_point_panels.items()
+                pid: {**p.to_dict(), "floor_plan_id": self._element_floorplan.get(pid, "")}
+                for pid, p in self.elec_point_panels.items()
             },
             "elec_cables": {
-                cid: p.to_dict() for cid, p in self.elec_cable_panels.items()
+                cid: {**p.to_dict(), "floor_plan_id": self._element_floorplan.get(cid, "")}
+                for cid, p in self.elec_cable_panels.items()
             },
             "hkv_points": {
-                hid: p.to_dict() for hid, p in self.hkv_panels.items()
+                hid: {**p.to_dict(), "floor_plan_id": self._element_floorplan.get(hid, "")}
+                for hid, p in self.hkv_panels.items()
             },
             "hkv_lines": {
-                lid: p.to_dict() for lid, p in self.hkv_line_panels.items()
+                lid: {**p.to_dict(), "floor_plan_id": self._element_floorplan.get(lid, "")}
+                for lid, p in self.hkv_line_panels.items()
             },
         }
 
@@ -2184,14 +2181,16 @@ class ParameterPanel(QWidget):
         # HKV-Punkte VOR Heizkreisen laden (für Verteiler-Dropdown)
         for hid, values in d.get("hkv_points", {}).items():
             panel = self.add_hkv_panel(
-                hid, name=values.get("name", hid),
+                hid, fp_id=values.get("floor_plan_id"),
+                name=values.get("name", hid),
                 color=values.get("color", "#e53935"),
             )
             panel.from_dict(values)
 
         for cid, values in d.get("circuits", {}).items():
             panel = self.add_circuit_panel(
-                cid, name=values.get("name", cid),
+                cid, fp_id=values.get("floor_plan_id"),
+                name=values.get("name", cid),
                 color=values.get("color", "#2a9d8f"),
             )
             # Populate HKV choices before restoring distributor
@@ -2199,19 +2198,22 @@ class ParameterPanel(QWidget):
             panel.from_dict(values)
         for pid, values in d.get("elec_points", {}).items():
             panel = self.add_elec_point_panel(
-                pid, name=values.get("name", pid),
+                pid, fp_id=values.get("floor_plan_id"),
+                name=values.get("name", pid),
                 color=values.get("color", "#4fc3f7"),
             )
             panel.from_dict(values)
         for cid, values in d.get("elec_cables", {}).items():
             panel = self.add_elec_cable_panel(
-                cid, name=values.get("name", cid),
+                cid, fp_id=values.get("floor_plan_id"),
+                name=values.get("name", cid),
                 color=values.get("color", "#ff9800"),
             )
             panel.from_dict(values)
         for lid, values in d.get("hkv_lines", {}).items():
             panel = self.add_hkv_line_panel(
-                lid, name=values.get("name", lid),
+                lid, fp_id=values.get("floor_plan_id"),
+                name=values.get("name", lid),
                 color=values.get("color", "#e53935"),
             )
             panel.from_dict(values)
