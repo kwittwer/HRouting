@@ -47,6 +47,8 @@ class FloorPlanLayer:
     ref_p1: Optional[QPointF] = field(default=None, repr=False)
     ref_p2: Optional[QPointF] = field(default=None, repr=False)
     ref_length_mm: float = 1000.0
+    fixed_width_mm: float = 0.0   # wenn > 0: feste Breite in mm (ignoriert mm_per_px)
+    fixed_height_mm: float = 0.0  # wenn > 0: feste Höhe in mm (ignoriert mm_per_px)
 
 COLORS = [
     "#e63946", "#2a9d8f", "#e9c46a", "#f4a261",
@@ -368,6 +370,27 @@ class CanvasWidget(QWidget):
         if self._ref_floor_id == fp_id:
             self._ref_p1 = layer.ref_p1
             self._ref_p2 = layer.ref_p2
+
+    def set_floor_plan_size_mm(self, fp_id: str,
+                               width_mm: float, height_mm: float):
+        """Setzt feste Abmessungen (mm) für ein Einrichtungselement."""
+        layer = self._floor_plans.get(fp_id)
+        if layer:
+            layer.fixed_width_mm = width_mm
+            layer.fixed_height_mm = height_mm
+            self.update()
+
+    def _layer_render_size(self, layer: "FloorPlanLayer") -> Tuple[float, float]:
+        """Gibt die gerenderte (Breite, Höhe) in Canvas-Pixeln zurück.
+        Wenn fixed_width_mm/fixed_height_mm gesetzt sind, werden diese verwendet,
+        andernfalls die mm_per_px-basierte Skalierung."""
+        ref_mpp = self._mm_per_px if self._mm_per_px > 0 else 1.0
+        if layer.fixed_width_mm > 0 and layer.fixed_height_mm > 0:
+            return (layer.fixed_width_mm / ref_mpp,
+                    layer.fixed_height_mm / ref_mpp)
+        ls = layer.mm_per_px / ref_mpp if layer.mm_per_px > 0 else 1.0
+        w, h = layer.size
+        return (w * ls, h * ls)
 
     def set_floor_plan_opacity(self, fp_id: str, opacity: float):
         layer = self._floor_plans.get(fp_id)
@@ -1186,6 +1209,8 @@ class CanvasWidget(QWidget):
                 "visible": layer.visible,
                 "mm_per_px": layer.mm_per_px,
                 "ref_length_mm": layer.ref_length_mm,
+                "fixed_width_mm": layer.fixed_width_mm,
+                "fixed_height_mm": layer.fixed_height_mm,
             }
             if layer.ref_p1 and layer.ref_p2:
                 fp_d["ref_line"] = [
@@ -1284,6 +1309,8 @@ class CanvasWidget(QWidget):
             layer.visible = fp_d.get("visible", True)
             layer.mm_per_px = fp_d.get("mm_per_px", 1.0)
             layer.ref_length_mm = fp_d.get("ref_length_mm", 1000.0)
+            layer.fixed_width_mm = fp_d.get("fixed_width_mm", 0.0)
+            layer.fixed_height_mm = fp_d.get("fixed_height_mm", 0.0)
             ref = fp_d.get("ref_line")
             if ref:
                 layer.ref_p1 = QPointF(*ref[0])
@@ -1535,73 +1562,13 @@ class CanvasWidget(QWidget):
 
     def _constrain_dragged_route_point(self, cid: str, idx: int,
                                        target: QPointF) -> QPointF:
-        pts = self._manual_routes.get(cid, [])
-        if idx < 0 or idx >= len(pts):
-            self._constraint_violation_point = None
-            self._constraint_violation_line = None
-            self._constraint_violation_reason = ""
-            return target
-        origin = pts[idx]
-        prev_pt = pts[idx - 1] if idx > 0 else None
-        next_pt = pts[idx + 1] if idx < len(pts) - 1 else None
-
-        def conflict_line_for(point: QPointF) -> Optional[Tuple[Tuple[QPointF, QPointF], str]]:
-            polygon = self._polygons.get(cid, [])
-            if len(polygon) < 3:
-                return None
-            wall_dist = self._route_wall_dist_px.get(cid, 0.0)
-            wall_dist_cm = wall_dist * self._mm_per_px / 10
-            if idx == 0:
-                on_or_in = self._point_in_polygon(point, polygon) or \
-                    self._min_dist_to_polygon_edge(point, polygon) < 1.0
-                if not on_or_in:
-                    seg = self._nearest_polygon_edge_segment(point, polygon)
-                    return (seg, "Außerhalb Polygon") if seg else None
-            elif not self._point_in_polygon(point, polygon):
-                seg = self._nearest_polygon_edge_segment(point, polygon)
-                return (seg, "Außerhalb Polygon") if seg else None
-            if idx != 0 and wall_dist > 0.0:
-                d = self._min_dist_to_polygon_edge(point, polygon)
-                if d + 1e-6 < wall_dist:
-                    seg = self._nearest_polygon_edge_segment(point, polygon)
-                    actual_cm = d * self._mm_per_px / 10
-                    return (seg, f"Randabstand {actual_cm:.1f}/{wall_dist_cm:.1f} cm") if seg else None
-
-            if prev_pt is not None:
-                c = self._find_route_conflict_line(
-                    cid, prev_pt, point,
-                    ignore_segment_indices={idx - 1, idx},
-                    allow_start_on_boundary=(idx - 1 == 0),
-                )
-                if c is not None:
-                    return c
-            if next_pt is not None:
-                c = self._find_route_conflict_line(
-                    cid, point, next_pt,
-                    ignore_segment_indices={idx - 1, idx},
-                    allow_start_on_boundary=(idx == 0),
-                )
-                if c is not None:
-                    return c
-            return None
-
-        def is_valid(point: QPointF) -> bool:
-            return conflict_line_for(point) is None
-
-        if is_valid(target):
-            self._constraint_violation_point = None
-            self._constraint_violation_line = None
-            self._constraint_violation_reason = ""
-            return target
-
-        best, violation = self._constrain_to_last_valid(origin, target, is_valid)
-        best = self._find_closest_valid_near_target(target, best, is_valid)
-        self._constraint_violation_point = violation
-        result = conflict_line_for(violation)
-        if result is None:
-            result = conflict_line_for(target)
-        self._constraint_violation_line, self._constraint_violation_reason = self._extract_conflict(result)
-        return best
+        """Grid-snap a dragged route point. Constraint violations are shown
+        as warnings only – the point is never blocked."""
+        snapped = self._snap_to_grid(target)
+        self._constraint_violation_point = None
+        self._constraint_violation_line = None
+        self._constraint_violation_reason = ""
+        return snapped
 
     def _constrain_to_last_valid(self, origin: QPointF, target: QPointF, is_valid_fn):
         lo, hi = 0.0, 1.0
@@ -1847,11 +1814,9 @@ class CanvasWidget(QWidget):
                 layer = self._floor_plans.get(self._active_floor_id)
                 if layer:
                     import math
-                    ref_mpp = self._mm_per_px if self._mm_per_px > 0 else 1.0
-                    ls = layer.mm_per_px / ref_mpp if layer.mm_per_px > 0 else 1.0
-                    w, h = layer.size
-                    cx = w * ls / 2 + layer.offset_x
-                    cy = h * ls / 2 + layer.offset_y
+                    sw, sh = self._layer_render_size(layer)
+                    cx = sw / 2 + layer.offset_x
+                    cy = sh / 2 + layer.offset_y
                     dx = canvas_pt.x() - cx
                     dy = canvas_pt.y() - cy
                     self._floor_rotate_start_angle = math.degrees(math.atan2(dy, dx))
@@ -1883,17 +1848,20 @@ class CanvasWidget(QWidget):
             if event.button() == Qt.LeftButton and self._current_route_cid:
                 ctrl_held = bool(event.modifiers() & Qt.ControlModifier)
                 if ctrl_held:
-                    constrained = canvas_pt
+                    final_pt = canvas_pt
                 else:
-                    snapped = self._apply_angle_snap(canvas_pt)
-                    allow_start_on_boundary = (len(self._current_route_points) == 1)
-                    constrained = self._constrain_route_candidate(
-                        self._current_route_cid,
-                        snapped,
-                        allow_start_on_boundary=allow_start_on_boundary,
+                    final_pt = self._snap_to_grid(
+                        self._apply_angle_snap(canvas_pt)
                     )
-                if _qdist(self._current_route_points[-1], constrained) > 1.0:
-                    self._current_route_points.append(constrained)
+                # Still compute violation for display only (not blocking)
+                allow_start_on_boundary = (len(self._current_route_points) == 1)
+                self._constrain_route_candidate(
+                    self._current_route_cid,
+                    final_pt,
+                    allow_start_on_boundary=allow_start_on_boundary,
+                )
+                if _qdist(self._current_route_points[-1], final_pt) > 1.0:
+                    self._current_route_points.append(final_pt)
                     self._current_route_preview_end = None
                     self._constraint_violation_point = None
                     self._constraint_violation_line = None
@@ -2301,11 +2269,9 @@ class CanvasWidget(QWidget):
                 layer = self._floor_plans.get(self._active_floor_id)
                 if layer:
                     import math
-                    ref_mpp = self._mm_per_px if self._mm_per_px > 0 else 1.0
-                    ls = layer.mm_per_px / ref_mpp if layer.mm_per_px > 0 else 1.0
-                    w, h = layer.size
-                    cx = w * ls / 2 + layer.offset_x
-                    cy = h * ls / 2 + layer.offset_y
+                    sw, sh = self._layer_render_size(layer)
+                    cx = sw / 2 + layer.offset_x
+                    cy = sh / 2 + layer.offset_y
                     dx = canvas_pt.x() - cx
                     dy = canvas_pt.y() - cy
                     angle = math.degrees(math.atan2(dy, dx))
@@ -2404,19 +2370,22 @@ class CanvasWidget(QWidget):
         if self._mode == ToolMode.DRAW_ROUTE and self._current_route_cid and self._current_route_points:
             ctrl_held = bool(event.modifiers() & Qt.ControlModifier)
             if ctrl_held:
-                self._current_route_preview_end = canvas_pt
+                preview_pt = canvas_pt
                 self._constraint_violation_point = None
                 self._constraint_violation_line = None
                 self._constraint_violation_reason = ""
             else:
-                snapped = self._apply_angle_snap(canvas_pt)
+                preview_pt = self._snap_to_grid(
+                    self._apply_angle_snap(canvas_pt)
+                )
                 allow_start_on_boundary = (len(self._current_route_points) == 1)
-                constrained = self._constrain_route_candidate(
+                # Compute violation for warning display only
+                self._constrain_route_candidate(
                     self._current_route_cid,
-                    snapped,
+                    preview_pt,
                     allow_start_on_boundary=allow_start_on_boundary,
                 )
-                self._current_route_preview_end = constrained
+            self._current_route_preview_end = preview_pt
             self.update()
             return
 
@@ -2829,10 +2798,8 @@ class CanvasWidget(QWidget):
             if not layer or not layer.visible:
                 continue
             painter.save()
-            w, h = layer.size
-            # Real-world scaling: layer pixel × layer_scale = canvas pixel
-            ls = layer.mm_per_px / ref_mpp if layer.mm_per_px > 0 else 1.0
-            sw, sh = w * ls, h * ls
+            # Real-world scaling: feste Abmessungen oder mm_per_px
+            sw, sh = self._layer_render_size(layer)
             # Apply per-layer transform: translate then rotate around centre
             cx = sw / 2 + layer.offset_x
             cy = sh / 2 + layer.offset_y
@@ -3064,7 +3031,7 @@ class CanvasWidget(QWidget):
         r = 4.0 / self._scale
         pen = QPen(color, 2.0 / self._scale, Qt.DashDotLine)
         font = painter.font()
-        font.setPointSizeF(max(7.0, 10.0 / self._scale))
+        font.setPointSizeF(10.0 / self._scale)
 
         # Draw persisted measurement lines
         for p1, p2, mm_len in self._measure_lines:
@@ -3152,7 +3119,7 @@ class CanvasWidget(QWidget):
 
         painter.save()
         font = painter.font()
-        font.setPointSizeF(max(8.0, 10.0 / self._scale))
+        font.setPointSizeF(10.0 / self._scale)
         painter.setFont(font)
         fm = painter.fontMetrics()
 
@@ -3208,7 +3175,7 @@ class CanvasWidget(QWidget):
         pos = self._label_positions.get(item_id, default_pos)
         size = self._label_font_sizes.get(item_id, 12.0)
         font = painter.font()
-        font.setPointSizeF(size)
+        font.setPointSizeF(size / self._scale)
         painter.setFont(font)
         # background for readability
         fm = painter.fontMetrics()
@@ -3257,7 +3224,9 @@ class CanvasWidget(QWidget):
         gx0 = (x0 // spacing_px) * spacing_px
         gy0 = (y0 // spacing_px) * spacing_px
 
-        pen = QPen(self._grid_color, max(0.5, 1.0 / self._scale))
+        pen = QPen(self._grid_color)
+        pen.setWidth(1)
+        pen.setCosmetic(True)
         painter.setPen(pen)
 
         # vertical lines
@@ -3296,7 +3265,7 @@ class CanvasWidget(QWidget):
         painter.setPen(QPen(Qt.white, 1.5 / self._scale))
         painter.drawPath(path)
         font = painter.font()
-        font.setPointSizeF(max(6.0, 9.0 / self._scale))
+        font.setPointSizeF(9.0 / self._scale)
         painter.setFont(font)
         painter.setPen(QPen(Qt.white))
         painter.drawText(
@@ -3332,7 +3301,7 @@ class CanvasWidget(QWidget):
                     - 10 / self._scale,
                 )
                 font = painter.font()
-                font.setPointSizeF(max(7.0, 10.0 / self._scale))
+                font.setPointSizeF(10.0 / self._scale)
                 painter.setFont(font)
                 painter.setPen(QPen(color))
                 painter.drawText(mid, f"{layer.ref_length_mm / 1000:.3f} m")
@@ -3368,7 +3337,7 @@ class CanvasWidget(QWidget):
                 - 10 / self._scale,
             )
             font = painter.font()
-            font.setPointSizeF(max(7.0, 10.0 / self._scale))
+            font.setPointSizeF(10.0 / self._scale)
             painter.setFont(font)
             painter.setPen(QPen(color))
             painter.drawText(mid, f"{mm_len / 1000:.3f} m")
@@ -3861,6 +3830,17 @@ class CanvasWidget(QWidget):
         rad = math.radians(snapped_angle)
         return QPointF(anchor.x() + math.cos(rad) * dist,
                        anchor.y() + math.sin(rad) * dist)
+
+    def _snap_to_grid(self, pt: QPointF) -> QPointF:
+        """Snap *pt* to the nearest grid intersection when grid is visible."""
+        if not self._grid_visible or self._mm_per_px <= 0:
+            return pt
+        spacing_px = self._grid_spacing_mm / self._mm_per_px
+        if spacing_px < 1.0:
+            return pt
+        x = round(pt.x() / spacing_px) * spacing_px
+        y = round(pt.y() / spacing_px) * spacing_px
+        return QPointF(x, y)
 
     def _draw_constraint_violation(self, painter,
                                    line_start: QPointF, line_end: QPointF,

@@ -64,6 +64,7 @@ class MainWindow(QMainWindow):
         self._hkv_counter = 0
         self._hkv_line_counter = 0
         self._floorplan_counter = 0
+        self._furniture_counter = 0
         self._dirty = False
 
         # Undo / Redo
@@ -312,6 +313,7 @@ class MainWindow(QMainWindow):
                 "hkv": self._hkv_counter,
                 "hkv_line": self._hkv_line_counter,
                 "floorplan": self._floorplan_counter,
+                "furniture": self._furniture_counter,
             },
         })
 
@@ -373,6 +375,7 @@ class MainWindow(QMainWindow):
             self._hkv_counter = c.get("hkv", 0)
             self._hkv_line_counter = c.get("hkv_line", 0)
             self._floorplan_counter = c.get("floorplan", 0)
+            self._furniture_counter = c.get("furniture", 0)
 
             # Reconnect panel signals + sync visual state
             self._reconnect_panels_after_restore()
@@ -392,6 +395,15 @@ class MainWindow(QMainWindow):
             if fp and os.path.exists(fp):
                 self.canvas.load_floor_plan_image(fid, fp)
             layer = self.canvas._floor_plans.get(fid)
+            if layer and layer.mm_per_px != 1.0:
+                panel.update_scale_label(layer.mm_per_px)
+
+        # Furniture panels: restore images + scale labels
+        for fur_id, panel in self.param_panel.furniture_panels.items():
+            fp = panel._file_path
+            if fp and os.path.exists(fp):
+                self.canvas.load_floor_plan_image(fur_id, fp)
+            layer = self.canvas._floor_plans.get(fur_id)
             if layer and layer.mm_per_px != 1.0:
                 panel.update_scale_label(layer.mm_per_px)
 
@@ -528,6 +540,9 @@ class MainWindow(QMainWindow):
         self.param_panel.add_hkv_line_requested.connect(self._add_hkv_line)
         self.param_panel.delete_hkv_requested.connect(self._delete_hkv)
         self.param_panel.delete_hkv_line_requested.connect(self._delete_hkv_line)
+        self.param_panel.add_furniture_requested.connect(self._add_furniture)
+        self.param_panel.delete_furniture_requested.connect(self._delete_furniture)
+        self.param_panel.furniture_size_changed.connect(self._on_furniture_size_changed)
         self.param_panel.heating_global_changed.connect(self._recalc_all_circuits)
 
         # Dirty-tracking: jede inhaltliche Änderung markiert als unsaved
@@ -755,6 +770,52 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._push_undo()
 
+    def _add_furniture(self, parent_fp_id: str):
+        """Add a new furniture element under a floor plan."""
+        self._furniture_counter += 1
+        fur_id = f"einr-{self._furniture_counter}"
+        name = f"Einrichtung {self._furniture_counter}"
+        self.canvas.add_floor_plan(fur_id)
+        # Insert furniture right after the last existing furniture of the same parent
+        order = self.canvas._floor_plan_order
+        if parent_fp_id in order:
+            order.remove(fur_id)
+            parent_idx = order.index(parent_fp_id)
+            insert_idx = parent_idx + 1
+            for i in range(parent_idx + 1, len(order)):
+                sibling = order[i]
+                if self.param_panel._furniture_parent.get(sibling) == parent_fp_id:
+                    insert_idx = i + 1
+                elif sibling in self.param_panel.floorplan_panels:
+                    break
+            order.insert(insert_idx, fur_id)
+        self.param_panel.add_furniture_panel(fur_id, parent_fp_id, name=name)
+        self._mark_dirty()
+        self._push_undo()
+        self.status.showMessage(
+            f"{fur_id}: Bild laden (\U0001f4c2) \u2192 Referenzlinie zeichnen \u2192 Positionieren"
+        )
+
+    def _delete_furniture(self, fur_id: str):
+        self.canvas.remove_floor_plan(fur_id)
+        self.param_panel.remove_furniture_panel(fur_id)
+        self._mark_dirty()
+        self._push_undo()
+        self.status.showMessage(f"\U0001f5d1\ufe0f Einrichtungselement {fur_id} gel\u00f6scht.")
+
+    def _on_furniture_size_changed(self, fur_id: str):
+        """Feste Abmessungen einer Einrichtung wurden im Panel geändert."""
+        panel = self.param_panel.furniture_panels.get(fur_id)
+        if not panel:
+            return
+        p = panel.get_parameters()
+        self.canvas.set_floor_plan_size_mm(
+            fur_id,
+            p.get("fixed_width_mm", 0.0),
+            p.get("fixed_height_mm", 0.0),
+        )
+        self._mark_dirty()
+
     def _browse_floorplan_file(self, fp_id: str):
         path, _ = QFileDialog.getOpenFileName(
             self, "Bild für Grundriss wählen", "",
@@ -863,7 +924,7 @@ class MainWindow(QMainWindow):
 
     def _on_floorplan_order_changed(self):
         """Tree order of floor plans changed – sync canvas render order."""
-        order = self.param_panel.get_floorplan_order()
+        order = self.param_panel.get_full_render_order()
         self.canvas.set_floor_plan_order(order)
         self.canvas.update()
         self._mark_dirty()
@@ -1510,17 +1571,34 @@ class MainWindow(QMainWindow):
 
     def _copy_to_images_folder(self, abs_path: str, project_dir: Path) -> str:
         """Copy *abs_path* into <project_dir>/images/ and return the
-        relative path 'images/<filename>'.  Does nothing when the file
-        is already inside that folder."""
+        relative path 'images/<filename>' (POSIX-style, forward slashes).
+        If a file with the same name already exists at the destination but
+        has *different* content, a numbered suffix is inserted to avoid
+        overwriting it."""
         if not abs_path:
             return ""
-        src = Path(abs_path)
+        src = Path(abs_path).resolve()
+        if not src.exists():
+            # File missing – just make it relative if already under project_dir
+            try:
+                return src.relative_to(project_dir).as_posix()
+            except ValueError:
+                return abs_path
         images_dir = project_dir / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
         dest = images_dir / src.name
-        if src != dest:
-            shutil.copy2(str(src), str(dest))
-        return str(dest.relative_to(project_dir))
+        # If source is already in the images dir, nothing to do
+        if src == dest.resolve():
+            return dest.relative_to(project_dir).as_posix()
+        # Avoid overwriting a *different* file that happens to share the name
+        if dest.exists() and dest.resolve() != src:
+            stem, suffix = src.stem, src.suffix
+            counter = 1
+            while dest.exists():
+                dest = images_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+        shutil.copy2(str(src), str(dest))
+        return dest.relative_to(project_dir).as_posix()
 
     # -- new project --------------------------------------------------- #
 
@@ -1538,6 +1616,7 @@ class MainWindow(QMainWindow):
         self._hkv_counter = 0
         self._hkv_line_counter = 0
         self._floorplan_counter = 0
+        self._furniture_counter = 0
 
         # Recreate canvas and panel
         old_canvas = self.canvas
@@ -1583,32 +1662,83 @@ class MainWindow(QMainWindow):
         filepath.parent.mkdir(parents=True, exist_ok=True)
         project_dir = filepath.parent
 
-        # --- copy icons into images/ and collect relative paths --------
         from gui.parameter_panel import BUILTIN_SYMBOLS
         _builtin_paths = set(BUILTIN_SYMBOLS.values())
-        icon_map: dict[str, str] = {}  # point_id -> relative icon path
+
+        # ── 1. Alle Bilder in images/ kopieren und Panels aktualisieren ──
+
+        # Grundrisse
+        for fid, panel in self.param_panel.floorplan_panels.items():
+            abs_fp = panel._file_path or ""
+            if abs_fp:
+                rel = self._copy_to_images_folder(abs_fp, project_dir)
+                new_abs = str((project_dir / rel).resolve())
+                panel.set_file_path(new_abs)
+                layer = self.canvas._floor_plans.get(fid)
+                if layer:
+                    layer.file_path = new_abs
+
+        # Einrichtungsgegenstände
+        for fur_id, panel in self.param_panel.furniture_panels.items():
+            abs_fp = panel._file_path or ""
+            if abs_fp:
+                rel = self._copy_to_images_folder(abs_fp, project_dir)
+                new_abs = str((project_dir / rel).resolve())
+                panel.set_file_path(new_abs)
+                layer = self.canvas._floor_plans.get(fur_id)
+                if layer:
+                    layer.file_path = new_abs
+
+        # Eigene Icons für Elektro-Anschlusspunkte
         for pid, panel in self.param_panel.elec_point_panels.items():
             abs_icon = panel._icon_path or ""
-            # Eingebaute Symbole nicht kopieren – werden über builtin_symbol key gespeichert
             if abs_icon and abs_icon not in _builtin_paths:
                 rel = self._copy_to_images_folder(abs_icon, project_dir)
-                icon_map[pid] = rel
                 panel._icon_path = str((project_dir / rel).resolve())
 
-        # --- build params with relative icon_path ----------------------
+        # Legacy svg_path
+        if self._svg_path:
+            rel_svg_copy = self._copy_to_images_folder(self._svg_path, project_dir)
+            self._svg_path = str((project_dir / rel_svg_copy).resolve())
+
+        # ── 2. JSON bauen – alle Pfade relativ zur Projektdatei ──────────
+
         params = self.param_panel.to_dict()
-        for pid, rel in icon_map.items():
-            if pid in params.get("elec_points", {}):
-                params["elec_points"][pid]["icon_path"] = rel
 
-        # --- svg_path relative ----------------------------------------
-        rel_svg = self._to_relative(self._svg_path, project_dir)
-
-        # --- floorplan file paths relative ----------------------------
+        # Grundrisse: absoluten Pfad → relativ
         for fid, fp_data in params.get("floorplans", {}).items():
             abs_fp = fp_data.get("file_path", "")
             if abs_fp:
-                fp_data["file_path"] = self._to_relative(abs_fp, project_dir)
+                try:
+                    fp_data["file_path"] = Path(abs_fp).relative_to(project_dir).as_posix()
+                except ValueError:
+                    fp_data["file_path"] = abs_fp
+
+        # Einrichtungsgegenstände: absoluten Pfad → relativ
+        for fur_id, fur_data in params.get("furniture", {}).items():
+            abs_fp = fur_data.get("file_path", "")
+            if abs_fp:
+                try:
+                    fur_data["file_path"] = Path(abs_fp).relative_to(project_dir).as_posix()
+                except ValueError:
+                    fur_data["file_path"] = abs_fp
+
+        # Icons: absoluten Pfad → relativ
+        for pid, pdata in params.get("elec_points", {}).items():
+            abs_icon = pdata.get("icon_path", "")
+            if abs_icon and abs_icon not in _builtin_paths:
+                try:
+                    pdata["icon_path"] = Path(abs_icon).relative_to(project_dir).as_posix()
+                except ValueError:
+                    pdata["icon_path"] = abs_icon
+
+        # Legacy svg_path relativ
+        rel_svg = ""
+        if self._svg_path:
+            try:
+                rel_svg = Path(self._svg_path).relative_to(project_dir).as_posix()
+            except ValueError:
+                rel_svg = self._svg_path
 
         data = {
             "svg_path": rel_svg,
@@ -1674,6 +1804,15 @@ class MainWindow(QMainWindow):
                     if abs_fp and Path(abs_fp).exists():
                         self.canvas.load_floor_plan_image(fid, abs_fp)
 
+            # --- resolve furniture file paths + load images -----------
+            for fur_id, fur_data in params.get("furniture", {}).items():
+                rel_fp = fur_data.get("file_path", "")
+                if rel_fp:
+                    abs_fp = self._to_absolute(rel_fp, project_dir)
+                    fur_data["file_path"] = abs_fp or ""
+                    if abs_fp and Path(abs_fp).exists():
+                        self.canvas.load_floor_plan_image(fur_id, abs_fp)
+
             # --- sync toolbar widgets with restored canvas state -------
             self._sync_toolbar_from_canvas()
 
@@ -1709,6 +1848,26 @@ class MainWindow(QMainWindow):
                     if "grundriss-1" not in self.canvas._floor_plans:
                         self.canvas.add_floor_plan("grundriss-1",
                                                     filepath=self._svg_path)
+
+            # Furniture panels: update counter + ensure canvas layer
+            for fur_id, panel in self.param_panel.furniture_panels.items():
+                if fur_id not in self.canvas._floor_plans and panel._file_path:
+                    self.canvas.add_floor_plan(fur_id, filepath=panel._file_path)
+                layer = self.canvas._floor_plans.get(fur_id)
+                if layer and layer.mm_per_px != 1.0:
+                    panel.update_scale_label(layer.mm_per_px)
+                # Feste Abmessungen aus Panel-Daten auf Canvas-Layer anwenden
+                p = panel.get_parameters()
+                w_mm = p.get("fixed_width_mm", 0.0)
+                h_mm = p.get("fixed_height_mm", 0.0)
+                if layer and (w_mm > 0 or h_mm > 0):
+                    layer.fixed_width_mm = w_mm
+                    layer.fixed_height_mm = h_mm
+                try:
+                    num = int(fur_id.split("-")[1])
+                    self._furniture_counter = max(self._furniture_counter, num)
+                except (IndexError, ValueError):
+                    pass
 
             for cid, panel in self.param_panel.circuit_panels.items():
                 panel.draw_route_requested.connect(self._start_manual_route)

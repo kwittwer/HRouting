@@ -928,18 +928,20 @@ class HkvLinePanel(QWidget):
 class FloorPlanPanel(QWidget):
     """Property panel for a single floor plan / background image."""
 
-    delete_requested     = Signal(str)
-    name_changed         = Signal(str, str)       # (fp_id, new_name)
-    visibility_changed   = Signal(str, bool)      # (fp_id, visible)
-    file_browse_requested = Signal(str)           # fp_id
-    ref_line_requested   = Signal(str)            # fp_id
-    ref_length_confirmed = Signal(str, float)     # (fp_id, length_mm)
-    transform_changed    = Signal(str)            # fp_id  (offset / rotation)
-    opacity_changed      = Signal(str, float)     # (fp_id, 0..1)
-    move_requested       = Signal(str)            # fp_id
-    rotate_requested     = Signal(str)            # fp_id
-    move_up_requested    = Signal(str)            # fp_id
-    move_down_requested  = Signal(str)            # fp_id
+    delete_requested        = Signal(str)
+    name_changed           = Signal(str, str)       # (fp_id, new_name)
+    visibility_changed     = Signal(str, bool)      # (fp_id, visible)
+    file_browse_requested  = Signal(str)           # fp_id
+    ref_line_requested     = Signal(str)            # fp_id
+    size_changed           = Signal(str)            # fp_id  (fixed_width/height)
+    ref_length_confirmed   = Signal(str, float)     # (fp_id, length_mm)
+    transform_changed      = Signal(str)            # fp_id  (offset / rotation)
+    opacity_changed        = Signal(str, float)     # (fp_id, 0..1)
+    move_requested         = Signal(str)            # fp_id
+    rotate_requested       = Signal(str)            # fp_id
+    move_up_requested      = Signal(str)            # fp_id
+    move_down_requested    = Signal(str)            # fp_id
+    add_furniture_requested = Signal(str)           # fp_id
 
     def __init__(self, fp_id: str, name: str | None = None, parent=None):
         super().__init__(parent)
@@ -1130,6 +1132,71 @@ class FloorPlanPanel(QWidget):
         )
         layout.addWidget(self.btn_delete)
 
+        # ── Einrichtungsgegenstände ────────────────────────────────
+        self._einr_sep = QFrame()
+        self._einr_sep.setFrameShape(QFrame.HLine)
+        self._einr_sep.setStyleSheet("color:#555;")
+        layout.addWidget(self._einr_sep)
+
+        # ── Feste Abmessungen (nur für Einrichtung, standardmäßig ausgeblendet) ──
+        self._fixed_size_sep = QFrame()
+        self._fixed_size_sep.setFrameShape(QFrame.HLine)
+        self._fixed_size_sep.setStyleSheet("color:#555;")
+        layout.addWidget(self._fixed_size_sep)
+        self._fixed_size_sep.hide()
+
+        self._fixed_size_title = QLabel("\U0001f4d0 Abmessungen")
+        self._fixed_size_title.setStyleSheet("font-weight:bold; padding:4px 0;")
+        layout.addWidget(self._fixed_size_title)
+        self._fixed_size_title.hide()
+
+        fixed_size_form = QFormLayout()
+        fixed_size_form.setContentsMargins(0, 0, 0, 0)
+        fixed_size_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+
+        self.sb_fixed_width = QDoubleSpinBox()
+        self.sb_fixed_width.setRange(0.0, 100.0)
+        self.sb_fixed_width.setDecimals(3)
+        self.sb_fixed_width.setSingleStep(0.01)
+        self.sb_fixed_width.setValue(0.0)
+        self.sb_fixed_width.setSpecialValueText("\u2013\u2013 (auto)")
+        self.sb_fixed_width.setSuffix(" m")
+        self.sb_fixed_width.setToolTip("Breite der Einrichtung in Metern (0 = Referenzlinie nutzen)")
+        self.sb_fixed_width.valueChanged.connect(
+            lambda _: self.size_changed.emit(self.fp_id)
+        )
+        fixed_size_form.addRow("Breite:", self.sb_fixed_width)
+
+        self.sb_fixed_height = QDoubleSpinBox()
+        self.sb_fixed_height.setRange(0.0, 100.0)
+        self.sb_fixed_height.setDecimals(3)
+        self.sb_fixed_height.setSingleStep(0.01)
+        self.sb_fixed_height.setValue(0.0)
+        self.sb_fixed_height.setSpecialValueText("\u2013\u2013 (auto)")
+        self.sb_fixed_height.setSuffix(" m")
+        self.sb_fixed_height.setToolTip("Tiefe der Einrichtung in Metern (0 = Referenzlinie nutzen)")
+        self.sb_fixed_height.valueChanged.connect(
+            lambda _: self.size_changed.emit(self.fp_id)
+        )
+        fixed_size_form.addRow("Tiefe:", self.sb_fixed_height)
+
+        self._fixed_size_widget = QWidget()
+        self._fixed_size_widget.setLayout(fixed_size_form)
+        layout.addWidget(self._fixed_size_widget)
+        self._fixed_size_widget.hide()
+
+        self.btn_add_furniture = QPushButton("\U0001fa91 Einrichtung hinzuf\u00fcgen")
+        self.btn_add_furniture.setToolTip(
+            "F\u00fcgt diesem Grundriss ein Einrichtungselement (SVG/Bild) hinzu"
+        )
+        self.btn_add_furniture.setStyleSheet(
+            "background:#546e7a; color:white; padding:4px;"
+        )
+        self.btn_add_furniture.clicked.connect(
+            lambda: self.add_furniture_requested.emit(self.fp_id)
+        )
+        layout.addWidget(self.btn_add_furniture)
+
     # ── Helpers ────────────────────────────────────────────────────
 
     def _emit_name(self, text: str):
@@ -1178,6 +1245,8 @@ class FloorPlanPanel(QWidget):
             "offset_y": self.sb_offset_y.value(),
             "rotation": self.sb_rotation.value(),
             "ref_length_mm": self.sb_ref_length.value() * 1000.0,
+            "fixed_width_mm": self.sb_fixed_width.value() * 1000.0,
+            "fixed_height_mm": self.sb_fixed_height.value() * 1000.0,
         }
 
     def to_dict(self) -> dict:
@@ -1191,9 +1260,27 @@ class FloorPlanPanel(QWidget):
         self.sb_offset_y.setValue(d.get("offset_y", 0.0))
         self.sb_rotation.setValue(d.get("rotation", 0.0))
         self.sb_ref_length.setValue(d.get("ref_length_mm", 1000.0) / 1000.0)
+        self.sb_fixed_width.blockSignals(True)
+        self.sb_fixed_height.blockSignals(True)
+        self.sb_fixed_width.setValue(d.get("fixed_width_mm", 0.0) / 1000.0)
+        self.sb_fixed_height.setValue(d.get("fixed_height_mm", 0.0) / 1000.0)
+        self.sb_fixed_width.blockSignals(False)
+        self.sb_fixed_height.blockSignals(False)
         fp = d.get("file_path", "")
         if fp:
             self.set_file_path(fp)
+
+    def configure_as_furniture(self):
+        """Hide controls that only apply to top-level floor plans."""
+        self.btn_up.hide()
+        self.btn_down.hide()
+        self._einr_sep.hide()
+        self.btn_add_furniture.hide()
+        self.btn_delete.setText("\U0001f5d1 Einrichtung entfernen")
+        # Feste Abmessungen anzeigen
+        self._fixed_size_sep.show()
+        self._fixed_size_title.show()
+        self._fixed_size_widget.show()
 
 
 # ================================================================== #
@@ -1229,9 +1316,12 @@ class ParameterPanel(QWidget):
     delete_hkv_line_requested   = Signal(str)
     duplicate_elec_point_requested = Signal(str)
     duplicate_elec_cable_requested = Signal(str)
-    all_hk_visibility_changed   = Signal(bool)
-    all_elec_visibility_changed = Signal(bool)
-    heating_global_changed      = Signal()
+    all_hk_visibility_changed      = Signal(bool)
+    all_elec_visibility_changed    = Signal(bool)
+    heating_global_changed         = Signal()
+    add_furniture_requested        = Signal(str)   # parent_fp_id
+    delete_furniture_requested     = Signal(str)   # furniture_id
+    furniture_size_changed         = Signal(str)   # furniture_id
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1241,6 +1331,8 @@ class ParameterPanel(QWidget):
         self.hkv_panels: dict[str, HkvPanel] = {}
         self.hkv_line_panels: dict[str, HkvLinePanel] = {}
         self.floorplan_panels: dict[str, FloorPlanPanel] = {}
+        self.furniture_panels: dict[str, FloorPlanPanel] = {}
+        self._furniture_parent: dict[str, str] = {}  # furniture_id -> parent_fp_id
         self._tree_items: dict[str, QTreeWidgetItem] = {}
         self._loading = False
         self._build_ui()
@@ -1487,6 +1579,8 @@ class ParameterPanel(QWidget):
         self._heat_global_panel.hide()
         for p in self.floorplan_panels.values():
             p.hide()
+        for p in self.furniture_panels.values():
+            p.hide()
         for p in self.circuit_panels.values():
             p.hide()
         for p in self.elec_point_panels.values():
@@ -1512,6 +1606,7 @@ class ParameterPanel(QWidget):
             return
 
         panel = (self.floorplan_panels.get(item_id)
+                 or self.furniture_panels.get(item_id)
                  or self.circuit_panels.get(item_id)
                  or self.elec_point_panels.get(item_id)
                  or self.elec_cable_panels.get(item_id)
@@ -1526,15 +1621,20 @@ class ParameterPanel(QWidget):
         """Handle check-state changes on category items (group visibility)."""
         if self._loading:
             return
-        # Top-level group: Grundriss toggles all floor plan visibility
+        # Top-level group: Grundriss toggles all floor plan + furniture visibility
         if item is self._tree_grundriss:
             checked = item.checkState(0) == Qt.Checked
             st = Qt.Checked if checked else Qt.Unchecked
             self._loading = True
             for i in range(item.childCount()):
-                item.child(i).setCheckState(0, st)
+                fp_child = item.child(i)
+                fp_child.setCheckState(0, st)
+                for j in range(fp_child.childCount()):
+                    fp_child.child(j).setCheckState(0, st)
             self._loading = False
             for panel in self.floorplan_panels.values():
+                panel.chk_visible.setChecked(checked)
+            for panel in self.furniture_panels.values():
                 panel.chk_visible.setChecked(checked)
         # Top-level group: Heizung toggles all heating sub-categories
         elif item is self._tree_heizung:
@@ -1619,6 +1719,7 @@ class ParameterPanel(QWidget):
             if item_id:
                 checked = item.checkState(0) == Qt.Checked
                 panel = (self.floorplan_panels.get(item_id)
+                         or self.furniture_panels.get(item_id)
                          or self.circuit_panels.get(item_id)
                          or self.elec_point_panels.get(item_id)
                          or self.elec_cable_panels.get(item_id)
@@ -1626,6 +1727,19 @@ class ParameterPanel(QWidget):
                          or self.hkv_line_panels.get(item_id))
                 if panel:
                     panel.chk_visible.setChecked(checked)
+                # If this is a floor plan, also toggle its furniture children
+                if item_id in self.floorplan_panels:
+                    self._loading = True
+                    for i in range(item.childCount()):
+                        item.child(i).setCheckState(
+                            0, Qt.Checked if checked else Qt.Unchecked
+                        )
+                    self._loading = False
+                    for fur_id, par_id in self._furniture_parent.items():
+                        if par_id == item_id:
+                            fur_panel = self.furniture_panels.get(fur_id)
+                            if fur_panel:
+                                fur_panel.chk_visible.setChecked(checked)
 
     def _sync_tree_checkbox(self, item_id: str, checked: bool):
         """Sync tree item checkbox when panel visibility changes."""
@@ -1665,11 +1779,48 @@ class ParameterPanel(QWidget):
         panel.rotate_requested.connect(self.floorplan_rotate_requested)
         panel.move_up_requested.connect(self._move_floorplan_up)
         panel.move_down_requested.connect(self._move_floorplan_down)
+        panel.add_furniture_requested.connect(self.add_furniture_requested)
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.floorplan_panels[fp_id] = panel
         self._add_tree_item(self._tree_grundriss, fp_id, name or fp_id)
         return panel
+
+    def add_furniture_panel(self, fur_id: str, parent_fp_id: str,
+                            name: str | None = None) -> "FloorPlanPanel":
+        """Create a furniture layer panel as child of the given floor plan."""
+        panel = FloorPlanPanel(fur_id, name=name)
+        panel.configure_as_furniture()
+        panel.delete_requested.connect(self.delete_furniture_requested)
+        panel.name_changed.connect(self._update_tree_item_name)
+        panel.visibility_changed.connect(
+            lambda fid, c: (self._sync_tree_checkbox(fid, c),
+                            self.floorplan_visibility_changed.emit(fid, c))
+        )
+        panel.file_browse_requested.connect(self.floorplan_file_browse)
+        panel.ref_line_requested.connect(self.floorplan_ref_line)
+        panel.ref_length_confirmed.connect(self.floorplan_ref_confirmed)
+        panel.transform_changed.connect(self.floorplan_transform_changed)
+        panel.opacity_changed.connect(self.floorplan_opacity_changed)
+        panel.move_requested.connect(self.floorplan_move_requested)
+        panel.rotate_requested.connect(self.floorplan_rotate_requested)
+        panel.size_changed.connect(self.furniture_size_changed)
+        self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
+        panel.hide()
+        self.furniture_panels[fur_id] = panel
+        self._furniture_parent[fur_id] = parent_fp_id
+        parent_tree_item = self._tree_items.get(parent_fp_id, self._tree_grundriss)
+        self._add_tree_item(parent_tree_item, fur_id, name or fur_id)
+        return panel
+
+    def remove_furniture_panel(self, fur_id: str):
+        self._remove_tree_item(fur_id)
+        self._furniture_parent.pop(fur_id, None)
+        panel = self.furniture_panels.pop(fur_id, None)
+        if panel:
+            self._prop_layout.removeWidget(panel)
+            panel.deleteLater()
+        self._show_placeholder_if_empty()
 
     def remove_floorplan_panel(self, fp_id: str):
         self._remove_tree_item(fp_id)
@@ -1726,8 +1877,23 @@ class ParameterPanel(QWidget):
         for i in range(self._tree_grundriss.childCount()):
             child = self._tree_grundriss.child(i)
             fid = child.data(0, Qt.UserRole)
-            if fid:
+            if fid and fid in self.floorplan_panels:
                 order.append(fid)
+        return order
+
+    def get_full_render_order(self) -> list[str]:
+        """Return all layer IDs (floor plans + furniture) in render order."""
+        order = []
+        for i in range(self._tree_grundriss.childCount()):
+            fp_item = self._tree_grundriss.child(i)
+            fp_id = fp_item.data(0, Qt.UserRole)
+            if fp_id and fp_id in self.floorplan_panels:
+                order.append(fp_id)
+                for j in range(fp_item.childCount()):
+                    fur_item = fp_item.child(j)
+                    fur_id = fur_item.data(0, Qt.UserRole)
+                    if fur_id and fur_id in self.furniture_panels:
+                        order.append(fur_id)
         return order
 
     # ──────────────────────────────────────────────────────────────── #
@@ -1914,6 +2080,7 @@ class ParameterPanel(QWidget):
         """Show the 'select an item' label when no panel is visible."""
         if not any(p.isVisible() for p in
                    list(self.floorplan_panels.values()) +
+                   list(self.furniture_panels.values()) +
                    list(self.circuit_panels.values()) +
                    list(self.elec_point_panels.values()) +
                    list(self.elec_cable_panels.values()) +
@@ -1938,6 +2105,8 @@ class ParameterPanel(QWidget):
 
     def clear_all_panels(self):
         """Remove all object panels (circuits, elec, HKV, floorplans) from the tree + layout."""
+        for fur_id in list(self.furniture_panels):
+            self.remove_furniture_panel(fur_id)
         for fid in list(self.floorplan_panels):
             self.remove_floorplan_panel(fid)
         for cid in list(self.circuit_panels):
@@ -1959,6 +2128,11 @@ class ParameterPanel(QWidget):
             "floorplans_order": self.get_floorplan_order(),
             "floorplans": {
                 fid: p.to_dict() for fid, p in self.floorplan_panels.items()
+            },
+            "furniture": {
+                fur_id: {**p.to_dict(),
+                         "parent_fp_id": self._furniture_parent.get(fur_id, "")}
+                for fur_id, p in self.furniture_panels.items()
             },
             "circuits": {
                 cid: p.to_dict() for cid, p in self.circuit_panels.items()
@@ -1997,6 +2171,15 @@ class ParameterPanel(QWidget):
         if not fp_order and "ref_length_mm" in d:
             panel = self.add_floorplan_panel("grundriss-1", name="Grundriss 1")
             panel.sb_ref_length.setValue(d["ref_length_mm"] / 1000.0)
+
+        # Einrichtungsgegenstände
+        for fur_id, values in d.get("furniture", {}).items():
+            parent_fp_id = values.get("parent_fp_id", "")
+            panel = self.add_furniture_panel(
+                fur_id, parent_fp_id=parent_fp_id,
+                name=values.get("name", fur_id),
+            )
+            panel.from_dict(values)
 
         # HKV-Punkte VOR Heizkreisen laden (für Verteiler-Dropdown)
         for hid, values in d.get("hkv_points", {}).items():
