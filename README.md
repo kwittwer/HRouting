@@ -6,6 +6,32 @@ Entwickelt mit **Python 3** und **PySide6** (Qt for Python).
 
 ---
 
+## Release Notes
+
+### V 0.1.1 (27.04.2026)
+
+#### Features ✨
+- **Möbel-Polygone für Grundrisse**: Möbel können jetzt direkt als Polygone auf dem Grundriss gezeichnet werden (Alternative zu Bildern)
+- **Möbel-Polygon-Editor**: Doppelklick auf Möbel-Polygon startet Edit-Modus mit Punkt-Verschiebung, Löschen und Einfügen
+- **Polygon-Farbwahl**: Farbe der Möbel-Polygone individuell konfigurierbar über Farbwähler
+- **Grid-Snapping für Polygon-Punkte**: Polygon-Punkte fangen am Raster beim Ziehen (wenn Raster sichtbar)
+- **Linienlängen-Anzeige**: Im Polygon-Edit-Modus werden Längen der benachbarten Segmente angezeigt
+
+#### Verbesserungen 🔧
+- **Zoom-Limits**: Maximales Zoom von 100x auf 50x reduziert (verhindert Rendering-Fehler)
+- **Pixmap-Fallback**: Bei extremem Zoom wird Platzhalter statt fehlerhaftem Bild angezeigt
+- **Mausrad-Schutz**: Alle Spinboxes ignorieren Mausrad komplett - verhindert versehentliche Wertänderungen
+- **Heizkreisgrößen flexibel**: Rohrdurchmesser, Verlegeabstand und Randabstand haben keine starren Obergrenzen mehr (nur > 0)
+
+#### Bugfixes 🐛
+- Pixmap verschwindet bei zu starkem Zoom (jetzt mit Fallback)
+- Grundrissbild-Rendering bei extremem Zoom
+
+### V 0.1.0 (27.04.2026)
+- Initiale Version mit Heizkreis- und Elektro-Planung
+
+---
+
 ## Projektstruktur
 
 ```
