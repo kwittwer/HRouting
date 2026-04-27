@@ -25,15 +25,12 @@ from pathlib import Path
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtCore import Signal, Qt
 
-# ── Custom Spinbox: Block mouse wheel unless focused ────────────── #
+# ── Custom Spinbox: Completely disable mouse wheel ────────────── #
 class SafeDoubleSpinBox(QDoubleSpinBox):
-    """QDoubleSpinBox that only responds to mouse wheel when focused.
-    Prevents accidental value changes when scrolling over the field."""
+    """QDoubleSpinBox that never responds to mouse wheel scrolling.
+    Prevents accidental value changes completely - only direct input allowed."""
     def wheelEvent(self, event):
-        if self.hasFocus():
-            super().wheelEvent(event)
-        else:
-            event.ignore()
+        event.ignore()
 
 # ── Eingebaute Elektro-Symbole (DIN EN 60617) ─────────────────── #
 _SYMBOLS_DIR = Path(__file__).resolve().parent.parent / "assets" / "symbols"
@@ -109,7 +106,8 @@ class HeatingCircuitPanel(QWidget):
         form.addRow("Farbe:", self.btn_color)
 
         self.sb_diameter = SafeDoubleSpinBox()
-        self.sb_diameter.setRange(1.0, 3.2)
+        self.sb_diameter.setMinimum(0.01)
+        self.sb_diameter.setMaximum(999999.0)
         self.sb_diameter.setSingleStep(0.05)
         self.sb_diameter.setValue(1.6)
         self.sb_diameter.setDecimals(2)
@@ -117,7 +115,8 @@ class HeatingCircuitPanel(QWidget):
         form.addRow("Rohrdurchmesser:", self.sb_diameter)
 
         self.sb_spacing = SafeDoubleSpinBox()
-        self.sb_spacing.setRange(5.0, 30.0)
+        self.sb_spacing.setMinimum(0.01)
+        self.sb_spacing.setMaximum(999999.0)
         self.sb_spacing.setSingleStep(0.5)
         self.sb_spacing.setValue(15.0)
         self.sb_spacing.setSuffix(" cm")
@@ -127,7 +126,8 @@ class HeatingCircuitPanel(QWidget):
         form.addRow("Verlegeabstand:", self.sb_spacing)
 
         self.sb_wall_dist = SafeDoubleSpinBox()
-        self.sb_wall_dist.setRange(0.0, 50.0)
+        self.sb_wall_dist.setMinimum(0.01)
+        self.sb_wall_dist.setMaximum(999999.0)
         self.sb_wall_dist.setSingleStep(0.5)
         self.sb_wall_dist.setValue(20.0)
         self.sb_wall_dist.setSuffix(" cm")
