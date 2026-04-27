@@ -49,6 +49,8 @@ class FloorPlanLayer:
     ref_length_mm: float = 1000.0
     fixed_width_mm: float = 0.0   # wenn > 0: feste Breite in mm (ignoriert mm_per_px)
     fixed_height_mm: float = 0.0  # wenn > 0: feste Höhe in mm (ignoriert mm_per_px)
+    polygon: List[QPointF] = field(default_factory=list, repr=False)
+    polygon_color: str = "#8d99ae"
 
 COLORS = [
     "#e63946", "#2a9d8f", "#e9c46a", "#f4a261",
@@ -59,6 +61,7 @@ class ToolMode(Enum):
     NONE       = auto()
     DRAW_REF   = auto()
     DRAW_POLY  = auto()
+    DRAW_FURNITURE_POLY = auto()
     MOVE_START = auto()
     DRAW_ROUTE = auto()
     MOVE_ROUTE_POINT = auto()
@@ -91,6 +94,7 @@ class CanvasWidget(QWidget):
     hkv_line_changed   = Signal(str)
     object_double_clicked = Signal(str, str)  # (object_type, object_id)
     floor_plan_transform_updated = Signal(str, float, float, float)  # (fp_id, ox, oy, rot)
+    floor_plan_polygon_finished = Signal(str, list)
     mode_changed = Signal()  # emitted when tool mode changes
 
     def __init__(self, parent=None):
@@ -125,6 +129,8 @@ class CanvasWidget(QWidget):
         self._offset = QPointF(0.0, 0.0)
         self._pan_start: Optional[QPointF] = None
         self._panning = False
+        self._scale_min = 0.1   # Minimum zoom: 0.1x
+        self._scale_max = 50.0  # Maximum zoom: 50x (was 100x)
 
         # Maßstab
         self._mm_per_px = 1.0
@@ -135,6 +141,7 @@ class CanvasWidget(QWidget):
 
         # Polygon-Zeichnen
         self._current_circuit_id: Optional[str] = None
+        self._current_furniture_id: Optional[str] = None
         self._current_points: List[QPointF] = []
 
         # Daten
@@ -231,6 +238,7 @@ class CanvasWidget(QWidget):
 
         # Edit modes
         self._edit_polygon_cid: Optional[str] = None
+        self._edit_floor_polygon_id: Optional[str] = None
         self._insert_between_indices: Optional[Tuple[int, int]] = None
         self._edit_route_cid: Optional[str] = None
 
@@ -283,6 +291,7 @@ class CanvasWidget(QWidget):
         if not layer:
             return
         layer.file_path = filepath
+        layer.polygon = []
         layer.renderer = None
         layer.pixmap = None
         if not os.path.exists(filepath):
@@ -404,6 +413,12 @@ class CanvasWidget(QWidget):
             layer.visible = visible
             self.update()
 
+    def set_floor_plan_polygon_color(self, fp_id: str, color: str):
+        layer = self._floor_plans.get(fp_id)
+        if layer:
+            layer.polygon_color = color or "#8d99ae"
+            self.update()
+
     def set_floor_plan_order(self, order: List[str]):
         self._floor_plan_order = [fid for fid in order
                                    if fid in self._floor_plans]
@@ -464,6 +479,15 @@ class CanvasWidget(QWidget):
         self._ensure_color(circuit_id)
         self.setCursor(Qt.CrossCursor)
 
+    def start_draw_floor_plan_polygon(self, fp_id: str):
+        """Start drawing a polygon as alternative source for a floor plan layer."""
+        if fp_id not in self._floor_plans:
+            return
+        self._mode = ToolMode.DRAW_FURNITURE_POLY
+        self._current_furniture_id = fp_id
+        self._current_points = []
+        self.setCursor(Qt.CrossCursor)
+
     def start_route_drawing(self, circuit_id: str,
                             wall_distance_mm: float,
                             line_distance_mm: float):
@@ -491,10 +515,102 @@ class CanvasWidget(QWidget):
     def start_edit_polygon(self, circuit_id: str):
         if circuit_id not in self._polygons:
             return
+        self._edit_floor_polygon_id = None
         self._edit_polygon_cid = circuit_id
         self._mode = ToolMode.EDIT_POLYGON
         self.setCursor(Qt.CrossCursor)
         self.update()
+
+    def start_edit_floor_plan_polygon(self, fp_id: str):
+        layer = self._floor_plans.get(fp_id)
+        if not layer or len(layer.polygon) < 3:
+            return
+        self._edit_polygon_cid = None
+        self._edit_floor_polygon_id = fp_id
+        self._mode = ToolMode.EDIT_POLYGON
+        self.setCursor(Qt.CrossCursor)
+        self.update()
+
+    def _floor_polygon_render_size(self, layer: "FloorPlanLayer") -> Tuple[float, float]:
+        """Rendered size for floor polygons. Polygons ignore mm scaling."""
+        w, h = layer.size
+        return (max(1.0, w), max(1.0, h))
+
+    def _floor_polygon_points_world(self, fp_id: str) -> List[QPointF]:
+        """Return polygon points transformed to canvas coordinates."""
+        layer = self._floor_plans.get(fp_id)
+        if not layer or not layer.polygon:
+            return []
+        import math
+        sw, sh = self._floor_polygon_render_size(layer)
+        cx = sw / 2 + layer.offset_x
+        cy = sh / 2 + layer.offset_y
+        rad = math.radians(layer.rotation)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+        out: List[QPointF] = []
+        for p in layer.polygon:
+            rx = p.x() - sw / 2
+            ry = p.y() - sh / 2
+            wx = cx + rx * cos_r - ry * sin_r
+            wy = cy + rx * sin_r + ry * cos_r
+            out.append(QPointF(wx, wy))
+        return out
+
+    def _world_to_floor_polygon_local(self, fp_id: str, world_pt: QPointF) -> QPointF:
+        layer = self._floor_plans.get(fp_id)
+        if not layer:
+            return QPointF(world_pt)
+        import math
+        sw, sh = self._floor_polygon_render_size(layer)
+        cx = sw / 2 + layer.offset_x
+        cy = sh / 2 + layer.offset_y
+        dx = world_pt.x() - cx
+        dy = world_pt.y() - cy
+        rad = math.radians(-layer.rotation)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+        lx = dx * cos_r - dy * sin_r + sw / 2
+        ly = dx * sin_r + dy * cos_r + sh / 2
+        return QPointF(lx, ly)
+
+    def _hit_floor_polygon_point(self, canvas_pt: QPointF, fp_id: str) -> Optional[int]:
+        pts = self._floor_polygon_points_world(fp_id)
+        if not pts:
+            return None
+        threshold = 10.0 / self._scale
+        for i, pt in enumerate(pts):
+            if _qdist(canvas_pt, pt) < threshold:
+                return i
+        return None
+
+    def _hit_floor_polygon_edge(self, canvas_pt: QPointF, fp_id: str) -> Optional[Tuple[int, int]]:
+        pts = self._floor_polygon_points_world(fp_id)
+        if len(pts) < 2:
+            return None
+        threshold = 8.0 / self._scale
+        for i in range(len(pts)):
+            p1 = pts[i]
+            p2 = pts[(i + 1) % len(pts)]
+            proj = _project_on_segment(canvas_pt, p1, p2)
+            if _qdist(canvas_pt, proj) < threshold:
+                return (i, (i + 1) % len(pts))
+        return None
+
+    def _delete_floor_polygon_point(self, fp_id: str, idx: int):
+        layer = self._floor_plans.get(fp_id)
+        if not layer or len(layer.polygon) <= 3:
+            return
+        del layer.polygon[idx]
+        self.update()
+
+    def _insert_floor_polygon_point(self, fp_id: str, idx1: int, idx2: int, canvas_pt: QPointF):
+        layer = self._floor_plans.get(fp_id)
+        if not layer or not layer.polygon:
+            return
+        pts = layer.polygon
+        next_idx = (idx1 + 1) % len(pts)
+        if idx2 == next_idx:
+            pts.insert(next_idx, self._world_to_floor_polygon_local(fp_id, canvas_pt))
+            self.update()
 
     def start_edit_route(self, circuit_id: str):
         if circuit_id not in self._manual_routes:
@@ -1211,12 +1327,15 @@ class CanvasWidget(QWidget):
                 "ref_length_mm": layer.ref_length_mm,
                 "fixed_width_mm": layer.fixed_width_mm,
                 "fixed_height_mm": layer.fixed_height_mm,
+                "polygon_color": layer.polygon_color,
             }
             if layer.ref_p1 and layer.ref_p2:
                 fp_d["ref_line"] = [
                     (layer.ref_p1.x(), layer.ref_p1.y()),
                     (layer.ref_p2.x(), layer.ref_p2.y()),
                 ]
+            if layer.polygon:
+                fp_d["polygon"] = [(p.x(), p.y()) for p in layer.polygon]
             fp_list.append(fp_d)
         result["floor_plans"] = fp_list
         return result
@@ -1225,6 +1344,8 @@ class CanvasWidget(QWidget):
         # Restore zoom & pan
         if "view_scale" in d:
             self._scale = float(d["view_scale"])
+            # Clamp restored scale to limits
+            self._scale = max(self._scale_min, min(self._scale_max, self._scale))
         if "view_offset" in d:
             ox, oy = d["view_offset"]
             self._offset = QPointF(float(ox), float(oy))
@@ -1311,10 +1432,13 @@ class CanvasWidget(QWidget):
             layer.ref_length_mm = fp_d.get("ref_length_mm", 1000.0)
             layer.fixed_width_mm = fp_d.get("fixed_width_mm", 0.0)
             layer.fixed_height_mm = fp_d.get("fixed_height_mm", 0.0)
+            layer.polygon_color = fp_d.get("polygon_color", "#8d99ae")
             ref = fp_d.get("ref_line")
             if ref:
                 layer.ref_p1 = QPointF(*ref[0])
                 layer.ref_p2 = QPointF(*ref[1])
+            poly = fp_d.get("polygon", [])
+            layer.polygon = [QPointF(x, y) for x, y in poly]
         self.update()
 
     # ------------------------------------------------------------------ #
@@ -1333,7 +1457,9 @@ class CanvasWidget(QWidget):
             return
         sx = self.width()  / w
         sy = self.height() / h
-        self._scale  = min(sx, sy) * 0.95
+        calculated_scale = min(sx, sy) * 0.95
+        # Clamp to zoom limits
+        self._scale = max(self._scale_min, min(self._scale_max, calculated_scale))
         self._offset = QPointF(
             (self.width()  - w * self._scale) / 2,
             (self.height() - h * self._scale) / 2,
@@ -1650,7 +1776,10 @@ class CanvasWidget(QWidget):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         mouse  = QPointF(event.position())
         cp     = self._to_canvas(mouse)
-        self._scale *= factor
+        new_scale = self._scale * factor
+        # Clamp zoom to limits
+        new_scale = max(self._scale_min, min(self._scale_max, new_scale))
+        self._scale = new_scale
         self._offset = QPointF(
             mouse.x() - cp.x() * self._scale,
             mouse.y() - cp.y() * self._scale,
@@ -1737,6 +1866,16 @@ class CanvasWidget(QWidget):
                         return
 
         # 7. Polygon (point inside)
+        for fid in reversed(self._floor_plan_order):
+            layer = self._floor_plans.get(fid)
+            if not layer or not layer.visible or not layer.polygon:
+                continue
+            poly = QPolygonF(self._floor_polygon_points_world(fid))
+            if poly.containsPoint(canvas_pt, Qt.OddEvenFill):
+                self.object_double_clicked.emit("floor_polygon", fid)
+                return
+
+        # 8. Polygon (point inside)
         for cid, poly in self._polygons.items():
             if not self._circuit_visible.get(cid, True):
                 continue
@@ -1814,7 +1953,10 @@ class CanvasWidget(QWidget):
                 layer = self._floor_plans.get(self._active_floor_id)
                 if layer:
                     import math
-                    sw, sh = self._layer_render_size(layer)
+                    if layer.polygon:
+                        sw, sh = self._floor_polygon_render_size(layer)
+                    else:
+                        sw, sh = self._layer_render_size(layer)
                     cx = sw / 2 + layer.offset_x
                     cy = sh / 2 + layer.offset_y
                     dx = canvas_pt.x() - cx
@@ -1838,6 +1980,41 @@ class CanvasWidget(QWidget):
                     pts = [(p.x(), p.y()) for p in self._current_points]
                     self.polygon_finished.emit(self._current_circuit_id, pts)
                 self._mode = ToolMode.NONE
+                self._current_points = []
+                self.setCursor(Qt.ArrowCursor)
+                self.update()
+            return
+
+        # ── Einrichtungs-Polygon zeichnen ──
+        if self._mode == ToolMode.DRAW_FURNITURE_POLY:
+            if event.button() == Qt.LeftButton:
+                self._current_points.append(canvas_pt)
+                self.update()
+            elif event.button() == Qt.RightButton:
+                if len(self._current_points) >= 3 and self._current_furniture_id:
+                    layer = self._floor_plans.get(self._current_furniture_id)
+                    if layer:
+                        min_x = min(p.x() for p in self._current_points)
+                        min_y = min(p.y() for p in self._current_points)
+                        max_x = max(p.x() for p in self._current_points)
+                        max_y = max(p.y() for p in self._current_points)
+                        w = max(1.0, max_x - min_x)
+                        h = max(1.0, max_y - min_y)
+                        layer.size = (w, h)
+                        layer.offset_x = min_x
+                        layer.offset_y = min_y
+                        layer.rotation = 0.0
+                        layer.file_path = ""
+                        layer.renderer = None
+                        layer.pixmap = None
+                        layer.polygon = [QPointF(p.x() - min_x, p.y() - min_y)
+                                         for p in self._current_points]
+                        pts = [(p.x(), p.y()) for p in self._current_points]
+                        self.floor_plan_polygon_finished.emit(
+                            self._current_furniture_id, pts
+                        )
+                self._mode = ToolMode.NONE
+                self._current_furniture_id = None
                 self._current_points = []
                 self.setCursor(Qt.ArrowCursor)
                 self.update()
@@ -2152,6 +2329,31 @@ class CanvasWidget(QWidget):
                 self.update()
                 return
 
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
+            fid = self._edit_floor_polygon_id
+            if event.button() == Qt.LeftButton:
+                hit = self._hit_floor_polygon_point(canvas_pt, fid)
+                if hit is not None:
+                    self._dragging_route_point = (fid, hit)
+                    self.setCursor(Qt.ClosedHandCursor)
+                return
+            elif event.button() == Qt.RightButton:
+                hit = self._hit_floor_polygon_point(canvas_pt, fid)
+                if hit is not None:
+                    self._delete_floor_polygon_point(fid, hit)
+                    return
+                hit = self._hit_floor_polygon_edge(canvas_pt, fid)
+                if hit is not None:
+                    idx1, idx2 = hit
+                    self._insert_floor_polygon_point(fid, idx1, idx2, canvas_pt)
+                return
+            elif event.button() == Qt.MiddleButton:
+                self._mode = ToolMode.NONE
+                self._edit_floor_polygon_id = None
+                self.setCursor(Qt.ArrowCursor)
+                self.update()
+                return
+
         # ── Rohrverlauf bearbeiten ──
         if self._mode == ToolMode.EDIT_ROUTE and self._edit_route_cid:
             cid = self._edit_route_cid
@@ -2269,7 +2471,10 @@ class CanvasWidget(QWidget):
                 layer = self._floor_plans.get(self._active_floor_id)
                 if layer:
                     import math
-                    sw, sh = self._layer_render_size(layer)
+                    if layer.polygon:
+                        sw, sh = self._floor_polygon_render_size(layer)
+                    else:
+                        sw, sh = self._layer_render_size(layer)
                     cx = sw / 2 + layer.offset_x
                     cy = sh / 2 + layer.offset_y
                     dx = canvas_pt.x() - cx
@@ -2337,6 +2542,27 @@ class CanvasWidget(QWidget):
                     self.update()
                     return
                 edge_hit = self._hit_polygon_edge(canvas_pt, self._edit_polygon_cid)
+                self.setCursor(Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
+            self.update()
+            return
+
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
+            fid = self._edit_floor_polygon_id
+            if self._dragging_route_point:
+                oid, idx = self._dragging_route_point
+                layer = self._floor_plans.get(fid)
+                if oid == fid and layer and 0 <= idx < len(layer.polygon):
+                    # Snap to grid if visible
+                    snapped_pt = self._snap_to_grid(canvas_pt) if self._grid_visible else canvas_pt
+                    layer.polygon[idx] = self._world_to_floor_polygon_local(fid, snapped_pt)
+                    self.update()
+            else:
+                hit = self._hit_floor_polygon_point(canvas_pt, fid)
+                if hit is not None:
+                    self.setCursor(Qt.OpenHandCursor)
+                    self.update()
+                    return
+                edge_hit = self._hit_floor_polygon_edge(canvas_pt, fid)
                 self.setCursor(Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
             self.update()
             return
@@ -2616,6 +2842,9 @@ class CanvasWidget(QWidget):
             if self._dragging_route_point and self._mode == ToolMode.EDIT_POLYGON:
                 cid, _ = self._dragging_route_point
                 self._dragging_route_point = None
+                if self._edit_floor_polygon_id and cid == self._edit_floor_polygon_id:
+                    self.update()
+                    return
                 self.update()
                 return
             if self._dragging_route_point and self._mode == ToolMode.EDIT_ROUTE:
@@ -2727,12 +2956,14 @@ class CanvasWidget(QWidget):
         if event.key() == Qt.Key_Escape:
             self._mode           = ToolMode.NONE
             self._current_points = []
+            self._current_furniture_id = None
             self._current_route_points = []
             self._current_route_cid = None
             self._current_route_preview_end = None
             self._dragging_start = None
             self._dragging_route_point = None
             self._edit_polygon_cid = None
+            self._edit_floor_polygon_id = None
             self._edit_route_cid = None
             self._constraint_violation_point = None
             self._constraint_violation_line = None
@@ -2770,6 +3001,8 @@ class CanvasWidget(QWidget):
             cid, idx = self._dragging_route_point
             if self._mode == ToolMode.EDIT_POLYGON and cid == self._edit_polygon_cid:
                 self._delete_polygon_point(cid, idx)
+            elif self._mode == ToolMode.EDIT_POLYGON and cid == self._edit_floor_polygon_id:
+                self._delete_floor_polygon_point(cid, idx)
             elif self._mode == ToolMode.EDIT_ROUTE and cid == self._edit_route_cid:
                 self._delete_route_point(cid, idx)
             self._dragging_route_point = None
@@ -2799,7 +3032,10 @@ class CanvasWidget(QWidget):
                 continue
             painter.save()
             # Real-world scaling: feste Abmessungen oder mm_per_px
-            sw, sh = self._layer_render_size(layer)
+            if layer.polygon:
+                sw, sh = self._floor_polygon_render_size(layer)
+            else:
+                sw, sh = self._layer_render_size(layer)
             # Apply per-layer transform: translate then rotate around centre
             cx = sw / 2 + layer.offset_x
             cy = sh / 2 + layer.offset_y
@@ -2810,8 +3046,31 @@ class CanvasWidget(QWidget):
             if layer.renderer:
                 layer.renderer.render(painter, QRectF(0, 0, sw, sh))
             elif layer.pixmap:
-                painter.drawPixmap(QRectF(0, 0, sw, sh), layer.pixmap,
-                                   QRectF(layer.pixmap.rect()))
+                # Prevent rendering pixmap at unreasonable sizes
+                # Qt has issues with extremely large rectangles
+                max_dim = 20000.0
+                if sw > 0 and sh > 0 and sw < max_dim and sh < max_dim:
+                    painter.drawPixmap(QRectF(0, 0, sw, sh), layer.pixmap,
+                                       QRectF(layer.pixmap.rect()))
+                else:
+                    # Fallback: draw placeholder rectangle
+                    painter.setPen(QPen(QColor("#ff6b6b"), 2.0 / self._scale))
+                    painter.setBrush(QBrush(QColor("#2b2b2b")))
+                    painter.drawRect(0, 0, max(sw, 100), max(sh, 100))
+            elif layer.polygon:
+                bw = layer.size[0] if layer.size[0] > 0 else 1.0
+                bh = layer.size[1] if layer.size[1] > 0 else 1.0
+                poly = QPolygonF([
+                    QPointF(p.x() * sw / bw, p.y() * sh / bh)
+                    for p in layer.polygon
+                ])
+                fill = QColor(layer.polygon_color or "#8d99ae")
+                fill.setAlpha(70)
+                painter.setBrush(QBrush(fill))
+                stroke = QColor(layer.polygon_color or "#8d99ae")
+                stroke = stroke.lighter(140)
+                painter.setPen(QPen(stroke, 2.0 / self._scale))
+                painter.drawPolygon(poly)
             painter.restore()
 
         # Legacy single background (SVG or raster image)
@@ -2891,6 +3150,9 @@ class CanvasWidget(QWidget):
                 self._color_map.get(self._current_circuit_id, QColor("gray"))
             )
 
+        if self._mode == ToolMode.DRAW_FURNITURE_POLY and self._current_points:
+            self._draw_in_progress(painter, QColor("#edf2f4"))
+
         if self._mode == ToolMode.DRAW_ROUTE and self._current_route_cid and self._current_route_points:
             self._draw_route_in_progress(
                 painter,
@@ -2910,6 +3172,10 @@ class CanvasWidget(QWidget):
         # Edit mode visualization
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
             self._draw_edit_polygon_overlay(painter, self._edit_polygon_cid)
+        elif self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
+            self._draw_edit_floor_polygon_overlay(
+                painter, self._edit_floor_polygon_id)
+            self._draw_floor_polygon_drag_distance_overlay(painter, self._edit_floor_polygon_id)
         elif self._mode == ToolMode.EDIT_ROUTE and self._edit_route_cid:
             self._draw_edit_route_overlay(painter, self._edit_route_cid)
         elif self._mode == ToolMode.EDIT_ELEC_CABLE and self._edit_elec_cable_id:
@@ -3124,6 +3390,81 @@ class CanvasWidget(QWidget):
         fm = painter.fontMetrics()
 
         for a, b in segs:
+            dist_px = _qdist(a, b)
+            dist_m = dist_px * mm_per_px / 1000.0
+
+            mid = QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2)
+            dx = b.x() - a.x()
+            dy = b.y() - a.y()
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                continue
+
+            # Offset label perpendicular to the segment
+            nx, ny = -dy / length, dx / length
+            offset = 8.0 / self._scale
+            label_pos = QPointF(mid.x() + nx * offset, mid.y() + ny * offset)
+
+            text = f"{dist_m:.2f} m"
+            tw = fm.horizontalAdvance(text)
+            th = fm.height()
+
+            # Background
+            bg_rect = QRectF(label_pos.x() - tw / 2 - 2,
+                             label_pos.y() - th / 2 - 1,
+                             tw + 4, th + 2)
+            bg = QColor("#000000")
+            bg.setAlpha(180)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(bg))
+            painter.drawRoundedRect(bg_rect, 3, 3)
+
+            # Dashed measurement line
+            pen = QPen(QColor("#ffdd00"), 1.0 / self._scale, Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(a, b)
+
+            # Text
+            painter.setPen(QPen(QColor("#ffdd00")))
+            painter.drawText(
+                QRectF(label_pos.x() - tw / 2, label_pos.y() - th / 2,
+                       tw, th),
+                Qt.AlignCenter, text)
+
+        painter.restore()
+
+    def _draw_floor_polygon_drag_distance_overlay(self, painter: QPainter, fp_id: str):
+        """Draw distance annotations for segments adjacent to a dragged polygon point."""
+        if not self._dragging_route_point or self._dragging_route_point[0] != fp_id:
+            return
+
+        _, idx = self._dragging_route_point
+        pts = self._floor_polygon_points_world(fp_id)
+        if not pts or idx < 0 or idx >= len(pts):
+            return
+
+        mm_per_px = self._mm_per_px
+        if mm_per_px <= 0:
+            return
+
+        # Get adjacent segments
+        segments = []
+        if idx > 0:
+            segments.append((pts[idx - 1], pts[idx]))
+        if idx < len(pts) - 1:
+            segments.append((pts[idx], pts[idx + 1]))
+
+        if not segments:
+            return
+
+        painter.save()
+        font = painter.font()
+        font.setPointSizeF(10.0 / self._scale)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+
+        for a, b in segments:
             dist_px = _qdist(a, b)
             dist_m = dist_px * mm_per_px / 1000.0
 
@@ -3890,6 +4231,26 @@ class CanvasWidget(QWidget):
                 painter.setBrush(QBrush(QColor("#ff6b6b")))
             else:
                 painter.setBrush(QBrush(color))
+            painter.setPen(QPen(QColor("#ffffff"), 1.0 / self._scale))
+            painter.drawEllipse(p, r, r)
+
+    def _draw_edit_floor_polygon_overlay(self, painter, fp_id: str):
+        pts = self._floor_polygon_points_world(fp_id)
+        if not pts:
+            return
+        layer = self._floor_plans.get(fp_id)
+        base_color = QColor("#8d99ae")
+        if layer and layer.polygon_color:
+            base_color = QColor(layer.polygon_color)
+
+        r = 5.0 / self._scale
+        for i, p in enumerate(pts):
+            if (self._dragging_route_point
+                    and self._dragging_route_point[0] == fp_id
+                    and self._dragging_route_point[1] == i):
+                painter.setBrush(QBrush(QColor("#ff6b6b")))
+            else:
+                painter.setBrush(QBrush(base_color))
             painter.setPen(QPen(QColor("#ffffff"), 1.0 / self._scale))
             painter.drawEllipse(p, r, r)
 

@@ -406,6 +406,13 @@ class MainWindow(QMainWindow):
             layer = self.canvas._floor_plans.get(fur_id)
             if layer and layer.mm_per_px != 1.0:
                 panel.update_scale_label(layer.mm_per_px)
+            if layer:
+                p = panel.get_parameters()
+                self.canvas.set_floor_plan_polygon_color(
+                    fur_id, p.get("polygon_color", "#8d99ae")
+                )
+            if layer and layer.polygon and not panel._file_path:
+                panel.set_polygon_source()
 
         for cid, panel in self.param_panel.circuit_panels.items():
             panel.draw_route_requested.connect(self._start_manual_route)
@@ -504,6 +511,8 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self.canvas.polygon_finished.connect(self._on_polygon_finished)
+        self.canvas.floor_plan_polygon_finished.connect(
+            self._on_floorplan_polygon_finished)
         self.canvas.mode_changed.connect(self._on_canvas_mode_changed)
         self.canvas.ref_line_set.connect(self._on_ref_line_drawn)
         self.canvas.start_point_moved.connect(self._on_start_point_moved)
@@ -521,6 +530,10 @@ class MainWindow(QMainWindow):
         self.param_panel.add_floorplan_requested.connect(self._add_floorplan)
         self.param_panel.delete_floorplan_requested.connect(self._delete_floorplan)
         self.param_panel.floorplan_file_browse.connect(self._browse_floorplan_file)
+        self.param_panel.floorplan_polygon_draw.connect(
+            self._on_floorplan_polygon_draw)
+        self.param_panel.floorplan_polygon_color_changed.connect(
+            self._on_floorplan_polygon_color_changed)
         self.param_panel.floorplan_ref_line.connect(self._on_floorplan_ref_line)
         self.param_panel.floorplan_ref_confirmed.connect(self._on_floorplan_ref_confirmed)
         self.param_panel.floorplan_transform_changed.connect(self._on_floorplan_transform)
@@ -547,6 +560,7 @@ class MainWindow(QMainWindow):
 
         # Dirty-tracking: jede inhaltliche Änderung markiert als unsaved
         self.canvas.polygon_finished.connect(self._mark_dirty)
+        self.canvas.floor_plan_polygon_finished.connect(self._mark_dirty)
         self.canvas.route_changed.connect(self._mark_dirty)
         self.canvas.supply_line_changed.connect(self._mark_dirty)
         self.canvas.elec_point_placed.connect(self._mark_dirty)
@@ -836,6 +850,35 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._push_undo()
 
+    def _on_floorplan_polygon_draw(self, fp_id: str):
+        panel = self.param_panel.furniture_panels.get(fp_id)
+        if panel:
+            p = panel.get_parameters()
+            self.canvas.set_floor_plan_polygon_color(
+                fp_id, p.get("polygon_color", "#8d99ae")
+            )
+        self.canvas.start_draw_floor_plan_polygon(fp_id)
+        self.status.showMessage(
+            f"{fp_id}: Einrichtungs-Polygon zeichnen  |  "
+            "Linksklick = Punkt  |  Rechtsklick = Fertig  |  ESC = Abbruch"
+        )
+
+    def _on_floorplan_polygon_finished(self, fp_id: str, points: list):
+        panel = self.param_panel.furniture_panels.get(fp_id)
+        if panel:
+            panel.set_polygon_source()
+            p = panel.get_parameters()
+            self.canvas.set_floor_plan_polygon_color(
+                fp_id, p.get("polygon_color", "#8d99ae")
+            )
+        self.status.showMessage(
+            f"✅ Einrichtung {fp_id}: Polygon erstellt ({len(points)} Punkte)."
+        )
+
+    def _on_floorplan_polygon_color_changed(self, fp_id: str, color: str):
+        self.canvas.set_floor_plan_polygon_color(fp_id, color)
+        self._mark_dirty()
+
     def _on_floorplan_ref_line(self, fp_id: str):
         self.canvas.start_ref_line_for_floor(fp_id)
 
@@ -1095,8 +1138,18 @@ class MainWindow(QMainWindow):
             self._on_edit_supply_requested(obj_id)
         elif obj_type == "route":
             self._on_edit_route_requested(obj_id)
+        elif obj_type == "floor_polygon":
+            self._on_edit_floor_polygon_requested(obj_id)
         elif obj_type == "polygon":
             self._on_edit_polygon_requested(obj_id)
+
+    def _on_edit_floor_polygon_requested(self, fp_id: str):
+        self.canvas.start_edit_floor_plan_polygon(fp_id)
+        self.status.showMessage(
+            "Einrichtungs-Polygon bearbeiten: Linksklick zum Verschieben, "
+            "Rechtsklick auf Punkt zum Löschen, Rechtsklick auf Kante zum Einfügen, "
+            "Mitteltaste oder ESC zum Beenden."
+        )
 
     def _on_edit_polygon_requested(self, circuit_id: str):
         self.canvas.start_edit_polygon(circuit_id)
@@ -1888,6 +1941,13 @@ class MainWindow(QMainWindow):
                 layer = self.canvas._floor_plans.get(fur_id)
                 if layer and layer.mm_per_px != 1.0:
                     panel.update_scale_label(layer.mm_per_px)
+                if layer:
+                    p = panel.get_parameters()
+                    self.canvas.set_floor_plan_polygon_color(
+                        fur_id, p.get("polygon_color", "#8d99ae")
+                    )
+                if layer and layer.polygon and not panel._file_path:
+                    panel.set_polygon_source()
                 # Feste Abmessungen aus Panel-Daten auf Canvas-Layer anwenden
                 p = panel.get_parameters()
                 w_mm = p.get("fixed_width_mm", 0.0)

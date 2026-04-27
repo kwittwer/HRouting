@@ -932,6 +932,8 @@ class FloorPlanPanel(QWidget):
     name_changed           = Signal(str, str)       # (fp_id, new_name)
     visibility_changed     = Signal(str, bool)      # (fp_id, visible)
     file_browse_requested  = Signal(str)           # fp_id
+    polygon_draw_requested = Signal(str)           # fp_id
+    polygon_color_changed  = Signal(str, str)      # (fp_id, color)
     ref_line_requested     = Signal(str)            # fp_id
     size_changed           = Signal(str)            # fp_id  (fixed_width/height)
     ref_length_confirmed   = Signal(str, float)     # (fp_id, length_mm)
@@ -948,6 +950,7 @@ class FloorPlanPanel(QWidget):
         self.fp_id = fp_id
         self._name = name or fp_id
         self._file_path: str = ""
+        self._polygon_color = QColor("#8d99ae")
         self._build_ui()
 
     # ── UI ─────────────────────────────────────────────────────────
@@ -986,6 +989,14 @@ class FloorPlanPanel(QWidget):
             lambda: self.file_browse_requested.emit(self.fp_id)
         )
         file_row.addWidget(btn_browse)
+        self.btn_draw_polygon = QPushButton("\u270f")
+        self.btn_draw_polygon.setToolTip("Alternativ Polygon zeichnen")
+        self.btn_draw_polygon.setFixedWidth(32)
+        self.btn_draw_polygon.clicked.connect(
+            lambda: self.polygon_draw_requested.emit(self.fp_id)
+        )
+        self.btn_draw_polygon.hide()
+        file_row.addWidget(self.btn_draw_polygon)
         form.addRow("Datei:", file_row)
 
         # Opacity
@@ -1185,6 +1196,17 @@ class FloorPlanPanel(QWidget):
         layout.addWidget(self._fixed_size_widget)
         self._fixed_size_widget.hide()
 
+        self._polygon_color_row = QHBoxLayout()
+        self._polygon_color_btn = QPushButton("Farbe")
+        self._polygon_color_btn.setToolTip("Farbe des Einrichtungs-Polygons")
+        self._polygon_color_btn.clicked.connect(self._choose_polygon_color)
+        self._update_polygon_color_button()
+        self._polygon_color_row.addWidget(self._polygon_color_btn)
+        self._polygon_color_widget = QWidget()
+        self._polygon_color_widget.setLayout(self._polygon_color_row)
+        fixed_size_form.addRow("Polygonfarbe:", self._polygon_color_widget)
+        self._polygon_color_widget.hide()
+
         self.btn_add_furniture = QPushButton("\U0001fa91 Einrichtung hinzuf\u00fcgen")
         self.btn_add_furniture.setToolTip(
             "F\u00fcgt diesem Grundriss ein Einrichtungselement (SVG/Bild) hinzu"
@@ -1229,6 +1251,25 @@ class FloorPlanPanel(QWidget):
         from pathlib import Path as P
         self.lbl_file.setText(P(path).name if path else "(kein Bild)")
 
+    def set_polygon_source(self):
+        """Mark panel source as polygon (no image file path)."""
+        self._file_path = ""
+        self.lbl_file.setText("(Polygon)")
+
+    def _choose_polygon_color(self):
+        color = QColorDialog.getColor(
+            self._polygon_color, self, "Polygonfarbe wählen"
+        )
+        if color.isValid():
+            self._polygon_color = color
+            self._update_polygon_color_button()
+            self.polygon_color_changed.emit(self.fp_id, color.name())
+
+    def _update_polygon_color_button(self):
+        self._polygon_color_btn.setStyleSheet(
+            f"background:{self._polygon_color.name()}; color:white;"
+        )
+
     def update_scale_label(self, mm_per_px: float):
         self.lbl_scale.setText(f"Ma\u00dfstab: {mm_per_px / 1000:.6f} m/px")
         self.btn_apply.setStyleSheet(
@@ -1240,6 +1281,7 @@ class FloorPlanPanel(QWidget):
             "name": self.le_name.text(),
             "visible": self.chk_visible.isChecked(),
             "file_path": self._file_path,
+            "polygon_color": self._polygon_color.name(),
             "opacity": self.sb_opacity.value(),
             "offset_x": self.sb_offset_x.value(),
             "offset_y": self.sb_offset_y.value(),
@@ -1255,6 +1297,9 @@ class FloorPlanPanel(QWidget):
     def from_dict(self, d: dict):
         self.le_name.setText(d.get("name", self.fp_id))
         self.chk_visible.setChecked(d.get("visible", True))
+        poly_col = d.get("polygon_color", "#8d99ae")
+        self._polygon_color = QColor(poly_col)
+        self._update_polygon_color_button()
         self.sb_opacity.setValue(d.get("opacity", 1.0))
         self.sb_offset_x.setValue(d.get("offset_x", 0.0))
         self.sb_offset_y.setValue(d.get("offset_y", 0.0))
@@ -1276,11 +1321,13 @@ class FloorPlanPanel(QWidget):
         self.btn_down.hide()
         self._einr_sep.hide()
         self.btn_add_furniture.hide()
+        self.btn_draw_polygon.show()
         self.btn_delete.setText("\U0001f5d1 Einrichtung entfernen")
         # Feste Abmessungen anzeigen
         self._fixed_size_sep.show()
         self._fixed_size_title.show()
         self._fixed_size_widget.show()
+        self._polygon_color_widget.show()
 
 
 # ================================================================== #
@@ -1295,6 +1342,8 @@ class ParameterPanel(QWidget):
     add_floorplan_requested     = Signal()
     delete_floorplan_requested  = Signal(str)
     floorplan_file_browse       = Signal(str)
+    floorplan_polygon_draw      = Signal(str)
+    floorplan_polygon_color_changed = Signal(str, str)
     floorplan_ref_line          = Signal(str)
     floorplan_ref_confirmed     = Signal(str, float)
     floorplan_transform_changed = Signal(str)
@@ -1683,6 +1732,8 @@ class ParameterPanel(QWidget):
                             self.floorplan_visibility_changed.emit(fid, c))
         )
         panel.file_browse_requested.connect(self.floorplan_file_browse)
+        panel.polygon_draw_requested.connect(self.floorplan_polygon_draw)
+        panel.polygon_color_changed.connect(self.floorplan_polygon_color_changed)
         panel.ref_line_requested.connect(self.floorplan_ref_line)
         panel.ref_length_confirmed.connect(self.floorplan_ref_confirmed)
         panel.transform_changed.connect(self.floorplan_transform_changed)
@@ -1743,6 +1794,8 @@ class ParameterPanel(QWidget):
                             self.floorplan_visibility_changed.emit(fid, c))
         )
         panel.file_browse_requested.connect(self.floorplan_file_browse)
+        panel.polygon_draw_requested.connect(self.floorplan_polygon_draw)
+        panel.polygon_color_changed.connect(self.floorplan_polygon_color_changed)
         panel.ref_line_requested.connect(self.floorplan_ref_line)
         panel.ref_length_confirmed.connect(self.floorplan_ref_confirmed)
         panel.transform_changed.connect(self.floorplan_transform_changed)
