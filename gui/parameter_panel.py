@@ -32,6 +32,12 @@ class SafeDoubleSpinBox(QDoubleSpinBox):
     def wheelEvent(self, event):
         event.ignore()
 
+class SafeComboBox(QComboBox):
+    """QComboBox that never responds to mouse wheel scrolling.
+    Prevents accidental value changes while scrolling."""
+    def wheelEvent(self, event):
+        event.ignore()
+
 # ── Eingebaute Elektro-Symbole (DIN EN 60617) ─────────────────── #
 _SYMBOLS_DIR = Path(__file__).resolve().parent.parent / "assets" / "symbols"
 # Fallback für PyInstaller
@@ -137,7 +143,7 @@ class HeatingCircuitPanel(QWidget):
         form.addRow("Randabstand:", self.sb_wall_dist)
 
         self.sb_label_size = SafeDoubleSpinBox()
-        self.sb_label_size.setRange(4.0, 80.0)
+        self.sb_label_size.setRange(0.1, 999999.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
         self.sb_label_size.setSuffix(" pt")
@@ -153,7 +159,7 @@ class HeatingCircuitPanel(QWidget):
         form.addRow(sep)
 
         self.sb_room_temp = SafeDoubleSpinBox()
-        self.sb_room_temp.setRange(10.0, 35.0)
+        self.sb_room_temp.setRange(-50.0, 200.0)
         self.sb_room_temp.setSingleStep(0.5)
         self.sb_room_temp.setValue(20.0)
         self.sb_room_temp.setDecimals(1)
@@ -164,7 +170,7 @@ class HeatingCircuitPanel(QWidget):
         form.addRow("Soll-Raumtemp.:", self.sb_room_temp)
 
         from logic.heating_calc import FLOOR_COVERINGS
-        self.cb_floor_covering = QComboBox()
+        self.cb_floor_covering = SafeComboBox()
         for name in FLOOR_COVERINGS:
             self.cb_floor_covering.addItem(name)
         self.cb_floor_covering.setCurrentText("Fliesen / Keramik")
@@ -173,7 +179,7 @@ class HeatingCircuitPanel(QWidget):
         )
         form.addRow("Fu\u00dfbodenbelag:", self.cb_floor_covering)
 
-        self.cb_distributor = QComboBox()
+        self.cb_distributor = SafeComboBox()
         self.cb_distributor.addItem("")
         form.addRow("Heizkreisverteiler:", self.cb_distributor)
 
@@ -370,7 +376,7 @@ class ElektroPointPanel(QWidget):
         form.addRow("Farbe:", self.btn_color)
 
         self.sb_width = SafeDoubleSpinBox()
-        self.sb_width.setRange(0.5, 20.0)
+        self.sb_width.setRange(0.01, 999999.0)
         self.sb_width.setSingleStep(0.5)
         self.sb_width.setValue(3.0)
         self.sb_width.setSuffix(" cm")
@@ -378,14 +384,14 @@ class ElektroPointPanel(QWidget):
         form.addRow("Breite:", self.sb_width)
 
         self.sb_height = SafeDoubleSpinBox()
-        self.sb_height.setRange(0.5, 20.0)
+        self.sb_height.setRange(0.01, 999999.0)
         self.sb_height.setSingleStep(0.5)
         self.sb_height.setValue(3.0)
         self.sb_height.setSuffix(" cm")
         self.sb_height.valueChanged.connect(lambda _: self.size_changed.emit(self.point_id))
         form.addRow("H\u00f6he:", self.sb_height)
 
-        self.cmb_symbol = QComboBox()
+        self.cmb_symbol = SafeComboBox()
         for label in BUILTIN_SYMBOLS:
             self.cmb_symbol.addItem(label)
         self.cmb_symbol.currentTextChanged.connect(self._on_symbol_selected)
@@ -396,7 +402,7 @@ class ElektroPointPanel(QWidget):
         form.addRow("", self.btn_icon)
 
         self.sb_label_size = SafeDoubleSpinBox()
-        self.sb_label_size.setRange(4.0, 80.0)
+        self.sb_label_size.setRange(0.1, 999999.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
         self.sb_label_size.setSuffix(" pt")
@@ -557,7 +563,7 @@ class ElektroCablePanel(QWidget):
         form.addRow("Kommentar:", self.te_comment)
 
         self.sb_label_size = SafeDoubleSpinBox()
-        self.sb_label_size.setRange(4.0, 80.0)
+        self.sb_label_size.setRange(0.1, 999999.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
         self.sb_label_size.setSuffix(" pt")
@@ -704,7 +710,7 @@ class HkvPanel(QWidget):
         form.addRow("Farbe:", self.btn_color)
 
         self.sb_width = SafeDoubleSpinBox()
-        self.sb_width.setRange(1.0, 50.0)
+        self.sb_width.setRange(0.01, 999999.0)
         self.sb_width.setSingleStep(1.0)
         self.sb_width.setValue(5.0)
         self.sb_width.setSuffix(" cm")
@@ -713,7 +719,7 @@ class HkvPanel(QWidget):
         form.addRow("Breite:", self.sb_width)
 
         self.sb_height = SafeDoubleSpinBox()
-        self.sb_height.setRange(1.0, 50.0)
+        self.sb_height.setRange(0.01, 999999.0)
         self.sb_height.setSingleStep(1.0)
         self.sb_height.setValue(5.0)
         self.sb_height.setSuffix(" cm")
@@ -726,7 +732,7 @@ class HkvPanel(QWidget):
         form.addRow("Symbol:", self.btn_icon)
 
         self.sb_label_size = SafeDoubleSpinBox()
-        self.sb_label_size.setRange(4.0, 80.0)
+        self.sb_label_size.setRange(0.1, 999999.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
         self.sb_label_size.setSuffix(" pt")
@@ -856,7 +862,7 @@ class HkvLinePanel(QWidget):
         form.addRow(self.lbl_end_hkv)
 
         self.sb_label_size = SafeDoubleSpinBox()
-        self.sb_label_size.setRange(4.0, 80.0)
+        self.sb_label_size.setRange(0.1, 999999.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
         self.sb_label_size.setSuffix(" pt")
@@ -929,6 +935,130 @@ class HkvLinePanel(QWidget):
         self.sb_label_size.setValue(d.get("label_size", 12.0))
         self.set_start_hkv(d.get("start_hkv", ""))
         self.set_end_hkv(d.get("end_hkv", ""))
+
+
+# ================================================================== #
+#  Text Annotation Panel                                               #
+# ================================================================== #
+
+class TextAnnotationPanel(QWidget):
+    """Panel for a text annotation placed on the canvas."""
+
+    delete_requested    = Signal(str)
+    place_requested     = Signal(str)
+    name_changed        = Signal(str, str)
+    content_changed     = Signal(str, str)
+    comment_changed     = Signal(str, str)
+    font_size_changed   = Signal(str, float)
+    color_changed       = Signal(str, str)
+    visibility_changed  = Signal(str, bool)
+
+    def __init__(self, text_id: str, name: str | None = None,
+                 color: str | None = None, parent=None):
+        super().__init__(parent)
+        self.text_id = text_id
+        self._name = name or text_id
+        self._color = QColor(color or "#ffffff")
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+
+        self.chk_visible = QCheckBox("Sichtbar")
+        self.chk_visible.setChecked(True)
+        self.chk_visible.toggled.connect(
+            lambda checked: self.visibility_changed.emit(self.text_id, checked))
+        form.addRow(self.chk_visible)
+
+        self.le_name = QLineEdit(self._name)
+        self.le_name.textChanged.connect(
+            lambda v: self.name_changed.emit(self.text_id, v))
+        form.addRow("Name:", self.le_name)
+
+        self.te_content = QTextEdit()
+        self.te_content.setMaximumHeight(80)
+        self.te_content.setPlainText("Text")
+        self.te_content.textChanged.connect(self._on_content_changed)
+        form.addRow("Text:", self.te_content)
+
+        self.sb_font_size = SafeDoubleSpinBox()
+        self.sb_font_size.setRange(1.0, 999999.0)
+        self.sb_font_size.setSingleStep(1.0)
+        self.sb_font_size.setValue(14.0)
+        self.sb_font_size.setSuffix(" pt")
+        self.sb_font_size.valueChanged.connect(
+            lambda v: self.font_size_changed.emit(self.text_id, v))
+        form.addRow("Schriftgröße:", self.sb_font_size)
+
+        self.te_comment = QTextEdit()
+        self.te_comment.setMaximumHeight(60)
+        self.te_comment.setPlaceholderText("Kommentar (Mouseover)")
+        self.te_comment.textChanged.connect(self._on_comment_changed)
+        form.addRow("Kommentar:", self.te_comment)
+
+        self.btn_color = QPushButton("Farbe")
+        self.btn_color.clicked.connect(self._choose_color)
+        self._update_color_button()
+        form.addRow("Textfarbe:", self.btn_color)
+
+        self.btn_place = QPushButton("\U0001f4cd Platzieren")
+        self.btn_place.clicked.connect(
+            lambda: self.place_requested.emit(self.text_id))
+        form.addRow(self.btn_place)
+
+        self.btn_delete = QPushButton("\U0001f5d1\ufe0f Löschen")
+        self.btn_delete.clicked.connect(
+            lambda: self.delete_requested.emit(self.text_id))
+        form.addRow(self.btn_delete)
+
+        layout.addLayout(form)
+
+    def _on_content_changed(self):
+        self.content_changed.emit(self.text_id, self.te_content.toPlainText())
+
+    def _on_comment_changed(self):
+        self.comment_changed.emit(self.text_id, self.te_comment.toPlainText())
+
+    def _choose_color(self):
+        color = QColorDialog.getColor(self._color, self, "Textfarbe")
+        if color.isValid():
+            self._color = color
+            self._update_color_button()
+            self.color_changed.emit(self.text_id, color.name())
+
+    def _update_color_button(self):
+        self.btn_color.setStyleSheet(
+            f"background-color:{self._color.name()}; color:#000; padding:4px;")
+
+    def get_parameters(self) -> dict:
+        return {
+            "name": self.le_name.text(),
+            "content": self.te_content.toPlainText(),
+            "font_size": self.sb_font_size.value(),
+            "color": self._color.name(),
+            "comment": self.te_comment.toPlainText(),
+            "visible": self.chk_visible.isChecked(),
+        }
+
+    def set_parameters(self, d: dict):
+        if "name" in d:
+            self.le_name.setText(d["name"])
+        if "content" in d:
+            self.te_content.setPlainText(d["content"])
+        if "font_size" in d:
+            self.sb_font_size.setValue(d["font_size"])
+        if "color" in d:
+            self._color = QColor(d["color"])
+            self._update_color_button()
+        if "comment" in d:
+            self.te_comment.setPlainText(d["comment"])
+        if "visible" in d:
+            self.chk_visible.setChecked(d["visible"])
 
 
 # ================================================================== #
@@ -1381,6 +1511,8 @@ class ParameterPanel(QWidget):
     add_furniture_requested        = Signal(str)   # parent_fp_id
     delete_furniture_requested     = Signal(str)   # furniture_id
     furniture_size_changed         = Signal(str)   # furniture_id
+    add_text_requested             = Signal(str)   # fp_id
+    delete_text_requested          = Signal(str)   # text_id
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1389,6 +1521,7 @@ class ParameterPanel(QWidget):
         self.elec_cable_panels: dict[str, ElektroCablePanel] = {}
         self.hkv_panels: dict[str, HkvPanel] = {}
         self.hkv_line_panels: dict[str, HkvLinePanel] = {}
+        self.text_panels: dict[str, TextAnnotationPanel] = {}
         self.floorplan_panels: dict[str, FloorPlanPanel] = {}
         self.furniture_panels: dict[str, FloorPlanPanel] = {}
         self._furniture_parent: dict[str, str] = {}  # furniture_id -> parent_fp_id
@@ -1459,6 +1592,14 @@ class ParameterPanel(QWidget):
         self.btn_add_hkv_line.clicked.connect(
             lambda: self.add_hkv_line_requested.emit(self.get_active_floorplan_id() or ""))
         btn_row2.addWidget(self.btn_add_hkv_line)
+
+        self.btn_add_text = QPushButton("\u2795 Text")
+        self.btn_add_text.setStyleSheet(
+            "background:#7b1fa2; color:white; padding:4px;"
+        )
+        self.btn_add_text.clicked.connect(
+            lambda: self.add_text_requested.emit(self.get_active_floorplan_id() or ""))
+        btn_row2.addWidget(self.btn_add_text)
         layout.addLayout(btn_row2)
 
         # ── Splitter: TreeView + Eigenschaften ─────────────────────
@@ -1610,6 +1751,8 @@ class ParameterPanel(QWidget):
             p.hide()
         for p in self.hkv_line_panels.values():
             p.hide()
+        for p in self.text_panels.values():
+            p.hide()
 
         if not current:
             self._empty_label.show()
@@ -1631,7 +1774,8 @@ class ParameterPanel(QWidget):
                  or self.elec_point_panels.get(item_id)
                  or self.elec_cable_panels.get(item_id)
                  or self.hkv_panels.get(item_id)
-                 or self.hkv_line_panels.get(item_id))
+                 or self.hkv_line_panels.get(item_id)
+                 or self.text_panels.get(item_id))
         if panel:
             panel.show()
         else:
@@ -1670,7 +1814,8 @@ class ParameterPanel(QWidget):
                              or self.elec_point_panels.get(eid)
                              or self.elec_cable_panels.get(eid)
                              or self.hkv_panels.get(eid)
-                             or self.hkv_line_panels.get(eid))
+                             or self.hkv_line_panels.get(eid)
+                             or self.text_panels.get(eid))
                     if panel:
                         panel.chk_visible.setChecked(checked)
             return
@@ -1697,6 +1842,8 @@ class ParameterPanel(QWidget):
                         panel = self.elec_point_panels.get(eid)
                     elif item is subs["kv"]:
                         panel = self.elec_cable_panels.get(eid)
+                    elif item is subs["text"]:
+                        panel = self.text_panels.get(eid)
                     if panel:
                         panel.chk_visible.setChecked(checked)
                 return
@@ -1708,7 +1855,8 @@ class ParameterPanel(QWidget):
                      or self.elec_point_panels.get(item_id)
                      or self.elec_cable_panels.get(item_id)
                      or self.hkv_panels.get(item_id)
-                     or self.hkv_line_panels.get(item_id))
+                     or self.hkv_line_panels.get(item_id)
+                     or self.text_panels.get(item_id))
             if panel:
                 panel.chk_visible.setChecked(checked)
 
@@ -1783,9 +1931,13 @@ class ParameterPanel(QWidget):
         kv_item.setFlags(kv_item.flags() | Qt.ItemIsUserCheckable)
         kv_item.setCheckState(0, Qt.Checked)
 
+        text_item = QTreeWidgetItem(fp_item, ["\U0001f4dd Beschriftungen"])
+        text_item.setFlags(text_item.flags() | Qt.ItemIsUserCheckable)
+        text_item.setCheckState(0, Qt.Checked)
+
         self._fp_sub_items[fp_id] = {
             "hk": hk_item, "hkv": hkv_item, "hkv_line": hkv_line_item,
-            "ap": ap_item, "kv": kv_item,
+            "ap": ap_item, "kv": kv_item, "text": text_item,
         }
         fp_item.setExpanded(True)
         if not self._loading:
@@ -2128,6 +2280,39 @@ class ParameterPanel(QWidget):
             self.hkv_line_panels[line_id].set_length(length_mm)
 
     # ──────────────────────────────────────────────────────────────── #
+    #  Text Annotations                                                 #
+    # ──────────────────────────────────────────────────────────────── #
+
+    def add_text_panel(self, text_id: str,
+                       fp_id: str | None = None,
+                       name: str | None = None,
+                       color: str | None = None) -> TextAnnotationPanel:
+        panel = TextAnnotationPanel(text_id, name=name, color=color)
+        panel.delete_requested.connect(self.delete_text_requested)
+        panel.name_changed.connect(self._update_tree_item_name)
+        panel.visibility_changed.connect(
+            lambda tid, c: self._sync_tree_checkbox(tid, c)
+        )
+        self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
+        panel.hide()
+        self.text_panels[text_id] = panel
+        resolved = self._resolve_fp_id(fp_id)
+        self._element_floorplan[text_id] = resolved or ""
+        parent_item = self._fp_sub_items.get(resolved or "", {}).get("text") if resolved else None
+        if parent_item:
+            self._add_tree_item(parent_item, text_id, name or text_id)
+        return panel
+
+    def remove_text_panel(self, text_id: str):
+        self._remove_tree_item(text_id)
+        self._element_floorplan.pop(text_id, None)
+        panel = self.text_panels.pop(text_id, None)
+        if panel:
+            self._prop_layout.removeWidget(panel)
+            panel.deleteLater()
+        self._show_placeholder_if_empty()
+
+    # ──────────────────────────────────────────────────────────────── #
     #  Helpers                                                          #
     # ──────────────────────────────────────────────────────────────── #
 
@@ -2140,7 +2325,8 @@ class ParameterPanel(QWidget):
                    list(self.elec_point_panels.values()) +
                    list(self.elec_cable_panels.values()) +
                    list(self.hkv_panels.values()) +
-                   list(self.hkv_line_panels.values())):
+                   list(self.hkv_line_panels.values()) +
+                   list(self.text_panels.values())):
             self._empty_label.show()
 
     # ──────────────────────────────────────────────────────────────── #
@@ -2208,6 +2394,10 @@ class ParameterPanel(QWidget):
             "hkv_lines": {
                 lid: {**p.to_dict(), "floor_plan_id": self._element_floorplan.get(lid, "")}
                 for lid, p in self.hkv_line_panels.items()
+            },
+            "text_annotations": {
+                tid: {**p.get_parameters(), "floor_plan_id": self._element_floorplan.get(tid, "")}
+                for tid, p in self.text_panels.items()
             },
         }
 
@@ -2280,6 +2470,14 @@ class ParameterPanel(QWidget):
                 color=values.get("color", "#e53935"),
             )
             panel.from_dict(values)
+
+        for tid, values in d.get("text_annotations", {}).items():
+            panel = self.add_text_panel(
+                tid, fp_id=values.get("floor_plan_id"),
+                name=values.get("name", tid),
+                color=values.get("color", "#ffffff"),
+            )
+            panel.set_parameters(values)
 
         self._loading = False
 

@@ -25,7 +25,7 @@ from PySide6.QtGui import (
     QPainter, QPen, QColor, QBrush, QPolygonF, QPainterPath, QPixmap,
 )
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QApplication, QToolTip
 
 Point = Tuple[float, float]
 
@@ -82,6 +82,8 @@ class ToolMode(Enum):
     MOVE_FLOOR_PLAN  = auto()
     ROTATE_FLOOR_PLAN = auto()
     MEASURE          = auto()
+    PLACE_TEXT       = auto()
+    MOVE_TEXT        = auto()
 
 class CanvasWidget(QWidget):
     polygon_finished  = Signal(str, list)
@@ -92,6 +94,7 @@ class CanvasWidget(QWidget):
     elec_cable_changed = Signal(str)
     hkv_placed         = Signal(str)
     hkv_line_changed   = Signal(str)
+    text_placed        = Signal(str)
     object_double_clicked = Signal(str, str)  # (object_type, object_id)
     floor_plan_transform_updated = Signal(str, float, float, float)  # (fp_id, ox, oy, rot)
     floor_plan_polygon_finished = Signal(str, list)
@@ -187,6 +190,15 @@ class CanvasWidget(QWidget):
         self._hkv_line_end:       Dict[str, str]                  = {}
         self._hkv_line_visible:   Dict[str, bool]                  = {}
 
+        # Text annotations
+        self._text_annotations:   Dict[str, QPointF]              = {}  # id → position
+        self._text_contents:      Dict[str, str]                  = {}  # id → text content
+        self._text_font_sizes:    Dict[str, float]                = {}  # id → font size pt
+        self._text_colors:        Dict[str, str]                  = {}  # id → color hex
+        self._text_comments:      Dict[str, str]                  = {}  # id → tooltip comment
+        self._text_visible:       Dict[str, bool]                 = {}
+        self._text_rects:         Dict[str, QRectF]               = {}  # transient hit rects
+
         # Labels (movable + resizable)
         self._label_positions:    Dict[str, QPointF]              = {}
         self._label_font_sizes:   Dict[str, float]                = {}
@@ -235,6 +247,10 @@ class CanvasWidget(QWidget):
         self._current_hkv_line_points: List[QPointF] = []
         self._current_hkv_line_preview: Optional[QPointF] = None
         self._edit_hkv_line_id: Optional[str] = None
+
+        # Text annotation edit state
+        self._placing_text_id: Optional[str] = None
+        self._dragging_text: Optional[str] = None
 
         # Edit modes
         self._edit_polygon_cid: Optional[str] = None
@@ -1164,6 +1180,53 @@ class CanvasWidget(QWidget):
     def get_polygon_px(self, circuit_id: str) -> List[Tuple[float, float]]:
         return [(p.x(), p.y()) for p in self._polygons.get(circuit_id, [])]
 
+    # ── Text Annotations API ────────────────────────────────────────── #
+
+    def start_place_text(self, text_id: str, content: str = "Text",
+                         font_size: float = 14.0, color: str = "#ffffff"):
+        """Enter text placement mode: next click places the annotation."""
+        self._text_contents[text_id] = content
+        self._text_font_sizes[text_id] = font_size
+        self._text_colors[text_id] = color
+        self._text_visible.setdefault(text_id, True)
+        self._placing_text_id = text_id
+        self._mode = ToolMode.PLACE_TEXT
+        self.setCursor(Qt.CrossCursor)
+        self.update()
+
+    def update_text_content(self, text_id: str, content: str):
+        self._text_contents[text_id] = content
+        self.update()
+
+    def update_text_font_size(self, text_id: str, size: float):
+        self._text_font_sizes[text_id] = size
+        self.update()
+
+    def update_text_color(self, text_id: str, color: str):
+        self._text_colors[text_id] = color
+        self.update()
+
+    def update_text_comment(self, text_id: str, comment: str):
+        self._text_comments[text_id] = comment
+
+    def set_text_visible(self, text_id: str, visible: bool):
+        self._text_visible[text_id] = visible
+        self.update()
+
+    def delete_text_annotation(self, text_id: str):
+        for d in (self._text_annotations, self._text_contents,
+                  self._text_font_sizes, self._text_colors,
+                  self._text_comments, self._text_visible, self._text_rects):
+            d.pop(text_id, None)
+        self.update()
+
+    def _hit_text_annotation(self, canvas_pt: QPointF) -> Optional[str]:
+        """Return the id of a text annotation hit at canvas_pt."""
+        for tid, rect in self._text_rects.items():
+            if rect.contains(canvas_pt) and self._text_visible.get(tid, True):
+                return tid
+        return None
+
     def get_start_point_px(self, circuit_id: str) -> Optional[Tuple[float, float]]:
         sp = self._start_points.get(circuit_id)
         return (sp.x(), sp.y()) if sp else None
@@ -1230,6 +1293,13 @@ class CanvasWidget(QWidget):
         self._hkv_line_start.clear()
         self._hkv_line_end.clear()
         self._hkv_line_visible.clear()
+        self._text_annotations.clear()
+        self._text_contents.clear()
+        self._text_font_sizes.clear()
+        self._text_colors.clear()
+        self._text_comments.clear()
+        self._text_visible.clear()
+        self._text_rects.clear()
         self._label_positions.clear()
         self._label_font_sizes.clear()
         self._label_rects.clear()
@@ -1304,6 +1374,17 @@ class CanvasWidget(QWidget):
                 for k, p in self._label_positions.items()
             },
             "label_font_sizes": dict(self._label_font_sizes),
+            "text_annotations": {
+                tid: {
+                    "pos": (p.x(), p.y()),
+                    "content": self._text_contents.get(tid, ""),
+                    "font_size": self._text_font_sizes.get(tid, 14.0),
+                    "color": self._text_colors.get(tid, "#ffffff"),
+                    "comment": self._text_comments.get(tid, ""),
+                    "visible": self._text_visible.get(tid, True),
+                }
+                for tid, p in self._text_annotations.items()
+            },
         }
         if self._ref_p1 and self._ref_p2:
             result["ref_line"] = [
@@ -1415,6 +1496,15 @@ class CanvasWidget(QWidget):
         for k, pt in d.get("label_positions", {}).items():
             self._label_positions[k] = QPointF(pt[0], pt[1])
         self._label_font_sizes.update(d.get("label_font_sizes", {}))
+        # Text annotations
+        for tid, tdata in d.get("text_annotations", {}).items():
+            pos = tdata.get("pos", (0, 0))
+            self._text_annotations[tid] = QPointF(pos[0], pos[1])
+            self._text_contents[tid] = tdata.get("content", "")
+            self._text_font_sizes[tid] = tdata.get("font_size", 14.0)
+            self._text_colors[tid] = tdata.get("color", "#ffffff")
+            self._text_comments[tid] = tdata.get("comment", "")
+            self._text_visible[tid] = tdata.get("visible", True)
         # Floor plan layers (geometry only – images are loaded by main_window)
         for fp_d in d.get("floor_plans", []):
             fid = fp_d.get("fp_id")
@@ -1969,7 +2059,9 @@ class CanvasWidget(QWidget):
         # ── Polygon zeichnen ──
         if self._mode == ToolMode.DRAW_POLY:
             if event.button() == Qt.LeftButton:
-                self._current_points.append(canvas_pt)
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                self._current_points.append(pt)
                 self.update()
             elif event.button() == Qt.RightButton:
                 if len(self._current_points) >= 3:
@@ -1988,7 +2080,9 @@ class CanvasWidget(QWidget):
         # ── Einrichtungs-Polygon zeichnen ──
         if self._mode == ToolMode.DRAW_FURNITURE_POLY:
             if event.button() == Qt.LeftButton:
-                self._current_points.append(canvas_pt)
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                self._current_points.append(pt)
                 self.update()
             elif event.button() == Qt.RightButton:
                 if len(self._current_points) >= 3 and self._current_furniture_id:
@@ -2023,7 +2117,7 @@ class CanvasWidget(QWidget):
         # ── Rohrverlauf zeichnen ──
         if self._mode == ToolMode.DRAW_ROUTE:
             if event.button() == Qt.LeftButton and self._current_route_cid:
-                ctrl_held = bool(event.modifiers() & Qt.ControlModifier)
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
                 if ctrl_held:
                     final_pt = canvas_pt
                 else:
@@ -2063,7 +2157,9 @@ class CanvasWidget(QWidget):
         if self._mode == ToolMode.PLACE_ELEC_POINT:
             if event.button() == Qt.LeftButton and self._placing_elec_point_id:
                 pid = self._placing_elec_point_id
-                self._elec_points[pid] = canvas_pt
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                self._elec_points[pid] = pt
                 self._placing_elec_point_id = None
                 self._mode = ToolMode.NONE
                 self.setCursor(Qt.ArrowCursor)
@@ -2074,7 +2170,11 @@ class CanvasWidget(QWidget):
         # ── Kabel zeichnen ──
         if self._mode == ToolMode.DRAW_ELEC_CABLE:
             if event.button() == Qt.LeftButton and self._current_elec_cable_id:
-                snapped = self._apply_angle_snap_elec(canvas_pt)
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                if ctrl_held:
+                    snapped = canvas_pt
+                else:
+                    snapped = self._snap_to_grid(self._apply_angle_snap_elec(canvas_pt))
                 # Snap to an AP if close enough
                 ap = self._find_nearest_ap(snapped)
                 if ap:
@@ -2150,7 +2250,11 @@ class CanvasWidget(QWidget):
         # ── Anschlussleitung zeichnen ──
         if self._mode == ToolMode.DRAW_SUPPLY_LINE:
             if event.button() == Qt.LeftButton and self._current_supply_cid:
-                snapped = self._apply_angle_snap_supply(canvas_pt)
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                if ctrl_held:
+                    snapped = canvas_pt
+                else:
+                    snapped = self._snap_to_grid(self._apply_angle_snap_supply(canvas_pt))
                 # Snap to HKV on first point (already set) or any later point
                 hkv = self._find_nearest_hkv(snapped)
                 if hkv:
@@ -2220,7 +2324,9 @@ class CanvasWidget(QWidget):
         if self._mode == ToolMode.PLACE_HKV:
             if event.button() == Qt.LeftButton and self._placing_hkv_id:
                 hid = self._placing_hkv_id
-                self._hkv_points[hid] = canvas_pt
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                self._hkv_points[hid] = pt
                 self._placing_hkv_id = None
                 self._mode = ToolMode.NONE
                 self.setCursor(Qt.ArrowCursor)
@@ -2228,10 +2334,28 @@ class CanvasWidget(QWidget):
                 self.update()
             return
 
+        # ── Text platzieren ──
+        if self._mode == ToolMode.PLACE_TEXT:
+            if event.button() == Qt.LeftButton and self._placing_text_id:
+                tid = self._placing_text_id
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                self._text_annotations[tid] = pt
+                self._placing_text_id = None
+                self._mode = ToolMode.NONE
+                self.setCursor(Qt.ArrowCursor)
+                self.text_placed.emit(tid)
+                self.update()
+            return
+
         # ── HKV-Verbindungsleitung zeichnen ──
         if self._mode == ToolMode.DRAW_HKV_LINE:
             if event.button() == Qt.LeftButton and self._current_hkv_line_id:
-                snapped = self._apply_angle_snap_hkv_line(canvas_pt)
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                if ctrl_held:
+                    snapped = canvas_pt
+                else:
+                    snapped = self._snap_to_grid(self._apply_angle_snap_hkv_line(canvas_pt))
                 hkv = self._find_nearest_hkv(snapped)
                 if hkv:
                     snapped = QPointF(self._hkv_points[hkv])
@@ -2384,6 +2508,14 @@ class CanvasWidget(QWidget):
                 self.update()
                 return
 
+        # ── Text-Annotation verschieben ──
+        if event.button() == Qt.LeftButton:
+            text_hit = self._hit_text_annotation(canvas_pt)
+            if text_hit:
+                self._dragging_text = text_hit
+                self.setCursor(Qt.ClosedHandCursor)
+                return
+
         # ── Label verschieben ──
         if event.button() == Qt.LeftButton:
             label_hit = self._hit_label(canvas_pt)
@@ -2501,7 +2633,9 @@ class CanvasWidget(QWidget):
             return
 
         if self._mode == ToolMode.MOVE_START and self._dragging_start:
-            snapped = self._snap_to_polygon_edge(self._dragging_start, canvas_pt)
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            base_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+            snapped = self._snap_to_polygon_edge(self._dragging_start, base_pt)
             self._start_points[self._dragging_start] = snapped
             route = self._manual_routes.get(self._dragging_start)
             if route:
@@ -2515,7 +2649,7 @@ class CanvasWidget(QWidget):
 
         if self._mode == ToolMode.MOVE_ROUTE_POINT and self._dragging_route_point:
             cid, idx = self._dragging_route_point
-            ctrl_held = bool(event.modifiers() & Qt.ControlModifier)
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
             if ctrl_held:
                 constrained = canvas_pt
                 self._constraint_violation_point = None
@@ -2533,7 +2667,9 @@ class CanvasWidget(QWidget):
             if self._dragging_route_point:
                 cid, idx = self._dragging_route_point
                 if cid == self._edit_polygon_cid and cid in self._polygons:
-                    self._polygons[cid][idx] = canvas_pt
+                    ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                    pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                    self._polygons[cid][idx] = pt
                     self.update()
             else:
                 hit = self._hit_polygon_point(canvas_pt, self._edit_polygon_cid)
@@ -2552,8 +2688,8 @@ class CanvasWidget(QWidget):
                 oid, idx = self._dragging_route_point
                 layer = self._floor_plans.get(fid)
                 if oid == fid and layer and 0 <= idx < len(layer.polygon):
-                    # Snap to grid if visible
-                    snapped_pt = self._snap_to_grid(canvas_pt) if self._grid_visible else canvas_pt
+                    ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                    snapped_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
                     layer.polygon[idx] = self._world_to_floor_polygon_local(fid, snapped_pt)
                     self.update()
             else:
@@ -2572,7 +2708,7 @@ class CanvasWidget(QWidget):
             if self._dragging_route_point:
                 cid, idx = self._dragging_route_point
                 if cid == self._edit_route_cid and cid in self._manual_routes:
-                    ctrl_held = bool(event.modifiers() & Qt.ControlModifier)
+                    ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
                     if ctrl_held:
                         self._manual_routes[cid][idx] = canvas_pt
                         self._constraint_violation_point = None
@@ -2594,7 +2730,7 @@ class CanvasWidget(QWidget):
             return
 
         if self._mode == ToolMode.DRAW_ROUTE and self._current_route_cid and self._current_route_points:
-            ctrl_held = bool(event.modifiers() & Qt.ControlModifier)
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
             if ctrl_held:
                 preview_pt = canvas_pt
                 self._constraint_violation_point = None
@@ -2617,38 +2753,46 @@ class CanvasWidget(QWidget):
 
         if self._mode == ToolMode.MOVE_ELEC_POINT and self._dragging_elec_point:
             pid = self._dragging_elec_point
-            self._elec_points[pid] = canvas_pt
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+            self._elec_points[pid] = pt
             # Move connected cable start/end points along with the AP
             for cid, ap_id in self._cable_start_ap.items():
                 if ap_id == pid and cid in self._elec_cables:
-                    self._elec_cables[cid][0] = QPointF(canvas_pt)
+                    self._elec_cables[cid][0] = QPointF(pt)
             for cid, ap_id in self._cable_end_ap.items():
                 if ap_id == pid and cid in self._elec_cables:
-                    self._elec_cables[cid][-1] = QPointF(canvas_pt)
+                    self._elec_cables[cid][-1] = QPointF(pt)
             self.update()
             return
 
         if self._mode == ToolMode.MOVE_HKV and self._dragging_hkv:
             hid = self._dragging_hkv
-            self._hkv_points[hid] = canvas_pt
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+            self._hkv_points[hid] = pt
             # Move connected supply line endpoints
             for cid, hkv_id in self._supply_hkv.items():
                 if hkv_id == hid and cid in self._supply_lines:
-                    self._supply_lines[cid][-1] = QPointF(canvas_pt)
+                    self._supply_lines[cid][-1] = QPointF(pt)
             # Move connected HKV line start/end points
             for lid, hkv_id in self._hkv_line_start.items():
                 if hkv_id == hid and lid in self._hkv_lines:
-                    self._hkv_lines[lid][0] = QPointF(canvas_pt)
+                    self._hkv_lines[lid][0] = QPointF(pt)
             for lid, hkv_id in self._hkv_line_end.items():
                 if hkv_id == hid and lid in self._hkv_lines:
-                    self._hkv_lines[lid][-1] = QPointF(canvas_pt)
+                    self._hkv_lines[lid][-1] = QPointF(pt)
             self.update()
             return
 
         if (self._mode == ToolMode.DRAW_ELEC_CABLE
                 and self._current_elec_cable_id
                 and self._current_elec_cable_points):
-            snapped = self._apply_angle_snap_elec(canvas_pt)
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            if ctrl_held:
+                snapped = canvas_pt
+            else:
+                snapped = self._snap_to_grid(self._apply_angle_snap_elec(canvas_pt))
             self._current_elec_cable_preview = snapped
             self.update()
             return
@@ -2658,15 +2802,17 @@ class CanvasWidget(QWidget):
                 cid, idx = self._dragging_route_point
                 if cid == self._edit_elec_cable_id and cid in self._elec_cables:
                     pts = self._elec_cables[cid]
+                    ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                    base_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
                     # Snap first/last point to nearest AP while dragging
                     if idx == 0 or idx == len(pts) - 1:
-                        ap = self._find_nearest_ap(canvas_pt)
+                        ap = self._find_nearest_ap(base_pt)
                         if ap:
                             pts[idx] = QPointF(self._elec_points[ap])
                         else:
-                            pts[idx] = canvas_pt
+                            pts[idx] = base_pt
                     else:
-                        pts[idx] = canvas_pt
+                        pts[idx] = base_pt
                     self.update()
             else:
                 hit = self._hit_elec_cable_point(
@@ -2685,7 +2831,11 @@ class CanvasWidget(QWidget):
         if (self._mode == ToolMode.DRAW_SUPPLY_LINE
                 and self._current_supply_cid
                 and self._current_supply_points):
-            snapped = self._apply_angle_snap_supply(canvas_pt)
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            if ctrl_held:
+                snapped = canvas_pt
+            else:
+                snapped = self._snap_to_grid(self._apply_angle_snap_supply(canvas_pt))
             self._current_supply_preview = snapped
             self.update()
             return
@@ -2696,15 +2846,17 @@ class CanvasWidget(QWidget):
                 cid, idx = self._dragging_route_point
                 if cid == self._edit_supply_cid and cid in self._supply_lines:
                     pts = self._supply_lines[cid]
+                    ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                    base_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
                     # Snap last point to nearest HKV
                     if idx == len(pts) - 1:
-                        hkv = self._find_nearest_hkv(canvas_pt)
+                        hkv = self._find_nearest_hkv(base_pt)
                         if hkv:
                             pts[idx] = QPointF(self._hkv_points[hkv])
                         else:
-                            pts[idx] = canvas_pt
+                            pts[idx] = base_pt
                     else:
-                        pts[idx] = canvas_pt
+                        pts[idx] = base_pt
                     self.update()
             else:
                 hit = self._hit_supply_line_point(
@@ -2723,7 +2875,11 @@ class CanvasWidget(QWidget):
         if (self._mode == ToolMode.DRAW_HKV_LINE
                 and self._current_hkv_line_id
                 and self._current_hkv_line_points):
-            snapped = self._apply_angle_snap_hkv_line(canvas_pt)
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            if ctrl_held:
+                snapped = canvas_pt
+            else:
+                snapped = self._snap_to_grid(self._apply_angle_snap_hkv_line(canvas_pt))
             self._current_hkv_line_preview = snapped
             self.update()
             return
@@ -2734,14 +2890,16 @@ class CanvasWidget(QWidget):
                 lid, idx = self._dragging_route_point
                 if lid == self._edit_hkv_line_id and lid in self._hkv_lines:
                     pts = self._hkv_lines[lid]
+                    ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                    base_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
                     if idx == 0 or idx == len(pts) - 1:
-                        hkv = self._find_nearest_hkv(canvas_pt)
+                        hkv = self._find_nearest_hkv(base_pt)
                         if hkv:
                             pts[idx] = QPointF(self._hkv_points[hkv])
                         else:
-                            pts[idx] = canvas_pt
+                            pts[idx] = base_pt
                     else:
-                        pts[idx] = canvas_pt
+                        pts[idx] = base_pt
                     self.update()
             else:
                 hit = self._hit_hkv_line_point(
@@ -2753,6 +2911,14 @@ class CanvasWidget(QWidget):
                         canvas_pt, self._edit_hkv_line_id)
                     self.setCursor(
                         Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
+            self.update()
+            return
+
+        # ── Text annotation dragging ──
+        if self._dragging_text:
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+            self._text_annotations[self._dragging_text] = pt
             self.update()
             return
 
@@ -2782,6 +2948,17 @@ class CanvasWidget(QWidget):
                 return
             hit = self._hit_start_point(canvas_pt)
             self.setCursor(Qt.OpenHandCursor if hit else Qt.ArrowCursor)
+
+        # Tooltip for text annotations on hover
+        text_hit = self._hit_text_annotation(canvas_pt)
+        if text_hit:
+            comment = self._text_comments.get(text_hit, "")
+            if comment:
+                QToolTip.showText(event.globalPosition().toPoint(), comment, self)
+            else:
+                QToolTip.hideText()
+        else:
+            QToolTip.hideText()
 
         self.update()
 
@@ -2949,6 +3126,10 @@ class CanvasWidget(QWidget):
                 self._label_drag_offset = QPointF(0, 0)
                 self.setCursor(Qt.ArrowCursor)
                 return
+            if self._dragging_text:
+                self._dragging_text = None
+                self.setCursor(Qt.ArrowCursor)
+                return
             self._panning   = False
             self._pan_start = None
 
@@ -2988,6 +3169,9 @@ class CanvasWidget(QWidget):
             self._current_hkv_line_preview = None
             self._edit_hkv_line_id = None
             self._dragging_label = None
+            # Text annotations
+            self._placing_text_id = None
+            self._dragging_text = None
             # Floor plan move/rotate
             self._active_floor_id = None
             self._floor_drag_start = None
@@ -3044,19 +3228,31 @@ class CanvasWidget(QWidget):
             painter.translate(-sw / 2, -sh / 2)
             painter.setOpacity(layer.opacity)
             if layer.renderer:
-                layer.renderer.render(painter, QRectF(0, 0, sw, sh))
+                # QSvgRenderer fails when the effective pixel area
+                # exceeds Qt's 256 MB allocation limit (~64M pixels).
+                # Fall back to a capped intermediate pixmap.
+                effective_w = sw * self._scale
+                effective_h = sh * self._scale
+                if effective_w * effective_h > 36_000_000 or effective_w > 10000 or effective_h > 10000:
+                    cap = 6000.0
+                    ratio = min(cap / max(effective_w, 1), cap / max(effective_h, 1), 1.0)
+                    pm_w = max(1, int(effective_w * ratio))
+                    pm_h = max(1, int(effective_h * ratio))
+                    pm = QPixmap(pm_w, pm_h)
+                    pm.fill(Qt.transparent)
+                    pm_painter = QPainter(pm)
+                    pm_painter.setRenderHint(QPainter.Antialiasing)
+                    pm_painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                    layer.renderer.render(pm_painter, QRectF(0, 0, pm_w, pm_h))
+                    pm_painter.end()
+                    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                    painter.drawPixmap(QRectF(0, 0, sw, sh), pm, QRectF(pm.rect()))
+                else:
+                    layer.renderer.render(painter, QRectF(0, 0, sw, sh))
             elif layer.pixmap:
-                # Prevent rendering pixmap at unreasonable sizes
-                # Qt has issues with extremely large rectangles
-                max_dim = 20000.0
-                if sw > 0 and sh > 0 and sw < max_dim and sh < max_dim:
+                if sw > 0 and sh > 0:
                     painter.drawPixmap(QRectF(0, 0, sw, sh), layer.pixmap,
                                        QRectF(layer.pixmap.rect()))
-                else:
-                    # Fallback: draw placeholder rectangle
-                    painter.setPen(QPen(QColor("#ff6b6b"), 2.0 / self._scale))
-                    painter.setBrush(QBrush(QColor("#2b2b2b")))
-                    painter.drawRect(0, 0, max(sw, 100), max(sh, 100))
             elif layer.polygon:
                 bw = layer.size[0] if layer.size[0] > 0 else 1.0
                 bh = layer.size[1] if layer.size[1] > 0 else 1.0
@@ -3077,7 +3273,24 @@ class CanvasWidget(QWidget):
         if not self._floor_plans:
             if self._svg_renderer:
                 w, h = self._svg_size
-                self._svg_renderer.render(painter, QRectF(0, 0, w, h))
+                effective_w = w * self._scale
+                effective_h = h * self._scale
+                if effective_w * effective_h > 36_000_000 or effective_w > 10000 or effective_h > 10000:
+                    cap = 6000.0
+                    ratio = min(cap / max(effective_w, 1), cap / max(effective_h, 1), 1.0)
+                    pm_w = max(1, int(effective_w * ratio))
+                    pm_h = max(1, int(effective_h * ratio))
+                    pm = QPixmap(pm_w, pm_h)
+                    pm.fill(Qt.transparent)
+                    pm_painter = QPainter(pm)
+                    pm_painter.setRenderHint(QPainter.Antialiasing)
+                    pm_painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                    self._svg_renderer.render(pm_painter, QRectF(0, 0, pm_w, pm_h))
+                    pm_painter.end()
+                    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                    painter.drawPixmap(QRectF(0, 0, w, h), pm, QRectF(pm.rect()))
+                else:
+                    self._svg_renderer.render(painter, QRectF(0, 0, w, h))
             elif self._bg_pixmap:
                 w, h = self._svg_size
                 painter.drawPixmap(QRectF(0, 0, w, h), self._bg_pixmap,
@@ -3282,6 +3495,9 @@ class CanvasWidget(QWidget):
             col = self._color_map.get(lid, QColor("#e53935"))
             self._draw_item_label(painter, lid, mid, text, col)
 
+        # ── Text-Annotationen ─────────────────────────────────────
+        self._draw_text_annotations(painter)
+
         # ── Messlinien ────────────────────────────────────────────
         self._draw_measurements(painter)
 
@@ -3332,6 +3548,47 @@ class CanvasWidget(QWidget):
                 painter.setFont(font)
                 painter.setPen(QPen(color))
                 painter.drawText(mid, f"{mm_len / 1000:.3f} m")
+
+    # ── Text Annotations drawing ─────────────────────────────────── #
+
+    def _draw_text_annotations(self, painter: QPainter):
+        """Render all visible text annotations on the canvas."""
+        self._text_rects.clear()
+        for tid, pos in self._text_annotations.items():
+            if not self._text_visible.get(tid, True):
+                continue
+            content = self._text_contents.get(tid, "")
+            if not content:
+                continue
+            size = self._text_font_sizes.get(tid, 14.0)
+            color_hex = self._text_colors.get(tid, "#ffffff")
+            font = painter.font()
+            font.setPointSizeF(size / self._scale)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            lines = content.split("\n")
+            line_height = fm.height()
+            max_width = max(fm.horizontalAdvance(line) for line in lines) if lines else 0
+            total_height = line_height * len(lines)
+            # Background
+            pad = 4.0 / self._scale
+            bg_rect = QRectF(pos.x() - pad,
+                             pos.y() - fm.ascent() - pad,
+                             max_width + 2 * pad,
+                             total_height + 2 * pad)
+            bg = QColor("#2b2b2b")
+            bg.setAlpha(180)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(bg))
+            painter.drawRoundedRect(bg_rect, 3.0 / self._scale, 3.0 / self._scale)
+            # Text
+            painter.setPen(QPen(QColor(color_hex)))
+            painter.setBrush(Qt.NoBrush)
+            for i, line in enumerate(lines):
+                painter.drawText(
+                    QPointF(pos.x(), pos.y() + i * line_height), line)
+            # Store rect for hit testing
+            self._text_rects[tid] = bg_rect
 
     # ── Drag-Distance Overlay ─────────────────────────────────────── #
 

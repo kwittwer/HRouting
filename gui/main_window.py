@@ -38,7 +38,7 @@ from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF
 from PySide6.QtPrintSupport import QPrinter
 
 from gui.canvas_widget import CanvasWidget, COLORS
-from gui.parameter_panel import ParameterPanel
+from gui.parameter_panel import ParameterPanel, SafeDoubleSpinBox, SafeComboBox
 from logic.svg_parser import parse_svg_dimensions
 from logic.heating_calc import calc_circuit, calc_balancing, FLOOR_COVERINGS
 
@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self._elec_cable_counter = 0
         self._hkv_counter = 0
         self._hkv_line_counter = 0
+        self._text_counter = 0
         self._floorplan_counter = 0
         self._furniture_counter = 0
         self._dirty = False
@@ -125,7 +126,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         lbl = QLabel("  Fangwinkel: ")
         tb.addWidget(lbl)
-        self._snap_combo = QComboBox()
+        self._snap_combo = SafeComboBox()
         self._snap_combo.addItem("Aus",   0)
         self._snap_combo.addItem("45°",  45)
         self._snap_combo.addItem("90°",  90)
@@ -142,7 +143,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._grid_cb)
 
         tb.addWidget(QLabel("  Abstand: "))
-        self._grid_spin = QDoubleSpinBox()
+        self._grid_spin = SafeDoubleSpinBox()
         self._grid_spin.setDecimals(2)
         self._grid_spin.setRange(0.01, 10.0)
         self._grid_spin.setSingleStep(0.01)
@@ -312,6 +313,7 @@ class MainWindow(QMainWindow):
                 "elec_cable": self._elec_cable_counter,
                 "hkv": self._hkv_counter,
                 "hkv_line": self._hkv_line_counter,
+                "text": self._text_counter,
                 "floorplan": self._floorplan_counter,
                 "furniture": self._furniture_counter,
             },
@@ -374,6 +376,7 @@ class MainWindow(QMainWindow):
             self._elec_cable_counter = c.get("elec_cable", 0)
             self._hkv_counter = c.get("hkv", 0)
             self._hkv_line_counter = c.get("hkv_line", 0)
+            self._text_counter = c.get("text", 0)
             self._floorplan_counter = c.get("floorplan", 0)
             self._furniture_counter = c.get("furniture", 0)
 
@@ -506,6 +509,21 @@ class MainWindow(QMainWindow):
             self.param_panel.set_hkv_line_length(lid, length_mm)
             self._update_hkv_line_labels(lid)
 
+        for tid, panel in self.param_panel.text_panels.items():
+            panel.place_requested.connect(self._on_place_text)
+            panel.content_changed.connect(self._on_text_content_changed)
+            panel.comment_changed.connect(self._on_text_comment_changed)
+            panel.font_size_changed.connect(self._on_text_font_size_changed)
+            panel.color_changed.connect(self._on_text_color_changed)
+            panel.visibility_changed.connect(self._on_text_visibility_changed)
+            panel.name_changed.connect(self._on_text_name_changed)
+            values = panel.get_parameters()
+            self.canvas._text_visible[tid] = values.get("visible", True)
+            self.canvas._text_contents[tid] = values.get("content", "Text")
+            self.canvas._text_font_sizes[tid] = values.get("font_size", 14.0)
+            self.canvas._text_colors[tid] = values.get("color", "#ffffff")
+            self.canvas._text_comments[tid] = values.get("comment", "")
+
         for cid in self.param_panel.circuit_panels:
             self._update_supply_hkv_label(cid)
 
@@ -522,6 +540,7 @@ class MainWindow(QMainWindow):
         self.canvas.elec_cable_changed.connect(self._on_elec_cable_changed)
         self.canvas.hkv_placed.connect(self._on_hkv_placed)
         self.canvas.hkv_line_changed.connect(self._on_hkv_line_changed)
+        self.canvas.text_placed.connect(self._on_text_placed)
         self.canvas.object_double_clicked.connect(self._on_object_double_clicked)
         self.canvas.floor_plan_transform_updated.connect(
             self._on_floor_plan_transform_from_canvas)
@@ -556,6 +575,8 @@ class MainWindow(QMainWindow):
         self.param_panel.add_furniture_requested.connect(self._add_furniture)
         self.param_panel.delete_furniture_requested.connect(self._delete_furniture)
         self.param_panel.furniture_size_changed.connect(self._on_furniture_size_changed)
+        self.param_panel.add_text_requested.connect(self._add_text)
+        self.param_panel.delete_text_requested.connect(self._delete_text)
         self.param_panel.heating_global_changed.connect(self._recalc_all_circuits)
 
         # Dirty-tracking: jede inhaltliche Änderung markiert als unsaved
@@ -567,6 +588,7 @@ class MainWindow(QMainWindow):
         self.canvas.elec_cable_changed.connect(self._mark_dirty)
         self.canvas.hkv_placed.connect(self._mark_dirty)
         self.canvas.hkv_line_changed.connect(self._mark_dirty)
+        self.canvas.text_placed.connect(self._mark_dirty)
         self.canvas.ref_line_set.connect(self._mark_dirty)
         self.canvas.start_point_moved.connect(self._mark_dirty)
         self.param_panel.heating_global_changed.connect(self._mark_dirty)
@@ -1598,6 +1620,75 @@ class MainWindow(QMainWindow):
                         if hkv_panel else hkv_id)
             panel.cb_distributor.setCurrentText(hkv_name)
 
+    # ── Beschriftungen (Text-Annotationen) ───────────────────────────── #
+
+    def _add_text(self, fp_id: str = ""):
+        self._text_counter += 1
+        tid = f"Text-{self._text_counter}"
+        self._create_text_panel(tid, fp_id=fp_id or None, name=tid)
+        self.status.showMessage(
+            f"{tid}: Klicke 'Platzieren' im Panel, dann auf den Plan klicken.")
+
+    def _create_text_panel(self, text_id: str,
+                           fp_id: str | None = None,
+                           name: str | None = None):
+        panel = self.param_panel.add_text_panel(text_id, fp_id=fp_id, name=name)
+        panel.place_requested.connect(self._on_place_text)
+        panel.content_changed.connect(self._on_text_content_changed)
+        panel.comment_changed.connect(self._on_text_comment_changed)
+        panel.font_size_changed.connect(self._on_text_font_size_changed)
+        panel.color_changed.connect(self._on_text_color_changed)
+        panel.visibility_changed.connect(self._on_text_visibility_changed)
+        panel.name_changed.connect(self._on_text_name_changed)
+        return panel
+
+    def _on_place_text(self, text_id: str):
+        panel = self.param_panel.text_panels.get(text_id)
+        if not panel:
+            return
+        params = panel.get_parameters()
+        self.canvas.start_place_text(
+            text_id,
+            params.get("content", "Text"),
+            params.get("font_size", 14.0),
+            params.get("color", "#ffffff"),
+        )
+        self.status.showMessage(
+            f"{text_id}: Klicke auf den Plan um den Text zu platzieren. "
+            "ESC = Abbruch")
+
+    def _on_text_placed(self, text_id: str):
+        self.status.showMessage(f"✅ Text {text_id} platziert.")
+
+    def _on_text_content_changed(self, text_id: str, content: str):
+        self.canvas.update_text_content(text_id, content)
+        self._mark_dirty()
+
+    def _on_text_comment_changed(self, text_id: str, comment: str):
+        self.canvas.update_text_comment(text_id, comment)
+        self._mark_dirty()
+
+    def _on_text_font_size_changed(self, text_id: str, size: float):
+        self.canvas.update_text_font_size(text_id, size)
+        self._mark_dirty()
+
+    def _on_text_color_changed(self, text_id: str, color: str):
+        self.canvas.update_text_color(text_id, color)
+        self._mark_dirty()
+
+    def _on_text_visibility_changed(self, text_id: str, visible: bool):
+        self.canvas.set_text_visible(text_id, visible)
+        self._mark_dirty()
+
+    def _on_text_name_changed(self, text_id: str, name: str):
+        self._mark_dirty()
+
+    def _delete_text(self, text_id: str):
+        self.canvas.delete_text_annotation(text_id)
+        self.param_panel.remove_text_panel(text_id)
+        self.status.showMessage(f"🗑️ Text {text_id} gelöscht.")
+        self._mark_dirty()
+
     # ------------------------------------------------------------------ #
     #  Speichern / Laden                                                   #
     # ------------------------------------------------------------------ #
@@ -2087,6 +2178,27 @@ class MainWindow(QMainWindow):
             # Update supply line HKV labels
             for cid in self.param_panel.circuit_panels:
                 self._update_supply_hkv_label(cid)
+
+            # Text annotation panels
+            for tid, panel in self.param_panel.text_panels.items():
+                panel.place_requested.connect(self._on_place_text)
+                panel.content_changed.connect(self._on_text_content_changed)
+                panel.comment_changed.connect(self._on_text_comment_changed)
+                panel.font_size_changed.connect(self._on_text_font_size_changed)
+                panel.color_changed.connect(self._on_text_color_changed)
+                panel.visibility_changed.connect(self._on_text_visibility_changed)
+                panel.name_changed.connect(self._on_text_name_changed)
+                values = panel.get_parameters()
+                self.canvas._text_visible[tid] = values.get("visible", True)
+                self.canvas._text_contents[tid] = values.get("content", "Text")
+                self.canvas._text_font_sizes[tid] = values.get("font_size", 14.0)
+                self.canvas._text_colors[tid] = values.get("color", "#ffffff")
+                self.canvas._text_comments[tid] = values.get("comment", "")
+                try:
+                    num = int(tid.split("-")[1])
+                    self._text_counter = max(self._text_counter, num)
+                except (IndexError, ValueError):
+                    pass
 
             # Remember as last project
             _SETTINGS.setValue(_LAST_PROJECT_KEY, str(filepath))
