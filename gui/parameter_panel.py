@@ -25,6 +25,16 @@ from pathlib import Path
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtCore import Signal, Qt
 
+# ── Custom Spinbox: Block mouse wheel unless focused ────────────── #
+class SafeDoubleSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox that only responds to mouse wheel when focused.
+    Prevents accidental value changes when scrolling over the field."""
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
 # ── Eingebaute Elektro-Symbole (DIN EN 60617) ─────────────────── #
 _SYMBOLS_DIR = Path(__file__).resolve().parent.parent / "assets" / "symbols"
 # Fallback für PyInstaller
@@ -98,7 +108,7 @@ class HeatingCircuitPanel(QWidget):
         self._update_color_button()
         form.addRow("Farbe:", self.btn_color)
 
-        self.sb_diameter = QDoubleSpinBox()
+        self.sb_diameter = SafeDoubleSpinBox()
         self.sb_diameter.setRange(1.0, 3.2)
         self.sb_diameter.setSingleStep(0.05)
         self.sb_diameter.setValue(1.6)
@@ -106,7 +116,7 @@ class HeatingCircuitPanel(QWidget):
         self.sb_diameter.setSuffix(" cm")
         form.addRow("Rohrdurchmesser:", self.sb_diameter)
 
-        self.sb_spacing = QDoubleSpinBox()
+        self.sb_spacing = SafeDoubleSpinBox()
         self.sb_spacing.setRange(5.0, 30.0)
         self.sb_spacing.setSingleStep(0.5)
         self.sb_spacing.setValue(15.0)
@@ -116,7 +126,7 @@ class HeatingCircuitPanel(QWidget):
         )
         form.addRow("Verlegeabstand:", self.sb_spacing)
 
-        self.sb_wall_dist = QDoubleSpinBox()
+        self.sb_wall_dist = SafeDoubleSpinBox()
         self.sb_wall_dist.setRange(0.0, 50.0)
         self.sb_wall_dist.setSingleStep(0.5)
         self.sb_wall_dist.setValue(20.0)
@@ -126,7 +136,7 @@ class HeatingCircuitPanel(QWidget):
         )
         form.addRow("Randabstand:", self.sb_wall_dist)
 
-        self.sb_label_size = QDoubleSpinBox()
+        self.sb_label_size = SafeDoubleSpinBox()
         self.sb_label_size.setRange(4.0, 80.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
@@ -142,7 +152,7 @@ class HeatingCircuitPanel(QWidget):
         sep.setStyleSheet("color:#555;")
         form.addRow(sep)
 
-        self.sb_room_temp = QDoubleSpinBox()
+        self.sb_room_temp = SafeDoubleSpinBox()
         self.sb_room_temp.setRange(10.0, 35.0)
         self.sb_room_temp.setSingleStep(0.5)
         self.sb_room_temp.setValue(20.0)
@@ -359,7 +369,7 @@ class ElektroPointPanel(QWidget):
         self._update_color_button()
         form.addRow("Farbe:", self.btn_color)
 
-        self.sb_width = QDoubleSpinBox()
+        self.sb_width = SafeDoubleSpinBox()
         self.sb_width.setRange(0.5, 20.0)
         self.sb_width.setSingleStep(0.5)
         self.sb_width.setValue(3.0)
@@ -367,7 +377,7 @@ class ElektroPointPanel(QWidget):
         self.sb_width.valueChanged.connect(lambda _: self.size_changed.emit(self.point_id))
         form.addRow("Breite:", self.sb_width)
 
-        self.sb_height = QDoubleSpinBox()
+        self.sb_height = SafeDoubleSpinBox()
         self.sb_height.setRange(0.5, 20.0)
         self.sb_height.setSingleStep(0.5)
         self.sb_height.setValue(3.0)
@@ -385,7 +395,7 @@ class ElektroPointPanel(QWidget):
         self.btn_icon.clicked.connect(self._load_icon)
         form.addRow("", self.btn_icon)
 
-        self.sb_label_size = QDoubleSpinBox()
+        self.sb_label_size = SafeDoubleSpinBox()
         self.sb_label_size.setRange(4.0, 80.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
@@ -546,7 +556,7 @@ class ElektroCablePanel(QWidget):
         self.te_comment.setPlaceholderText("Kommentar...")
         form.addRow("Kommentar:", self.te_comment)
 
-        self.sb_label_size = QDoubleSpinBox()
+        self.sb_label_size = SafeDoubleSpinBox()
         self.sb_label_size.setRange(4.0, 80.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
@@ -693,7 +703,7 @@ class HkvPanel(QWidget):
         self._update_color_button()
         form.addRow("Farbe:", self.btn_color)
 
-        self.sb_width = QDoubleSpinBox()
+        self.sb_width = SafeDoubleSpinBox()
         self.sb_width.setRange(1.0, 50.0)
         self.sb_width.setSingleStep(1.0)
         self.sb_width.setValue(5.0)
@@ -702,7 +712,7 @@ class HkvPanel(QWidget):
             lambda _: self.size_changed.emit(self.hkv_id))
         form.addRow("Breite:", self.sb_width)
 
-        self.sb_height = QDoubleSpinBox()
+        self.sb_height = SafeDoubleSpinBox()
         self.sb_height.setRange(1.0, 50.0)
         self.sb_height.setSingleStep(1.0)
         self.sb_height.setValue(5.0)
@@ -715,7 +725,7 @@ class HkvPanel(QWidget):
         self.btn_icon.clicked.connect(self._load_icon)
         form.addRow("Symbol:", self.btn_icon)
 
-        self.sb_label_size = QDoubleSpinBox()
+        self.sb_label_size = SafeDoubleSpinBox()
         self.sb_label_size.setRange(4.0, 80.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
@@ -845,7 +855,7 @@ class HkvLinePanel(QWidget):
         self.lbl_end_hkv = QLabel("End-HKV: \u2013")
         form.addRow(self.lbl_end_hkv)
 
-        self.sb_label_size = QDoubleSpinBox()
+        self.sb_label_size = SafeDoubleSpinBox()
         self.sb_label_size.setRange(4.0, 80.0)
         self.sb_label_size.setSingleStep(1.0)
         self.sb_label_size.setValue(12.0)
@@ -1000,7 +1010,7 @@ class FloorPlanPanel(QWidget):
         form.addRow("Datei:", file_row)
 
         # Opacity
-        self.sb_opacity = QDoubleSpinBox()
+        self.sb_opacity = SafeDoubleSpinBox()
         self.sb_opacity.setRange(0.0, 1.0)
         self.sb_opacity.setSingleStep(0.05)
         self.sb_opacity.setDecimals(2)
@@ -1011,7 +1021,7 @@ class FloorPlanPanel(QWidget):
         form.addRow("Deckkraft:", self.sb_opacity)
 
         # Offset X / Y
-        self.sb_offset_x = QDoubleSpinBox()
+        self.sb_offset_x = SafeDoubleSpinBox()
         self.sb_offset_x.setRange(-99999.0, 99999.0)
         self.sb_offset_x.setSingleStep(1.0)
         self.sb_offset_x.setDecimals(1)
@@ -1019,7 +1029,7 @@ class FloorPlanPanel(QWidget):
         self.sb_offset_x.valueChanged.connect(self._emit_transform)
         form.addRow("Versatz X:", self.sb_offset_x)
 
-        self.sb_offset_y = QDoubleSpinBox()
+        self.sb_offset_y = SafeDoubleSpinBox()
         self.sb_offset_y.setRange(-99999.0, 99999.0)
         self.sb_offset_y.setSingleStep(1.0)
         self.sb_offset_y.setDecimals(1)
@@ -1028,7 +1038,7 @@ class FloorPlanPanel(QWidget):
         form.addRow("Versatz Y:", self.sb_offset_y)
 
         # Rotation
-        self.sb_rotation = QDoubleSpinBox()
+        self.sb_rotation = SafeDoubleSpinBox()
         self.sb_rotation.setRange(-360.0, 360.0)
         self.sb_rotation.setSingleStep(0.5)
         self.sb_rotation.setDecimals(1)
@@ -1085,7 +1095,7 @@ class FloorPlanPanel(QWidget):
         layout.addWidget(step2_lbl)
 
         input_row = QHBoxLayout()
-        self.sb_ref_length = QDoubleSpinBox()
+        self.sb_ref_length = SafeDoubleSpinBox()
         self.sb_ref_length.setRange(0.01, 100.0)
         self.sb_ref_length.setDecimals(3)
         self.sb_ref_length.setSingleStep(0.1)
@@ -1165,7 +1175,7 @@ class FloorPlanPanel(QWidget):
         fixed_size_form.setContentsMargins(0, 0, 0, 0)
         fixed_size_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
 
-        self.sb_fixed_width = QDoubleSpinBox()
+        self.sb_fixed_width = SafeDoubleSpinBox()
         self.sb_fixed_width.setRange(0.0, 100.0)
         self.sb_fixed_width.setDecimals(3)
         self.sb_fixed_width.setSingleStep(0.01)
@@ -1178,7 +1188,7 @@ class FloorPlanPanel(QWidget):
         )
         fixed_size_form.addRow("Breite:", self.sb_fixed_width)
 
-        self.sb_fixed_height = QDoubleSpinBox()
+        self.sb_fixed_height = SafeDoubleSpinBox()
         self.sb_fixed_height.setRange(0.0, 100.0)
         self.sb_fixed_height.setDecimals(3)
         self.sb_fixed_height.setSingleStep(0.01)
@@ -1497,7 +1507,7 @@ class ParameterPanel(QWidget):
         hg_form.setContentsMargins(0, 0, 0, 0)
         hg_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
 
-        self.sb_vorlauf = QDoubleSpinBox()
+        self.sb_vorlauf = SafeDoubleSpinBox()
         self.sb_vorlauf.setRange(20.0, 90.0)
         self.sb_vorlauf.setSingleStep(0.5)
         self.sb_vorlauf.setValue(35.0)
@@ -1508,7 +1518,7 @@ class ParameterPanel(QWidget):
         )
         hg_form.addRow("Vorlauftemperatur:", self.sb_vorlauf)
 
-        self.sb_ruecklauf = QDoubleSpinBox()
+        self.sb_ruecklauf = SafeDoubleSpinBox()
         self.sb_ruecklauf.setRange(15.0, 80.0)
         self.sb_ruecklauf.setSingleStep(0.5)
         self.sb_ruecklauf.setValue(30.0)
@@ -1519,7 +1529,7 @@ class ParameterPanel(QWidget):
         )
         hg_form.addRow("R\u00fccklauftemperatur:", self.sb_ruecklauf)
 
-        self.sb_norm_aussen = QDoubleSpinBox()
+        self.sb_norm_aussen = SafeDoubleSpinBox()
         self.sb_norm_aussen.setRange(-30.0, 5.0)
         self.sb_norm_aussen.setSingleStep(1.0)
         self.sb_norm_aussen.setValue(-12.0)
@@ -2272,3 +2282,4 @@ class ParameterPanel(QWidget):
             panel.from_dict(values)
 
         self._loading = False
+
