@@ -34,7 +34,7 @@ from PySide6.QtGui import (
     QAction, QColor, QFont, QPainter, QPageLayout,
     QPen, QBrush, QPolygonF, QPainterPath, QKeySequence,
 )
-from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF
+from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF, QTimer
 from PySide6.QtPrintSupport import QPrinter
 
 from gui.canvas_widget import CanvasWidget, COLORS
@@ -72,12 +72,16 @@ class MainWindow(QMainWindow):
         self._undo_stack: list[dict] = []
         self._redo_stack: list[dict] = []
         self._undo_blocked = False
+        self._last_snapshot: dict | None = None
 
         self._build_ui()
         self._build_toolbar()
         self._build_menubar()
         self._connect_signals()
         self._auto_load_last_project()
+
+        # Capture the initial state as baseline for undo
+        self._last_snapshot = self._capture_snapshot()
 
     # ------------------------------------------------------------------ #
     #  UI                                                                  #
@@ -320,35 +324,58 @@ class MainWindow(QMainWindow):
         })
 
     def _push_undo(self):
-        """Save the current state onto the undo stack."""
+        """Save the previous state onto the undo stack (before the change)."""
         if self._undo_blocked:
             return
-        snap = self._capture_snapshot()
-        self._undo_stack.append(snap)
-        if len(self._undo_stack) > _MAX_UNDO:
-            self._undo_stack.pop(0)
-        self._redo_stack.clear()
+        current = self._capture_snapshot()
+        # Avoid pushing a duplicate state (e.g. from multiple rapid signals)
+        if self._last_snapshot is not None:
+            # Quick identity check: if counters haven't changed, compare key fields
+            if (current.get("counters") == self._last_snapshot.get("counters")
+                    and current.get("canvas") == self._last_snapshot.get("canvas")
+                    and current.get("params") == self._last_snapshot.get("params")):
+                return  # nothing changed, skip
+            self._undo_stack.append(self._last_snapshot)
+            if len(self._undo_stack) > _MAX_UNDO:
+                self._undo_stack.pop(0)
+            self._redo_stack.clear()
+        self._last_snapshot = current
         self._update_undo_actions()
 
     def _undo(self):
         if not self._undo_stack:
             return
+        # Block undo pushes during and briefly after restore
+        self._undo_blocked = True
         # Save current state to redo before restoring
         self._redo_stack.append(self._capture_snapshot())
         snap = self._undo_stack.pop()
+        self._last_snapshot = snap
         self._restore_snapshot(snap)
         self._update_undo_actions()
         self.status.showMessage("↩ Rückgängig")
+        # Keep blocked until next event-loop tick so deferred signals settle
+        QTimer.singleShot(0, self._unblock_undo)
 
     def _redo(self):
         if not self._redo_stack:
             return
+        # Block undo pushes during and briefly after restore
+        self._undo_blocked = True
         # Save current state to undo before restoring
         self._undo_stack.append(self._capture_snapshot())
         snap = self._redo_stack.pop()
+        self._last_snapshot = snap
         self._restore_snapshot(snap)
         self._update_undo_actions()
         self.status.showMessage("↪ Wiederherstellen")
+        # Keep blocked until next event-loop tick so deferred signals settle
+        QTimer.singleShot(0, self._unblock_undo)
+
+    def _unblock_undo(self):
+        """Re-enable undo recording after restore settles."""
+        self._undo_blocked = False
+        self._last_snapshot = self._capture_snapshot()
 
     def _update_undo_actions(self):
         if hasattr(self, '_undo_action'):
@@ -388,7 +415,8 @@ class MainWindow(QMainWindow):
             self._update_title()
             self.canvas.update()
         finally:
-            self._undo_blocked = False
+            # _undo_blocked stays True – caller or QTimer will reset it
+            pass
 
     def _reconnect_panels_after_restore(self):
         """Reconnect per-object panel signals after an undo/redo restore."""
@@ -714,7 +742,6 @@ class MainWindow(QMainWindow):
         self._svg_path = path
         self._fit_window_to_svg()
         self._mark_dirty()
-        self._push_undo()
         self.status.showMessage(
             f"Grundriss geladen: {Path(path).name}  |  "
             "Jetzt Referenzlinie im Grundriss-Panel zeichnen!"
@@ -798,13 +825,11 @@ class MainWindow(QMainWindow):
         panel = self.param_panel.add_floorplan_panel(fp_id, name=name)
         self._connect_floorplan_panel_signals(panel)
         self._mark_dirty()
-        self._push_undo()
 
     def _delete_floorplan(self, fp_id: str):
         self.canvas.remove_floor_plan(fp_id)
         self.param_panel.remove_floorplan_panel(fp_id)
         self._mark_dirty()
-        self._push_undo()
 
     def _add_furniture(self, parent_fp_id: str):
         """Add a new furniture element under a floor plan."""
@@ -827,7 +852,6 @@ class MainWindow(QMainWindow):
             order.insert(insert_idx, fur_id)
         self.param_panel.add_furniture_panel(fur_id, parent_fp_id, name=name)
         self._mark_dirty()
-        self._push_undo()
         self.status.showMessage(
             f"{fur_id}: Bild laden (\U0001f4c2) \u2192 Referenzlinie zeichnen \u2192 Positionieren"
         )
@@ -836,7 +860,6 @@ class MainWindow(QMainWindow):
         self.canvas.remove_floor_plan(fur_id)
         self.param_panel.remove_furniture_panel(fur_id)
         self._mark_dirty()
-        self._push_undo()
         self.status.showMessage(f"\U0001f5d1\ufe0f Einrichtungselement {fur_id} gel\u00f6scht.")
 
     def _on_furniture_size_changed(self, fur_id: str):
@@ -870,7 +893,6 @@ class MainWindow(QMainWindow):
             self._svg_path = path
             self._fit_window_to_svg()
         self._mark_dirty()
-        self._push_undo()
 
     def _on_floorplan_polygon_draw(self, fp_id: str):
         panel = self.param_panel.furniture_panels.get(fp_id)
@@ -1790,6 +1812,7 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._last_snapshot = self._capture_snapshot()
         self._update_undo_actions()
         self._update_title()
         self.status.showMessage("📄 Neues Projekt erstellt.")
@@ -2206,6 +2229,7 @@ class MainWindow(QMainWindow):
             self._dirty = False
             self._undo_stack.clear()
             self._redo_stack.clear()
+            self._last_snapshot = self._capture_snapshot()
             self._update_undo_actions()
             self._update_title()
             self.status.showMessage(f"📂 Projekt geladen: {filepath.name}")

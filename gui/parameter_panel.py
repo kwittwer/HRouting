@@ -1715,13 +1715,17 @@ class ParameterPanel(QWidget):
     def _remove_tree_item(self, item_id: str):
         item = self._tree_items.pop(item_id, None)
         if item:
-            parent = item.parent()
-            if parent:
-                parent.removeChild(item)
-            else:
-                idx = self._tree.indexOfTopLevelItem(item)
-                if idx >= 0:
-                    self._tree.takeTopLevelItem(idx)
+            try:
+                parent = item.parent()
+                if parent:
+                    parent.removeChild(item)
+                else:
+                    idx = self._tree.indexOfTopLevelItem(item)
+                    if idx >= 0:
+                        self._tree.takeTopLevelItem(idx)
+            except RuntimeError:
+                # C++ object already deleted (e.g. parent removed first)
+                pass
 
     def _update_tree_item_name(self, item_id: str, name: str):
         item = self._tree_items.get(item_id)
@@ -2346,20 +2350,24 @@ class ParameterPanel(QWidget):
 
     def clear_all_panels(self):
         """Remove all object panels (circuits, elec, HKV, floorplans) from the tree + layout."""
+        # Remove children first (they live under floorplan tree items)
+        for tid in list(self.text_panels):
+            self.remove_text_panel(tid)
+        for lid in list(self.hkv_line_panels):
+            self.remove_hkv_line_panel(lid)
+        for hid in list(self.hkv_panels):
+            self.remove_hkv_panel(hid)
+        for cid in list(self.elec_cable_panels):
+            self.remove_elec_cable_panel(cid)
+        for pid in list(self.elec_point_panels):
+            self.remove_elec_point_panel(pid)
+        for cid in list(self.circuit_panels):
+            self.remove_circuit_panel(cid)
+        # Remove furniture and floorplans last (they are parents)
         for fur_id in list(self.furniture_panels):
             self.remove_furniture_panel(fur_id)
         for fid in list(self.floorplan_panels):
             self.remove_floorplan_panel(fid)
-        for cid in list(self.circuit_panels):
-            self.remove_circuit_panel(cid)
-        for pid in list(self.elec_point_panels):
-            self.remove_elec_point_panel(pid)
-        for cid in list(self.elec_cable_panels):
-            self.remove_elec_cable_panel(cid)
-        for hid in list(self.hkv_panels):
-            self.remove_hkv_panel(hid)
-        for lid in list(self.hkv_line_panels):
-            self.remove_hkv_line_panel(lid)
 
     def to_dict(self) -> dict:
         return {

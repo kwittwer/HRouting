@@ -307,7 +307,8 @@ class CanvasWidget(QWidget):
         if not layer:
             return
         layer.file_path = filepath
-        layer.polygon = []
+        # Preserve existing polygon (important for undo restore)
+        saved_polygon = layer.polygon
         layer.renderer = None
         layer.pixmap = None
         if not os.path.exists(filepath):
@@ -334,6 +335,9 @@ class CanvasWidget(QWidget):
         # initialise layer to match so it renders at native pixel size.
         if self._mm_per_px > 1.0 and layer.mm_per_px == 1.0:
             layer.mm_per_px = self._mm_per_px
+        # Restore polygon if it existed (e.g. during undo restore)
+        if saved_polygon:
+            layer.polygon = saved_polygon
         self.update()
 
     def set_floor_plan_transform(self, fp_id: str,
