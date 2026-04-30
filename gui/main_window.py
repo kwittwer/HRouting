@@ -192,8 +192,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction("📄 Neues Projekt", self._new_project)
         file_menu.addAction("📂 Projekt öffnen…", self._open_project)
         file_menu.addSeparator()
-        file_menu.addAction("💾 Speichern", self._save_project)
-        file_menu.addAction("💾 Speichern unter…", self._save_project_as)
+        save_action = file_menu.addAction("💾 Speichern", self._save_project)
+        save_action.setShortcut(QKeySequence.Save)
+        save_as_action = file_menu.addAction("💾 Speichern unter…", self._save_project_as)
+        save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
         file_menu.addSeparator()
 
         self._recent_menu = file_menu.addMenu("🕑 Letzte Projekte")
@@ -479,9 +481,13 @@ class MainWindow(QMainWindow):
             panel.color_changed.connect(self._on_elec_point_color_changed)
             panel.visibility_changed.connect(self._on_elec_visibility_changed)
             panel.label_size_changed.connect(self._on_label_size_changed)
+            panel.position_changed.connect(self._on_elec_point_position_changed)
+            panel.height_changed.connect(self._on_elec_point_height_changed)
             values = panel.get_parameters()
             self.canvas._label_map[pid] = values.get("name", pid)
             self.canvas._elec_visible[pid] = values.get("visible", True)
+            self.canvas._elec_point_position[pid] = values.get("position", "Wand")
+            self.canvas._elec_point_height[pid] = values.get("height_from_floor", 0.0)
             self.canvas.set_label_font_size(pid, values.get("label_size", 12.0))
             self.canvas.set_color(pid, QColor(values.get("color", "#4fc3f7")))
             if values.get("icon_path"):
@@ -557,6 +563,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self.canvas.polygon_finished.connect(self._on_polygon_finished)
+        self.canvas.polygon_changed.connect(self._update_circuit_area)
         self.canvas.floor_plan_polygon_finished.connect(
             self._on_floorplan_polygon_finished)
         self.canvas.mode_changed.connect(self._on_canvas_mode_changed)
@@ -609,6 +616,7 @@ class MainWindow(QMainWindow):
 
         # Dirty-tracking: jede inhaltliche Änderung markiert als unsaved
         self.canvas.polygon_finished.connect(self._mark_dirty)
+        self.canvas.polygon_changed.connect(self._mark_dirty)
         self.canvas.floor_plan_polygon_finished.connect(self._mark_dirty)
         self.canvas.route_changed.connect(self._mark_dirty)
         self.canvas.supply_line_changed.connect(self._mark_dirty)
@@ -1318,6 +1326,8 @@ class MainWindow(QMainWindow):
         panel.color_changed.connect(self._on_elec_point_color_changed)
         panel.visibility_changed.connect(self._on_elec_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
+        panel.position_changed.connect(self._on_elec_point_position_changed)
+        panel.height_changed.connect(self._on_elec_point_height_changed)
         return panel
 
     def _on_place_elec_point(self, point_id: str):
@@ -1351,6 +1361,14 @@ class MainWindow(QMainWindow):
     def _on_elec_point_name_changed(self, point_id: str, name: str):
         self.canvas._label_map[point_id] = name
         self.canvas.update()
+
+    def _on_elec_point_position_changed(self, point_id: str, position: str):
+        self.canvas._elec_point_position[point_id] = position
+        self._mark_dirty()
+
+    def _on_elec_point_height_changed(self, point_id: str, height: float):
+        self.canvas._elec_point_height[point_id] = height
+        self._mark_dirty()
 
     def _on_elec_visibility_changed(self, item_id: str, visible: bool):
         self.canvas._elec_visible[item_id] = visible
@@ -1450,6 +1468,13 @@ class MainWindow(QMainWindow):
         panel.sb_width.setValue(src.get("width", 30.0) / 10)
         panel.sb_height.setValue(src.get("height", 30.0) / 10)
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
+        # Position und Höhe kopieren
+        pos_idx = panel.cmb_position.findText(src.get("position", "Wand"))
+        if pos_idx >= 0:
+            panel.cmb_position.setCurrentIndex(pos_idx)
+        panel.sb_height_from_floor.setValue(src.get("height_from_floor", 0.0))
+        self.canvas._elec_point_position[new_id] = src.get("position", "Wand")
+        self.canvas._elec_point_height[new_id] = src.get("height_from_floor", 0.0)
         c = src.get("color", "#4fc3f7")
         panel._color = QColor(c)
         panel._update_color_button()
@@ -2116,9 +2141,13 @@ class MainWindow(QMainWindow):
                 panel.color_changed.connect(self._on_elec_point_color_changed)
                 panel.visibility_changed.connect(self._on_elec_visibility_changed)
                 panel.label_size_changed.connect(self._on_label_size_changed)
+                panel.position_changed.connect(self._on_elec_point_position_changed)
+                panel.height_changed.connect(self._on_elec_point_height_changed)
                 values = panel.get_parameters()
                 self.canvas._label_map[pid] = values.get("name", pid)
                 self.canvas._elec_visible[pid] = values.get("visible", True)
+                self.canvas._elec_point_position[pid] = values.get("position", "Wand")
+                self.canvas._elec_point_height[pid] = values.get("height_from_floor", 0.0)
                 self.canvas.set_label_font_size(pid, values.get("label_size", 12.0))
                 self.canvas.set_color(pid, QColor(values.get("color", "#4fc3f7")))
                 if values.get("icon_path"):
@@ -2775,21 +2804,38 @@ class MainWindow(QMainWindow):
             length_m = length_px * scale / 1000.0
             start_ap_id, end_ap_id = self.canvas.get_cable_ap(kid)
             start_name = ""
+            start_height = 0.0
+            start_position = ""
             if start_ap_id:
                 ap_p = self.param_panel.elec_point_panels.get(start_ap_id)
                 start_name = (ap_p.get_parameters()["name"]
                               if ap_p else start_ap_id)
+                start_height = self.canvas._elec_point_height.get(start_ap_id, 0.0)
+                start_position = self.canvas._elec_point_position.get(start_ap_id, "")
             end_name = ""
+            end_height = 0.0
+            end_position = ""
             if end_ap_id:
                 ap_p = self.param_panel.elec_point_panels.get(end_ap_id)
                 end_name = (ap_p.get_parameters()["name"]
                             if ap_p else end_ap_id)
+                end_height = self.canvas._elec_point_height.get(end_ap_id, 0.0)
+                end_position = self.canvas._elec_point_position.get(end_ap_id, "")
+            
+            # Höhen zu Kabellänge addieren (in cm, zu m umrechnen: cm / 100)
+            total_height_cm = start_height + end_height
+            length_m += total_height_cm / 100.0
+            
             kv_rows.append({
                 "name": params["name"],
                 "type": params["type"],
                 "length_m": length_m,
                 "start_ap": start_name,
                 "end_ap": end_name,
+                "start_height_cm": start_height,
+                "end_height_cm": end_height,
+                "start_position": start_position,
+                "end_position": end_position,
             })
 
         # Summe pro Kabel-Typ
@@ -2982,19 +3028,28 @@ class MainWindow(QMainWindow):
         kv_layout = QVBoxLayout(kv_widget)
 
         kv_layout.addWidget(QLabel("<b>Kabelverbindungen – Einzellängen</b>"))
-        tbl_kv = QTableWidget(len(kv_rows), 5)
+        tbl_kv = QTableWidget(len(kv_rows), 9)
         tbl_kv.setHorizontalHeaderLabels(
-            ["Name", "Typ", "Start-AP", "End-AP", "Länge (m)"])
+            ["Name", "Typ", "Start-AP", "Start-Pos.", "Start-H. (cm)",
+             "End-AP", "End-Pos.", "End-H. (cm)", "Länge (m)"])
         tbl_kv.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         tbl_kv.setEditTriggers(QTableWidget.NoEditTriggers)
         for i, r in enumerate(kv_rows):
             tbl_kv.setItem(i, 0, QTableWidgetItem(r["name"]))
             tbl_kv.setItem(i, 1, QTableWidgetItem(r["type"]))
             tbl_kv.setItem(i, 2, QTableWidgetItem(r.get("start_ap", "")))
-            tbl_kv.setItem(i, 3, QTableWidgetItem(r.get("end_ap", "")))
-            item = QTableWidgetItem(f"{r['length_m']:.2f}")
+            tbl_kv.setItem(i, 3, QTableWidgetItem(r.get("start_position", "")))
+            item = QTableWidgetItem(f"{r.get('start_height_cm', 0.0):.1f}")
             item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             tbl_kv.setItem(i, 4, item)
+            tbl_kv.setItem(i, 5, QTableWidgetItem(r.get("end_ap", "")))
+            tbl_kv.setItem(i, 6, QTableWidgetItem(r.get("end_position", "")))
+            item = QTableWidgetItem(f"{r.get('end_height_cm', 0.0):.1f}")
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            tbl_kv.setItem(i, 7, item)
+            item = QTableWidgetItem(f"{r['length_m']:.2f}")
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            tbl_kv.setItem(i, 8, item)
         kv_layout.addWidget(tbl_kv)
 
         kv_layout.addWidget(QLabel("<b>Summe pro Leitungstyp</b>"))
@@ -3126,12 +3181,16 @@ class MainWindow(QMainWindow):
 
         # Elektro Einzellängen
         lines.append("Elektro - Kabelverbindungen")
-        lines.append(sep.join(["Name", "Typ", "Start-AP", "End-AP",
-                               "Länge (m)"]))
+        lines.append(sep.join(["Name", "Typ", "Start-AP", "Start-Position",
+                               "Start-Höhe (cm)", "End-AP", "End-Position",
+                               "End-Höhe (cm)", "Länge (m)"]))
         for r in kv_rows:
             lines.append(sep.join([
                 r["name"], r["type"],
-                r.get("start_ap", ""), r.get("end_ap", ""),
+                r.get("start_ap", ""), r.get("start_position", ""),
+                f"{r.get('start_height_cm', 0.0):.1f}",
+                r.get("end_ap", ""), r.get("end_position", ""),
+                f"{r.get('end_height_cm', 0.0):.1f}",
                 f"{r['length_m']:.2f}",
             ]))
         lines.append("")
@@ -3247,18 +3306,35 @@ class MainWindow(QMainWindow):
             length_m = self.canvas.get_elec_cable_length_px(kid) * scale / 1000.0
             start_ap_id, end_ap_id = self.canvas.get_cable_ap(kid)
             start_name = ""
+            start_height = 0.0
+            start_position = ""
             if start_ap_id:
                 ap_p = self.param_panel.elec_point_panels.get(start_ap_id)
                 start_name = (ap_p.get_parameters()["name"]
                               if ap_p else start_ap_id)
+                start_height = self.canvas._elec_point_height.get(start_ap_id, 0.0)
+                start_position = self.canvas._elec_point_position.get(start_ap_id, "")
             end_name = ""
+            end_height = 0.0
+            end_position = ""
             if end_ap_id:
                 ap_p = self.param_panel.elec_point_panels.get(end_ap_id)
                 end_name = (ap_p.get_parameters()["name"]
                             if ap_p else end_ap_id)
+                end_height = self.canvas._elec_point_height.get(end_ap_id, 0.0)
+                end_position = self.canvas._elec_point_position.get(end_ap_id, "")
+            
+            # Höhen zu Kabellänge addieren (in cm, zu m umrechnen: cm / 100)
+            total_height_cm = start_height + end_height
+            length_m += total_height_cm / 100.0
+            
             kv_rows.append({"name": params["name"], "type": params["type"],
                             "length_m": length_m,
-                            "start_ap": start_name, "end_ap": end_name})
+                            "start_ap": start_name, "end_ap": end_name,
+                            "start_height_cm": start_height,
+                            "end_height_cm": end_height,
+                            "start_position": start_position,
+                            "end_position": end_position})
 
         kv_sum: dict[str, float] = defaultdict(float)
         for r in kv_rows:
@@ -3551,9 +3627,10 @@ class MainWindow(QMainWindow):
             ctx.painter.restore()
             table_y += ctx.mm(6)
 
-            headers = ["Name", "Typ", "Start-AP", "End-AP", "L\u00e4nge (m)"]
+            headers = ["Name", "Typ", "Start-AP", "Start-H. (cm)", "End-AP", "End-H. (cm)", "L\u00e4nge (m)"]
             rows = [[r["name"], r["type"],
-                     r.get("start_ap", ""), r.get("end_ap", ""),
+                     r.get("start_ap", ""), f"{r.get('start_height_cm', 0.0):.1f}",
+                     r.get("end_ap", ""), f"{r.get('end_height_cm', 0.0):.1f}",
                      f"{r['length_m']:.2f}"]
                     for r in data["kv_rows"]]
             y_after = ctx.draw_table(page, table_y, headers, rows)

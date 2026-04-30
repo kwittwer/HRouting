@@ -90,6 +90,7 @@ class CanvasWidget(QWidget):
     ref_line_set      = Signal()          # Linie fertig, Länge kommt vom Panel
     start_point_moved = Signal(str, tuple)
     route_changed     = Signal(str)
+    polygon_changed   = Signal(str)       # emitted when polygon is edited (point moved/added/deleted)
     elec_point_placed  = Signal(str)
     elec_cable_changed = Signal(str)
     hkv_placed         = Signal(str)
@@ -167,6 +168,8 @@ class CanvasWidget(QWidget):
         self._elec_point_size_px: Dict[str, Tuple[float, float]]  = {}
         self._elec_point_icons:   Dict[str, Optional[QPixmap]]    = {}
         self._elec_point_svgs:    Dict[str, Optional[QSvgRenderer]] = {}
+        self._elec_point_position: Dict[str, str]                 = {}  # "Wand", "Decke", "Boden", "Freitext"
+        self._elec_point_height:   Dict[str, float]               = {}  # Höhe vom Boden in mm
         self._elec_cables:        Dict[str, List[QPointF]]        = {}
         self._elec_visible:       Dict[str, bool]                 = {}
 
@@ -686,6 +689,7 @@ class CanvasWidget(QWidget):
         if cid not in self._polygons or len(self._polygons[cid]) <= 3:
             return
         del self._polygons[cid][idx]
+        self.polygon_changed.emit(cid)
         self.update()
 
     def _insert_polygon_point(self, cid: str, idx1: int, idx2: int, pt: QPointF):
@@ -695,6 +699,7 @@ class CanvasWidget(QWidget):
         next_idx = (idx1 + 1) % len(pts)
         if idx2 == next_idx:
             pts.insert(next_idx, pt)
+            self.polygon_changed.emit(cid)
             self.update()
 
     def _delete_route_point(self, cid: str, idx: int):
@@ -894,6 +899,7 @@ class CanvasWidget(QWidget):
     def delete_elec_point(self, point_id: str):
         for d in (self._elec_points, self._elec_point_size_px,
                   self._elec_point_icons, self._elec_visible,
+                  self._elec_point_position, self._elec_point_height,
                   self._label_positions, self._label_font_sizes,
                   self._label_rects, self._label_draw_pos):
             d.pop(point_id, None)
@@ -1349,6 +1355,8 @@ class CanvasWidget(QWidget):
                 pid: list(s)
                 for pid, s in self._elec_point_size_px.items()
             },
+            "elec_point_position": dict(self._elec_point_position),
+            "elec_point_height": dict(self._elec_point_height),
             "elec_cables": {
                 cid: [(p.x(), p.y()) for p in pts]
                 for cid, pts in self._elec_cables.items()
@@ -1472,6 +1480,10 @@ class CanvasWidget(QWidget):
             self._elec_points[pid] = QPointF(pt[0], pt[1])
         for pid, s in d.get("elec_point_size_px", {}).items():
             self._elec_point_size_px[pid] = tuple(s)
+        self._elec_point_position = dict(d.get("elec_point_position", {}))
+        self._elec_point_height = {
+            pid: float(h) for pid, h in d.get("elec_point_height", {}).items()
+        }
         for cid, pts in d.get("elec_cables", {}).items():
             self._elec_cables[cid] = [QPointF(x, y) for x, y in pts]
             self._ensure_color(cid)
@@ -1887,6 +1899,108 @@ class CanvasWidget(QWidget):
             return super().mouseDoubleClickEvent(event)
 
         canvas_pt = self._to_canvas(QPointF(event.position()))
+        threshold = 10.0 / self._scale
+
+        # In Draw-Supply-Line mode: double-click on last point finishes the supply line
+        if self._mode == ToolMode.DRAW_SUPPLY_LINE and self._current_supply_cid and self._current_supply_points:
+            last_pt = self._current_supply_points[-1]
+            if _qdist(canvas_pt, last_pt) < threshold:
+                cid = self._current_supply_cid
+                if len(self._current_supply_points) >= 2:
+                    # Check last point for HKV snap
+                    last_pt = self._current_supply_points[-1]
+                    hkv = self._find_nearest_hkv(last_pt)
+                    if hkv:
+                        self._current_supply_points[-1] = QPointF(
+                            self._hkv_points[hkv])
+                        self._supply_hkv[cid] = hkv
+                    else:
+                        self._supply_hkv.pop(cid, None)
+                    self._supply_lines[cid] = list(self._current_supply_points)
+                self._current_supply_cid = None
+                self._current_supply_points = []
+                self._current_supply_preview = None
+                self._mode = ToolMode.NONE
+                self.setCursor(Qt.ArrowCursor)
+                self.supply_line_changed.emit(cid)
+                self.update()
+            return
+
+        # In Draw-Elec-Cable mode: double-click on last point finishes the cable
+        if self._mode == ToolMode.DRAW_ELEC_CABLE and self._current_elec_cable_id and self._current_elec_cable_points:
+            last_pt = self._current_elec_cable_points[-1]
+            if _qdist(canvas_pt, last_pt) < threshold:
+                cid = self._current_elec_cable_id
+                if len(self._current_elec_cable_points) >= 2:
+                    # Check last point for AP snap
+                    last_pt = self._current_elec_cable_points[-1]
+                    ap = self._find_nearest_ap(last_pt)
+                    if ap:
+                        self._current_elec_cable_points[-1] = QPointF(
+                            self._elec_points[ap])
+                        self._cable_end_ap[cid] = ap
+                    else:
+                        self._cable_end_ap.pop(cid, None)
+                    self._elec_cables[cid] = list(self._current_elec_cable_points)
+                self._current_elec_cable_id = None
+                self._current_elec_cable_points = []
+                self._current_elec_cable_preview = None
+                self._mode = ToolMode.NONE
+                self.setCursor(Qt.ArrowCursor)
+                self.elec_cable_changed.emit(cid)
+                self.update()
+            return
+
+        # In Draw-HKV-Line mode: double-click on last point finishes the HKV line
+        if self._mode == ToolMode.DRAW_HKV_LINE and self._current_hkv_line_id and self._current_hkv_line_points:
+            last_pt = self._current_hkv_line_points[-1]
+            if _qdist(canvas_pt, last_pt) < threshold:
+                lid = self._current_hkv_line_id
+                if len(self._current_hkv_line_points) >= 2:
+                    # Check start and end points for HKV snap
+                    start_pt = self._current_hkv_line_points[0]
+                    end_pt = self._current_hkv_line_points[-1]
+                    start_hkv = self._find_nearest_hkv(start_pt)
+                    end_hkv = self._find_nearest_hkv(end_pt)
+                    if start_hkv:
+                        self._current_hkv_line_points[0] = QPointF(
+                            self._hkv_points[start_hkv])
+                        self._hkv_line_start[lid] = start_hkv
+                    else:
+                        self._hkv_line_start.pop(lid, None)
+                    if end_hkv:
+                        self._current_hkv_line_points[-1] = QPointF(
+                            self._hkv_points[end_hkv])
+                        self._hkv_line_end[lid] = end_hkv
+                    else:
+                        self._hkv_line_end.pop(lid, None)
+                    self._hkv_lines[lid] = list(self._current_hkv_line_points)
+                self._current_hkv_line_id = None
+                self._current_hkv_line_points = []
+                self._current_hkv_line_preview = None
+                self._mode = ToolMode.NONE
+                self.setCursor(Qt.ArrowCursor)
+                self.hkv_line_changed.emit(lid)
+                self.update()
+            return
+
+        # In Draw-Route mode: double-click on last point finishes the route
+        if self._mode == ToolMode.DRAW_ROUTE and self._current_route_cid and self._current_route_points:
+            last_pt = self._current_route_points[-1]
+            if _qdist(canvas_pt, last_pt) < threshold:
+                cid = self._current_route_cid
+                self._manual_routes[cid] = list(self._current_route_points)
+                self._current_route_cid = None
+                self._current_route_points = []
+                self._current_route_preview_end = None
+                self._constraint_violation_point = None
+                self._constraint_violation_line = None
+                self._constraint_violation_reason = ""
+                self._mode = ToolMode.NONE
+                self.setCursor(Qt.ArrowCursor)
+                self.route_changed.emit(cid)
+                self.update()
+            return
 
         # In Edit-Route mode: snap route point on double-click
         if self._mode == ToolMode.EDIT_ROUTE and self._edit_route_cid:
@@ -1915,44 +2029,87 @@ class CanvasWidget(QWidget):
             self.object_double_clicked.emit("hkv", hkv_hit)
             return
 
-        # 3. Elektro-Kabel (edge hit)
+        # 3. Elektro-Kabel – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
         for kid, pts in self._elec_cables.items():
             if not self._elec_visible.get(kid, True):
                 continue
             if len(pts) >= 2:
+                # Last point hit → resume drawing
+                if _qdist(canvas_pt, pts[-1]) < threshold:
+                    self._current_elec_cable_points = list(pts)
+                    self._current_elec_cable_id = kid
+                    self._mode = ToolMode.DRAW_ELEC_CABLE
+                    self._current_elec_cable_preview = None
+                    self.setCursor(Qt.CrossCursor)
+                    self.update()
+                    return
+                # Edge hit → edit mode
                 for i in range(len(pts) - 1):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
                         self.object_double_clicked.emit("elec_cable", kid)
                         return
 
-        # 4. HKV-Leitung (edge hit)
+        # 4. HKV-Leitung – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
         for lid, pts in self._hkv_lines.items():
             if not self._hkv_line_visible.get(lid, True):
                 continue
             if len(pts) >= 2:
+                # Last point hit → resume drawing
+                if _qdist(canvas_pt, pts[-1]) < threshold:
+                    self._current_hkv_line_points = list(pts)
+                    self._current_hkv_line_id = lid
+                    self._mode = ToolMode.DRAW_HKV_LINE
+                    self._current_hkv_line_preview = None
+                    self.setCursor(Qt.CrossCursor)
+                    self.update()
+                    return
+                # Edge hit → edit mode
                 for i in range(len(pts) - 1):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
                         self.object_double_clicked.emit("hkv_line", lid)
                         return
 
-        # 5. Zuleitung (edge hit)
+        # 5. Zuleitung – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
         for cid, pts in self._supply_lines.items():
             if not self._circuit_visible.get(cid, True):
                 continue
             if len(pts) >= 2:
+                # Last point hit → resume drawing
+                if _qdist(canvas_pt, pts[-1]) < threshold:
+                    self._current_supply_points = list(pts)
+                    self._current_supply_cid = cid
+                    self._mode = ToolMode.DRAW_SUPPLY_LINE
+                    self._current_supply_preview = None
+                    self.setCursor(Qt.CrossCursor)
+                    self.update()
+                    return
+                # Edge hit → edit mode
                 for i in range(len(pts) - 1):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
                         self.object_double_clicked.emit("supply_line", cid)
                         return
 
-        # 6. Rohrverlauf (edge hit)
+        # 6. Rohrverlauf – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
         for cid, pts in self._manual_routes.items():
             if not self._circuit_visible.get(cid, True):
                 continue
             if len(pts) >= 2:
+                # Last point hit → resume drawing
+                if _qdist(canvas_pt, pts[-1]) < threshold:
+                    self._current_route_points = list(pts)
+                    self._current_route_cid = cid
+                    self._mode = ToolMode.DRAW_ROUTE
+                    self._current_route_preview_end = None
+                    self._constraint_violation_point = None
+                    self._constraint_violation_line = None
+                    self._constraint_violation_reason = ""
+                    self.setCursor(Qt.CrossCursor)
+                    self.update()
+                    return
+                # Edge hit → edit mode
                 for i in range(len(pts) - 1):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
@@ -3026,6 +3183,7 @@ class CanvasWidget(QWidget):
                 if self._edit_floor_polygon_id and cid == self._edit_floor_polygon_id:
                     self.update()
                     return
+                self.polygon_changed.emit(cid)
                 self.update()
                 return
             if self._dragging_route_point and self._mode == ToolMode.EDIT_ROUTE:

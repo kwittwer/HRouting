@@ -339,6 +339,8 @@ class ElektroPointPanel(QWidget):
     place_requested    = Signal(str)
     label_size_changed = Signal(str, float)
     duplicate_requested = Signal(str)
+    position_changed   = Signal(str, str)      # (point_id, position)
+    height_changed     = Signal(str, float)    # (point_id, height_mm)
 
     def __init__(self, point_id: str, name: str | None = None,
                  color: str | None = None, parent=None):
@@ -411,6 +413,34 @@ class ElektroPointPanel(QWidget):
         )
         form.addRow("Schriftgr\u00f6\u00dfe:", self.sb_label_size)
 
+        # Position (Wand, Decke, Boden, Freitext)
+        pos_layout = QHBoxLayout()
+        self.cmb_position = SafeComboBox()
+        self.cmb_position.addItems(["Wand", "Decke", "Boden", "Freitext"])
+        self.cmb_position.currentTextChanged.connect(self._on_position_changed)
+        pos_layout.addWidget(self.cmb_position)
+        
+        self.le_position_custom = QLineEdit()
+        self.le_position_custom.setPlaceholderText("Z.B. Trockenbau, Fenster...")
+        self.le_position_custom.setEnabled(False)
+        self.le_position_custom.textChanged.connect(
+            lambda v: self.position_changed.emit(self.point_id, v if self.le_position_custom.isEnabled() else self.cmb_position.currentText())
+        )
+        pos_layout.addWidget(self.le_position_custom)
+        form.addRow("Position:", pos_layout)
+
+        # H\u00f6he vom Boden in cm
+        self.sb_height_from_floor = SafeDoubleSpinBox()
+        self.sb_height_from_floor.setRange(0.0, 999.9)
+        self.sb_height_from_floor.setSingleStep(1.0)
+        self.sb_height_from_floor.setValue(0.0)
+        self.sb_height_from_floor.setDecimals(1)
+        self.sb_height_from_floor.setSuffix(" cm")
+        self.sb_height_from_floor.valueChanged.connect(
+            lambda v: self.height_changed.emit(self.point_id, v)
+        )
+        form.addRow("H\u00f6he v. Boden:", self.sb_height_from_floor)
+
         self.btn_place = QPushButton("\U0001f4cd Platzieren")
         self.btn_place.clicked.connect(
             lambda: self.place_requested.emit(self.point_id)
@@ -441,6 +471,18 @@ class ElektroPointPanel(QWidget):
     def _update_color_button(self):
         self.btn_color.setStyleSheet(f"background:{self._color.name()}; color:white;")
 
+    def _on_position_changed(self, pos: str):
+        """Handle position dropdown changes - enable custom text field if 'Freitext' is selected."""
+        is_custom = (pos == "Freitext")
+        self.le_position_custom.setEnabled(is_custom)
+        if not is_custom:
+            self.le_position_custom.clear()
+            self.position_changed.emit(self.point_id, pos)
+        else:
+            # When Freitext is selected, emit the custom text if any
+            if self.le_position_custom.text():
+                self.position_changed.emit(self.point_id, self.le_position_custom.text())
+
     def _on_symbol_selected(self, label: str):
         path = BUILTIN_SYMBOLS.get(label, "")
         if path:
@@ -466,6 +508,11 @@ class ElektroPointPanel(QWidget):
             self.icon_changed.emit(self.point_id, path)
 
     def get_parameters(self) -> dict:
+        # Wenn Freitext ausgewählt ist, speichere den benutzerdefinierten Text
+        position = self.cmb_position.currentText()
+        if position == "Freitext":
+            position = self.le_position_custom.text().strip() or "Freitext"
+        
         return {
             "name":      self.le_name.text().strip() or self.point_id,
             "color":     self._color.name(),
@@ -475,6 +522,8 @@ class ElektroPointPanel(QWidget):
             "builtin_symbol": self.cmb_symbol.currentText(),
             "visible":   self.chk_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
+            "position":  position,
+            "height_from_floor": self.sb_height_from_floor.value(),
         }
 
     def to_dict(self) -> dict:
@@ -491,6 +540,20 @@ class ElektroPointPanel(QWidget):
         self.sb_height.setValue(d.get("height", 30.0) / 10)
         self.chk_visible.setChecked(d.get("visible", True))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
+        
+        # Position und Höhe vom Boden
+        position = d.get("position", "Wand")
+        # Prüfe ob Position eine Standardoption ist
+        idx = self.cmb_position.findText(position)
+        if idx >= 0:
+            self.cmb_position.setCurrentIndex(idx)
+        else:
+            # Benutzerdefinierte Position - setze auf "Freitext" und speichere den Text
+            self.cmb_position.setCurrentIndex(self.cmb_position.findText("Freitext"))
+            self.le_position_custom.setText(position)
+        
+        self.sb_height_from_floor.setValue(d.get("height_from_floor", 0.0))
+        
         # Eingebautes Symbol wiederherstellen
         builtin = d.get("builtin_symbol", "")
         if builtin and builtin in BUILTIN_SYMBOLS:
