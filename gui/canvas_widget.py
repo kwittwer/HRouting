@@ -82,6 +82,7 @@ class ToolMode(Enum):
     MOVE_FLOOR_PLAN  = auto()
     ROTATE_FLOOR_PLAN = auto()
     MEASURE          = auto()
+    DRAW_EXPORT_FRAME = auto()
     PLACE_TEXT       = auto()
     MOVE_TEXT        = auto()
 
@@ -228,6 +229,11 @@ class CanvasWidget(QWidget):
         self._measure_p1: Optional[QPointF] = None
         self._measure_p2: Optional[QPointF] = None
         self._measure_lines: List[Tuple[QPointF, QPointF, float]] = []  # persisted lines
+
+        # Export frame (for SVG/PDF crop)
+        self._export_frame: Optional[QRectF] = None
+        self._export_frame_start: Optional[QPointF] = None
+        self._export_frame_current: Optional[QPointF] = None
 
         # Elektro edit state
         self._placing_elec_point_id: Optional[str] = None
@@ -471,6 +477,32 @@ class CanvasWidget(QWidget):
         """Remove all persisted measurement lines."""
         self._measure_lines.clear()
         self.update()
+
+    def start_draw_export_frame(self):
+        """Enter mode to draw an export frame rectangle."""
+        self._mode = ToolMode.DRAW_EXPORT_FRAME
+        self._export_frame_start = None
+        self._export_frame_current = None
+        self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
+        self.update()
+
+    def clear_export_frame(self):
+        """Remove export frame and reset draw state."""
+        self._export_frame = None
+        self._export_frame_start = None
+        self._export_frame_current = None
+        if self._mode == ToolMode.DRAW_EXPORT_FRAME:
+            self._mode = ToolMode.NONE
+            self.setCursor(Qt.ArrowCursor)
+            self.mode_changed.emit()
+        self.update()
+
+    def get_export_frame(self) -> Optional[QRectF]:
+        """Return normalized export frame in canvas coordinates."""
+        if not self._export_frame:
+            return None
+        return QRectF(self._export_frame.normalized())
 
     def start_move_floor_plan(self, fp_id: str):
         """Enter mode to drag-move a floor plan with the mouse."""
@@ -1327,6 +1359,7 @@ class CanvasWidget(QWidget):
             "grid_color": [self._grid_color.red(), self._grid_color.green(),
                            self._grid_color.blue(), self._grid_color.alpha()],
             "snap_angle": self._snap_angle,
+            "export_frame": None,
             "polygons": {
                 cid: [(p.x(), p.y()) for p in pts]
                 for cid, pts in self._polygons.items()
@@ -1398,6 +1431,9 @@ class CanvasWidget(QWidget):
                 for tid, p in self._text_annotations.items()
             },
         }
+        if self._export_frame:
+            r = self._export_frame.normalized()
+            result["export_frame"] = [r.x(), r.y(), r.width(), r.height()]
         if self._ref_p1 and self._ref_p2:
             result["ref_line"] = [
                 (self._ref_p1.x(), self._ref_p1.y()),
@@ -1455,6 +1491,12 @@ class CanvasWidget(QWidget):
             self._grid_color = QColor(gc[0], gc[1], gc[2], gc[3])
         if "snap_angle" in d:
             self._snap_angle = float(d["snap_angle"])
+        ef = d.get("export_frame")
+        if ef and len(ef) == 4:
+            self._export_frame = QRectF(float(ef[0]), float(ef[1]),
+                                        float(ef[2]), float(ef[3])).normalized()
+        else:
+            self._export_frame = None
 
         for cid, pts in d.get("polygons", {}).items():
             self._polygons[cid] = [QPointF(x, y) for x, y in pts]
@@ -2191,6 +2233,16 @@ class CanvasWidget(QWidget):
                     self.update()
             return
 
+        # ── Export-Rahmen zeichnen ──
+        if self._mode == ToolMode.DRAW_EXPORT_FRAME:
+            if event.button() == Qt.LeftButton:
+                self._export_frame_start = QPointF(canvas_pt)
+                self._export_frame_current = QPointF(canvas_pt)
+                self.update()
+            elif event.button() == Qt.RightButton:
+                self.clear_export_frame()
+            return
+
         # ── Grundriss verschieben ──
         if self._mode == ToolMode.MOVE_FLOOR_PLAN:
             if event.button() == Qt.LeftButton and self._active_floor_id:
@@ -2793,6 +2845,12 @@ class CanvasWidget(QWidget):
                     self.update()
             return
 
+        # ── Export-Rahmen zeichnen (Move) ──
+        if self._mode == ToolMode.DRAW_EXPORT_FRAME and self._export_frame_start:
+            self._export_frame_current = QPointF(canvas_pt)
+            self.update()
+            return
+
         if self._mode == ToolMode.MOVE_START and self._dragging_start:
             ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
             base_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
@@ -3130,6 +3188,20 @@ class CanvasWidget(QWidget):
             return
 
         if event.button() == Qt.LeftButton:
+            # ── Export-Rahmen Zeichnen abschliessen ──
+            if self._mode == ToolMode.DRAW_EXPORT_FRAME and self._export_frame_start:
+                end_pt = self._export_frame_current or self._export_frame_start
+                rect = QRectF(self._export_frame_start, end_pt).normalized()
+                if rect.width() > 1.0 and rect.height() > 1.0:
+                    self._export_frame = rect
+                self._export_frame_start = None
+                self._export_frame_current = None
+                self._mode = ToolMode.NONE
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                self.update()
+                return
+
             # ── Grundriss verschieben abschliessen ──
             if self._mode == ToolMode.MOVE_FLOOR_PLAN and self._active_floor_id:
                 layer = self._floor_plans.get(self._active_floor_id)
@@ -3340,6 +3412,8 @@ class CanvasWidget(QWidget):
             # Measurement
             self._measure_p1 = None
             self._measure_p2 = None
+            self._export_frame_start = None
+            self._export_frame_current = None
             self.setCursor(Qt.ArrowCursor)
             self.mode_changed.emit()
             self.update()
@@ -3663,6 +3737,9 @@ class CanvasWidget(QWidget):
         # ── Messlinien ────────────────────────────────────────────
         self._draw_measurements(painter)
 
+        # ── Export-Rahmen ─────────────────────────────────────────
+        self._draw_export_frame(painter)
+
         # ── Maße beim Verschieben anzeigen ────────────────────────
         self._draw_drag_distance_overlay(painter)
 
@@ -3710,6 +3787,28 @@ class CanvasWidget(QWidget):
                 painter.setFont(font)
                 painter.setPen(QPen(color))
                 painter.drawText(mid, f"{mm_len / 1000:.3f} m")
+
+    def _draw_export_frame(self, painter: QPainter):
+        """Draw persisted and in-progress export frame."""
+        frame = self._export_frame
+        if self._mode == ToolMode.DRAW_EXPORT_FRAME and self._export_frame_start:
+            end_pt = self._export_frame_current or self._export_frame_start
+            frame = QRectF(self._export_frame_start, end_pt).normalized()
+
+        if not frame:
+            return
+
+        pen = QPen(QColor("#00e676"), 2.0 / self._scale, Qt.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(frame)
+
+        text = f"Export: {frame.width():.0f} × {frame.height():.0f} px"
+        font = painter.font()
+        font.setPointSizeF(10.0 / self._scale)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor("#00e676")))
+        painter.drawText(QPointF(frame.x(), frame.y() - 6.0 / self._scale), text)
 
     # ── Text Annotations drawing ─────────────────────────────────── #
 

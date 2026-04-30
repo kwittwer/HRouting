@@ -32,9 +32,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QAction, QColor, QFont, QPainter, QPageLayout,
-    QPen, QBrush, QPolygonF, QPainterPath, QKeySequence,
+    QPen, QBrush, QPolygonF, QPainterPath, QKeySequence, QImage,
 )
-from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF, QTimer
+from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF, QTimer, QByteArray, QBuffer, QIODevice
 from PySide6.QtPrintSupport import QPrinter
 
 from gui.canvas_widget import CanvasWidget, COLORS
@@ -183,6 +183,21 @@ class MainWindow(QMainWindow):
         self._clear_measure_btn.setFixedWidth(28)
         self._clear_measure_btn.clicked.connect(self._on_clear_measurements)
         tb.addWidget(self._clear_measure_btn)
+
+        # ── Export frame tool ──
+        tb.addSeparator()
+        self._export_frame_btn = QPushButton("⬚ Export-Rahmen")
+        self._export_frame_btn.setToolTip("Rahmen ziehen für SVG/PDF-Exportausschnitt")
+        self._export_frame_btn.setCheckable(True)
+        self._export_frame_btn.setFixedWidth(120)
+        self._export_frame_btn.clicked.connect(self._on_export_frame_toggled)
+        tb.addWidget(self._export_frame_btn)
+
+        self._clear_export_frame_btn = QPushButton("✕")
+        self._clear_export_frame_btn.setToolTip("Export-Rahmen löschen")
+        self._clear_export_frame_btn.setFixedWidth(28)
+        self._clear_export_frame_btn.clicked.connect(self._on_clear_export_frame)
+        tb.addWidget(self._clear_export_frame_btn)
 
     def _build_menubar(self):
         mb = self.menuBar()
@@ -699,12 +714,37 @@ class MainWindow(QMainWindow):
         self.canvas.clear_measurements()
         self.status.showMessage("Messlinien gelöscht", 2000)
 
+    def _on_export_frame_toggled(self, checked: bool):
+        if checked:
+            self.canvas.start_draw_export_frame()
+            self.status.showMessage(
+                "⬚ Export-Rahmen – Linksklick ziehen, Rechtsklick löschen, ESC abbrechen"
+            )
+        else:
+            from gui.canvas_widget import ToolMode
+            if self.canvas._mode == ToolMode.DRAW_EXPORT_FRAME:
+                self.canvas._mode = ToolMode.NONE
+                self.canvas._export_frame_start = None
+                self.canvas._export_frame_current = None
+                self.canvas.setCursor(Qt.ArrowCursor)
+                self.canvas.mode_changed.emit()
+                self.canvas.update()
+            self.status.clearMessage()
+
+    def _on_clear_export_frame(self):
+        self.canvas.clear_export_frame()
+        self.status.showMessage("Export-Rahmen gelöscht", 2000)
+
     def _on_canvas_mode_changed(self):
         from gui.canvas_widget import ToolMode
         if self.canvas._mode != ToolMode.MEASURE:
             self._measure_btn.blockSignals(True)
             self._measure_btn.setChecked(False)
             self._measure_btn.blockSignals(False)
+        if self.canvas._mode != ToolMode.DRAW_EXPORT_FRAME:
+            self._export_frame_btn.blockSignals(True)
+            self._export_frame_btn.setChecked(False)
+            self._export_frame_btn.blockSignals(False)
 
     def _sync_toolbar_from_canvas(self):
         """Synchronise toolbar widgets with the current canvas state."""
@@ -2272,30 +2312,57 @@ class MainWindow(QMainWindow):
     def _render_plan_to_painter(self, painter: QPainter,
                                 target_rect: QRectF,
                                 layer: str = "all",
-                                floor_plan_id: str | None = None):
+                                floor_plan_id: str | None = None,
+                                source_rect: QRectF | None = None,
+                                rasterize: bool = False):
         """Render the floor plan with overlays directly onto *painter*.
 
         *target_rect* – the rectangle within the painter to draw into.
         *layer* – ``"all"`` | ``"heating"`` | ``"elektro"``
         *floor_plan_id* – if given, render only this floor plan as background.
         """
+        if rasterize:
+            iw = max(1, int(round(target_rect.width())))
+            ih = max(1, int(round(target_rect.height())))
+            iw, ih, _ = self._clamp_raster_size(iw, ih)
+            img = QImage(iw, ih, QImage.Format_ARGB32_Premultiplied)
+            img.fill(Qt.transparent)
+            ip = QPainter(img)
+            ip.setRenderHint(QPainter.Antialiasing)
+            self._render_plan_to_painter(
+                ip,
+                QRectF(0, 0, iw, ih),
+                layer=layer,
+                floor_plan_id=floor_plan_id,
+                source_rect=source_rect,
+                rasterize=False,
+            )
+            ip.end()
+            painter.drawImage(target_rect, img)
+            return
+
         svg_w, svg_h = self.canvas._svg_size
-        if svg_w <= 0 or svg_h <= 0:
+        if source_rect:
+            src = QRectF(source_rect.normalized())
+        else:
+            src = QRectF(0.0, 0.0, svg_w, svg_h)
+        if src.width() <= 0 or src.height() <= 0:
             return
 
         # Scale SVG to fill the target rect as much as possible while
         # preserving aspect ratio (fit to best dimension).
-        sx = target_rect.width() / svg_w
-        sy = target_rect.height() / svg_h
+        sx = target_rect.width() / src.width()
+        sy = target_rect.height() / src.height()
         scale = min(sx, sy)
-        scaled_w = svg_w * scale
-        scaled_h = svg_h * scale
+        scaled_w = src.width() * scale
+        scaled_h = src.height() * scale
         ox = target_rect.x() + (target_rect.width() - scaled_w) / 2
         oy = target_rect.y() + (target_rect.height() - scaled_h) / 2
 
         painter.save()
         painter.translate(ox, oy)
         painter.scale(scale, scale)
+        painter.translate(-src.x(), -src.y())
 
         # Helper: create a font that looks correct in the scaled SVG
         # coordinate system.  We use setPixelSize so the size is in SVG
@@ -2680,32 +2747,82 @@ class MainWindow(QMainWindow):
 
         return lines
 
-    def _write_plan_svg(self, path: str):
-        """Write the complete plan (background + circuits + elektro) as SVG."""
+    def _get_export_source_rect(self) -> QRectF:
+        """Return export source rect in canvas coordinates.
+
+        If a custom export frame exists, use it; otherwise use the full
+        legacy SVG/background extent.
+        """
+        frame = self.canvas.get_export_frame()
+        if frame and frame.width() > 1.0 and frame.height() > 1.0:
+            return frame
         w, h = self.canvas._svg_size
+        return QRectF(0.0, 0.0, float(w), float(h))
+
+    @staticmethod
+    def _clamp_raster_size(width_px: int,
+                           height_px: int,
+                           max_dim: int = 6000,
+                           max_pixels: int = 20_000_000) -> tuple[int, int, bool]:
+        """Clamp raster size to safe limits and return (w, h, was_clamped)."""
+        w = max(1, int(width_px))
+        h = max(1, int(height_px))
+
+        s_dim = min(1.0, max_dim / max(w, h))
+        s_pix = min(1.0, math.sqrt(max_pixels / max(1.0, float(w * h))))
+        s = min(s_dim, s_pix)
+
+        if s >= 0.9999:
+            return w, h, False
+
+        cw = max(1, int(round(w * s)))
+        ch = max(1, int(round(h * s)))
+        return cw, ch, True
+
+    def _render_plan_to_image(self,
+                              width_px: int,
+                              height_px: int,
+                              layer: str = "all") -> QImage:
+        """Rasterize current plan/crop to an in-memory image."""
+        rw, rh, _ = self._clamp_raster_size(width_px, height_px)
+        img = QImage(max(1, rw), max(1, rh),
+                     QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        self._render_plan_to_painter(
+            p,
+            QRectF(0, 0, img.width(), img.height()),
+            layer=layer,
+            source_rect=self._get_export_source_rect(),
+        )
+        p.end()
+        return img
+
+    def _write_plan_svg(self, path: str):
+        """Write the complete plan as SVG image using current export frame crop."""
+        import base64
+
+        src = self._get_export_source_rect()
+        w = max(1, int(round(src.width())))
+        h = max(1, int(round(src.height())))
+        w, h, _ = self._clamp_raster_size(w, h)
+
+        img = self._render_plan_to_image(w, h, layer="all")
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.WriteOnly)
+        img.save(buf, "PNG")
+        png_b64 = base64.b64encode(bytes(ba)).decode("ascii")
+
         lines = [
             '<?xml version="1.0" encoding="utf-8"?>',
             f'<svg xmlns="http://www.w3.org/2000/svg" '
             f'xmlns:xlink="http://www.w3.org/1999/xlink" '
             f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
+            f'  <image href="data:image/png;base64,{png_b64}" '
+            f'x="0" y="0" width="{w}" height="{h}"/>',
         ]
-        if self._svg_path:
-            ext = Path(self._svg_path).suffix.lower()
-            if ext == ".svg":
-                href = Path(self._svg_path).as_uri()
-            else:
-                import base64
-                mime = {"png": "image/png", "jpg": "image/jpeg",
-                        "jpeg": "image/jpeg", "bmp": "image/bmp"}
-                mt = mime.get(ext.lstrip("."), "image/png")
-                raw = Path(self._svg_path).read_bytes()
-                b64 = base64.b64encode(raw).decode("ascii")
-                href = f"data:{mt};base64,{b64}"
-            lines.append(
-                f'  <image href="{href}" '
-                f'x="0" y="0" width="{w}" height="{h}"/>'
-            )
-        lines.extend(self._generate_plan_svg_elements())
         lines.append("</svg>")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
@@ -3488,8 +3605,14 @@ class MainWindow(QMainWindow):
             page.height() - title_h - ctx.mm(6),
         )
 
-        self._render_plan_to_painter(ctx.painter, draw_rect, layer=layer,
-                                     floor_plan_id=floor_plan_id)
+        self._render_plan_to_painter(
+            ctx.painter,
+            draw_rect,
+            layer=layer,
+            floor_plan_id=floor_plan_id,
+            source_rect=self._get_export_source_rect(),
+            rasterize=True,
+        )
 
     # ── Seite: Rohrlängen ──
 
@@ -3611,7 +3734,13 @@ class MainWindow(QMainWindow):
         plan_top = page.y() + title_h + ctx.mm(2)
         plan_h = page.height() * 0.48
         plan_rect = QRectF(page.x(), plan_top, page.width(), plan_h)
-        self._render_plan_to_painter(ctx.painter, plan_rect, layer="elektro")
+        self._render_plan_to_painter(
+            ctx.painter,
+            plan_rect,
+            layer="elektro",
+            source_rect=self._get_export_source_rect(),
+            rasterize=True,
+        )
 
         # Lower half: table
         table_y = plan_top + plan_h + ctx.mm(4)
