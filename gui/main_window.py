@@ -178,6 +178,13 @@ class MainWindow(QMainWindow):
         self._measure_btn.clicked.connect(self._on_measure_toggled)
         tb.addWidget(self._measure_btn)
 
+        self._measure_color_btn = QPushButton()
+        self._measure_color_btn.setToolTip("Messlinien-Farbe")
+        self._measure_color_btn.setFixedWidth(28)
+        self._measure_color_btn.setStyleSheet("background:#00e5ff;")
+        self._measure_color_btn.clicked.connect(self._on_measure_color_pick)
+        tb.addWidget(self._measure_color_btn)
+
         self._clear_measure_btn = QPushButton("✕")
         self._clear_measure_btn.setToolTip("Alle Messlinien löschen")
         self._clear_measure_btn.setFixedWidth(28)
@@ -591,6 +598,8 @@ class MainWindow(QMainWindow):
         self.canvas.hkv_placed.connect(self._on_hkv_placed)
         self.canvas.hkv_line_changed.connect(self._on_hkv_line_changed)
         self.canvas.text_placed.connect(self._on_text_placed)
+        self.canvas.object_clicked.connect(self._on_object_clicked)
+        self.canvas.object_switched_from_edit.connect(self._on_object_switched_from_edit)
         self.canvas.object_double_clicked.connect(self._on_object_double_clicked)
         self.canvas.floor_plan_transform_updated.connect(
             self._on_floor_plan_transform_from_canvas)
@@ -604,6 +613,10 @@ class MainWindow(QMainWindow):
         self.param_panel.floorplan_polygon_color_changed.connect(
             self._on_floorplan_polygon_color_changed)
         self.param_panel.floorplan_ref_line.connect(self._on_floorplan_ref_line)
+        self.param_panel.floorplan_ref_line_color_changed.connect(
+            self._on_floorplan_ref_line_color_changed)
+        self.param_panel.floorplan_ref_line_visibility_changed.connect(
+            self._on_floorplan_ref_line_visibility_changed)
         self.param_panel.floorplan_ref_confirmed.connect(self._on_floorplan_ref_confirmed)
         self.param_panel.floorplan_transform_changed.connect(self._on_floorplan_transform)
         self.param_panel.floorplan_opacity_changed.connect(self._on_floorplan_opacity)
@@ -714,6 +727,18 @@ class MainWindow(QMainWindow):
         self.canvas.clear_measurements()
         self.status.showMessage("Messlinien gelöscht", 2000)
 
+    def _on_measure_color_pick(self):
+        """Open colour picker for measurement lines."""
+        color = QColorDialog.getColor(
+            QColor(self.canvas.get_measure_color()),
+            self, "Messlinie-Farbe wählen"
+        )
+        if color.isValid():
+            hex_color = color.name()
+            self.canvas.set_measure_color(hex_color)
+            self._measure_color_btn.setStyleSheet(f"background:{hex_color};")
+            self._mark_dirty()
+
     def _on_export_frame_toggled(self, checked: bool):
         if checked:
             self.canvas.start_draw_export_frame()
@@ -760,6 +785,10 @@ class MainWindow(QMainWindow):
 
         self._update_grid_color_btn(c._grid_color)
         self._update_bg_color_btn(c._bg_color)
+
+        # Measure color
+        measure_color = QColor(c.get_measure_color())
+        self._measure_color_btn.setStyleSheet(f"background:{measure_color.name()};")
 
         # Snap angle
         angle = c._snap_angle
@@ -973,6 +1002,16 @@ class MainWindow(QMainWindow):
 
     def _on_floorplan_ref_line(self, fp_id: str):
         self.canvas.start_ref_line_for_floor(fp_id)
+
+    def _on_floorplan_ref_line_color_changed(self, fp_id: str, color: str):
+        """Update reference line color in canvas."""
+        self.canvas.set_ref_line_color(fp_id, color)
+        self._mark_dirty()
+
+    def _on_floorplan_ref_line_visibility_changed(self, fp_id: str, visible: bool):
+        """Update reference line visibility in canvas."""
+        self.canvas.set_ref_line_visible(fp_id, visible)
+        self._mark_dirty()
 
     def _on_floorplan_ref_confirmed(self, fp_id: str, length_mm: float):
         layer = self.canvas._floor_plans.get(fp_id)
@@ -1234,6 +1273,28 @@ class MainWindow(QMainWindow):
             self._on_edit_floor_polygon_requested(obj_id)
         elif obj_type == "polygon":
             self._on_edit_polygon_requested(obj_id)
+
+    def _on_object_clicked(self, obj_type: str, obj_id: str):
+        """Handle single-click on canvas object – select in sidebar."""
+        self.param_panel.select_item(obj_id)
+
+    def _on_object_switched_from_edit(self, obj_type: str, obj_id: str):
+        """Show feedback when edit mode is exited by clicking another object."""
+        labels = {
+            "elec_point": "Anschlusspunkt",
+            "hkv": "HKV",
+            "elec_cable": "Kabel",
+            "hkv_line": "HKV-Leitung",
+            "supply_line": "Zuleitung",
+            "route": "Rohrverlauf",
+            "floor_polygon": "Einrichtung",
+            "polygon": "Polygon",
+        }
+        label = labels.get(obj_type, "Objekt")
+        self.status.showMessage(
+            f"Bearbeitungsmodus beendet — {label} '{obj_id}' ausgewählt.",
+            3000,
+        )
 
     def _on_edit_floor_polygon_requested(self, fp_id: str):
         self.canvas.start_edit_floor_plan_polygon(fp_id)

@@ -1138,6 +1138,8 @@ class FloorPlanPanel(QWidget):
     polygon_draw_requested = Signal(str)           # fp_id
     polygon_color_changed  = Signal(str, str)      # (fp_id, color)
     ref_line_requested     = Signal(str)            # fp_id
+    ref_line_color_changed = Signal(str, str)       # (fp_id, color hex)
+    ref_line_visibility_changed = Signal(str, bool) # (fp_id, visible)
     size_changed           = Signal(str)            # fp_id  (fixed_width/height)
     ref_length_confirmed   = Signal(str, float)     # (fp_id, length_mm)
     transform_changed      = Signal(str)            # fp_id  (offset / rotation)
@@ -1309,6 +1311,36 @@ class FloorPlanPanel(QWidget):
         )
         layout.addWidget(self.lbl_scale)
 
+        # ── Referenzlinien-Optionen ────────────────────────────────
+        sep_ref_options = QFrame()
+        sep_ref_options.setFrameShape(QFrame.HLine)
+        sep_ref_options.setStyleSheet("color:#555;")
+        layout.addWidget(sep_ref_options)
+
+        ref_options_title = QLabel("\U0001f4d1 Referenzlinie")
+        ref_options_title.setStyleSheet("font-weight:bold; padding:4px 0;")
+        layout.addWidget(ref_options_title)
+
+        # Reference line visibility toggle
+        self.chk_ref_visible = QCheckBox("Referenzlinie sichtbar")
+        self.chk_ref_visible.setChecked(True)
+        self.chk_ref_visible.toggled.connect(
+            lambda c: self.ref_line_visibility_changed.emit(self.fp_id, c)
+        )
+        layout.addWidget(self.chk_ref_visible)
+
+        # Reference line color
+        ref_color_row = QHBoxLayout()
+        ref_color_label = QLabel("Farbe:")
+        self.btn_ref_color = QPushButton()
+        self.btn_ref_color.setFixedHeight(32)
+        self.btn_ref_color.setStyleSheet("background:#ffdd00;")
+        self.btn_ref_color.clicked.connect(self._choose_ref_line_color)
+        self._ref_line_color = "#ffdd00"
+        ref_color_row.addWidget(ref_color_label)
+        ref_color_row.addWidget(self.btn_ref_color, stretch=1)
+        layout.addLayout(ref_color_row)
+
         # Reihenfolge (up/down) + Delete
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.HLine)
@@ -1473,6 +1505,15 @@ class FloorPlanPanel(QWidget):
             f"background:{self._polygon_color.name()}; color:white;"
         )
 
+    def _choose_ref_line_color(self):
+        color = QColorDialog.getColor(
+            QColor(self._ref_line_color), self, "Referenzlinien-Farbe wählen"
+        )
+        if color.isValid():
+            self._ref_line_color = color.name()
+            self.btn_ref_color.setStyleSheet(f"background:{self._ref_line_color};")
+            self.ref_line_color_changed.emit(self.fp_id, self._ref_line_color)
+
     def update_scale_label(self, mm_per_px: float):
         self.lbl_scale.setText(f"Ma\u00dfstab: {mm_per_px / 1000:.6f} m/px")
         self.btn_apply.setStyleSheet(
@@ -1485,6 +1526,8 @@ class FloorPlanPanel(QWidget):
             "visible": self.chk_visible.isChecked(),
             "file_path": self._file_path,
             "polygon_color": self._polygon_color.name(),
+            "ref_line_visible": self.chk_ref_visible.isChecked(),
+            "ref_line_color": self._ref_line_color,
             "opacity": self.sb_opacity.value(),
             "offset_x": self.sb_offset_x.value(),
             "offset_y": self.sb_offset_y.value(),
@@ -1503,6 +1546,9 @@ class FloorPlanPanel(QWidget):
         poly_col = d.get("polygon_color", "#8d99ae")
         self._polygon_color = QColor(poly_col)
         self._update_polygon_color_button()
+        self._ref_line_color = d.get("ref_line_color", "#ffdd00")
+        self.btn_ref_color.setStyleSheet(f"background:{self._ref_line_color};")
+        self.chk_ref_visible.setChecked(d.get("ref_line_visible", True))
         self.sb_opacity.setValue(d.get("opacity", 1.0))
         self.sb_offset_x.setValue(d.get("offset_x", 0.0))
         self.sb_offset_y.setValue(d.get("offset_y", 0.0))
@@ -1548,6 +1594,8 @@ class ParameterPanel(QWidget):
     floorplan_polygon_draw      = Signal(str)
     floorplan_polygon_color_changed = Signal(str, str)
     floorplan_ref_line          = Signal(str)
+    floorplan_ref_line_color_changed = Signal(str, str)  # (fp_id, color hex)
+    floorplan_ref_line_visibility_changed = Signal(str, bool)  # (fp_id, visible)
     floorplan_ref_confirmed     = Signal(str, float)
     floorplan_transform_changed = Signal(str)
     floorplan_opacity_changed   = Signal(str, float)
@@ -1960,6 +2008,8 @@ class ParameterPanel(QWidget):
         panel.polygon_draw_requested.connect(self.floorplan_polygon_draw)
         panel.polygon_color_changed.connect(self.floorplan_polygon_color_changed)
         panel.ref_line_requested.connect(self.floorplan_ref_line)
+        panel.ref_line_color_changed.connect(self.floorplan_ref_line_color_changed)
+        panel.ref_line_visibility_changed.connect(self.floorplan_ref_line_visibility_changed)
         panel.ref_length_confirmed.connect(self.floorplan_ref_confirmed)
         panel.transform_changed.connect(self.floorplan_transform_changed)
         panel.opacity_changed.connect(self.floorplan_opacity_changed)
@@ -2026,6 +2076,8 @@ class ParameterPanel(QWidget):
         panel.polygon_draw_requested.connect(self.floorplan_polygon_draw)
         panel.polygon_color_changed.connect(self.floorplan_polygon_color_changed)
         panel.ref_line_requested.connect(self.floorplan_ref_line)
+        panel.ref_line_color_changed.connect(self.floorplan_ref_line_color_changed)
+        panel.ref_line_visibility_changed.connect(self.floorplan_ref_line_visibility_changed)
         panel.ref_length_confirmed.connect(self.floorplan_ref_confirmed)
         panel.transform_changed.connect(self.floorplan_transform_changed)
         panel.opacity_changed.connect(self.floorplan_opacity_changed)

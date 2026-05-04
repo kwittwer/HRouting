@@ -97,6 +97,8 @@ class CanvasWidget(QWidget):
     hkv_placed         = Signal(str)
     hkv_line_changed   = Signal(str)
     text_placed        = Signal(str)
+    object_clicked     = Signal(str, str)  # (object_type, object_id) – single click selection
+    object_switched_from_edit = Signal(str, str)  # (object_type, object_id)
     object_double_clicked = Signal(str, str)  # (object_type, object_id)
     floor_plan_transform_updated = Signal(str, float, float, float)  # (fp_id, ox, oy, rot)
     floor_plan_polygon_finished = Signal(str, list)
@@ -214,6 +216,7 @@ class CanvasWidget(QWidget):
         self._color_index   = 0
         self._dragging_start: Optional[str] = None
         self._dragging_route_point: Optional[Tuple[str, int]] = None
+        self._last_clicked_object: Optional[Tuple[str, str]] = None  # (obj_type, obj_id)
         self._mode          = ToolMode.NONE
         self._mouse_pos:    Optional[QPointF] = None
         self._show_ref_line = True
@@ -229,6 +232,11 @@ class CanvasWidget(QWidget):
         self._measure_p1: Optional[QPointF] = None
         self._measure_p2: Optional[QPointF] = None
         self._measure_lines: List[Tuple[QPointF, QPointF, float]] = []  # persisted lines
+        self._measure_color: str = "#00e5ff"  # Color for measurement tool
+
+        # Reference line configuration per floor plan
+        self._ref_line_colors: Dict[str, str] = {}  # fp_id -> hex color
+        self._ref_line_visible: Dict[str, bool] = {}  # fp_id -> visible
 
         # Export frame (for SVG/PDF crop)
         self._export_frame: Optional[QRectF] = None
@@ -477,6 +485,33 @@ class CanvasWidget(QWidget):
         """Remove all persisted measurement lines."""
         self._measure_lines.clear()
         self.update()
+
+    def set_measure_color(self, color: str):
+        """Set color for measurement tool (hex string, e.g. '#00ff00')."""
+        self._measure_color = color
+        self.update()
+
+    def get_measure_color(self) -> str:
+        """Get current measurement tool color."""
+        return self._measure_color
+
+    def set_ref_line_color(self, fp_id: str, color: str):
+        """Set reference line color for a specific floor plan."""
+        self._ref_line_colors[fp_id] = color
+        self.update()
+
+    def get_ref_line_color(self, fp_id: str) -> str:
+        """Get reference line color for a floor plan (defaults to #ffdd00)."""
+        return self._ref_line_colors.get(fp_id, "#ffdd00")
+
+    def set_ref_line_visible(self, fp_id: str, visible: bool):
+        """Set reference line visibility for a specific floor plan."""
+        self._ref_line_visible[fp_id] = visible
+        self.update()
+
+    def get_ref_line_visible(self, fp_id: str) -> bool:
+        """Get reference line visibility for a floor plan (defaults to True)."""
+        return self._ref_line_visible.get(fp_id, True)
 
     def start_draw_export_frame(self):
         """Enter mode to draw an export frame rectangle."""
@@ -1045,6 +1080,131 @@ class CanvasWidget(QWidget):
         return QPointF(anchor.x() + math.cos(rad) * dist,
                        anchor.y() + math.sin(rad) * dist)
 
+    def _hit_any_object(self, canvas_pt: QPointF) -> Optional[Tuple[str, str]]:
+        """Try to hit any clickable object. Returns (object_type, object_id) or None.
+        Checks in this order: floor plans, polygons, elec points, hkv, etc."""
+        threshold = 10.0 / self._scale
+
+        # 1. Floor plan layers (check in reverse render order, front-to-back)
+        for fid in reversed(self._floor_plan_order):
+            layer = self._floor_plans.get(fid)
+            if not layer or not layer.visible:
+                continue
+            # Check if point is inside floor polygon
+            if layer.polygon:
+                poly = QPolygonF(self._floor_polygon_points_world(fid))
+                if poly.containsPoint(canvas_pt, Qt.OddEvenFill):
+                    return ("floor_polygon", fid)
+            # For other floor plan types, check bounds (simplified)
+            if layer.renderer or layer.pixmap or layer.polygon:
+                if layer.polygon:
+                    sw, sh = self._floor_polygon_render_size(layer)
+                else:
+                    sw, sh = self._layer_render_size(layer)
+                cx = sw / 2 + layer.offset_x
+                cy = sh / 2 + layer.offset_y
+                rect = QRectF(cx - sw / 2, cy - sh / 2, sw, sh)
+                if rect.contains(canvas_pt):
+                    return ("floor_polygon", fid)
+
+        # 2. Heating circuits polygons
+        for cid, poly in self._polygons.items():
+            if not self._circuit_visible.get(cid, True):
+                continue
+            if self._point_in_polygon(canvas_pt, poly):
+                return ("polygon", cid)
+
+        # 3. Electrical points
+        ap = self._hit_elec_point(canvas_pt)
+        if ap:
+            return ("elec_point", ap)
+
+        # 4. HKV points
+        hkv = self._hit_hkv(canvas_pt)
+        if hkv:
+            return ("hkv", hkv)
+
+        # 5. Electrical cables
+        for kid, pts in self._elec_cables.items():
+            if not self._elec_visible.get(kid, True):
+                continue
+            if len(pts) >= 2:
+                for i in range(len(pts) - 1):
+                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
+                    if _qdist(canvas_pt, proj) < threshold:
+                        return ("elec_cable", kid)
+
+        # 6. HKV lines
+        for lid, pts in self._hkv_lines.items():
+            if not self._hkv_line_visible.get(lid, True):
+                continue
+            if len(pts) >= 2:
+                for i in range(len(pts) - 1):
+                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
+                    if _qdist(canvas_pt, proj) < threshold:
+                        return ("hkv_line", lid)
+
+        # 7. Supply lines
+        for cid, pts in self._supply_lines.items():
+            if not self._circuit_visible.get(cid, True):
+                continue
+            if len(pts) >= 2:
+                for i in range(len(pts) - 1):
+                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
+                    if _qdist(canvas_pt, proj) < threshold:
+                        return ("supply_line", cid)
+
+        # 8. Routes (manual)
+        for cid, pts in self._manual_routes.items():
+            if not self._circuit_visible.get(cid, True):
+                continue
+            if len(pts) >= 2:
+                for i in range(len(pts) - 1):
+                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
+                    if _qdist(canvas_pt, proj) < threshold:
+                        return ("route", cid)
+
+        return None
+
+    def _current_edit_target(self) -> Optional[Tuple[str, str]]:
+        """Return the currently edited object as (type, id), if any."""
+        if self._mode == ToolMode.EDIT_ELEC_CABLE and self._edit_elec_cable_id:
+            return ("elec_cable", self._edit_elec_cable_id)
+        if self._mode == ToolMode.EDIT_SUPPLY_LINE and self._edit_supply_cid:
+            return ("supply_line", self._edit_supply_cid)
+        if self._mode == ToolMode.EDIT_HKV_LINE and self._edit_hkv_line_id:
+            return ("hkv_line", self._edit_hkv_line_id)
+        if self._mode == ToolMode.EDIT_ROUTE and self._edit_route_cid:
+            return ("route", self._edit_route_cid)
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
+            return ("polygon", self._edit_polygon_cid)
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
+            return ("floor_polygon", self._edit_floor_polygon_id)
+        return None
+
+    def _is_edit_mode_active(self) -> bool:
+        return self._current_edit_target() is not None
+
+    def _exit_edit_mode(self):
+        """Leave any active edit mode and reset edit-related state."""
+        self._edit_elec_cable_id = None
+        self._edit_supply_cid = None
+        self._edit_hkv_line_id = None
+        self._edit_route_cid = None
+        self._edit_polygon_cid = None
+        self._edit_floor_polygon_id = None
+        self._dragging_route_point = None
+        if self._mode in (
+            ToolMode.EDIT_ELEC_CABLE,
+            ToolMode.EDIT_SUPPLY_LINE,
+            ToolMode.EDIT_HKV_LINE,
+            ToolMode.EDIT_ROUTE,
+            ToolMode.EDIT_POLYGON,
+        ):
+            self._mode = ToolMode.NONE
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+
     # ── HKV (Heizkreisverteiler) API ────────────────────────────────── #
 
     def start_place_hkv(self, hkv_id: str,
@@ -1360,6 +1520,9 @@ class CanvasWidget(QWidget):
                            self._grid_color.blue(), self._grid_color.alpha()],
             "snap_angle": self._snap_angle,
             "export_frame": None,
+            "measure_color": self._measure_color,
+            "ref_line_colors": dict(self._ref_line_colors),
+            "ref_line_visible": dict(self._ref_line_visible),
             "polygons": {
                 cid: [(p.x(), p.y()) for p in pts]
                 for cid, pts in self._polygons.items()
@@ -1491,6 +1654,17 @@ class CanvasWidget(QWidget):
             self._grid_color = QColor(gc[0], gc[1], gc[2], gc[3])
         if "snap_angle" in d:
             self._snap_angle = float(d["snap_angle"])
+        
+        # Restore color settings
+        if "measure_color" in d:
+            self._measure_color = d["measure_color"]
+        if "ref_line_colors" in d:
+            self._ref_line_colors = dict(d["ref_line_colors"])
+        if "ref_line_visible" in d:
+            self._ref_line_visible = {
+                k: bool(v) for k, v in d["ref_line_visible"].items()
+            }
+        
         ef = d.get("export_frame")
         if ef and len(ef) == 4:
             self._export_frame = QRectF(float(ef[0]), float(ef[1]),
@@ -2425,6 +2599,15 @@ class CanvasWidget(QWidget):
             return
 
         # ── Kabel bearbeiten ──
+        if event.button() == Qt.LeftButton and self._is_edit_mode_active():
+            clicked_obj = self._hit_any_object(canvas_pt)
+            current_target = self._current_edit_target()
+            if clicked_obj and clicked_obj != current_target:
+                self._exit_edit_mode()
+                self.object_clicked.emit(clicked_obj[0], clicked_obj[1])
+                self.object_switched_from_edit.emit(clicked_obj[0], clicked_obj[1])
+                return
+
         if self._mode == ToolMode.EDIT_ELEC_CABLE and self._edit_elec_cable_id:
             cid = self._edit_elec_cable_id
             if event.button() == Qt.LeftButton:
@@ -2767,6 +2950,16 @@ class CanvasWidget(QWidget):
                 self._mode = ToolMode.MOVE_HKV
                 self.setCursor(Qt.ClosedHandCursor)
                 return
+
+            # ── Unified object selection: try to hit any other object ──
+            obj = self._hit_any_object(canvas_pt)
+            if obj:
+                obj_type, obj_id = obj
+                self.object_clicked.emit(obj_type, obj_id)
+                # Store for potential drag-to-move
+                self._last_clicked_object = obj
+                return
+
             self._pan_start = pos
             self._panning   = True
 
@@ -3748,7 +3941,7 @@ class CanvasWidget(QWidget):
     # ── Measurement drawing ───────────────────────────────────────── #
 
     def _draw_measurements(self, painter: QPainter):
-        color = QColor("#00e5ff")
+        color = QColor(self._measure_color)
         r = 4.0 / self._scale
         pen = QPen(color, 2.0 / self._scale, Qt.DashDotLine)
         font = painter.font()
@@ -4134,9 +4327,8 @@ class CanvasWidget(QWidget):
     def _draw_ref_line(self, painter):
         if not self._show_ref_line:
             return
-        color = QColor("#ffdd00")
         r = 4.0 / self._scale
-        pen = QPen(color, 2.0 / self._scale, Qt.DashLine)
+        pen_style = Qt.DashLine
 
         # Draw per-floor-plan ref lines (completed calibrations)
         drawn_floor_ids = set()
@@ -4144,11 +4336,16 @@ class CanvasWidget(QWidget):
             layer = self._floor_plans.get(fid)
             if not layer or not layer.visible:
                 continue
+            # Check if ref line is visible for this floor plan
+            if not self.get_ref_line_visible(fid):
+                continue
             if layer.ref_p1 and layer.ref_p2:
                 # Skip the currently-being-drawn ref (shown via _ref_p1/_ref_p2)
                 if self._ref_floor_id == fid and self._mode == ToolMode.DRAW_REF:
                     continue
                 drawn_floor_ids.add(fid)
+                color = QColor(self.get_ref_line_color(fid))
+                pen = QPen(color, 2.0 / self._scale, pen_style)
                 painter.setPen(pen)
                 painter.drawLine(layer.ref_p1, layer.ref_p2)
                 painter.setBrush(QBrush(color))
@@ -4173,15 +4370,23 @@ class CanvasWidget(QWidget):
             fl = self._floor_plans.get(self._ref_floor_id)
             if fl and not fl.visible:
                 return
+            if self._mode != ToolMode.DRAW_REF and not self.get_ref_line_visible(self._ref_floor_id):
+                return
         # If floor plans exist but no _ref_floor_id is set, the global
         # ref line is an orphan — don't draw it (each floor plan has its own).
         if self._floor_plans and not self._ref_floor_id and self._mode != ToolMode.DRAW_REF:
+            return
+        # Outside of draw mode, completed per-floor lines are already rendered above.
+        # Do not draw the global fallback line, as it can override per-floor color/visibility.
+        if self._mode != ToolMode.DRAW_REF:
             return
         if self._ref_p1 is None:
             return
         p2 = self._ref_p2 if self._ref_p2 else self._mouse_pos
         if p2 is None:
             return
+        color = QColor(self.get_ref_line_color(self._ref_floor_id or ""))
+        pen = QPen(color, 2.0 / self._scale, pen_style)
         painter.setPen(pen)
         painter.drawLine(self._ref_p1, p2)
         painter.setBrush(QBrush(color))
