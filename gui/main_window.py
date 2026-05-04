@@ -75,6 +75,11 @@ class MainWindow(QMainWindow):
         self._undo_blocked = False
         self._last_snapshot: dict | None = None
 
+        self._dirty_debounce_timer = QTimer(self)
+        self._dirty_debounce_timer.setSingleShot(True)
+        self._dirty_debounce_timer.setInterval(300)
+        self._dirty_debounce_timer.timeout.connect(self._apply_debounced_dirty)
+
         self._build_ui()
         self._build_toolbar()
         self._build_menubar()
@@ -311,6 +316,19 @@ class MainWindow(QMainWindow):
         self._push_undo()
         self._update_title()
 
+    def _mark_dirty_debounced(self, *_args):
+        self._dirty = True
+        self._update_title()
+        self._dirty_debounce_timer.start()
+
+    def _apply_debounced_dirty(self):
+        self._push_undo()
+
+    def _flush_pending_dirty(self):
+        if self._dirty_debounce_timer.isActive():
+            self._dirty_debounce_timer.stop()
+            self._apply_debounced_dirty()
+
     def _maybe_save(self) -> bool:
         """Ask the user to save if there are unsaved changes.
         Returns True if the caller may proceed, False to cancel."""
@@ -378,6 +396,7 @@ class MainWindow(QMainWindow):
     def _undo(self):
         if not self._undo_stack:
             return
+        self._flush_pending_dirty()
         # Block undo pushes during and briefly after restore
         self._undo_blocked = True
         # Save current state to redo before restoring
@@ -393,6 +412,7 @@ class MainWindow(QMainWindow):
     def _redo(self):
         if not self._redo_stack:
             return
+        self._flush_pending_dirty()
         # Block undo pushes during and briefly after restore
         self._undo_blocked = True
         # Save current state to undo before restoring
@@ -418,6 +438,9 @@ class MainWindow(QMainWindow):
     def _restore_snapshot(self, snap: dict):
         """Restore canvas + param panel from a snapshot dict."""
         self._undo_blocked = True
+        # Keep current viewport during undo/redo (no jump in zoom/pan position)
+        current_view_scale = self.canvas._scale
+        current_view_offset = QPointF(self.canvas._offset)
         try:
             # Clear existing data
             self.canvas.clear_data()
@@ -442,6 +465,11 @@ class MainWindow(QMainWindow):
 
             # Reconnect panel signals + sync visual state
             self._reconnect_panels_after_restore()
+
+            # Restore previous viewport after geometry/panel restore finished
+            self.canvas._scale = current_view_scale
+            self.canvas._offset = QPointF(current_view_offset)
+
             self._sync_toolbar_from_canvas()
 
             self._dirty = True
@@ -2044,11 +2072,11 @@ class MainWindow(QMainWindow):
 
     def _on_text_content_changed(self, text_id: str, content: str):
         self.canvas.update_text_content(text_id, content)
-        self._mark_dirty()
+        self._mark_dirty_debounced()
 
     def _on_text_comment_changed(self, text_id: str, comment: str):
         self.canvas.update_text_comment(text_id, comment)
-        self._mark_dirty()
+        self._mark_dirty_debounced()
 
     def _on_text_font_size_changed(self, text_id: str, size: float):
         self.canvas.update_text_font_size(text_id, size)
@@ -2063,7 +2091,7 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
 
     def _on_text_name_changed(self, text_id: str, name: str):
-        self._mark_dirty()
+        self._mark_dirty_debounced()
 
     def _delete_text(self, text_id: str):
         self.canvas.delete_text_annotation(text_id)
@@ -2141,6 +2169,7 @@ class MainWindow(QMainWindow):
 
     def _new_project(self):
         """Reset everything to a blank state."""
+        self._flush_pending_dirty()
         if not self._maybe_save():
             return
 
@@ -2181,12 +2210,14 @@ class MainWindow(QMainWindow):
 
     def _save_project(self):
         """Save to the current project path, or prompt if none set."""
+        self._flush_pending_dirty()
         if not self._project_path:
             self._save_project_as()
             return
         self._write_project(self._project_path)
 
     def _save_project_as(self):
+        self._flush_pending_dirty()
         path, _ = QFileDialog.getSaveFileName(
             self, "Projekt speichern unter…", "",
             "HRouting Projekt (*.hrp);;JSON (*.json)"

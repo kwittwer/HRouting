@@ -1648,6 +1648,8 @@ class ParameterPanel(QWidget):
         self._fp_sub_items: dict[str, dict] = {}      # fp_id -> {hk, hkv, hkv_line, ap, kv}
         self._element_floorplan: dict[str, str] = {}  # element_id -> fp_id
         self._loading = False
+        self._active_panel: QWidget | None = None
+        self._active_special: str | None = "empty"  # "empty", "heat", or None
         self._build_ui()
 
     # ──────────────────────────────────────────────────────────────── #
@@ -1866,28 +1868,8 @@ class ParameterPanel(QWidget):
         if self._loading:
             return
 
-        # Hide everything first
-        self._empty_label.hide()
-        self._heat_global_panel.hide()
-        for p in self.floorplan_panels.values():
-            p.hide()
-        for p in self.furniture_panels.values():
-            p.hide()
-        for p in self.circuit_panels.values():
-            p.hide()
-        for p in self.elec_point_panels.values():
-            p.hide()
-        for p in self.elec_cable_panels.values():
-            p.hide()
-        for p in self.hkv_panels.values():
-            p.hide()
-        for p in self.hkv_line_panels.values():
-            p.hide()
-        for p in self.text_panels.values():
-            p.hide()
-
         if not current:
-            self._empty_label.show()
+            self._set_active_special("empty")
             return
 
         item_id = current.data(0, Qt.UserRole)
@@ -1895,9 +1877,9 @@ class ParameterPanel(QWidget):
             # Sub-category headers — show heat global panel for "🔥 Heizkreise"
             for subs in self._fp_sub_items.values():
                 if current is subs.get("hk"):
-                    self._heat_global_panel.show()
+                    self._set_active_special("heat")
                     return
-            self._empty_label.show()
+            self._set_active_special("empty")
             return
 
         panel = (self.floorplan_panels.get(item_id)
@@ -1909,9 +1891,41 @@ class ParameterPanel(QWidget):
                  or self.hkv_line_panels.get(item_id)
                  or self.text_panels.get(item_id))
         if panel:
-            panel.show()
+            self._set_active_panel(panel)
         else:
+            self._set_active_special("empty")
+
+    def _set_active_panel(self, panel: QWidget):
+        if self._active_panel is panel and self._active_special is None:
+            return
+        if self._active_panel and self._active_panel is not panel:
+            self._active_panel.hide()
+        if self._active_special == "empty":
+            self._empty_label.hide()
+        elif self._active_special == "heat":
+            self._heat_global_panel.hide()
+        self._active_panel = panel
+        self._active_special = None
+        panel.show()
+
+    def _set_active_special(self, mode: str):
+        if self._active_special == mode and self._active_panel is None:
+            return
+        if self._active_panel:
+            self._active_panel.hide()
+            self._active_panel = None
+        if self._active_special == "empty" and mode != "empty":
+            self._empty_label.hide()
+        if self._active_special == "heat" and mode != "heat":
+            self._heat_global_panel.hide()
+
+        if mode == "empty":
+            self._heat_global_panel.hide()
             self._empty_label.show()
+        else:
+            self._empty_label.hide()
+            self._heat_global_panel.show()
+        self._active_special = mode
 
     def _on_tree_item_changed(self, item: QTreeWidgetItem, column: int):
         """Handle check-state changes on category items (group visibility)."""
@@ -2555,6 +2569,8 @@ class ParameterPanel(QWidget):
 
     def _show_placeholder_if_empty(self):
         """Show the 'select an item' label when no panel is visible."""
+        if self._active_panel and self._active_panel.parent() is None:
+            self._active_panel = None
         if not any(p.isVisible() for p in
                    list(self.floorplan_panels.values()) +
                    list(self.furniture_panels.values()) +
@@ -2564,7 +2580,7 @@ class ParameterPanel(QWidget):
                    list(self.hkv_panels.values()) +
                    list(self.hkv_line_panels.values()) +
                    list(self.text_panels.values())):
-            self._empty_label.show()
+            self._set_active_special("empty")
 
     # ──────────────────────────────────────────────────────────────── #
     #  General heating params                                           #

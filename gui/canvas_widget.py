@@ -122,6 +122,11 @@ class CanvasWidget(QWidget):
         self._floor_drag_start: Optional[QPointF] = None
         self._floor_rotate_start_angle: float = 0.0
         self._floor_rotate_orig: float = 0.0
+        self._floor_polygon_world_cache: Dict[str, Tuple[tuple, List[QPointF], QPolygonF]] = {}
+        self._manual_route_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
+        self._supply_line_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
+        self._elec_cable_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
+        self._hkv_line_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
 
         # Background color
         self._bg_color = QColor("#2b2b2b")
@@ -320,6 +325,7 @@ class CanvasWidget(QWidget):
 
     def remove_floor_plan(self, fp_id: str):
         self._floor_plans.pop(fp_id, None)
+        self._floor_polygon_world_cache.pop(fp_id, None)
         if fp_id in self._floor_plan_order:
             self._floor_plan_order.remove(fp_id)
         self.update()
@@ -641,11 +647,25 @@ class CanvasWidget(QWidget):
         w, h = layer.size
         return (max(1.0, w), max(1.0, h))
 
+    def _floor_polygon_world_cache_key(self, layer: "FloorPlanLayer") -> tuple:
+        return (
+            layer.offset_x,
+            layer.offset_y,
+            layer.rotation,
+            layer.size[0],
+            layer.size[1],
+            tuple((p.x(), p.y()) for p in layer.polygon),
+        )
+
     def _floor_polygon_points_world(self, fp_id: str) -> List[QPointF]:
         """Return polygon points transformed to canvas coordinates."""
         layer = self._floor_plans.get(fp_id)
         if not layer or not layer.polygon:
             return []
+        key = self._floor_polygon_world_cache_key(layer)
+        cached = self._floor_polygon_world_cache.get(fp_id)
+        if cached and cached[0] == key:
+            return cached[1]
         import math
         sw, sh = self._floor_polygon_render_size(layer)
         cx = sw / 2 + layer.offset_x
@@ -659,7 +679,20 @@ class CanvasWidget(QWidget):
             wx = cx + rx * cos_r - ry * sin_r
             wy = cy + rx * sin_r + ry * cos_r
             out.append(QPointF(wx, wy))
+        self._floor_polygon_world_cache[fp_id] = (key, out, QPolygonF(out))
         return out
+
+    def _floor_polygon_world_polygon(self, fp_id: str) -> QPolygonF:
+        layer = self._floor_plans.get(fp_id)
+        if not layer or not layer.polygon:
+            return QPolygonF()
+        key = self._floor_polygon_world_cache_key(layer)
+        cached = self._floor_polygon_world_cache.get(fp_id)
+        if cached and cached[0] == key:
+            return cached[2]
+        self._floor_polygon_points_world(fp_id)
+        cached = self._floor_polygon_world_cache.get(fp_id)
+        return cached[2] if cached else QPolygonF()
 
     def _world_to_floor_polygon_local(self, fp_id: str, world_pt: QPointF) -> QPointF:
         layer = self._floor_plans.get(fp_id)
@@ -852,6 +885,8 @@ class CanvasWidget(QWidget):
                   self._label_positions, self._label_font_sizes,
                   self._label_rects, self._label_draw_pos):
             d.pop(circuit_id, None)
+        self._manual_route_path_cache.pop(circuit_id, None)
+        self._supply_line_path_cache.pop(circuit_id, None)
         self.update()
 
     # ── Supply Line (Anschlussleitung) API ──────────────────────────── #
@@ -1009,6 +1044,7 @@ class CanvasWidget(QWidget):
                   self._label_positions, self._label_font_sizes,
                   self._label_rects, self._label_draw_pos):
             d.pop(cable_id, None)
+        self._elec_cable_path_cache.pop(cable_id, None)
         self._color_map.pop(cable_id, None)
         self.update()
 
@@ -1179,7 +1215,7 @@ class CanvasWidget(QWidget):
             if not layer or not layer.visible:
                 continue
             if layer.polygon:
-                poly = QPolygonF(self._floor_polygon_points_world(fid))
+                poly = self._floor_polygon_world_polygon(fid)
                 if poly.containsPoint(canvas_pt, Qt.OddEvenFill):
                     return ("floor_polygon", fid)
             if layer.renderer or layer.pixmap or layer.polygon:
@@ -1407,6 +1443,7 @@ class CanvasWidget(QWidget):
                   self._label_positions, self._label_font_sizes,
                   self._label_rects, self._label_draw_pos):
             d.pop(line_id, None)
+        self._hkv_line_path_cache.pop(line_id, None)
         self._color_map.pop(line_id, None)
         self.update()
 
@@ -1550,6 +1587,11 @@ class CanvasWidget(QWidget):
     def clear_data(self):
         """Clear all geometric and object data (keeps SVG, zoom and grid settings)."""
         self._floor_plans.clear()
+        self._floor_polygon_world_cache.clear()
+        self._manual_route_path_cache.clear()
+        self._supply_line_path_cache.clear()
+        self._elec_cable_path_cache.clear()
+        self._hkv_line_path_cache.clear()
         self._floor_plan_order.clear()
         self._ref_floor_id = None
         self._polygons.clear()
@@ -2423,7 +2465,7 @@ class CanvasWidget(QWidget):
             layer = self._floor_plans.get(fid)
             if not layer or not layer.visible or not layer.polygon:
                 continue
-            poly = QPolygonF(self._floor_polygon_points_world(fid))
+            poly = self._floor_polygon_world_polygon(fid)
             if poly.containsPoint(canvas_pt, Qt.OddEvenFill):
                 self.object_double_clicked.emit("floor_polygon", fid)
                 return
@@ -3180,11 +3222,9 @@ class CanvasWidget(QWidget):
                 hit = self._hit_polygon_point(canvas_pt, self._edit_polygon_cid)
                 if hit is not None:
                     self.setCursor(Qt.OpenHandCursor)
-                    self.update()
                     return
                 edge_hit = self._hit_polygon_edge(canvas_pt, self._edit_polygon_cid)
                 self.setCursor(Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
-            self.update()
             return
 
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
@@ -3201,11 +3241,9 @@ class CanvasWidget(QWidget):
                 hit = self._hit_floor_polygon_point(canvas_pt, fid)
                 if hit is not None:
                     self.setCursor(Qt.OpenHandCursor)
-                    self.update()
                     return
                 edge_hit = self._hit_floor_polygon_edge(canvas_pt, fid)
                 self.setCursor(Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
-            self.update()
             return
 
         # ── Edit Route: Punkt verschieben ──
@@ -3227,11 +3265,9 @@ class CanvasWidget(QWidget):
                 hit = self._hit_route_point_in_circuit(canvas_pt, self._edit_route_cid)
                 if hit is not None:
                     self.setCursor(Qt.OpenHandCursor)
-                    self.update()
                     return
                 edge_hit = self._hit_route_edge(canvas_pt, self._edit_route_cid)
                 self.setCursor(Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
-            self.update()
             return
 
         if self._mode == ToolMode.DRAW_ROUTE and self._current_route_cid and self._current_route_points:
@@ -3329,7 +3365,6 @@ class CanvasWidget(QWidget):
                         canvas_pt, self._edit_elec_cable_id)
                     self.setCursor(
                         Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
-            self.update()
             return
 
         # ── Anschlussleitung zeichnen (Move) ──
@@ -3373,7 +3408,6 @@ class CanvasWidget(QWidget):
                         canvas_pt, self._edit_supply_cid)
                     self.setCursor(
                         Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
-            self.update()
             return
 
         # ── HKV-Verbindungsleitung zeichnen (Move) ──
@@ -3416,7 +3450,6 @@ class CanvasWidget(QWidget):
                         canvas_pt, self._edit_hkv_line_id)
                     self.setCursor(
                         Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
-            self.update()
             return
 
         # ── Text annotation dragging ──
@@ -3437,6 +3470,12 @@ class CanvasWidget(QWidget):
             return
 
         if self._mode == ToolMode.NONE:
+            state_cleared = (
+                self._current_route_preview_end is not None
+                or self._constraint_violation_point is not None
+                or self._constraint_violation_line is not None
+                or bool(self._constraint_violation_reason)
+            )
             self._current_route_preview_end = None
             self._constraint_violation_point = None
             self._constraint_violation_line = None
@@ -3444,15 +3483,19 @@ class CanvasWidget(QWidget):
             label_hit = self._hit_label(canvas_pt)
             if label_hit:
                 self.setCursor(Qt.SizeAllCursor)
-                self.update()
+                if state_cleared:
+                    self.update()
                 return
             route_hit = self._hit_route_point(canvas_pt)
             if route_hit:
                 self.setCursor(Qt.OpenHandCursor)
-                self.update()
+                if state_cleared:
+                    self.update()
                 return
             hit = self._hit_start_point(canvas_pt)
             self.setCursor(Qt.OpenHandCursor if hit else Qt.ArrowCursor)
+            if state_cleared:
+                self.update()
 
         # Tooltip for text annotations on hover
         text_hit = self._hit_text_annotation(canvas_pt)
@@ -3464,8 +3507,6 @@ class CanvasWidget(QWidget):
                 QToolTip.hideText()
         else:
             QToolTip.hideText()
-
-        self.update()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MiddleButton:
@@ -4538,7 +4579,17 @@ class CanvasWidget(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         if len(combined) > 1:
-            painter.drawPath(self._smooth_polyline_path(combined, offset))
+            path_key = (
+                tuple((p.x(), p.y()) for p in points),
+                line_dist,
+            )
+            cached = self._manual_route_path_cache.get(cid)
+            if cached and cached[0] == path_key:
+                path = cached[1]
+            else:
+                path = self._smooth_polyline_path(combined, offset)
+                self._manual_route_path_cache[cid] = (path_key, path)
+            painter.drawPath(path)
 
         # Draw control points
         painter.setBrush(QBrush(color))
@@ -4614,7 +4665,17 @@ class CanvasWidget(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         rounding = 8.0 / self._scale
-        painter.drawPath(self._smooth_polyline_path(points, rounding))
+        path_key = (
+            tuple((p.x(), p.y()) for p in points),
+            round(self._scale, 6),
+        )
+        cached = self._elec_cable_path_cache.get(cable_id)
+        if cached and cached[0] == path_key:
+            path = cached[1]
+        else:
+            path = self._smooth_polyline_path(points, rounding)
+            self._elec_cable_path_cache[cable_id] = (path_key, path)
+        painter.drawPath(path)
         painter.setBrush(QBrush(color))
         r = 3.0 / self._scale
         for pt in points:
@@ -4680,7 +4741,17 @@ class CanvasWidget(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         if len(combined) > 1:
-            painter.drawPath(self._smooth_polyline_path(combined, offset))
+            path_key = (
+                tuple((p.x(), p.y()) for p in points),
+                line_dist,
+            )
+            cached = self._supply_line_path_cache.get(cid)
+            if cached and cached[0] == path_key:
+                path = cached[1]
+            else:
+                path = self._smooth_polyline_path(combined, offset)
+                self._supply_line_path_cache[cid] = (path_key, path)
+            painter.drawPath(path)
 
         # Draw control points
         painter.setBrush(QBrush(color))
@@ -4778,22 +4849,30 @@ class CanvasWidget(QWidget):
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
-        if len(line1) > 1:
-            path1 = QPainterPath()
-            path1.moveTo(line1[0])
-            for p in line1[1:]:
-                path1.lineTo(p)
-            painter.drawPath(path1)
-        if len(line2) > 1:
-            path2 = QPainterPath()
-            path2.moveTo(line2[0])
-            for p in line2[1:]:
-                path2.lineTo(p)
-            painter.drawPath(path2)
-        # End connector
-        if line1 and line2:
-            painter.drawLine(line1[-1], line2[-1])
-            painter.drawLine(line1[0], line2[0])
+        path_key = (
+            tuple((p.x(), p.y()) for p in points),
+            round(self._scale, 6),
+        )
+        cached = self._hkv_line_path_cache.get(lid)
+        if cached and cached[0] == path_key:
+            path = cached[1]
+        else:
+            path = QPainterPath()
+            if len(line1) > 1:
+                path.moveTo(line1[0])
+                for p in line1[1:]:
+                    path.lineTo(p)
+            if len(line2) > 1:
+                path.moveTo(line2[0])
+                for p in line2[1:]:
+                    path.lineTo(p)
+            if line1 and line2:
+                path.moveTo(line1[-1])
+                path.lineTo(line2[-1])
+                path.moveTo(line1[0])
+                path.lineTo(line2[0])
+            self._hkv_line_path_cache[lid] = (path_key, path)
+        painter.drawPath(path)
         # Control points
         painter.setBrush(QBrush(color))
         r = 3.0 / self._scale
