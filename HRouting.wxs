@@ -38,6 +38,7 @@
       <?endif?>
       <ComponentRef Id="cmpStartMenuShortcut" />
       <ComponentRef Id="cmpFileAssociation" />
+      <ComponentRef Id="cmpDefaultAppsRegistration" />
       <ComponentRef Id="cmpAppPaths" />
     </Feature>
 
@@ -82,6 +83,10 @@
     <Component Id="cmpFileAssociation" Guid="{7FEA0CB3-D46D-4D19-8A48-838421D6D145}" Directory="INSTALLFOLDER">
       <RegistryKey Root="HKLM" Key="Software\Classes\.hrp">
         <RegistryValue Value="HRouting.Project" Type="string" KeyPath="yes" />
+        <RegistryValue Name="PerceivedType" Value="document" Type="string" />
+      </RegistryKey>
+      <RegistryKey Root="HKLM" Key="Software\Classes\.hrp\OpenWithProgids">
+        <RegistryValue Name="HRouting.Project" Value="" Type="string" />
       </RegistryKey>
       <RegistryKey Root="HKLM" Key="Software\Classes\HRouting.Project">
         <RegistryValue Value="HRouting Project" Type="string" />
@@ -91,6 +96,19 @@
       </RegistryKey>
       <RegistryKey Root="HKLM" Key="Software\Classes\HRouting.Project\shell\open\command">
         <RegistryValue Value='&quot;[INSTALLFOLDER]$(var.ExeName)&quot; &quot;%1&quot;' Type="string" />
+      </RegistryKey>
+    </Component>
+
+    <Component Id="cmpDefaultAppsRegistration" Guid="{CC7F026E-3542-4B24-B6FF-EAC74DEB3E19}" Directory="INSTALLFOLDER">
+      <RegistryKey Root="HKLM" Key="Software\HRouting\Capabilities">
+        <RegistryValue Name="ApplicationName" Value="HRouting" Type="string" />
+        <RegistryValue Name="ApplicationDescription" Value="Öffnet HRouting-Projektdateien (.hrp)" Type="string" />
+      </RegistryKey>
+      <RegistryKey Root="HKLM" Key="Software\HRouting\Capabilities\FileAssociations">
+        <RegistryValue Name=".hrp" Value="HRouting.Project" Type="string" KeyPath="yes" />
+      </RegistryKey>
+      <RegistryKey Root="HKLM" Key="Software\RegisteredApplications">
+        <RegistryValue Name="HRouting" Value="Software\HRouting\Capabilities" Type="string" />
       </RegistryKey>
     </Component>
 
