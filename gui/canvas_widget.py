@@ -274,6 +274,11 @@ class CanvasWidget(QWidget):
         self._edit_floor_polygon_id: Optional[str] = None
         self._insert_between_indices: Optional[Tuple[int, int]] = None
         self._edit_route_cid: Optional[str] = None
+        self._edit_selected_owner: Optional[str] = None
+        self._edit_selected_indices: set[int] = set()
+        self._edit_selection_rect_start: Optional[QPointF] = None
+        self._edit_selection_rect_end: Optional[QPointF] = None
+        self._edit_drag_last_pos: Optional[QPointF] = None
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -607,6 +612,11 @@ class CanvasWidget(QWidget):
             return
         self._edit_floor_polygon_id = None
         self._edit_polygon_cid = circuit_id
+        self._edit_selected_owner = None
+        self._edit_selected_indices.clear()
+        self._edit_selection_rect_start = None
+        self._edit_selection_rect_end = None
+        self._edit_drag_last_pos = None
         self._mode = ToolMode.EDIT_POLYGON
         self.setCursor(Qt.CrossCursor)
         self.update()
@@ -617,6 +627,11 @@ class CanvasWidget(QWidget):
             return
         self._edit_polygon_cid = None
         self._edit_floor_polygon_id = fp_id
+        self._edit_selected_owner = None
+        self._edit_selected_indices.clear()
+        self._edit_selection_rect_start = None
+        self._edit_selection_rect_end = None
+        self._edit_drag_last_pos = None
         self._mode = ToolMode.EDIT_POLYGON
         self.setCursor(Qt.CrossCursor)
         self.update()
@@ -706,6 +721,11 @@ class CanvasWidget(QWidget):
         if circuit_id not in self._manual_routes:
             return
         self._edit_route_cid = circuit_id
+        self._edit_selected_owner = None
+        self._edit_selected_indices.clear()
+        self._edit_selection_rect_start = None
+        self._edit_selection_rect_end = None
+        self._edit_drag_last_pos = None
         self._mode = ToolMode.EDIT_ROUTE
         self.setCursor(Qt.CrossCursor)
         self.update()
@@ -858,6 +878,11 @@ class CanvasWidget(QWidget):
         if circuit_id not in self._supply_lines:
             return
         self._edit_supply_cid = circuit_id
+        self._edit_selected_owner = None
+        self._edit_selected_indices.clear()
+        self._edit_selection_rect_start = None
+        self._edit_selection_rect_end = None
+        self._edit_drag_last_pos = None
         self._mode = ToolMode.EDIT_SUPPLY_LINE
         self.setCursor(Qt.CrossCursor)
         self.update()
@@ -959,6 +984,11 @@ class CanvasWidget(QWidget):
         if cable_id not in self._elec_cables:
             return
         self._edit_elec_cable_id = cable_id
+        self._edit_selected_owner = None
+        self._edit_selected_indices.clear()
+        self._edit_selection_rect_start = None
+        self._edit_selection_rect_end = None
+        self._edit_drag_last_pos = None
         self._mode = ToolMode.EDIT_ELEC_CABLE
         self.setCursor(Qt.CrossCursor)
         self.update()
@@ -1082,20 +1112,76 @@ class CanvasWidget(QWidget):
 
     def _hit_any_object(self, canvas_pt: QPointF) -> Optional[Tuple[str, str]]:
         """Try to hit any clickable object. Returns (object_type, object_id) or None.
-        Checks in this order: floor plans, polygons, elec points, hkv, etc."""
+        Checks in this order: foreground objects first, floor plans last."""
         threshold = 10.0 / self._scale
 
-        # 1. Floor plan layers (check in reverse render order, front-to-back)
+        # 1. Heating circuits polygons
+        for cid, poly in self._polygons.items():
+            if not self._circuit_visible.get(cid, True):
+                continue
+            if self._point_in_polygon(canvas_pt, poly):
+                return ("polygon", cid)
+
+        # 2. Electrical points
+        ap = self._hit_elec_point(canvas_pt)
+        if ap:
+            return ("elec_point", ap)
+
+        # 3. HKV points
+        hkv = self._hit_hkv(canvas_pt)
+        if hkv:
+            return ("hkv", hkv)
+
+        # 4. Electrical cables
+        for kid, pts in self._elec_cables.items():
+            if not self._elec_visible.get(kid, True):
+                continue
+            if len(pts) >= 2:
+                for i in range(len(pts) - 1):
+                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
+                    if _qdist(canvas_pt, proj) < threshold:
+                        return ("elec_cable", kid)
+
+        # 5. HKV lines
+        for lid, pts in self._hkv_lines.items():
+            if not self._hkv_line_visible.get(lid, True):
+                continue
+            if len(pts) >= 2:
+                for i in range(len(pts) - 1):
+                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
+                    if _qdist(canvas_pt, proj) < threshold:
+                        return ("hkv_line", lid)
+
+        # 6. Supply lines
+        for cid, pts in self._supply_lines.items():
+            if not self._circuit_visible.get(cid, True):
+                continue
+            if len(pts) >= 2:
+                for i in range(len(pts) - 1):
+                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
+                    if _qdist(canvas_pt, proj) < threshold:
+                        return ("supply_line", cid)
+
+        # 7. Routes (manual)
+        for cid, pts in self._manual_routes.items():
+            if not self._circuit_visible.get(cid, True):
+                continue
+            if len(pts) >= 2:
+                for i in range(len(pts) - 1):
+                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
+                    if _qdist(canvas_pt, proj) < threshold:
+                        return ("route", cid)
+
+        # 8. Floor plan layers (check in reverse render order, front-to-back)
+        # Keep this last so background layers don't shadow foreground objects.
         for fid in reversed(self._floor_plan_order):
             layer = self._floor_plans.get(fid)
             if not layer or not layer.visible:
                 continue
-            # Check if point is inside floor polygon
             if layer.polygon:
                 poly = QPolygonF(self._floor_polygon_points_world(fid))
                 if poly.containsPoint(canvas_pt, Qt.OddEvenFill):
                     return ("floor_polygon", fid)
-            # For other floor plan types, check bounds (simplified)
             if layer.renderer or layer.pixmap or layer.polygon:
                 if layer.polygon:
                     sw, sh = self._floor_polygon_render_size(layer)
@@ -1106,63 +1192,6 @@ class CanvasWidget(QWidget):
                 rect = QRectF(cx - sw / 2, cy - sh / 2, sw, sh)
                 if rect.contains(canvas_pt):
                     return ("floor_polygon", fid)
-
-        # 2. Heating circuits polygons
-        for cid, poly in self._polygons.items():
-            if not self._circuit_visible.get(cid, True):
-                continue
-            if self._point_in_polygon(canvas_pt, poly):
-                return ("polygon", cid)
-
-        # 3. Electrical points
-        ap = self._hit_elec_point(canvas_pt)
-        if ap:
-            return ("elec_point", ap)
-
-        # 4. HKV points
-        hkv = self._hit_hkv(canvas_pt)
-        if hkv:
-            return ("hkv", hkv)
-
-        # 5. Electrical cables
-        for kid, pts in self._elec_cables.items():
-            if not self._elec_visible.get(kid, True):
-                continue
-            if len(pts) >= 2:
-                for i in range(len(pts) - 1):
-                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
-                    if _qdist(canvas_pt, proj) < threshold:
-                        return ("elec_cable", kid)
-
-        # 6. HKV lines
-        for lid, pts in self._hkv_lines.items():
-            if not self._hkv_line_visible.get(lid, True):
-                continue
-            if len(pts) >= 2:
-                for i in range(len(pts) - 1):
-                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
-                    if _qdist(canvas_pt, proj) < threshold:
-                        return ("hkv_line", lid)
-
-        # 7. Supply lines
-        for cid, pts in self._supply_lines.items():
-            if not self._circuit_visible.get(cid, True):
-                continue
-            if len(pts) >= 2:
-                for i in range(len(pts) - 1):
-                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
-                    if _qdist(canvas_pt, proj) < threshold:
-                        return ("supply_line", cid)
-
-        # 8. Routes (manual)
-        for cid, pts in self._manual_routes.items():
-            if not self._circuit_visible.get(cid, True):
-                continue
-            if len(pts) >= 2:
-                for i in range(len(pts) - 1):
-                    proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
-                    if _qdist(canvas_pt, proj) < threshold:
-                        return ("route", cid)
 
         return None
 
@@ -1193,6 +1222,11 @@ class CanvasWidget(QWidget):
         self._edit_route_cid = None
         self._edit_polygon_cid = None
         self._edit_floor_polygon_id = None
+        self._edit_selected_owner = None
+        self._edit_selected_indices.clear()
+        self._edit_selection_rect_start = None
+        self._edit_selection_rect_end = None
+        self._edit_drag_last_pos = None
         self._dragging_route_point = None
         if self._mode in (
             ToolMode.EDIT_ELEC_CABLE,
@@ -1204,6 +1238,53 @@ class CanvasWidget(QWidget):
             self._mode = ToolMode.NONE
             self.setCursor(Qt.ArrowCursor)
             self.update()
+
+    def _get_multiselect_points_world(self) -> Optional[Tuple[str, List[QPointF]]]:
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
+            pts = self._polygons.get(self._edit_polygon_cid, [])
+            return self._edit_polygon_cid, [QPointF(p) for p in pts]
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
+            fid = self._edit_floor_polygon_id
+            return fid, self._floor_polygon_points_world(fid)
+        if self._mode == ToolMode.EDIT_ROUTE and self._edit_route_cid:
+            pts = self._manual_routes.get(self._edit_route_cid, [])
+            return self._edit_route_cid, [QPointF(p) for p in pts]
+        if self._mode == ToolMode.EDIT_ELEC_CABLE and self._edit_elec_cable_id:
+            pts = self._elec_cables.get(self._edit_elec_cable_id, [])
+            return self._edit_elec_cable_id, [QPointF(p) for p in pts]
+        if self._mode == ToolMode.EDIT_SUPPLY_LINE and self._edit_supply_cid:
+            pts = self._supply_lines.get(self._edit_supply_cid, [])
+            return self._edit_supply_cid, [QPointF(p) for p in pts]
+        if self._mode == ToolMode.EDIT_HKV_LINE and self._edit_hkv_line_id:
+            pts = self._hkv_lines.get(self._edit_hkv_line_id, [])
+            return self._edit_hkv_line_id, [QPointF(p) for p in pts]
+        return None
+
+    def _set_multiselect_point_world(self, owner_id: str, idx: int, world_pt: QPointF):
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid == owner_id:
+            if owner_id in self._polygons and 0 <= idx < len(self._polygons[owner_id]):
+                self._polygons[owner_id][idx] = QPointF(world_pt)
+            return
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id == owner_id:
+            layer = self._floor_plans.get(owner_id)
+            if layer and 0 <= idx < len(layer.polygon):
+                layer.polygon[idx] = self._world_to_floor_polygon_local(owner_id, world_pt)
+            return
+        if self._mode == ToolMode.EDIT_ROUTE and self._edit_route_cid == owner_id:
+            if owner_id in self._manual_routes and 0 <= idx < len(self._manual_routes[owner_id]):
+                self._manual_routes[owner_id][idx] = QPointF(world_pt)
+            return
+        if self._mode == ToolMode.EDIT_ELEC_CABLE and self._edit_elec_cable_id == owner_id:
+            if owner_id in self._elec_cables and 0 <= idx < len(self._elec_cables[owner_id]):
+                self._elec_cables[owner_id][idx] = QPointF(world_pt)
+            return
+        if self._mode == ToolMode.EDIT_SUPPLY_LINE and self._edit_supply_cid == owner_id:
+            if owner_id in self._supply_lines and 0 <= idx < len(self._supply_lines[owner_id]):
+                self._supply_lines[owner_id][idx] = QPointF(world_pt)
+            return
+        if self._mode == ToolMode.EDIT_HKV_LINE and self._edit_hkv_line_id == owner_id:
+            if owner_id in self._hkv_lines and 0 <= idx < len(self._hkv_lines[owner_id]):
+                self._hkv_lines[owner_id][idx] = QPointF(world_pt)
 
     # ── HKV (Heizkreisverteiler) API ────────────────────────────────── #
 
@@ -1311,6 +1392,11 @@ class CanvasWidget(QWidget):
         if line_id not in self._hkv_lines:
             return
         self._edit_hkv_line_id = line_id
+        self._edit_selected_owner = None
+        self._edit_selected_indices.clear()
+        self._edit_selection_rect_start = None
+        self._edit_selection_rect_end = None
+        self._edit_drag_last_pos = None
         self._mode = ToolMode.EDIT_HKV_LINE
         self.setCursor(Qt.CrossCursor)
         self.update()
@@ -2602,7 +2688,14 @@ class CanvasWidget(QWidget):
         if event.button() == Qt.LeftButton and self._is_edit_mode_active():
             clicked_obj = self._hit_any_object(canvas_pt)
             current_target = self._current_edit_target()
-            if clicked_obj and clicked_obj != current_target:
+            # Don't leave edit mode when clicking only on floor/background.
+            # This enables marquee selection drag over the floor plan.
+            is_background_floor_hit = (
+                clicked_obj is not None
+                and clicked_obj[0] == "floor_polygon"
+                and (current_target is None or current_target[0] != "floor_polygon")
+            )
+            if clicked_obj and clicked_obj != current_target and not is_background_floor_hit:
                 self._exit_edit_mode()
                 self.object_clicked.emit(clicked_obj[0], clicked_obj[1])
                 self.object_switched_from_edit.emit(clicked_obj[0], clicked_obj[1])
@@ -3445,6 +3538,7 @@ class CanvasWidget(QWidget):
             if self._dragging_route_point and self._mode == ToolMode.EDIT_POLYGON:
                 cid, _ = self._dragging_route_point
                 self._dragging_route_point = None
+                self._edit_drag_last_pos = None
                 if self._edit_floor_polygon_id and cid == self._edit_floor_polygon_id:
                     self.update()
                     return
@@ -3454,6 +3548,7 @@ class CanvasWidget(QWidget):
             if self._dragging_route_point and self._mode == ToolMode.EDIT_ROUTE:
                 cid, _ = self._dragging_route_point
                 self._dragging_route_point = None
+                self._edit_drag_last_pos = None
                 self.route_changed.emit(cid)
                 return
             if self._mode == ToolMode.MOVE_ELEC_POINT and self._dragging_elec_point:
@@ -3473,6 +3568,7 @@ class CanvasWidget(QWidget):
             if self._dragging_route_point and self._mode == ToolMode.EDIT_ELEC_CABLE:
                 cid, idx = self._dragging_route_point
                 self._dragging_route_point = None
+                self._edit_drag_last_pos = None
                 # Update AP binding if first or last point was moved
                 pts = self._elec_cables.get(cid, [])
                 if pts and (idx == 0 or idx == len(pts) - 1):
@@ -3496,6 +3592,7 @@ class CanvasWidget(QWidget):
             if self._dragging_route_point and self._mode == ToolMode.EDIT_SUPPLY_LINE:
                 cid, idx = self._dragging_route_point
                 self._dragging_route_point = None
+                self._edit_drag_last_pos = None
                 # Update HKV binding if last point was moved
                 pts = self._supply_lines.get(cid, [])
                 if pts and idx == len(pts) - 1:
@@ -3529,6 +3626,7 @@ class CanvasWidget(QWidget):
             if self._dragging_route_point and self._mode == ToolMode.EDIT_HKV_LINE:
                 lid, idx = self._dragging_route_point
                 self._dragging_route_point = None
+                self._edit_drag_last_pos = None
                 pts = self._hkv_lines.get(lid, [])
                 if pts and (idx == 0 or idx == len(pts) - 1):
                     hkv = self._find_nearest_hkv(pts[idx])
@@ -3573,6 +3671,11 @@ class CanvasWidget(QWidget):
             self._edit_polygon_cid = None
             self._edit_floor_polygon_id = None
             self._edit_route_cid = None
+            self._edit_selected_owner = None
+            self._edit_selected_indices.clear()
+            self._edit_selection_rect_start = None
+            self._edit_selection_rect_end = None
+            self._edit_drag_last_pos = None
             self._constraint_violation_point = None
             self._constraint_violation_line = None
             self._constraint_violation_reason = ""
@@ -4992,6 +5095,42 @@ class CanvasWidget(QWidget):
                 painter.setBrush(QBrush(color))
             painter.setPen(QPen(QColor("#ffffff"), 1.0 / self._scale))
             painter.drawEllipse(p, r, r)
+
+    def _draw_multiselect_overlay(self, painter: QPainter):
+        if self._mode not in (
+            ToolMode.EDIT_POLYGON,
+            ToolMode.EDIT_ROUTE,
+            ToolMode.EDIT_ELEC_CABLE,
+            ToolMode.EDIT_SUPPLY_LINE,
+            ToolMode.EDIT_HKV_LINE,
+        ):
+            return
+
+        if self._edit_selection_rect_start is not None:
+            start = self._edit_selection_rect_start
+            end = self._edit_selection_rect_end or start
+            rect = QRectF(start, end).normalized()
+            painter.save()
+            painter.setBrush(QBrush(QColor(100, 180, 255, 40)))
+            painter.setPen(QPen(QColor("#64b5f6"), 1.2 / self._scale, Qt.DashLine))
+            painter.drawRect(rect)
+            painter.restore()
+
+        if not self._edit_selected_owner or not self._edit_selected_indices:
+            return
+
+        points_data = self._get_multiselect_points_world()
+        if not points_data or points_data[0] != self._edit_selected_owner:
+            return
+        _, pts = points_data
+        painter.save()
+        r = 7.0 / self._scale
+        painter.setPen(QPen(QColor("#ffffff"), 1.0 / self._scale))
+        painter.setBrush(QBrush(QColor("#ffd166")))
+        for idx in self._edit_selected_indices:
+            if 0 <= idx < len(pts):
+                painter.drawEllipse(pts[idx], r, r)
+        painter.restore()
 
     def _draw_in_progress(self, painter, color):
         painter.setPen(QPen(color, 2.0 / self._scale, Qt.DashLine))

@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QAction, QColor, QFont, QPainter, QPageLayout,
-    QPen, QBrush, QPolygonF, QPainterPath, QKeySequence, QImage,
+    QPen, QBrush, QPolygonF, QPainterPath, QKeySequence, QImage, QShortcut,
 )
 from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF, QTimer, QByteArray, QBuffer, QIODevice
 from PySide6.QtPrintSupport import QPrinter
@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         self._floorplan_counter = 0
         self._furniture_counter = 0
         self._dirty = False
+        self._copy_buffer: dict | None = None
 
         # Undo / Redo
         self._undo_stack: list[dict] = []
@@ -77,6 +78,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_toolbar()
         self._build_menubar()
+        self._build_shortcuts()
         self._connect_signals()
         self._auto_load_last_project()
 
@@ -241,6 +243,13 @@ class MainWindow(QMainWindow):
         # ── Hilfe ──
         help_menu = mb.addMenu("&Hilfe")
         help_menu.addAction("ℹ️ Über HRouting…", self._show_about)
+
+    def _build_shortcuts(self):
+        self._copy_shortcut = QShortcut(QKeySequence.Copy, self)
+        self._copy_shortcut.activated.connect(self._copy_selected_object)
+
+        self._paste_shortcut = QShortcut(QKeySequence.Paste, self)
+        self._paste_shortcut.activated.connect(self._paste_copied_object)
 
     # -- Recent Projects ----------------------------------------------- #
 
@@ -1557,6 +1566,219 @@ class MainWindow(QMainWindow):
         self.param_panel.remove_elec_cable_panel(cable_id)
         self.status.showMessage(f"🗑️ Kabelverbindung {cable_id} gelöscht.")
 
+    def _selected_object_type(self, item_id: str) -> str | None:
+        if item_id in self.param_panel.floorplan_panels:
+            return "floorplan"
+        if item_id in self.param_panel.furniture_panels:
+            return "furniture"
+        if item_id in self.param_panel.circuit_panels:
+            return "circuit"
+        if item_id in self.param_panel.elec_point_panels:
+            return "elec_point"
+        if item_id in self.param_panel.elec_cable_panels:
+            return "elec_cable"
+        if item_id in self.param_panel.hkv_panels:
+            return "hkv"
+        if item_id in self.param_panel.hkv_line_panels:
+            return "hkv_line"
+        if item_id in self.param_panel.text_panels:
+            return "text"
+        return None
+
+    def _copy_selected_object(self):
+        item_id = self.param_panel.get_selected_item_id()
+        if not item_id:
+            self.status.showMessage("Kein Objekt ausgewählt.", 2000)
+            return
+        obj_type = self._selected_object_type(item_id)
+        if not obj_type:
+            self.status.showMessage("Dieser Eintrag kann nicht kopiert werden.", 2000)
+            return
+        self._copy_buffer = {"type": obj_type, "id": item_id}
+        self.status.showMessage(f"📋 {item_id} kopiert.", 2000)
+
+    def _paste_copied_object(self):
+        if not self._copy_buffer:
+            self.status.showMessage("Zwischenablage ist leer.", 2000)
+            return
+        obj_type = self._copy_buffer.get("type")
+        source_id = self._copy_buffer.get("id")
+        if not source_id:
+            return
+
+        new_id = None
+        if obj_type == "elec_point":
+            new_id = self._duplicate_elec_point(source_id)
+        elif obj_type == "elec_cable":
+            new_id = self._duplicate_elec_cable(source_id)
+        elif obj_type == "circuit":
+            new_id = self._duplicate_circuit(source_id)
+        elif obj_type == "hkv":
+            new_id = self._duplicate_hkv(source_id)
+        elif obj_type == "hkv_line":
+            new_id = self._duplicate_hkv_line(source_id)
+        elif obj_type == "text":
+            new_id = self._duplicate_text(source_id)
+        elif obj_type == "floorplan":
+            new_id = self._duplicate_floorplan(source_id)
+        elif obj_type == "furniture":
+            new_id = self._duplicate_furniture(source_id)
+
+        if new_id:
+            self.param_panel.select_item(new_id)
+            self._mark_dirty()
+
+    def _duplicate_circuit(self, source_id: str) -> str | None:
+        src_panel = self.param_panel.circuit_panels.get(source_id)
+        if not src_panel:
+            return None
+        src = src_panel.to_dict()
+        src_fp_id = self.param_panel._element_floorplan.get(source_id)
+        self._circuit_counter += 1
+        new_id = f"HK-{self._circuit_counter}"
+        panel = self._create_circuit_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel.from_dict(src)
+        panel.le_name.setText(f"{src.get('name', source_id)} (Kopie)")
+        if source_id in self.canvas._polygons:
+            self.canvas._polygons[new_id] = [QPointF(p.x() + 20, p.y() + 20)
+                                             for p in self.canvas._polygons[source_id]]
+            self.canvas._start_points[new_id] = QPointF(
+                self.canvas._start_points[source_id].x() + 20,
+                self.canvas._start_points[source_id].y() + 20,
+            ) if source_id in self.canvas._start_points else self.canvas._polygons[new_id][0]
+        if source_id in self.canvas._manual_routes:
+            self.canvas._manual_routes[new_id] = [QPointF(p.x() + 20, p.y() + 20)
+                                                  for p in self.canvas._manual_routes[source_id]]
+        if source_id in self.canvas._supply_lines:
+            self.canvas._supply_lines[new_id] = [QPointF(p.x() + 20, p.y() + 20)
+                                                 for p in self.canvas._supply_lines[source_id]]
+        self.canvas._route_wall_dist_px[new_id] = self.canvas._route_wall_dist_px.get(source_id, 0.0)
+        self.canvas._route_line_dist_px[new_id] = self.canvas._route_line_dist_px.get(source_id, 0.0)
+        self.canvas._supply_hkv.pop(new_id, None)
+        self.status.showMessage(f"📋 {source_id} dupliziert → {new_id}")
+        self.canvas.update()
+        return new_id
+
+    def _duplicate_hkv(self, source_id: str) -> str | None:
+        src_panel = self.param_panel.hkv_panels.get(source_id)
+        if not src_panel:
+            return None
+        src = src_panel.to_dict()
+        src_fp_id = self.param_panel._element_floorplan.get(source_id)
+        self._hkv_counter += 1
+        new_id = f"HKV-{self._hkv_counter}"
+        panel = self._create_hkv_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel.from_dict(src)
+        panel.le_name.setText(f"{src.get('name', source_id)} (Kopie)")
+        if source_id in self.canvas._hkv_points:
+            p = self.canvas._hkv_points[source_id]
+            self.canvas._hkv_points[new_id] = QPointF(p.x() + 20, p.y() + 20)
+        self.status.showMessage(f"📋 {source_id} dupliziert → {new_id}")
+        self.canvas.update()
+        return new_id
+
+    def _duplicate_hkv_line(self, source_id: str) -> str | None:
+        src_panel = self.param_panel.hkv_line_panels.get(source_id)
+        if not src_panel:
+            return None
+        src = src_panel.to_dict()
+        src_fp_id = self.param_panel._element_floorplan.get(source_id)
+        self._hkv_line_counter += 1
+        new_id = f"HL-{self._hkv_line_counter}"
+        panel = self._create_hkv_line_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel.from_dict(src)
+        panel.le_name.setText(f"{src.get('name', source_id)} (Kopie)")
+        if source_id in self.canvas._hkv_lines:
+            self.canvas._hkv_lines[new_id] = [QPointF(p.x() + 20, p.y() + 20)
+                                              for p in self.canvas._hkv_lines[source_id]]
+        self.canvas._hkv_line_start.pop(new_id, None)
+        self.canvas._hkv_line_end.pop(new_id, None)
+        self.status.showMessage(f"📋 {source_id} dupliziert → {new_id}")
+        self.canvas.update()
+        return new_id
+
+    def _duplicate_text(self, source_id: str) -> str | None:
+        src_panel = self.param_panel.text_panels.get(source_id)
+        if not src_panel:
+            return None
+        src = src_panel.to_dict()
+        src_fp_id = self.param_panel._element_floorplan.get(source_id)
+        self._text_counter += 1
+        new_id = f"Text-{self._text_counter}"
+        panel = self._create_text_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel.set_parameters(src)
+        panel.le_name.setText(f"{src.get('name', source_id)} (Kopie)")
+        if source_id in self.canvas._text_annotations:
+            p = self.canvas._text_annotations[source_id]
+            self.canvas._text_annotations[new_id] = QPointF(p.x() + 20, p.y() + 20)
+            self.canvas._text_contents[new_id] = self.canvas._text_contents.get(source_id, "")
+            self.canvas._text_font_sizes[new_id] = self.canvas._text_font_sizes.get(source_id, 14.0)
+            self.canvas._text_colors[new_id] = self.canvas._text_colors.get(source_id, "#ffffff")
+            self.canvas._text_comments[new_id] = self.canvas._text_comments.get(source_id, "")
+            self.canvas._text_visible[new_id] = self.canvas._text_visible.get(source_id, True)
+        self.status.showMessage(f"📋 {source_id} dupliziert → {new_id}")
+        self.canvas.update()
+        return new_id
+
+    def _copy_layer_values(self, source_id: str, new_id: str):
+        src_layer = self.canvas._floor_plans.get(source_id)
+        dst_layer = self.canvas._floor_plans.get(new_id)
+        if not src_layer or not dst_layer:
+            return
+        dst_layer.size = tuple(src_layer.size)
+        dst_layer.offset_x = src_layer.offset_x + 20
+        dst_layer.offset_y = src_layer.offset_y + 20
+        dst_layer.rotation = src_layer.rotation
+        dst_layer.opacity = src_layer.opacity
+        dst_layer.visible = src_layer.visible
+        dst_layer.mm_per_px = src_layer.mm_per_px
+        dst_layer.ref_length_mm = src_layer.ref_length_mm
+        dst_layer.fixed_width_mm = src_layer.fixed_width_mm
+        dst_layer.fixed_height_mm = src_layer.fixed_height_mm
+        dst_layer.polygon_color = src_layer.polygon_color
+        dst_layer.polygon = [QPointF(p.x(), p.y()) for p in src_layer.polygon]
+        if src_layer.ref_p1:
+            dst_layer.ref_p1 = QPointF(src_layer.ref_p1.x() + 20, src_layer.ref_p1.y() + 20)
+        if src_layer.ref_p2:
+            dst_layer.ref_p2 = QPointF(src_layer.ref_p2.x() + 20, src_layer.ref_p2.y() + 20)
+
+    def _duplicate_floorplan(self, source_id: str) -> str | None:
+        src_panel = self.param_panel.floorplan_panels.get(source_id)
+        if not src_panel:
+            return None
+        self._floorplan_counter += 1
+        new_id = f"grundriss-{self._floorplan_counter}"
+        self.canvas.add_floor_plan(new_id)
+        panel = self.param_panel.add_floorplan_panel(new_id, name=f"{src_panel.get_parameters().get('name', source_id)} (Kopie)")
+        panel.from_dict(src_panel.to_dict())
+        panel.le_name.setText(f"{src_panel.get_parameters().get('name', source_id)} (Kopie)")
+        if src_panel.get_parameters().get("file_path"):
+            self.canvas.load_floor_plan_image(new_id, src_panel.get_parameters().get("file_path"))
+        self._copy_layer_values(source_id, new_id)
+        self.canvas.update()
+        self.status.showMessage(f"📋 {source_id} dupliziert → {new_id}")
+        return new_id
+
+    def _duplicate_furniture(self, source_id: str) -> str | None:
+        src_panel = self.param_panel.furniture_panels.get(source_id)
+        if not src_panel:
+            return None
+        parent_fp_id = self.param_panel._furniture_parent.get(source_id)
+        if not parent_fp_id:
+            return None
+        self._furniture_counter += 1
+        new_id = f"einr-{self._furniture_counter}"
+        self.canvas.add_floor_plan(new_id)
+        panel = self.param_panel.add_furniture_panel(new_id, parent_fp_id, name=f"{src_panel.get_parameters().get('name', source_id)} (Kopie)")
+        panel.from_dict(src_panel.to_dict())
+        panel.le_name.setText(f"{src_panel.get_parameters().get('name', source_id)} (Kopie)")
+        if src_panel.get_parameters().get("file_path"):
+            self.canvas.load_floor_plan_image(new_id, src_panel.get_parameters().get("file_path"))
+        self._copy_layer_values(source_id, new_id)
+        self.canvas.update()
+        self.status.showMessage(f"📋 {source_id} dupliziert → {new_id}")
+        return new_id
+
     def _duplicate_elec_point(self, source_id: str):
         src_panel = self.param_panel.elec_point_panels.get(source_id)
         if not src_panel:
@@ -1592,7 +1814,12 @@ class MainWindow(QMainWindow):
         self.canvas._ensure_color(new_id)
         self.canvas.set_color(new_id, QColor(c))
         self.canvas.set_label_font_size(new_id, src.get("label_size", 12.0))
+        if source_id in self.canvas._elec_points:
+            p = self.canvas._elec_points[source_id]
+            self.canvas._elec_points[new_id] = QPointF(p.x() + 20, p.y() + 20)
         self.status.showMessage(f"📋 {source_id} dupliziert → {new_id}")
+        self.canvas.update()
+        return new_id
 
     def _duplicate_elec_cable(self, source_id: str):
         src_panel = self.param_panel.elec_cable_panels.get(source_id)
@@ -1612,7 +1839,14 @@ class MainWindow(QMainWindow):
         self.canvas._ensure_color(new_id)
         self.canvas.set_color(new_id, QColor(c))
         self.canvas.set_label_font_size(new_id, src.get("label_size", 12.0))
+        if source_id in self.canvas._elec_cables:
+            self.canvas._elec_cables[new_id] = [QPointF(p.x() + 20, p.y() + 20)
+                                                for p in self.canvas._elec_cables[source_id]]
+            self.canvas._cable_start_ap.pop(new_id, None)
+            self.canvas._cable_end_ap.pop(new_id, None)
         self.status.showMessage(f"📋 {source_id} dupliziert → {new_id}")
+        self.canvas.update()
+        return new_id
 
     # ── HKV (Heizkreisverteiler) ─────────────────────────────────────── #
 

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QDoubleSpinBox, QPushButton, QGroupBox,
     QScrollArea, QHBoxLayout, QFrame, QColorDialog,
     QCheckBox, QFileDialog, QTextEdit, QComboBox,
-    QTreeWidget, QTreeWidgetItem, QSplitter,
+    QTreeWidget, QTreeWidgetItem, QSplitter, QAbstractItemView,
 )
 from pathlib import Path
 from PySide6.QtGui import QColor, QPixmap
@@ -37,6 +37,14 @@ class SafeComboBox(QComboBox):
     Prevents accidental value changes while scrolling."""
     def wheelEvent(self, event):
         event.ignore()
+
+
+class DragDropTreeWidget(QTreeWidget):
+    items_dropped = Signal()
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        self.items_dropped.emit()
 
 # ── Eingebaute Elektro-Symbole (DIN EN 60617) ─────────────────── #
 _SYMBOLS_DIR = Path(__file__).resolve().parent.parent / "assets" / "symbols"
@@ -1718,15 +1726,21 @@ class ParameterPanel(QWidget):
         splitter.setChildrenCollapsible(False)
 
         # -- TreeView -----------------------------------------------
-        self._tree = QTreeWidget()
+        self._tree = DragDropTreeWidget()
         self._tree.setHeaderHidden(True)
         self._tree.setRootIsDecorated(True)
         self._tree.setIndentation(16)
+        self._tree.setDragEnabled(True)
+        self._tree.setAcceptDrops(True)
+        self._tree.setDropIndicatorShown(True)
+        self._tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self._tree.setDefaultDropAction(Qt.MoveAction)
 
         # Floor plan items are created dynamically via add_floorplan_panel()
         # Connect AFTER initial setup to avoid spurious signals
         self._tree.currentItemChanged.connect(self._on_tree_selection)
         self._tree.itemChanged.connect(self._on_tree_item_changed)
+        self._tree.items_dropped.connect(self._on_tree_items_dropped)
         splitter.addWidget(self._tree)
 
         # -- Eigenschaftenbereich (property panel) -------------------
@@ -1815,7 +1829,10 @@ class ParameterPanel(QWidget):
                        item_id: str, name: str) -> QTreeWidgetItem:
         child = QTreeWidgetItem(parent_item, [name])
         child.setData(0, Qt.UserRole, item_id)
-        child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+        child.setFlags(
+            (child.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled)
+            & ~Qt.ItemIsDropEnabled
+        )
         child.setCheckState(0, Qt.Checked)
         self._tree_items[item_id] = child
         parent_item.setExpanded(True)
@@ -1991,6 +2008,105 @@ class ParameterPanel(QWidget):
         if tree_item:
             self._tree.setCurrentItem(tree_item)
 
+    def get_selected_item_id(self) -> str | None:
+        current = self._tree.currentItem()
+        if not current:
+            return None
+        item_id = current.data(0, Qt.UserRole)
+        return item_id or None
+
+    def _expected_subcategory_key(self, item_id: str) -> str | None:
+        if item_id in self.circuit_panels:
+            return "hk"
+        if item_id in self.hkv_panels:
+            return "hkv"
+        if item_id in self.hkv_line_panels:
+            return "hkv_line"
+        if item_id in self.elec_point_panels:
+            return "ap"
+        if item_id in self.elec_cable_panels:
+            return "kv"
+        if item_id in self.text_panels:
+            return "text"
+        return None
+
+    def _ancestor_floorplan_id(self, item: QTreeWidgetItem | None) -> str | None:
+        cur = item
+        while cur:
+            cid = cur.data(0, Qt.UserRole)
+            if cid and cid in self.floorplan_panels:
+                return cid
+            cur = cur.parent()
+        return None
+
+    def _move_child_item(self, child: QTreeWidgetItem, new_parent: QTreeWidgetItem):
+        old_parent = child.parent()
+        if old_parent is new_parent:
+            return
+        if old_parent:
+            idx = old_parent.indexOfChild(child)
+            if idx >= 0:
+                old_parent.takeChild(idx)
+        else:
+            idx = self._tree.indexOfTopLevelItem(child)
+            if idx >= 0:
+                self._tree.takeTopLevelItem(idx)
+        new_parent.addChild(child)
+
+    def _on_tree_items_dropped(self):
+        if self._loading:
+            return
+        self._loading = True
+        try:
+            for i in range(self._tree.topLevelItemCount()):
+                fp_item = self._tree.topLevelItem(i)
+                fp_id = fp_item.data(0, Qt.UserRole)
+                if not fp_id or fp_id not in self.floorplan_panels:
+                    continue
+                subs = self._fp_sub_items.get(fp_id, {})
+
+                direct_children = [fp_item.child(j) for j in range(fp_item.childCount())]
+                for child in direct_children:
+                    cid = child.data(0, Qt.UserRole)
+                    if not cid:
+                        continue
+                    if cid in self.furniture_panels:
+                        continue
+                    expected = self._expected_subcategory_key(cid)
+                    if expected and expected in subs:
+                        self._move_child_item(child, subs[expected])
+
+                for key, sub_item in subs.items():
+                    sub_children = [sub_item.child(j) for j in range(sub_item.childCount())]
+                    for child in sub_children:
+                        cid = child.data(0, Qt.UserRole)
+                        if not cid:
+                            continue
+                        if cid in self.furniture_panels:
+                            self._move_child_item(child, fp_item)
+                            continue
+                        expected = self._expected_subcategory_key(cid)
+                        if expected and expected != key and expected in subs:
+                            self._move_child_item(child, subs[expected])
+
+            for eid in list(self._element_floorplan.keys()):
+                item = self._tree_items.get(eid)
+                if item:
+                    anc = self._ancestor_floorplan_id(item)
+                    if anc:
+                        self._element_floorplan[eid] = anc
+
+            for fur_id in list(self._furniture_parent.keys()):
+                item = self._tree_items.get(fur_id)
+                if item:
+                    anc = self._ancestor_floorplan_id(item)
+                    if anc:
+                        self._furniture_parent[fur_id] = anc
+
+            self.floorplan_order_changed.emit()
+        finally:
+            self._loading = False
+
     # ──────────────────────────────────────────────────────────────── #
     #  Grundrisse (Floor Plans)                                         #
     # ──────────────────────────────────────────────────────────────── #
@@ -2024,32 +2140,34 @@ class ParameterPanel(QWidget):
         # Create top-level floor plan tree item with sub-categories
         fp_item = QTreeWidgetItem(self._tree, [name or fp_id])
         fp_item.setData(0, Qt.UserRole, fp_id)
-        fp_item.setFlags(fp_item.flags() | Qt.ItemIsUserCheckable)
+        fp_item.setFlags(
+            fp_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled
+        )
         fp_item.setCheckState(0, Qt.Checked)
         self._tree_items[fp_id] = fp_item
 
         hk_item = QTreeWidgetItem(fp_item, ["\U0001f525 Heizkreise"])
-        hk_item.setFlags(hk_item.flags() | Qt.ItemIsUserCheckable)
+        hk_item.setFlags((hk_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         hk_item.setCheckState(0, Qt.Checked)
 
         hkv_item = QTreeWidgetItem(fp_item, ["Heizkreisverteiler"])
-        hkv_item.setFlags(hkv_item.flags() | Qt.ItemIsUserCheckable)
+        hkv_item.setFlags((hkv_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         hkv_item.setCheckState(0, Qt.Checked)
 
         hkv_line_item = QTreeWidgetItem(fp_item, ["HKV-Leitungen"])
-        hkv_line_item.setFlags(hkv_line_item.flags() | Qt.ItemIsUserCheckable)
+        hkv_line_item.setFlags((hkv_line_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         hkv_line_item.setCheckState(0, Qt.Checked)
 
         ap_item = QTreeWidgetItem(fp_item, ["\u26a1 Anschlusspunkte"])
-        ap_item.setFlags(ap_item.flags() | Qt.ItemIsUserCheckable)
+        ap_item.setFlags((ap_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         ap_item.setCheckState(0, Qt.Checked)
 
         kv_item = QTreeWidgetItem(fp_item, ["Kabelverbindungen"])
-        kv_item.setFlags(kv_item.flags() | Qt.ItemIsUserCheckable)
+        kv_item.setFlags((kv_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         kv_item.setCheckState(0, Qt.Checked)
 
         text_item = QTreeWidgetItem(fp_item, ["\U0001f4dd Beschriftungen"])
-        text_item.setFlags(text_item.flags() | Qt.ItemIsUserCheckable)
+        text_item.setFlags((text_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         text_item.setCheckState(0, Qt.Checked)
 
         self._fp_sub_items[fp_id] = {
