@@ -47,23 +47,47 @@ class DragDropTreeWidget(QTreeWidget):
         self.items_dropped.emit()
 
 # ── Eingebaute Elektro-Symbole (DIN EN 60617) ─────────────────── #
-_SYMBOLS_DIR = Path(__file__).resolve().parent.parent / "assets" / "symbols"
 # Fallback für PyInstaller
 import sys as _sys
-if hasattr(_sys, '_MEIPASS'):
-    _SYMBOLS_DIR = Path(_sys._MEIPASS) / "assets" / "symbols"
 
-BUILTIN_SYMBOLS: dict[str, str] = {
-    "(kein Symbol)": "",
-    "Steckdose":        str(_SYMBOLS_DIR / "steckdose.svg"),
-    "Doppelsteckdose":  str(_SYMBOLS_DIR / "doppelsteckdose.svg"),
-    "Leuchte":          str(_SYMBOLS_DIR / "leuchte.svg"),
-    "Ausschalter":      str(_SYMBOLS_DIR / "ausschalter.svg"),
-    "Wechselschalter":  str(_SYMBOLS_DIR / "wechselschalter.svg"),
-    "Serienschalter":   str(_SYMBOLS_DIR / "serienschalter.svg"),
-    "Kreuzschalter":    str(_SYMBOLS_DIR / "kreuzschalter.svg"),
-    "Taster":           str(_SYMBOLS_DIR / "taster.svg"),
-}
+def _symbol_root() -> Path:
+    if hasattr(_sys, '_MEIPASS'):
+        return Path(_sys._MEIPASS)
+    return Path(__file__).resolve().parent.parent
+
+
+def _symbol_label_from_stem(stem: str) -> str:
+    text = stem.replace("_", " ").replace("-", " ").strip()
+    return text[:1].upper() + text[1:] if text else stem
+
+
+def _discover_builtin_symbols() -> dict[str, str]:
+    root = _symbol_root()
+    symbol_dirs = [root / "icons"]
+    allowed_suffixes = {".svg", ".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+
+    result: dict[str, str] = {"(kein Symbol)": ""}
+    used_labels: set[str] = set(result.keys())
+
+    for directory in symbol_dirs:
+        if not directory.is_dir():
+            continue
+        for file_path in sorted(directory.iterdir(), key=lambda p: p.name.lower()):
+            if not file_path.is_file() or file_path.suffix.lower() not in allowed_suffixes:
+                continue
+            base_label = _symbol_label_from_stem(file_path.stem)
+            label = base_label
+            idx = 2
+            while label in used_labels:
+                label = f"{base_label} ({idx})"
+                idx += 1
+            used_labels.add(label)
+            result[label] = str(file_path)
+
+    return result
+
+
+BUILTIN_SYMBOLS: dict[str, str] = _discover_builtin_symbols()
 
 
 # ================================================================== #
@@ -83,6 +107,7 @@ class HeatingCircuitPanel(QWidget):
     wall_dist_changed          = Signal(str)
     visibility_changed         = Signal(str, bool)
     label_size_changed         = Signal(str, float)
+    label_visibility_changed   = Signal(str, bool)
     hydraulics_param_changed   = Signal(str)
 
     def __init__(self, circuit_id: str, name: str | None = None,
@@ -107,6 +132,13 @@ class HeatingCircuitPanel(QWidget):
             lambda checked: self.visibility_changed.emit(self.circuit_id, checked)
         )
         form.addRow(self.chk_visible)
+
+        self.chk_label_visible = QCheckBox("Beschriftung")
+        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.toggled.connect(
+            lambda checked: self.label_visibility_changed.emit(self.circuit_id, checked)
+        )
+        form.addRow(self.chk_label_visible)
 
         self.le_name = QLineEdit(self._name)
         self.le_name.textChanged.connect(
@@ -261,6 +293,7 @@ class HeatingCircuitPanel(QWidget):
             "spacing":        self.sb_spacing.value() * 10,
             "wall_dist":      self.sb_wall_dist.value() * 10,
             "visible":        self.chk_visible.isChecked(),
+            "label_visible":  self.chk_label_visible.isChecked(),
             "label_size":     self.sb_label_size.value(),
             "room_temp":      self.sb_room_temp.value(),
             "floor_covering": self.cb_floor_covering.currentText(),
@@ -318,6 +351,7 @@ class HeatingCircuitPanel(QWidget):
         self.sb_spacing.setValue(d.get("spacing", 150.0) / 10)
         self.sb_wall_dist.setValue(d.get("wall_dist", 200.0) / 10)
         self.chk_visible.setChecked(d.get("visible", True))
+        self.chk_label_visible.setChecked(d.get("label_visible", True))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
         self.sb_room_temp.setValue(d.get("room_temp", 20.0))
         fc = d.get("floor_covering", "Fliesen / Keramik")
@@ -346,6 +380,7 @@ class ElektroPointPanel(QWidget):
     visibility_changed = Signal(str, bool)
     place_requested    = Signal(str)
     label_size_changed = Signal(str, float)
+    label_visibility_changed = Signal(str, bool)
     duplicate_requested = Signal(str)
     position_changed   = Signal(str, str)      # (point_id, position)
     height_changed     = Signal(str, float)    # (point_id, height_mm)
@@ -373,6 +408,13 @@ class ElektroPointPanel(QWidget):
             lambda c: self.visibility_changed.emit(self.point_id, c)
         )
         form.addRow(self.chk_visible)
+
+        self.chk_label_visible = QCheckBox("Beschriftung")
+        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.toggled.connect(
+            lambda c: self.label_visibility_changed.emit(self.point_id, c)
+        )
+        form.addRow(self.chk_label_visible)
 
         self.le_name = QLineEdit(self._name)
         self.le_name.textChanged.connect(
@@ -529,6 +571,7 @@ class ElektroPointPanel(QWidget):
             "icon_path": self._icon_path or "",
             "builtin_symbol": self.cmb_symbol.currentText(),
             "visible":   self.chk_visible.isChecked(),
+            "label_visible": self.chk_label_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
             "position":  position,
             "height_from_floor": self.sb_height_from_floor.value(),
@@ -547,6 +590,7 @@ class ElektroPointPanel(QWidget):
         self.sb_width.setValue(d.get("width", 30.0) / 10)
         self.sb_height.setValue(d.get("height", 30.0) / 10)
         self.chk_visible.setChecked(d.get("visible", True))
+        self.chk_label_visible.setChecked(d.get("label_visible", True))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
         
         # Position und Höhe vom Boden
@@ -590,6 +634,7 @@ class ElektroCablePanel(QWidget):
     edit_cable_requested = Signal(str)
     visibility_changed   = Signal(str, bool)
     label_size_changed   = Signal(str, float)
+    label_visibility_changed = Signal(str, bool)
     duplicate_requested  = Signal(str)
 
     def __init__(self, cable_id: str, name: str | None = None,
@@ -616,6 +661,13 @@ class ElektroCablePanel(QWidget):
             lambda c: self.visibility_changed.emit(self.cable_id, c)
         )
         form.addRow(self.chk_visible)
+
+        self.chk_label_visible = QCheckBox("Beschriftung")
+        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.toggled.connect(
+            lambda c: self.label_visibility_changed.emit(self.cable_id, c)
+        )
+        form.addRow(self.chk_label_visible)
 
         self.le_name = QLineEdit(self._name)
         self.le_name.textChanged.connect(
@@ -718,6 +770,7 @@ class ElektroCablePanel(QWidget):
             "type":    self.get_type_text().strip(),
             "comment": self.te_comment.toPlainText(),
             "visible": self.chk_visible.isChecked(),
+            "label_visible": self.chk_label_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
             "start_ap": self._start_ap,
             "end_ap":   self._end_ap,
@@ -763,6 +816,7 @@ class ElektroCablePanel(QWidget):
         self.set_type_text(d.get("type", self.DEFAULT_CABLE_TYPE))
         self.te_comment.setPlainText(d.get("comment", ""))
         self.chk_visible.setChecked(d.get("visible", True))
+        self.chk_label_visible.setChecked(d.get("label_visible", True))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
         self.set_start_ap(d.get("start_ap", ""))
         self.set_end_ap(d.get("end_ap", ""))
@@ -782,6 +836,7 @@ class HkvPanel(QWidget):
     visibility_changed = Signal(str, bool)
     place_requested    = Signal(str)
     label_size_changed = Signal(str, float)
+    label_visibility_changed = Signal(str, bool)
 
     def __init__(self, hkv_id: str, name: str | None = None,
                  color: str | None = None, parent=None):
@@ -805,6 +860,12 @@ class HkvPanel(QWidget):
         self.chk_visible.toggled.connect(
             lambda c: self.visibility_changed.emit(self.hkv_id, c))
         form.addRow(self.chk_visible)
+
+        self.chk_label_visible = QCheckBox("Beschriftung")
+        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.toggled.connect(
+            lambda c: self.label_visibility_changed.emit(self.hkv_id, c))
+        form.addRow(self.chk_label_visible)
 
         self.le_name = QLineEdit(self._name)
         self.le_name.textChanged.connect(
@@ -886,6 +947,7 @@ class HkvPanel(QWidget):
             "height":    self.sb_height.value() * 10,
             "icon_path": self._icon_path or "",
             "visible":   self.chk_visible.isChecked(),
+            "label_visible": self.chk_label_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
         }
 
@@ -902,6 +964,7 @@ class HkvPanel(QWidget):
         self.sb_width.setValue(d.get("width", 50.0) / 10)
         self.sb_height.setValue(d.get("height", 50.0) / 10)
         self.chk_visible.setChecked(d.get("visible", True))
+        self.chk_label_visible.setChecked(d.get("label_visible", True))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
         icon = d.get("icon_path", "")
         if icon:
@@ -922,6 +985,7 @@ class HkvLinePanel(QWidget):
     edit_line_requested   = Signal(str)
     visibility_changed    = Signal(str, bool)
     label_size_changed    = Signal(str, float)
+    label_visibility_changed = Signal(str, bool)
 
     def __init__(self, line_id: str, name: str | None = None,
                  color: str | None = None, parent=None):
@@ -946,6 +1010,12 @@ class HkvLinePanel(QWidget):
         self.chk_visible.toggled.connect(
             lambda c: self.visibility_changed.emit(self.line_id, c))
         form.addRow(self.chk_visible)
+
+        self.chk_label_visible = QCheckBox("Beschriftung")
+        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.toggled.connect(
+            lambda c: self.label_visibility_changed.emit(self.line_id, c))
+        form.addRow(self.chk_label_visible)
 
         self.le_name = QLineEdit(self._name)
         self.le_name.textChanged.connect(
@@ -1022,6 +1092,7 @@ class HkvLinePanel(QWidget):
             "color":     self._color.name(),
             "type":      self.le_type.text().strip() or "DN20",
             "visible":   self.chk_visible.isChecked(),
+            "label_visible": self.chk_label_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
             "start_hkv": self._start_hkv,
             "end_hkv":   self._end_hkv,
@@ -1039,6 +1110,7 @@ class HkvLinePanel(QWidget):
         self._update_color_button()
         self.le_type.setText(d.get("type", "DN20"))
         self.chk_visible.setChecked(d.get("visible", True))
+        self.chk_label_visible.setChecked(d.get("label_visible", True))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
         self.set_start_hkv(d.get("start_hkv", ""))
         self.set_end_hkv(d.get("end_hkv", ""))

@@ -145,6 +145,7 @@ def build_exe(version: str) -> Path:
         "--hidden-import", "logic.heating_calc",
         # Daten einbetten
         "--add-data", f"assets{';' if sys.platform == 'win32' else ':'}assets",
+        "--add-data", f"icons{';' if sys.platform == 'win32' else ':'}icons",
     ]
 
     # Icon (SVG kann nicht direkt als Windows-Icon, nur wenn .ico vorhanden)

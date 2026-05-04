@@ -213,6 +213,7 @@ class CanvasWidget(QWidget):
         # Labels (movable + resizable)
         self._label_positions:    Dict[str, QPointF]              = {}
         self._label_font_sizes:   Dict[str, float]                = {}
+        self._label_visible:      Dict[str, bool]                 = {}
         self._label_rects:        Dict[str, QRectF]               = {}  # hit testing (transient)
         self._label_draw_pos:     Dict[str, QPointF]              = {}  # transient
         self._dragging_label:     Optional[str]                   = None
@@ -877,12 +878,16 @@ class CanvasWidget(QWidget):
         self._label_font_sizes[item_id] = size
         self.update()
 
+    def set_label_visible(self, item_id: str, visible: bool):
+        self._label_visible[item_id] = bool(visible)
+        self.update()
+
     def delete_circuit(self, circuit_id: str):
         for d in (self._polygons, self._color_map, self._start_points,
                   self._label_map, self._helper_lines, self._show_helper_line,
                   self._manual_routes, self._route_wall_dist_px,
                   self._route_line_dist_px, self._supply_lines,
-                  self._label_positions, self._label_font_sizes,
+                  self._label_positions, self._label_font_sizes, self._label_visible,
                   self._label_rects, self._label_draw_pos):
             d.pop(circuit_id, None)
         self._manual_route_path_cache.pop(circuit_id, None)
@@ -1032,7 +1037,7 @@ class CanvasWidget(QWidget):
         for d in (self._elec_points, self._elec_point_size_px,
                   self._elec_point_icons, self._elec_visible,
                   self._elec_point_position, self._elec_point_height,
-                  self._label_positions, self._label_font_sizes,
+                  self._label_positions, self._label_font_sizes, self._label_visible,
                   self._label_rects, self._label_draw_pos):
             d.pop(point_id, None)
         self._color_map.pop(point_id, None)
@@ -1041,7 +1046,7 @@ class CanvasWidget(QWidget):
     def delete_elec_cable(self, cable_id: str):
         for d in (self._elec_cables, self._elec_visible,
                   self._cable_start_ap, self._cable_end_ap,
-                  self._label_positions, self._label_font_sizes,
+                  self._label_positions, self._label_font_sizes, self._label_visible,
                   self._label_rects, self._label_draw_pos):
             d.pop(cable_id, None)
         self._elec_cable_path_cache.pop(cable_id, None)
@@ -1062,7 +1067,11 @@ class CanvasWidget(QWidget):
             if not self._elec_visible.get(pid, True):
                 continue
             w, h = self._elec_point_size_px.get(pid, (30, 30))
-            rect = QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h)
+            min_pick_half = 8.0 / max(self._scale, 1e-9)
+            half_w = max(w / 2, min_pick_half)
+            half_h = max(h / 2, min_pick_half)
+            rect = QRectF(pos.x() - half_w, pos.y() - half_h,
+                          half_w * 2, half_h * 2)
             if rect.contains(canvas_pt):
                 return pid
         return None
@@ -1151,24 +1160,17 @@ class CanvasWidget(QWidget):
         Checks in this order: foreground objects first, floor plans last."""
         threshold = 10.0 / self._scale
 
-        # 1. Heating circuits polygons
-        for cid, poly in self._polygons.items():
-            if not self._circuit_visible.get(cid, True):
-                continue
-            if self._point_in_polygon(canvas_pt, poly):
-                return ("polygon", cid)
-
-        # 2. Electrical points
+        # 1. Electrical points (highest priority)
         ap = self._hit_elec_point(canvas_pt)
         if ap:
             return ("elec_point", ap)
 
-        # 3. HKV points
+        # 2. HKV points
         hkv = self._hit_hkv(canvas_pt)
         if hkv:
             return ("hkv", hkv)
 
-        # 4. Electrical cables
+        # 3. Electrical cables
         for kid, pts in self._elec_cables.items():
             if not self._elec_visible.get(kid, True):
                 continue
@@ -1178,7 +1180,7 @@ class CanvasWidget(QWidget):
                     if _qdist(canvas_pt, proj) < threshold:
                         return ("elec_cable", kid)
 
-        # 5. HKV lines
+        # 4. HKV lines
         for lid, pts in self._hkv_lines.items():
             if not self._hkv_line_visible.get(lid, True):
                 continue
@@ -1188,7 +1190,7 @@ class CanvasWidget(QWidget):
                     if _qdist(canvas_pt, proj) < threshold:
                         return ("hkv_line", lid)
 
-        # 6. Supply lines
+        # 5. Supply lines
         for cid, pts in self._supply_lines.items():
             if not self._circuit_visible.get(cid, True):
                 continue
@@ -1198,7 +1200,7 @@ class CanvasWidget(QWidget):
                     if _qdist(canvas_pt, proj) < threshold:
                         return ("supply_line", cid)
 
-        # 7. Routes (manual)
+        # 6. Routes (manual)
         for cid, pts in self._manual_routes.items():
             if not self._circuit_visible.get(cid, True):
                 continue
@@ -1207,6 +1209,13 @@ class CanvasWidget(QWidget):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
                         return ("route", cid)
+
+        # 7. Heating circuits polygons
+        for cid, poly in self._polygons.items():
+            if not self._circuit_visible.get(cid, True):
+                continue
+            if self._point_in_polygon(canvas_pt, poly):
+                return ("polygon", cid)
 
         # 8. Floor plan layers (check in reverse render order, front-to-back)
         # Keep this last so background layers don't shadow foreground objects.
@@ -1366,7 +1375,7 @@ class CanvasWidget(QWidget):
     def delete_hkv(self, hkv_id: str):
         for d in (self._hkv_points, self._hkv_size_px, self._hkv_icons,
                   self._hkv_svgs, self._hkv_visible,
-                  self._label_positions, self._label_font_sizes,
+                  self._label_positions, self._label_font_sizes, self._label_visible,
                   self._label_rects, self._label_draw_pos):
             d.pop(hkv_id, None)
         self._color_map.pop(hkv_id, None)
@@ -1440,7 +1449,7 @@ class CanvasWidget(QWidget):
     def delete_hkv_line(self, line_id: str):
         for d in (self._hkv_lines, self._hkv_line_start,
                   self._hkv_line_end, self._hkv_line_visible,
-                  self._label_positions, self._label_font_sizes,
+                  self._label_positions, self._label_font_sizes, self._label_visible,
                   self._label_rects, self._label_draw_pos):
             d.pop(line_id, None)
         self._hkv_line_path_cache.pop(line_id, None)
@@ -1632,7 +1641,9 @@ class CanvasWidget(QWidget):
         self._text_rects.clear()
         self._label_positions.clear()
         self._label_font_sizes.clear()
+        self._label_visible.clear()
         self._label_rects.clear()
+        self._label_draw_pos.clear()
         self._ref_p1 = None
         self._ref_p2 = None
         self.update()
@@ -1710,6 +1721,7 @@ class CanvasWidget(QWidget):
                 for k, p in self._label_positions.items()
             },
             "label_font_sizes": dict(self._label_font_sizes),
+            "label_visible": dict(self._label_visible),
             "text_annotations": {
                 tid: {
                     "pos": (p.x(), p.y()),
@@ -1856,6 +1868,9 @@ class CanvasWidget(QWidget):
         for k, pt in d.get("label_positions", {}).items():
             self._label_positions[k] = QPointF(pt[0], pt[1])
         self._label_font_sizes.update(d.get("label_font_sizes", {}))
+        self._label_visible = {
+            k: bool(v) for k, v in d.get("label_visible", {}).items()
+        }
         # Text annotations
         for tid, tdata in d.get("text_annotations", {}).items():
             pos = tdata.get("pos", (0, 0))
@@ -3043,6 +3058,7 @@ class CanvasWidget(QWidget):
         if event.button() == Qt.LeftButton:
             text_hit = self._hit_text_annotation(canvas_pt)
             if text_hit:
+                self.object_clicked.emit("text", text_hit)
                 self._dragging_text = text_hit
                 self.setCursor(Qt.ClosedHandCursor)
                 return
@@ -3051,11 +3067,12 @@ class CanvasWidget(QWidget):
         if event.button() == Qt.LeftButton:
             label_hit = self._hit_label(canvas_pt)
             if label_hit:
-                self._dragging_label = label_hit
+                self.object_clicked.emit("label", label_hit)
                 draw_pos = self._label_draw_pos.get(label_hit, canvas_pt)
                 self._label_drag_offset = QPointF(
                     canvas_pt.x() - draw_pos.x(),
                     canvas_pt.y() - draw_pos.y())
+                self._dragging_label = label_hit
                 self.setCursor(Qt.ClosedHandCursor)
                 return
 
@@ -3075,12 +3092,14 @@ class CanvasWidget(QWidget):
                 return
             elec_hit = self._hit_elec_point(canvas_pt)
             if elec_hit:
+                self.object_clicked.emit("elec_point", elec_hit)
                 self._dragging_elec_point = elec_hit
                 self._mode = ToolMode.MOVE_ELEC_POINT
                 self.setCursor(Qt.ClosedHandCursor)
                 return
             hkv_hit = self._hit_hkv(canvas_pt)
             if hkv_hit:
+                self.object_clicked.emit("hkv", hkv_hit)
                 self._dragging_hkv = hkv_hit
                 self._mode = ToolMode.MOVE_HKV
                 self.setCursor(Qt.ClosedHandCursor)
@@ -4012,6 +4031,8 @@ class CanvasWidget(QWidget):
         for cid, pts in self._polygons.items():
             if not self._circuit_visible.get(cid, True):
                 continue
+            if not self._label_visible.get(cid, True):
+                continue
             color = self._color_map.get(cid, QColor("blue"))
             text = self._label_map.get(cid, cid)
             default_pos = QPointF(
@@ -4021,6 +4042,8 @@ class CanvasWidget(QWidget):
         for pid in self._elec_points:
             if not self._elec_visible.get(pid, True):
                 continue
+            if not self._label_visible.get(pid, True):
+                continue
             pos = self._elec_points[pid]
             w, h = self._elec_point_size_px.get(pid, (30, 30))
             default_pos = QPointF(pos.x(), pos.y() + h / 2 + 14.0)
@@ -4029,6 +4052,8 @@ class CanvasWidget(QWidget):
                                   self._color_map.get(pid, QColor("#4fc3f7")))
         for kid, kpts in self._elec_cables.items():
             if not self._elec_visible.get(kid, True):
+                continue
+            if not self._label_visible.get(kid, True):
                 continue
             if len(kpts) < 2:
                 continue
@@ -4046,6 +4071,8 @@ class CanvasWidget(QWidget):
         for hid in self._hkv_points:
             if not self._hkv_visible.get(hid, True):
                 continue
+            if not self._label_visible.get(hid, True):
+                continue
             pos = self._hkv_points[hid]
             w, h = self._hkv_size_px.get(hid, (30, 30))
             default_pos = QPointF(pos.x(), pos.y() + h / 2 + 14.0)
@@ -4055,6 +4082,8 @@ class CanvasWidget(QWidget):
         # HKV line labels
         for lid, lpts in self._hkv_lines.items():
             if not self._hkv_line_visible.get(lid, True):
+                continue
+            if not self._label_visible.get(lid, True):
                 continue
             if len(lpts) < 2:
                 continue
@@ -4368,6 +4397,8 @@ class CanvasWidget(QWidget):
 
     def _draw_item_label(self, painter, item_id: str,
                           default_pos: QPointF, text: str, color: QColor):
+        if not self._label_visible.get(item_id, True):
+            return
         pos = self._label_positions.get(item_id, default_pos)
         size = self._label_font_sizes.get(item_id, 12.0)
         font = painter.font()

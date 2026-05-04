@@ -518,12 +518,14 @@ class MainWindow(QMainWindow):
             panel.wall_dist_changed.connect(self._on_wall_dist_changed)
             panel.visibility_changed.connect(self._on_visibility_changed)
             panel.label_size_changed.connect(self._on_label_size_changed)
+            panel.label_visibility_changed.connect(self._on_label_visibility_changed)
             panel.hydraulics_param_changed.connect(self._recalc_circuit_hydraulics)
             values = panel.get_parameters()
             self.canvas.set_polygon_name(cid, values["name"])
             self.canvas.set_color(cid, QColor(values["color"]))
             self.canvas._circuit_visible[cid] = values.get("visible", True)
             self.canvas.set_label_font_size(cid, values.get("label_size", 12.0))
+            self.canvas.set_label_visible(cid, values.get("label_visible", True))
             self._update_circuit_area(cid)
             route_mm = self.canvas.get_manual_route_length_px(cid) * self.canvas.get_mm_per_px()
             self.param_panel.set_circuit_length(cid, route_mm)
@@ -540,6 +542,7 @@ class MainWindow(QMainWindow):
             panel.color_changed.connect(self._on_elec_point_color_changed)
             panel.visibility_changed.connect(self._on_elec_visibility_changed)
             panel.label_size_changed.connect(self._on_label_size_changed)
+            panel.label_visibility_changed.connect(self._on_label_visibility_changed)
             panel.position_changed.connect(self._on_elec_point_position_changed)
             panel.height_changed.connect(self._on_elec_point_height_changed)
             values = panel.get_parameters()
@@ -548,6 +551,7 @@ class MainWindow(QMainWindow):
             self.canvas._elec_point_position[pid] = values.get("position", "Wand")
             self.canvas._elec_point_height[pid] = values.get("height_from_floor", 0.0)
             self.canvas.set_label_font_size(pid, values.get("label_size", 12.0))
+            self.canvas.set_label_visible(pid, values.get("label_visible", True))
             self.canvas.set_color(pid, QColor(values.get("color", "#4fc3f7")))
             if values.get("icon_path"):
                 self.canvas.set_elec_point_icon(pid, values["icon_path"])
@@ -559,10 +563,12 @@ class MainWindow(QMainWindow):
             panel.color_changed.connect(self._on_elec_cable_color_changed)
             panel.visibility_changed.connect(self._on_elec_visibility_changed)
             panel.label_size_changed.connect(self._on_label_size_changed)
+            panel.label_visibility_changed.connect(self._on_label_visibility_changed)
             values = panel.get_parameters()
             self.canvas._label_map[kid] = values.get("name", kid)
             self.canvas._elec_visible[kid] = values.get("visible", True)
             self.canvas.set_label_font_size(kid, values.get("label_size", 12.0))
+            self.canvas.set_label_visible(kid, values.get("label_visible", True))
             self.canvas.set_color(kid, QColor(values.get("color", "#ff9800")))
             length_px = self.canvas.get_elec_cable_length_px(kid)
             length_mm = length_px * self.canvas.get_mm_per_px()
@@ -577,10 +583,12 @@ class MainWindow(QMainWindow):
             panel.color_changed.connect(self._on_hkv_color_changed)
             panel.visibility_changed.connect(self._on_hkv_visibility_changed)
             panel.label_size_changed.connect(self._on_label_size_changed)
+            panel.label_visibility_changed.connect(self._on_label_visibility_changed)
             values = panel.get_parameters()
             self.canvas._label_map[hid] = values.get("name", hid)
             self.canvas._hkv_visible[hid] = values.get("visible", True)
             self.canvas.set_label_font_size(hid, values.get("label_size", 12.0))
+            self.canvas.set_label_visible(hid, values.get("label_visible", True))
             self.canvas.set_color(hid, QColor(values.get("color", "#e53935")))
             if values.get("icon_path"):
                 self.canvas.set_hkv_icon(hid, values["icon_path"])
@@ -592,10 +600,12 @@ class MainWindow(QMainWindow):
             panel.color_changed.connect(self._on_hkv_line_color_changed)
             panel.visibility_changed.connect(self._on_hkv_line_visibility_changed)
             panel.label_size_changed.connect(self._on_label_size_changed)
+            panel.label_visibility_changed.connect(self._on_label_visibility_changed)
             values = panel.get_parameters()
             self.canvas._label_map[lid] = values.get("name", lid)
             self.canvas._hkv_line_visible[lid] = values.get("visible", True)
             self.canvas.set_label_font_size(lid, values.get("label_size", 12.0))
+            self.canvas.set_label_visible(lid, values.get("label_visible", True))
             self.canvas.set_color(lid, QColor(values.get("color", "#e53935")))
             length_px = self.canvas.get_hkv_line_length_px(lid)
             length_mm = length_px * self.canvas.get_mm_per_px()
@@ -1194,6 +1204,7 @@ class MainWindow(QMainWindow):
         panel.wall_dist_changed.connect(self._on_wall_dist_changed)
         panel.visibility_changed.connect(self._on_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
+        panel.label_visibility_changed.connect(self._on_label_visibility_changed)
         panel.hydraulics_param_changed.connect(self._recalc_circuit_hydraulics)
         return panel
 
@@ -1364,6 +1375,9 @@ class MainWindow(QMainWindow):
     def _on_label_size_changed(self, item_id: str, size: float):
         self.canvas.set_label_font_size(item_id, size)
 
+    def _on_label_visibility_changed(self, item_id: str, visible: bool):
+        self.canvas.set_label_visible(item_id, visible)
+
     def _compute_polygon_area_mm2(self, circuit_id: str) -> float | None:
         px_points = self.canvas.get_polygon_px(circuit_id)
         if len(px_points) < 3:
@@ -1464,6 +1478,7 @@ class MainWindow(QMainWindow):
         panel.color_changed.connect(self._on_elec_point_color_changed)
         panel.visibility_changed.connect(self._on_elec_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
+        panel.label_visibility_changed.connect(self._on_label_visibility_changed)
         panel.position_changed.connect(self._on_elec_point_position_changed)
         panel.height_changed.connect(self._on_elec_point_height_changed)
         return panel
@@ -1535,6 +1550,7 @@ class MainWindow(QMainWindow):
         panel.color_changed.connect(self._on_elec_cable_color_changed)
         panel.visibility_changed.connect(self._on_elec_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
+        panel.label_visibility_changed.connect(self._on_label_visibility_changed)
         return panel
 
     def _on_draw_elec_cable(self, cable_id: str):
@@ -1842,6 +1858,7 @@ class MainWindow(QMainWindow):
         self.canvas._ensure_color(new_id)
         self.canvas.set_color(new_id, QColor(c))
         self.canvas.set_label_font_size(new_id, src.get("label_size", 12.0))
+        self.canvas.set_label_visible(new_id, src.get("label_visible", True))
         if source_id in self.canvas._elec_points:
             p = self.canvas._elec_points[source_id]
             self.canvas._elec_points[new_id] = QPointF(p.x() + 20, p.y() + 20)
@@ -1867,6 +1884,7 @@ class MainWindow(QMainWindow):
         self.canvas._ensure_color(new_id)
         self.canvas.set_color(new_id, QColor(c))
         self.canvas.set_label_font_size(new_id, src.get("label_size", 12.0))
+        self.canvas.set_label_visible(new_id, src.get("label_visible", True))
         if source_id in self.canvas._elec_cables:
             self.canvas._elec_cables[new_id] = [QPointF(p.x() + 20, p.y() + 20)
                                                 for p in self.canvas._elec_cables[source_id]]
@@ -1897,6 +1915,7 @@ class MainWindow(QMainWindow):
         panel.color_changed.connect(self._on_hkv_color_changed)
         panel.visibility_changed.connect(self._on_hkv_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
+        panel.label_visibility_changed.connect(self._on_label_visibility_changed)
         return panel
 
     def _on_place_hkv(self, hkv_id: str):
@@ -1959,6 +1978,7 @@ class MainWindow(QMainWindow):
         panel.color_changed.connect(self._on_hkv_line_color_changed)
         panel.visibility_changed.connect(self._on_hkv_line_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
+        panel.label_visibility_changed.connect(self._on_label_visibility_changed)
         return panel
 
     def _on_draw_hkv_line(self, line_id: str):
@@ -2133,6 +2153,69 @@ class MainWindow(QMainWindow):
         if p.is_absolute():
             return str(p)
         return str((project_dir / p).resolve())
+
+    @staticmethod
+    def _normalize_symbol_key(text: str) -> str:
+        return (text or "").strip().lower().replace("_", " ").replace("-", " ")
+
+    def _migrate_legacy_ap_icon(self, ap_data: dict):
+        """Migrate legacy AP icon fields to current builtin icons.
+
+        Strategy:
+        - Try matching by builtin symbol name.
+        - If not possible, try matching by icon filename stem.
+        - If still not possible and icon file is missing, clear icon assignment.
+        """
+        from gui.parameter_panel import BUILTIN_SYMBOLS
+
+        builtin_symbol = str(ap_data.get("builtin_symbol", "") or "").strip()
+        icon_path = str(ap_data.get("icon_path", "") or "").strip()
+
+        available_labels = [k for k in BUILTIN_SYMBOLS.keys() if k != "(kein Symbol)"]
+        label_by_norm = {
+            self._normalize_symbol_key(label): label
+            for label in available_labels
+        }
+
+        stem_by_norm: dict[str, str] = {}
+        for label in available_labels:
+            builtin_path = BUILTIN_SYMBOLS.get(label, "")
+            if not builtin_path:
+                continue
+            stem_norm = self._normalize_symbol_key(Path(builtin_path).stem)
+            if stem_norm and stem_norm not in stem_by_norm:
+                stem_by_norm[stem_norm] = label
+
+        match_label = ""
+
+        norm_builtin = self._normalize_symbol_key(builtin_symbol)
+        if norm_builtin in label_by_norm:
+            match_label = label_by_norm[norm_builtin]
+        elif norm_builtin in stem_by_norm:
+            match_label = stem_by_norm[norm_builtin]
+
+        if not match_label and icon_path:
+            icon_name_norm = self._normalize_symbol_key(Path(icon_path).name)
+            icon_stem_norm = self._normalize_symbol_key(Path(icon_path).stem)
+            for key in (icon_name_norm, icon_stem_norm):
+                if key in label_by_norm:
+                    match_label = label_by_norm[key]
+                    break
+                if key in stem_by_norm:
+                    match_label = stem_by_norm[key]
+                    break
+
+        if match_label:
+            ap_data["builtin_symbol"] = match_label
+            ap_data["icon_path"] = BUILTIN_SYMBOLS.get(match_label, "")
+            return
+
+        if icon_path and Path(icon_path).exists():
+            ap_data["builtin_symbol"] = "(kein Symbol)"
+            return
+
+        ap_data["builtin_symbol"] = "(kein Symbol)"
+        ap_data["icon_path"] = ""
 
     def _copy_to_images_folder(self, abs_path: str, project_dir: Path) -> str:
         """Copy *abs_path* into <project_dir>/images/ and return the
@@ -2406,6 +2489,7 @@ class MainWindow(QMainWindow):
                 rel_icon = pdata.get("icon_path", "")
                 if rel_icon:
                     pdata["icon_path"] = self._to_absolute(rel_icon, project_dir)
+                self._migrate_legacy_ap_icon(pdata)
 
             for hid, hdata in params.get("hkv_points", {}).items():
                 rel_icon = hdata.get("icon_path", "")
@@ -2478,12 +2562,14 @@ class MainWindow(QMainWindow):
                 panel.wall_dist_changed.connect(self._on_wall_dist_changed)
                 panel.visibility_changed.connect(self._on_visibility_changed)
                 panel.label_size_changed.connect(self._on_label_size_changed)
+                panel.label_visibility_changed.connect(self._on_label_visibility_changed)
                 panel.hydraulics_param_changed.connect(self._recalc_circuit_hydraulics)
                 values = panel.get_parameters()
                 self.canvas.set_polygon_name(cid, values["name"])
                 self.canvas.set_color(cid, QColor(values["color"]))
                 self.canvas._circuit_visible[cid] = values.get("visible", True)
                 self.canvas.set_label_font_size(cid, values.get("label_size", 12.0))
+                self.canvas.set_label_visible(cid, values.get("label_visible", True))
                 self._update_circuit_area(cid)
                 # Update lengths
                 route_mm = self.canvas.get_manual_route_length_px(cid) * self.canvas.get_mm_per_px()
@@ -2507,6 +2593,7 @@ class MainWindow(QMainWindow):
                 panel.color_changed.connect(self._on_elec_point_color_changed)
                 panel.visibility_changed.connect(self._on_elec_visibility_changed)
                 panel.label_size_changed.connect(self._on_label_size_changed)
+                panel.label_visibility_changed.connect(self._on_label_visibility_changed)
                 panel.position_changed.connect(self._on_elec_point_position_changed)
                 panel.height_changed.connect(self._on_elec_point_height_changed)
                 values = panel.get_parameters()
@@ -2515,6 +2602,7 @@ class MainWindow(QMainWindow):
                 self.canvas._elec_point_position[pid] = values.get("position", "Wand")
                 self.canvas._elec_point_height[pid] = values.get("height_from_floor", 0.0)
                 self.canvas.set_label_font_size(pid, values.get("label_size", 12.0))
+                self.canvas.set_label_visible(pid, values.get("label_visible", True))
                 self.canvas.set_color(pid, QColor(values.get("color", "#4fc3f7")))
                 if values.get("icon_path"):
                     self.canvas.set_elec_point_icon(pid, values["icon_path"])
@@ -2531,10 +2619,12 @@ class MainWindow(QMainWindow):
                 panel.color_changed.connect(self._on_elec_cable_color_changed)
                 panel.visibility_changed.connect(self._on_elec_visibility_changed)
                 panel.label_size_changed.connect(self._on_label_size_changed)
+                panel.label_visibility_changed.connect(self._on_label_visibility_changed)
                 values = panel.get_parameters()
                 self.canvas._label_map[kid] = values.get("name", kid)
                 self.canvas._elec_visible[kid] = values.get("visible", True)
                 self.canvas.set_label_font_size(kid, values.get("label_size", 12.0))
+                self.canvas.set_label_visible(kid, values.get("label_visible", True))
                 self.canvas.set_color(kid, QColor(values.get("color", "#ff9800")))
                 # Update cable length + AP labels
                 length_px = self.canvas.get_elec_cable_length_px(kid)
@@ -2556,10 +2646,12 @@ class MainWindow(QMainWindow):
                 panel.color_changed.connect(self._on_hkv_color_changed)
                 panel.visibility_changed.connect(self._on_hkv_visibility_changed)
                 panel.label_size_changed.connect(self._on_label_size_changed)
+                panel.label_visibility_changed.connect(self._on_label_visibility_changed)
                 values = panel.get_parameters()
                 self.canvas._label_map[hid] = values.get("name", hid)
                 self.canvas._hkv_visible[hid] = values.get("visible", True)
                 self.canvas.set_label_font_size(hid, values.get("label_size", 12.0))
+                self.canvas.set_label_visible(hid, values.get("label_visible", True))
                 self.canvas.set_color(hid, QColor(values.get("color", "#e53935")))
                 if values.get("icon_path"):
                     self.canvas.set_hkv_icon(hid, values["icon_path"])
@@ -2577,10 +2669,12 @@ class MainWindow(QMainWindow):
                 panel.color_changed.connect(self._on_hkv_line_color_changed)
                 panel.visibility_changed.connect(self._on_hkv_line_visibility_changed)
                 panel.label_size_changed.connect(self._on_label_size_changed)
+                panel.label_visibility_changed.connect(self._on_label_visibility_changed)
                 values = panel.get_parameters()
                 self.canvas._label_map[lid] = values.get("name", lid)
                 self.canvas._hkv_line_visible[lid] = values.get("visible", True)
                 self.canvas.set_label_font_size(lid, values.get("label_size", 12.0))
+                self.canvas.set_label_visible(lid, values.get("label_visible", True))
                 self.canvas.set_color(lid, QColor(values.get("color", "#e53935")))
                 # Update length + HKV labels
                 length_px = self.canvas.get_hkv_line_length_px(lid)
@@ -2799,6 +2893,8 @@ class MainWindow(QMainWindow):
             for cid in self.canvas._polygons:
                 if not self.canvas._circuit_visible.get(cid, True):
                     continue
+                if not self.canvas._label_visible.get(cid, True):
+                    continue
                 label = self.canvas._label_map.get(cid, cid)
                 pts = self.canvas._polygons.get(cid, [])
                 if len(pts) < 3:
@@ -2833,6 +2929,8 @@ class MainWindow(QMainWindow):
                     painter.setBrush(QBrush(fill))
                     painter.setPen(QPen(color, 2.0))
                     painter.drawRoundedRect(QRectF(x, y, w, h), 4.0, 4.0)
+                if not self.canvas._label_visible.get(hid, True):
+                    continue
                 label = self.canvas._label_map.get(hid, hid)
                 font_size = self.canvas._label_font_sizes.get(hid, 10.0)
                 painter.setFont(_svg_font(font_size))
@@ -2866,6 +2964,8 @@ class MainWindow(QMainWindow):
                 if line1 and line2:
                     painter.drawLine(line1[-1], line2[-1])
                     painter.drawLine(line1[0], line2[0])
+                if not self.canvas._label_visible.get(lid, True):
+                    continue
                 label = self.canvas._label_map.get(lid, lid)
                 if len(pts) >= 2:
                     mi = len(pts) // 2
@@ -2902,6 +3002,9 @@ class MainWindow(QMainWindow):
                     painter.setPen(QPen(color, 2.0))
                     painter.drawRect(QRectF(x, y, ew, eh))
 
+                if not self.canvas._label_visible.get(pid, True):
+                    continue
+
                 label = self.canvas._label_map.get(pid, pid)
                 font_size = self.canvas._label_font_sizes.get(pid, 10.0)
                 painter.setFont(_svg_font(font_size))
@@ -2925,6 +3028,9 @@ class MainWindow(QMainWindow):
                                     Qt.RoundCap, Qt.RoundJoin))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawPath(qpath)
+
+                if not self.canvas._label_visible.get(kid, True):
+                    continue
 
                 label = self.canvas._label_map.get(kid, kid)
                 if len(pts) >= 2:
@@ -3166,6 +3272,23 @@ class MainWindow(QMainWindow):
     #  Längen-Export                                                       #
     # ------------------------------------------------------------------ #
 
+    def _collect_ap_type_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
+        for panel in self.param_panel.elec_point_panels.values():
+            params = panel.get_parameters()
+            symbol = (params.get("builtin_symbol") or "").strip()
+            icon_path = (params.get("icon_path") or "").strip()
+
+            if symbol and symbol != "(kein Symbol)":
+                type_name = symbol
+            elif icon_path:
+                type_name = Path(icon_path).stem.replace("_", " ").replace("-", " ").strip() or "Eigenes Symbol"
+            else:
+                type_name = "(kein Symbol)"
+
+            counts[type_name] += 1
+        return dict(sorted(counts.items(), key=lambda kv: kv[0].lower()))
+
     def _export_lengths(self):
         """Show a dialog with length tables, hydraulic overview and optional CSV export."""
         scale = self.canvas.get_mm_per_px()
@@ -3288,6 +3411,7 @@ class MainWindow(QMainWindow):
 
         # AP → Kabel Zuordnung
         ap_cables = self._build_ap_cable_map(kv_rows)
+        ap_type_counts = self._collect_ap_type_counts()
 
         # ── HKV-Leitungen sammeln ──
         hl_rows: list[dict] = []
@@ -3509,6 +3633,20 @@ class MainWindow(QMainWindow):
             tbl_kv_sum.setItem(i, 1, item)
         kv_layout.addWidget(tbl_kv_sum)
 
+        if ap_type_counts:
+            kv_layout.addWidget(QLabel("<b>Anschlusspunkte – Anzahl pro Typ</b>"))
+            sorted_ap_types = sorted(ap_type_counts.keys())
+            tbl_ap_types = QTableWidget(len(sorted_ap_types), 2)
+            tbl_ap_types.setHorizontalHeaderLabels(["Typ", "Anzahl"])
+            tbl_ap_types.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            tbl_ap_types.setEditTriggers(QTableWidget.NoEditTriggers)
+            for i, t in enumerate(sorted_ap_types):
+                tbl_ap_types.setItem(i, 0, QTableWidgetItem(t))
+                item = QTableWidgetItem(str(ap_type_counts[t]))
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                tbl_ap_types.setItem(i, 1, item)
+            kv_layout.addWidget(tbl_ap_types)
+
         # AP-Anschlüsse
         if ap_cables:
             kv_layout.addWidget(QLabel(
@@ -3539,7 +3677,8 @@ class MainWindow(QMainWindow):
         btn_csv = QPushButton("💾 Als CSV exportieren")
         btn_csv.clicked.connect(
             lambda: self._save_lengths_csv(hk_rows, hk_sum, kv_rows, kv_sum,
-                                           hkv_sum, ap_cables, hl_rows, hl_sum)
+                                           hkv_sum, ap_cables, hl_rows, hl_sum,
+                                           ap_type_counts)
         )
         btn_box.addButton(btn_csv, QDialogButtonBox.ActionRole)
         btn_box.addButton(QDialogButtonBox.Close)
@@ -3549,7 +3688,8 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _save_lengths_csv(self, hk_rows, hk_sum, kv_rows, kv_sum, hkv_sum,
-                           ap_cables=None, hl_rows=None, hl_sum=None):
+                           ap_cables=None, hl_rows=None, hl_sum=None,
+                           ap_type_counts=None):
         path, _ = QFileDialog.getSaveFileName(
             self, "Längen als CSV speichern", "laengen.csv",
             "CSV (*.csv)")
@@ -3656,6 +3796,14 @@ class MainWindow(QMainWindow):
                         ap_name, c["cable"], c["type"], c["role"],
                         f"{c['length_m']:.2f}",
                     ]))
+            lines.append("")
+
+        # AP-Typen
+        if ap_type_counts:
+            lines.append("Elektro - Anschlusspunkte je Typ")
+            lines.append(sep.join(["Typ", "Anzahl"]))
+            for type_name in sorted(ap_type_counts.keys()):
+                lines.append(sep.join([type_name, str(ap_type_counts[type_name])]))
             lines.append("")
 
         # HKV-Leitungen
@@ -3784,6 +3932,7 @@ class MainWindow(QMainWindow):
             kv_sum[r["type"]] += r["length_m"]
 
         ap_cables = self._build_ap_cable_map(kv_rows)
+        ap_type_counts = self._collect_ap_type_counts()
 
         # ── HKV-Leitungen sammeln ──
         hl_rows: list[dict] = []
@@ -3814,6 +3963,7 @@ class MainWindow(QMainWindow):
             "hk_rows": hk_rows, "hkv_sum": hkv_sum,
             "kv_rows": kv_rows, "kv_sum": kv_sum,
             "ap_cables": ap_cables,
+            "ap_type_counts": ap_type_counts,
             "hl_rows": hl_rows, "hl_sum": hl_sum,
         }
 
@@ -4070,6 +4220,7 @@ class MainWindow(QMainWindow):
 
         # Lower half: table
         table_y = plan_top + plan_h + ctx.mm(4)
+        y_after = table_y
 
         if data["kv_rows"]:
             ctx.painter.save()
@@ -4105,10 +4256,24 @@ class MainWindow(QMainWindow):
                       for t in sorted(kv_sum.keys())]
                 y_after = ctx.draw_table(page, y_after, h2, r2)
 
+        ap_type_counts = data.get("ap_type_counts", {})
+        if ap_type_counts:
+            y_after += ctx.mm(4)
+            ctx.painter.save()
+            ctx.painter.setFont(QFont("Arial", 9, QFont.Bold))
+            ctx.painter.drawText(
+                int(page.x()), int(y_after + ctx.mm(3)),
+                "Anschlusspunkte je Typ:")
+            ctx.painter.restore()
+            y_after += ctx.mm(5)
+            h_types = ["Typ", "Anzahl"]
+            r_types = [[t, str(ap_type_counts[t])] for t in sorted(ap_type_counts.keys())]
+            y_after = ctx.draw_table(page, y_after, h_types, r_types)
+
         # AP connection summary
         ap_cables = data.get("ap_cables", {})
         if ap_cables:
-            y_after = (y_after or table_y) + ctx.mm(4)
+            y_after += ctx.mm(4)
             ctx.painter.save()
             ctx.painter.setFont(QFont("Arial", 9, QFont.Bold))
             ctx.painter.drawText(
