@@ -580,9 +580,12 @@ class ElektroPointPanel(QWidget):
 # ================================================================== #
 
 class ElektroCablePanel(QWidget):
+    DEFAULT_CABLE_TYPE = "5x1,5"
+
     delete_requested     = Signal(str)
     name_changed         = Signal(str, str)
     color_changed        = Signal(str, str)
+    type_changed         = Signal(str, str)
     draw_cable_requested = Signal(str)
     edit_cable_requested = Signal(str)
     visibility_changed   = Signal(str, bool)
@@ -625,8 +628,14 @@ class ElektroCablePanel(QWidget):
         self._update_color_button()
         form.addRow("Farbe:", self.btn_color)
 
-        self.le_type = QLineEdit("5x1,5")
-        form.addRow("Typ:", self.le_type)
+        self.cmb_type = SafeComboBox()
+        self.cmb_type.setEditable(True)
+        self.cmb_type.addItem(self.DEFAULT_CABLE_TYPE)
+        self.cmb_type.setCurrentText(self.DEFAULT_CABLE_TYPE)
+        self.cmb_type.editTextChanged.connect(
+            lambda value: self.type_changed.emit(self.cable_id, value)
+        )
+        form.addRow("Typ:", self.cmb_type)
 
         self.te_comment = QTextEdit()
         self.te_comment.setMaximumHeight(50)
@@ -706,13 +715,40 @@ class ElektroCablePanel(QWidget):
         return {
             "name":    self.le_name.text().strip() or self.cable_id,
             "color":   self._color.name(),
-            "type":    self.le_type.text().strip(),
+            "type":    self.get_type_text().strip(),
             "comment": self.te_comment.toPlainText(),
             "visible": self.chk_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
             "start_ap": self._start_ap,
             "end_ap":   self._end_ap,
         }
+
+    def get_type_text(self) -> str:
+        return self.cmb_type.currentText()
+
+    def set_type_text(self, cable_type: str):
+        value = (cable_type or "").strip() or self.DEFAULT_CABLE_TYPE
+        self.cmb_type.setCurrentText(value)
+
+    def set_type_choices(self, choices: list[str]):
+        current = self.get_type_text().strip() or self.DEFAULT_CABLE_TYPE
+        merged: list[str] = []
+
+        for choice in choices:
+            text = (choice or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+
+        if current not in merged:
+            merged.append(current)
+        if self.DEFAULT_CABLE_TYPE not in merged:
+            merged.insert(0, self.DEFAULT_CABLE_TYPE)
+
+        self.cmb_type.blockSignals(True)
+        self.cmb_type.clear()
+        self.cmb_type.addItems(merged)
+        self.cmb_type.setCurrentText(current)
+        self.cmb_type.blockSignals(False)
 
     def to_dict(self) -> dict:
         d = self.get_parameters()
@@ -724,7 +760,7 @@ class ElektroCablePanel(QWidget):
         c = d.get("color", self._color.name())
         self._color = QColor(c)
         self._update_color_button()
-        self.le_type.setText(d.get("type", "5x1,5"))
+        self.set_type_text(d.get("type", self.DEFAULT_CABLE_TYPE))
         self.te_comment.setPlainText(d.get("comment", ""))
         self.chk_visible.setChecked(d.get("visible", True))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
@@ -2436,6 +2472,7 @@ class ParameterPanel(QWidget):
         panel.delete_requested.connect(self.delete_elec_cable_requested)
         panel.duplicate_requested.connect(self.duplicate_elec_cable_requested)
         panel.name_changed.connect(self._update_tree_item_name)
+        panel.type_changed.connect(self._on_elec_cable_type_changed)
         panel.visibility_changed.connect(
             lambda cid, c: self._sync_tree_checkbox(cid, c)
         )
@@ -2447,6 +2484,7 @@ class ParameterPanel(QWidget):
         parent_item = self._fp_sub_items.get(resolved or "", {}).get("kv") if resolved else None
         if parent_item:
             self._add_tree_item(parent_item, cable_id, name or cable_id)
+        self.update_all_elec_cable_type_choices()
         return panel
 
     def remove_elec_cable_panel(self, cable_id: str):
@@ -2456,7 +2494,28 @@ class ParameterPanel(QWidget):
         if panel:
             self._prop_layout.removeWidget(panel)
             panel.deleteLater()
+        self.update_all_elec_cable_type_choices()
         self._show_placeholder_if_empty()
+
+    def _on_elec_cable_type_changed(self, cable_id: str, value: str):
+        if self._loading:
+            return
+        self.update_all_elec_cable_type_choices()
+
+    def _collect_elec_cable_types(self) -> list[str]:
+        cable_types: list[str] = []
+        for panel in self.elec_cable_panels.values():
+            text = panel.get_type_text().strip()
+            if text and text not in cable_types:
+                cable_types.append(text)
+        if ElektroCablePanel.DEFAULT_CABLE_TYPE not in cable_types:
+            cable_types.insert(0, ElektroCablePanel.DEFAULT_CABLE_TYPE)
+        return cable_types
+
+    def update_all_elec_cable_type_choices(self):
+        choices = self._collect_elec_cable_types()
+        for panel in self.elec_cable_panels.values():
+            panel.set_type_choices(choices)
 
     def set_cable_length(self, cable_id: str, length_mm: float):
         if cable_id in self.elec_cable_panels:
@@ -2720,6 +2779,7 @@ class ParameterPanel(QWidget):
                 color=values.get("color", "#ff9800"),
             )
             panel.from_dict(values)
+        self.update_all_elec_cable_type_choices()
         for lid, values in d.get("hkv_lines", {}).items():
             panel = self.add_hkv_line_panel(
                 lid, fp_id=values.get("floor_plan_id"),

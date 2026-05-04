@@ -1,11 +1,20 @@
 """
 Build-Script für HRouting
 =========================
-Inkrementiert automatisch die Patch-Version in main.py,
-baut dann mit PyInstaller eine einzelne .exe mit Versionssuffix.
+Automatisierter Build-Prozess:
+  1. Version in main.py inkrementieren (oder manuell setzen)
+  2. Splash Screen neu generieren
+  3. PyInstaller → einzelne .exe kompilieren
+  4. Wiki → PDF konvertieren
+        5. WiX Toolset Installer bauen (WiX v7/v4 oder v3)
 
 Aufruf:
     python build.py
+
+Output:
+    dist/HRouting_x.y.z.exe         (Standalone-EXE)
+    dist/HRouting_x.y.z_Wiki.pdf    (Dokumentation)
+    dist/setup_HRouting_x.y.z.msi   (WiX Installer)
 """
 
 import re
@@ -347,7 +356,152 @@ def build_wiki_pdf(version: str) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Dateiassoziation .hrp registrieren (optional)
+# 5. WiX Toolset Installer bauen
+# ---------------------------------------------------------------------------
+def build_installer(version: str, exe_path: Path) -> Path | None:
+    """
+    Build a WiX Toolset MSI installer around the PyInstaller EXE.
+
+    Unterstützt WiX v7/v4 (wix build) und WiX v3 (candle/light).
+    """
+    wxs_script = ROOT / "HRouting.wxs"
+    if not wxs_script.exists():
+        print(f"\nFEHLER: {wxs_script} nicht gefunden!")
+        return None
+
+    if not exe_path.exists():
+        print(f"\nFEHLER: PyInstaller EXE nicht gefunden: {exe_path}")
+        return None
+
+    wiki_pdf = DIST / f"HRouting_{version}_Wiki.pdf"
+    include_wiki = "1" if wiki_pdf.exists() else "0"
+    installer_path = DIST / f"setup_HRouting_{version}.msi"
+
+    print(f"\n{'='*60}")
+    print("Baue Windows Installer (WiX Toolset) …")
+    print(f"  Version: {version}")
+    print(f"  Quelle: {exe_path.name}")
+    print(f"  Wiki-PDF: {'ja' if include_wiki == '1' else 'nein'}")
+    print(f"{'='*60}\n")
+
+    wix_v4_cmd = [
+        "wix",
+        "build",
+        "-nologo",
+        "-arch", "x64",
+        "-d", f"Version={version}",
+        "-d", f"ExeName={exe_path.name}",
+        "-d", f"WikiPdfName={wiki_pdf.name}",
+        "-d", f"IncludeWiki={include_wiki}",
+        "-o", str(installer_path),
+        str(wxs_script),
+    ]
+
+    used_tool = None
+    result = None
+    wix_requires_eula = False
+    wix_build_cmd = list(wix_v4_cmd)
+
+    try:
+        probe = subprocess.run(
+            ["wix", "--version"],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        if probe.returncode == 0:
+            version_text = (probe.stdout or probe.stderr or "").strip()
+            m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", version_text)
+            if m and int(m.group(1)) >= 7:
+                wix_requires_eula = True
+                wix_build_cmd += ["-acceptEula", "wix7"]
+
+            used_tool = "WiX v7" if wix_requires_eula else "WiX v4"
+            result = subprocess.run(wix_build_cmd, cwd=str(ROOT))
+
+            if result.returncode != 0 and wix_requires_eula:
+                accept_result = subprocess.run(
+                    ["wix", "eula", "accept", "wix7"],
+                    cwd=str(ROOT),
+                )
+                if accept_result.returncode == 0:
+                    print("Hinweis: WiX v7 EULA wurde akzeptiert – starte Build erneut …")
+                    result = subprocess.run(wix_build_cmd, cwd=str(ROOT))
+    except FileNotFoundError:
+        pass
+
+    if used_tool is None:
+        try:
+            candle_probe = subprocess.run(
+                ["candle", "-?"],
+                capture_output=True,
+                text=True,
+                cwd=str(ROOT),
+            )
+            light_probe = subprocess.run(
+                ["light", "-?"],
+                capture_output=True,
+                text=True,
+                cwd=str(ROOT),
+            )
+
+            if candle_probe.returncode == 0 and light_probe.returncode == 0:
+                used_tool = "WiX v3"
+                wixobj = DIST / f"HRouting_{version}.wixobj"
+                candle_cmd = [
+                    "candle",
+                    "-nologo",
+                    "-arch", "x64",
+                    f"-dVersion={version}",
+                    f"-dExeName={exe_path.name}",
+                    f"-dWikiPdfName={wiki_pdf.name}",
+                    f"-dIncludeWiki={include_wiki}",
+                    "-out", str(wixobj),
+                    str(wxs_script),
+                ]
+                candle_result = subprocess.run(candle_cmd, cwd=str(ROOT))
+                if candle_result.returncode != 0:
+                    print(f"\nFEHLER: candle beendet mit Code {candle_result.returncode}")
+                    return None
+
+                light_cmd = [
+                    "light",
+                    "-nologo",
+                    "-sice:ICE61",
+                    "-out", str(installer_path),
+                    str(wixobj),
+                ]
+                result = subprocess.run(light_cmd, cwd=str(ROOT))
+                if wixobj.exists():
+                    wixobj.unlink()
+        except FileNotFoundError:
+            pass
+
+    if used_tool is None or result is None:
+        print("\n⚠️  WARNUNG: WiX Toolset nicht gefunden.")
+        print("   Installer wird NICHT erstellt.")
+        print("\n   Bitte installieren Sie WiX Toolset:")
+        print("   - WiX v4: https://wixtoolset.org/releases/")
+        print("   - oder WiX v3: https://github.com/wixtoolset/wix3/releases")
+        return None
+
+    if result.returncode != 0:
+        print(f"\nFEHLER: {used_tool} Build fehlgeschlagen mit Code {result.returncode}")
+        return None
+
+    if installer_path.exists():
+        size_mb = installer_path.stat().st_size / (1024 * 1024)
+        print(f"\n✓ Installer fertig: {installer_path}")
+        print(f"  Tool: {used_tool}")
+        print(f"  Größe: {size_mb:.1f} MB")
+        return installer_path
+
+    print(f"\nWARNUNG: Installer {installer_path} nicht gefunden!")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 6. Dateiassoziation .hrp registrieren (optional)
 # ---------------------------------------------------------------------------
 def register_filetype(exe_path: Path):
     """Register .hrp file association with the built EXE."""
@@ -373,4 +527,8 @@ if __name__ == "__main__":
     regenerate_splash()
     exe = build_exe(ver)
     build_wiki_pdf(ver)
-    register_filetype(exe)
+    installer_result = build_installer(ver, exe)
+    
+    # Only register filetype for the PyInstaller EXE, not the installer
+    # (The installer handles file association via Registry integration)
+    # register_filetype(exe)

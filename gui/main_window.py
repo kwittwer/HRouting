@@ -1858,7 +1858,7 @@ class MainWindow(QMainWindow):
         self._elec_cable_counter += 1
         new_id = f"KV-{self._elec_cable_counter}"
         panel = self._create_elec_cable_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
-        panel.le_type.setText(src.get("type", "5x1,5"))
+        panel.set_type_text(src.get("type", "5x1,5"))
         panel.te_comment.setPlainText(src.get("comment", ""))
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
         c = src.get("color", "#ff9800")

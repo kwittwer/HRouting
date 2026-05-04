@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package
+    Name="HRouting"
+    Manufacturer="Konrad-Fabian Wittwer"
+    Version="$(var.Version)"
+    Language="1031"
+    UpgradeCode="9E4E2F47-4E1E-4E46-93A8-B1D287D90D39"
+    InstallerVersion="500"
+    Scope="perMachine"
+    Compressed="yes">
+
+    <SummaryInformation Description="HRouting Installer" Manufacturer="Konrad-Fabian Wittwer" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="Eine neuere Version von HRouting ist bereits installiert." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="assets\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="HRouting" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="HRouting" />
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="HRouting" Level="1">
+      <ComponentRef Id="cmpMainExe" />
+      <ComponentRef Id="cmpReadme" />
+      <ComponentRef Id="cmpLicense" />
+      <?if $(var.IncludeWiki) = 1 ?>
+      <ComponentRef Id="cmpWikiPdf" />
+      <?endif?>
+      <ComponentRef Id="cmpStartMenuShortcut" />
+      <ComponentRef Id="cmpFileAssociation" />
+      <ComponentRef Id="cmpAppPaths" />
+    </Feature>
+
+    <Component Id="cmpMainExe" Guid="{9E8607B7-A5D0-4C68-A540-C64BB81DFE51}" Directory="INSTALLFOLDER">
+      <File Id="filMainExe" Source="dist\$(var.ExeName)" KeyPath="yes" />
+    </Component>
+
+    <Component Id="cmpReadme" Guid="{6AF50CDA-770D-4CB6-82A8-D21A84E95E72}" Directory="INSTALLFOLDER">
+      <File Id="filReadme" Source="README.md" KeyPath="yes" />
+    </Component>
+
+    <Component Id="cmpLicense" Guid="{B4F9010E-A81A-405F-8BC1-D1E30B4F2ED8}" Directory="INSTALLFOLDER">
+      <File Id="filLicense" Source="LICENSE" KeyPath="yes" />
+    </Component>
+
+    <?if $(var.IncludeWiki) = 1 ?>
+    <Component Id="cmpWikiPdf" Guid="{C35FBE4E-5A16-464E-8D90-4611B0581F44}" Directory="INSTALLFOLDER">
+      <File Id="filWikiPdf" Source="dist\$(var.WikiPdfName)" KeyPath="yes" />
+    </Component>
+    <?endif?>
+
+    <Component Id="cmpStartMenuShortcut" Guid="{2E4C98A7-D113-4CEC-B117-B6D6A4179F8B}" Directory="ApplicationProgramsFolder">
+      <Shortcut
+        Id="scStartMenuHRouting"
+        Name="HRouting"
+        Description="HRouting starten"
+        Target="[INSTALLFOLDER]$(var.ExeName)"
+        WorkingDirectory="INSTALLFOLDER"
+        Icon="AppIcon"
+        Advertise="no" />
+      <Shortcut
+        Id="scUninstallHRouting"
+        Name="HRouting deinstallieren"
+        Description="HRouting deinstallieren"
+        Target="[System64Folder]msiexec.exe"
+        Arguments="/x [ProductCode]"
+        Advertise="no" />
+      <RemoveFolder Id="RemoveProgramsFolder" On="uninstall" />
+      <RegistryValue Root="HKLM" Key="Software\HRouting" Name="StartMenu" Value="1" Type="integer" KeyPath="yes" />
+    </Component>
+
+    <Component Id="cmpFileAssociation" Guid="{7FEA0CB3-D46D-4D19-8A48-838421D6D145}" Directory="INSTALLFOLDER">
+      <RegistryKey Root="HKLM" Key="Software\Classes\.hrp">
+        <RegistryValue Value="HRouting.Project" Type="string" KeyPath="yes" />
+      </RegistryKey>
+      <RegistryKey Root="HKLM" Key="Software\Classes\HRouting.Project">
+        <RegistryValue Value="HRouting Project" Type="string" />
+      </RegistryKey>
+      <RegistryKey Root="HKLM" Key="Software\Classes\HRouting.Project\DefaultIcon">
+        <RegistryValue Value="[INSTALLFOLDER]$(var.ExeName),0" Type="string" />
+      </RegistryKey>
+      <RegistryKey Root="HKLM" Key="Software\Classes\HRouting.Project\shell\open\command">
+        <RegistryValue Value='&quot;[INSTALLFOLDER]$(var.ExeName)&quot; &quot;%1&quot;' Type="string" />
+      </RegistryKey>
+    </Component>
+
+    <Component Id="cmpAppPaths" Guid="{D6C8F173-422D-4D1D-A032-26D28A610442}" Directory="INSTALLFOLDER">
+      <RegistryKey Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\HRouting.exe">
+        <RegistryValue Value="[INSTALLFOLDER]$(var.ExeName)" Type="string" KeyPath="yes" />
+        <RegistryValue Name="Path" Value="[INSTALLFOLDER]" Type="string" />
+      </RegistryKey>
+    </Component>
+
+  </Package>
+</Wix>
