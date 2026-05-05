@@ -39,6 +39,7 @@ from PySide6.QtPrintSupport import QPrinter
 
 from gui.canvas_widget import CanvasWidget, COLORS
 from gui.parameter_panel import ParameterPanel, SafeDoubleSpinBox, SafeComboBox
+from gui.pdf_export_dialog import PdfExportConfigDialog
 from logic.svg_parser import parse_svg_dimensions
 from logic.heating_calc import calc_circuit, calc_balancing, FLOOR_COVERINGS
 
@@ -66,6 +67,7 @@ class MainWindow(QMainWindow):
         self._text_counter = 0
         self._floorplan_counter = 0
         self._furniture_counter = 0
+        self._pdf_export_pages: list[dict] = []
         self._dirty = False
         self._copy_buffer: dict | None = None
 
@@ -85,6 +87,7 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_shortcuts()
         self._connect_signals()
+        self._pdf_export_pages = self._default_pdf_export_pages()
         self._auto_load_last_project()
 
         # Capture the initial state as baseline for undo
@@ -198,10 +201,12 @@ class MainWindow(QMainWindow):
         self._clear_measure_btn.clicked.connect(self._on_clear_measurements)
         tb.addWidget(self._clear_measure_btn)
 
-        # ── Export frame tool ──
+        # ── Export-Rahmen tool ──
         tb.addSeparator()
         self._export_frame_btn = QPushButton("⬚ Export-Rahmen")
-        self._export_frame_btn.setToolTip("Rahmen ziehen für SVG/PDF-Exportausschnitt")
+        self._export_frame_btn.setToolTip(
+            "Export-Rahmen aufziehen – Linksklick ziehen, Rechtsklick löschen, ESC abbrechen"
+        )
         self._export_frame_btn.setCheckable(True)
         self._export_frame_btn.setFixedWidth(120)
         self._export_frame_btn.clicked.connect(self._on_export_frame_toggled)
@@ -362,6 +367,7 @@ class MainWindow(QMainWindow):
         return copy.deepcopy({
             "canvas": self.canvas.to_dict(),
             "params": self.param_panel.to_dict(),
+            "pdf_export_pages": self._pdf_export_pages,
             "counters": {
                 "circuit": self._circuit_counter,
                 "elec_point": self._elec_point_counter,
@@ -462,6 +468,9 @@ class MainWindow(QMainWindow):
             self._text_counter = c.get("text", 0)
             self._floorplan_counter = c.get("floorplan", 0)
             self._furniture_counter = c.get("furniture", 0)
+            self._pdf_export_pages = self._normalize_pdf_export_pages(
+                snap.get("pdf_export_pages")
+            )
 
             # Reconnect panel signals + sync visual state
             self._reconnect_panels_after_restore()
@@ -1392,10 +1401,26 @@ class MainWindow(QMainWindow):
         scale = self.canvas.get_mm_per_px()
         return area_px * scale * scale
 
+    def _compute_polygon_perimeter_mm(self, circuit_id: str) -> float | None:
+        px_points = self.canvas.get_polygon_px(circuit_id)
+        if len(px_points) < 3:
+            return None
+        perimeter_px = 0.0
+        n = len(px_points)
+        for i in range(n):
+            x1, y1 = px_points[i]
+            x2, y2 = px_points[(i + 1) % n]
+            perimeter_px += math.hypot(x2 - x1, y2 - y1)
+        scale = self.canvas.get_mm_per_px()
+        return perimeter_px * scale
+
     def _update_circuit_area(self, circuit_id: str):
         area_mm2 = self._compute_polygon_area_mm2(circuit_id)
         if area_mm2 is not None:
             self.param_panel.set_circuit_area(circuit_id, area_mm2)
+        perimeter_mm = self._compute_polygon_perimeter_mm(circuit_id)
+        if perimeter_mm is not None:
+            self.param_panel.set_circuit_perimeter(circuit_id, perimeter_mm)
         self._recalc_circuit_hydraulics(circuit_id)
 
     # ------------------------------------------------------------------ #
@@ -2266,6 +2291,7 @@ class MainWindow(QMainWindow):
         self._hkv_line_counter = 0
         self._floorplan_counter = 0
         self._furniture_counter = 0
+        self._pdf_export_pages = self._default_pdf_export_pages()
 
         # Recreate canvas and panel
         old_canvas = self.canvas
@@ -2412,6 +2438,7 @@ class MainWindow(QMainWindow):
             "svg_path": rel_svg,
             "canvas":   self.canvas.to_dict(),
             "params":   params,
+            "pdf_export_pages": self._pdf_export_pages,
         }
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -2461,6 +2488,9 @@ class MainWindow(QMainWindow):
 
             canvas_data = data.get("canvas", {})
             self.canvas.from_dict(canvas_data)
+            self._pdf_export_pages = self._normalize_pdf_export_pages(
+                data.get("pdf_export_pages")
+            )
 
             # --- resolve floorplan file paths + load images -------------
             params = data.get("params", {})
@@ -2729,11 +2759,166 @@ class MainWindow(QMainWindow):
     #  Export                                                              #
     # ------------------------------------------------------------------ #
 
+    def _floor_plan_display_name(self, floor_plan_id: str) -> str:
+        panel = self.param_panel.floorplan_panels.get(floor_plan_id)
+        if panel:
+            name = (panel.le_name.text() or "").strip()
+            if name:
+                return name
+        return floor_plan_id
+
+    def _default_pdf_export_pages(self) -> list[dict]:
+        pages: list[dict] = [
+            {
+                "id": "overview-all",
+                "type": "plan",
+                "title": "Gesamtübersicht – Alle Elemente",
+                "enabled": True,
+                "show_background": True,
+                "show_heating": True,
+                "show_elektro": True,
+                "floor_plan_id": None,
+                "source_rect": None,
+            },
+            {
+                "id": "plan-heating",
+                "type": "plan",
+                "title": "Fußbodenheizung – Verlegeplan",
+                "enabled": True,
+                "show_background": True,
+                "show_heating": True,
+                "show_elektro": False,
+                "floor_plan_id": None,
+                "source_rect": None,
+            },
+            {
+                "id": "table-lengths",
+                "type": "lengths",
+                "title": "Heizkreise – Rohrlängen",
+                "enabled": True,
+            },
+            {
+                "id": "table-hydraulics",
+                "type": "hydraulics",
+                "title": "Hydraulische Übersicht & Abgleich",
+                "enabled": True,
+            },
+            {
+                "id": "page-elektro",
+                "type": "elektro",
+                "title": "Elektro – Übersicht",
+                "enabled": True,
+                "show_background": True,
+                "show_heating": False,
+                "show_elektro": True,
+                "floor_plan_id": None,
+                "source_rect": None,
+            },
+        ]
+
+        for fid in self.canvas._floor_plan_order:
+            layer = self.canvas._floor_plans.get(fid)
+            if not layer or not layer.visible:
+                continue
+            pages.append({
+                "id": f"floor-{fid}",
+                "type": "plan",
+                "title": f"Grundriss – {self._floor_plan_display_name(fid)}",
+                "enabled": True,
+                "show_background": True,
+                "show_heating": True,
+                "show_elektro": True,
+                "floor_plan_id": fid,
+                "source_rect": None,
+            })
+        return pages
+
+    def _normalize_pdf_export_pages(self, pages: list[dict] | None) -> list[dict]:
+        if not pages:
+            return self._default_pdf_export_pages()
+
+        normalized: list[dict] = []
+        for index, src in enumerate(pages):
+            if not isinstance(src, dict):
+                continue
+            ptype = str(src.get("type", "plan")).strip().lower()
+            if ptype not in ("plan", "lengths", "hydraulics", "elektro"):
+                continue
+
+            page = {
+                "id": str(src.get("id") or f"page-{index + 1}"),
+                "type": ptype,
+                "title": str(src.get("title") or "Seite"),
+                "enabled": bool(src.get("enabled", True)),
+            }
+
+            if ptype in ("plan", "elektro"):
+                page["show_background"] = bool(src.get("show_background", True))
+                page["show_heating"] = bool(src.get("show_heating", True))
+                page["show_elektro"] = bool(src.get("show_elektro", True))
+                floor_plan_id = src.get("floor_plan_id")
+                page["floor_plan_id"] = floor_plan_id if floor_plan_id else None
+
+                rect = src.get("source_rect")
+                if (isinstance(rect, (list, tuple)) and len(rect) == 4):
+                    try:
+                        rx, ry, rw, rh = [float(v) for v in rect]
+                        if rw > 0 and rh > 0:
+                            page["source_rect"] = [rx, ry, rw, rh]
+                        else:
+                            page["source_rect"] = None
+                    except (TypeError, ValueError):
+                        page["source_rect"] = None
+                else:
+                    page["source_rect"] = None
+
+            normalized.append(page)
+
+        if not normalized:
+            return self._default_pdf_export_pages()
+        return normalized
+
+    def _current_floor_plans_for_export_dialog(self) -> list[tuple[str, str]]:
+        result: list[tuple[str, str]] = []
+        for fid in self.canvas._floor_plan_order:
+            result.append((fid, self._floor_plan_display_name(fid)))
+        return result
+
+    @staticmethod
+    def _page_source_rect(page: dict | None) -> QRectF | None:
+        if not page:
+            return None
+        rect = page.get("source_rect")
+        if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+            return None
+        try:
+            x, y, w, h = [float(v) for v in rect]
+        except (TypeError, ValueError):
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        return QRectF(x, y, w, h).normalized()
+
+    def _open_pdf_export_config_dialog(self) -> list[dict] | None:
+        dialog = PdfExportConfigDialog(
+            pages=self._normalize_pdf_export_pages(self._pdf_export_pages),
+            floor_plans=self._current_floor_plans_for_export_dialog(),
+            svg_size=self.canvas._svg_size,
+            canvas=self.canvas,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return self._normalize_pdf_export_pages(dialog.get_pages())
+
     def _render_plan_to_painter(self, painter: QPainter,
                                 target_rect: QRectF,
                                 layer: str = "all",
                                 floor_plan_id: str | None = None,
                                 source_rect: QRectF | None = None,
+                                show_background: bool | None = None,
+                                show_heating: bool | None = None,
+                                show_elektro: bool | None = None,
                                 rasterize: bool = False):
         """Render the floor plan with overlays directly onto *painter*.
 
@@ -2755,6 +2940,9 @@ class MainWindow(QMainWindow):
                 layer=layer,
                 floor_plan_id=floor_plan_id,
                 source_rect=source_rect,
+                show_background=show_background,
+                show_heating=show_heating,
+                show_elektro=show_elektro,
                 rasterize=False,
             )
             ip.end()
@@ -2795,42 +2983,47 @@ class MainWindow(QMainWindow):
         # Background: floor plan layers
         ref_mpp = self.canvas._mm_per_px if self.canvas._mm_per_px > 0 else 1.0
         rendered_floor = False
-        fp_ids = [floor_plan_id] if floor_plan_id else self.canvas._floor_plan_order
-        for fid in fp_ids:
-            fp_layer = self.canvas._floor_plans.get(fid)
-            if not fp_layer or not fp_layer.visible:
-                continue
-            rendered_floor = True
-            painter.save()
-            w, h = fp_layer.size
-            ls = fp_layer.mm_per_px / ref_mpp if fp_layer.mm_per_px > 0 else 1.0
-            sw, sh = w * ls, h * ls
-            cx_fp = sw / 2 + fp_layer.offset_x
-            cy_fp = sh / 2 + fp_layer.offset_y
-            painter.translate(cx_fp, cy_fp)
-            painter.rotate(fp_layer.rotation)
-            painter.translate(-sw / 2, -sh / 2)
-            painter.setOpacity(fp_layer.opacity)
-            if fp_layer.renderer:
-                fp_layer.renderer.render(painter, QRectF(0, 0, sw, sh))
-            elif fp_layer.pixmap:
-                painter.drawPixmap(QRectF(0, 0, sw, sh), fp_layer.pixmap,
-                                   QRectF(fp_layer.pixmap.rect()))
-            painter.restore()
+        if show_background is None:
+            show_background = True
+        if show_background:
+            fp_ids = [floor_plan_id] if floor_plan_id else self.canvas._floor_plan_order
+            for fid in fp_ids:
+                fp_layer = self.canvas._floor_plans.get(fid)
+                if not fp_layer or not fp_layer.visible:
+                    continue
+                rendered_floor = True
+                painter.save()
+                w, h = fp_layer.size
+                ls = fp_layer.mm_per_px / ref_mpp if fp_layer.mm_per_px > 0 else 1.0
+                sw, sh = w * ls, h * ls
+                cx_fp = sw / 2 + fp_layer.offset_x
+                cy_fp = sh / 2 + fp_layer.offset_y
+                painter.translate(cx_fp, cy_fp)
+                painter.rotate(fp_layer.rotation)
+                painter.translate(-sw / 2, -sh / 2)
+                painter.setOpacity(fp_layer.opacity)
+                if fp_layer.renderer:
+                    fp_layer.renderer.render(painter, QRectF(0, 0, sw, sh))
+                elif fp_layer.pixmap:
+                    painter.drawPixmap(QRectF(0, 0, sw, sh), fp_layer.pixmap,
+                                       QRectF(fp_layer.pixmap.rect()))
+                painter.restore()
 
-        # Legacy single background (only if no floor plan layers rendered)
-        if not rendered_floor:
-            if self.canvas._svg_renderer and self.canvas._svg_renderer.isValid():
-                self.canvas._svg_renderer.render(
-                    painter, QRectF(0, 0, svg_w, svg_h)
-                )
-            elif self.canvas._bg_pixmap:
-                painter.drawPixmap(QRectF(0, 0, svg_w, svg_h),
-                                   self.canvas._bg_pixmap,
-                                   QRectF(self.canvas._bg_pixmap.rect()))
+            # Legacy single background (only if no floor plan layers rendered)
+            if not rendered_floor:
+                if self.canvas._svg_renderer and self.canvas._svg_renderer.isValid():
+                    self.canvas._svg_renderer.render(
+                        painter, QRectF(0, 0, svg_w, svg_h)
+                    )
+                elif self.canvas._bg_pixmap:
+                    painter.drawPixmap(QRectF(0, 0, svg_w, svg_h),
+                                       self.canvas._bg_pixmap,
+                                       QRectF(self.canvas._bg_pixmap.rect()))
 
-        show_heating = layer in ("all", "heating")
-        show_elektro = layer in ("all", "elektro")
+        if show_heating is None:
+            show_heating = layer in ("all", "heating")
+        if show_elektro is None:
+            show_elektro = layer in ("all", "elektro")
 
         # ── Heating elements ──────────────────────────────────────
         if show_heating:
@@ -3179,15 +3372,7 @@ class MainWindow(QMainWindow):
 
         return lines
 
-    def _get_export_source_rect(self) -> QRectF:
-        """Return export source rect in canvas coordinates.
-
-        If a custom export frame exists, use it; otherwise use the full
-        legacy SVG/background extent.
-        """
-        frame = self.canvas.get_export_frame()
-        if frame and frame.width() > 1.0 and frame.height() > 1.0:
-            return frame
+    def _default_source_rect(self) -> QRectF:
         w, h = self.canvas._svg_size
         return QRectF(0.0, 0.0, float(w), float(h))
 
@@ -3214,7 +3399,12 @@ class MainWindow(QMainWindow):
     def _render_plan_to_image(self,
                               width_px: int,
                               height_px: int,
-                              layer: str = "all") -> QImage:
+                              layer: str = "all",
+                              source_rect: QRectF | None = None,
+                              show_background: bool | None = None,
+                              show_heating: bool | None = None,
+                              show_elektro: bool | None = None,
+                              floor_plan_id: str | None = None) -> QImage:
         """Rasterize current plan/crop to an in-memory image."""
         rw, rh, _ = self._clamp_raster_size(width_px, height_px)
         img = QImage(max(1, rw), max(1, rh),
@@ -3226,21 +3416,40 @@ class MainWindow(QMainWindow):
             p,
             QRectF(0, 0, img.width(), img.height()),
             layer=layer,
-            source_rect=self._get_export_source_rect(),
+            floor_plan_id=floor_plan_id,
+            source_rect=source_rect or self._default_source_rect(),
+            show_background=show_background,
+            show_heating=show_heating,
+            show_elektro=show_elektro,
         )
         p.end()
         return img
 
-    def _write_plan_svg(self, path: str):
+    def _write_plan_svg(self,
+                        path: str,
+                        source_rect: QRectF | None = None,
+                        show_background: bool | None = None,
+                        show_heating: bool | None = None,
+                        show_elektro: bool | None = None,
+                        floor_plan_id: str | None = None):
         """Write the complete plan as SVG image using current export frame crop."""
         import base64
 
-        src = self._get_export_source_rect()
+        src = source_rect or self._default_source_rect()
         w = max(1, int(round(src.width())))
         h = max(1, int(round(src.height())))
         w, h, _ = self._clamp_raster_size(w, h)
 
-        img = self._render_plan_to_image(w, h, layer="all")
+        img = self._render_plan_to_image(
+            w,
+            h,
+            layer="all",
+            source_rect=src,
+            show_background=show_background,
+            show_heating=show_heating,
+            show_elektro=show_elektro,
+            floor_plan_id=floor_plan_id,
+        )
         ba = QByteArray()
         buf = QBuffer(ba)
         buf.open(QIODevice.WriteOnly)
@@ -3309,6 +3518,8 @@ class MainWindow(QMainWindow):
             # Fläche berechnen
             area_mm2 = self._compute_polygon_area_mm2(cid)
             area_m2 = (area_mm2 or 0.0) / 1_000_000.0
+            perimeter_mm = self._compute_polygon_perimeter_mm(cid)
+            perimeter_m = (perimeter_mm or 0.0) / 1000.0
 
             # Heizungstechnische Berechnung
             spacing_cm = params["spacing"] / 10.0  # mm → cm
@@ -3336,6 +3547,7 @@ class MainWindow(QMainWindow):
                 "route_m": route_m,
                 "supply_m": supply_m,
                 "total_m": total_m,
+                "perimeter_m": perimeter_m,
                 "area_m2": area_m2,
                 "room_temp": room_temp,
                 "floor_covering": floor_name,
@@ -3456,17 +3668,17 @@ class MainWindow(QMainWindow):
         hk_layout = QVBoxLayout(hk_widget)
 
         hk_layout.addWidget(QLabel("<b>Heizkreise – Einzellängen</b>"))
-        tbl_hk = QTableWidget(len(hk_rows), 6)
+        tbl_hk = QTableWidget(len(hk_rows), 8)
         tbl_hk.setHorizontalHeaderLabels(
             ["Name", "Durchm. (mm)", "Abstand (mm)",
-             "Rohr (m)", "Zuleitung (m)", "Gesamt (m)"])
+             "Rohr (m)", "Zuleitung (m)", "Gesamt (m)", "Umfang (m)", "Fläche (m²)"])
         tbl_hk.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         tbl_hk.setEditTriggers(QTableWidget.NoEditTriggers)
         for i, r in enumerate(hk_rows):
             tbl_hk.setItem(i, 0, QTableWidgetItem(r["name"]))
             tbl_hk.setItem(i, 1, QTableWidgetItem(f"{r['diameter_mm']:.1f}"))
             tbl_hk.setItem(i, 2, QTableWidgetItem(f"{r['spacing_mm']:.1f}"))
-            for col, key in [(3, "route_m"), (4, "supply_m"), (5, "total_m")]:
+            for col, key in [(3, "route_m"), (4, "supply_m"), (5, "total_m"), (6, "perimeter_m"), (7, "area_m2")]:
                 item = QTableWidgetItem(f"{r[key]:.2f}")
                 item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 tbl_hk.setItem(i, col, item)
@@ -3702,7 +3914,7 @@ class MainWindow(QMainWindow):
         lines.append("Heizkreise - Einzellängen")
         lines.append(sep.join(["Name", "Rohrdurchmesser (mm)",
                                "Verlegeabstand (mm)",
-                               "Rohr (m)", "Zuleitung (m)", "Gesamt (m)"]))
+                               "Rohr (m)", "Zuleitung (m)", "Gesamt (m)", "Umfang (m)", "Fläche (m²)"]))
         for r in hk_rows:
             lines.append(sep.join([
                 r["name"],
@@ -3711,6 +3923,8 @@ class MainWindow(QMainWindow):
                 f"{r['route_m']:.2f}",
                 f"{r['supply_m']:.2f}",
                 f"{r['total_m']:.2f}",
+                f"{r.get('perimeter_m', 0.0):.2f}",
+                f"{r.get('area_m2', 0.0):.2f}",
             ]))
         lines.append("")
 
@@ -3863,6 +4077,8 @@ class MainWindow(QMainWindow):
             total_m = route_m + supply_m
             area_mm2 = self._compute_polygon_area_mm2(cid)
             area_m2 = (area_mm2 or 0.0) / 1_000_000.0
+            perimeter_mm = self._compute_polygon_perimeter_mm(cid)
+            perimeter_m = (perimeter_mm or 0.0) / 1000.0
             spacing_cm = params["spacing"] / 10.0
             floor_name = params.get("floor_covering", "Fliesen / Keramik")
             r_lambda_b = FLOOR_COVERINGS.get(floor_name, 0.01)
@@ -3878,6 +4094,7 @@ class MainWindow(QMainWindow):
                 "name": params["name"], "diameter_mm": diameter_mm,
                 "spacing_mm": params["spacing"],
                 "route_m": route_m, "supply_m": supply_m, "total_m": total_m,
+                "perimeter_m": perimeter_m,
                 "area_m2": area_m2, "room_temp": room_temp,
                 "floor_covering": floor_name,
                 "distributor": params.get("distributor", ""), **hc,
@@ -3980,6 +4197,23 @@ class MainWindow(QMainWindow):
         5. Elektro – Grundriss nur mit Elektro-Elementen + Tabelle
         6+. Pro Grundriss – Einzelne Seite mit Heizung + Elektro
         """
+        pages = self._open_pdf_export_config_dialog()
+        if pages is None:
+            return
+
+        enabled_pages = [p for p in pages if p.get("enabled", True)]
+        if not enabled_pages:
+            QMessageBox.information(
+                self,
+                "PDF-Export",
+                "Keine aktive Exportseite ausgewählt.",
+            )
+            return
+
+        if pages != self._pdf_export_pages:
+            self._pdf_export_pages = pages
+            self._mark_dirty()
+
         path, _ = QFileDialog.getSaveFileName(
             self, "Als PDF exportieren", "projektbericht.pdf", "PDF (*.pdf)")
         if not path:
@@ -4007,51 +4241,10 @@ class MainWindow(QMainWindow):
             svg_path = str(Path(path).with_suffix('.svg'))
             self._write_plan_svg(svg_path)
 
-            # Page 1 – Übersicht (alle Elemente)
-            self._pdf_plan_page(ctx, "Gesamt\u00fcbersicht \u2013 Alle Elemente",
-                                layer="all")
-
-            # Page 2 – Heizung Plan
-            printer.newPage()
-            self._pdf_plan_page(
-                ctx,
-                "Fu\u00dfbodenheizung \u2013 Verlegeplan",
-                layer="heating",
-            )
-
-            # Page 3 – Rohrlängen
-            printer.newPage()
-            self._pdf_lengths_page(ctx, data)
-
-            # Page 4 – Hydraulik & Abgleich
-            printer.newPage()
-            self._pdf_hydraulics_page(ctx, data)
-
-            # Page 5 – Elektro (Plan + Tabelle)
-            has_elec = (data["kv_rows"]
-                        or self.canvas._elec_points
-                        or self.canvas._elec_cables)
-            if has_elec:
-                printer.newPage()
-                self._pdf_elektro_page(ctx, data)
-
-            # Per-floor-plan pages – each floor plan on its own page
-            for fid in self.canvas._floor_plan_order:
-                fp_layer = self.canvas._floor_plans.get(fid)
-                if not fp_layer or not fp_layer.visible:
-                    continue
-                # Determine floor plan name from panel or fallback
-                fp_name = fid
-                fp_panel = self.param_panel.floorplan_panels.get(fid)
-                if fp_panel:
-                    fp_name = fp_panel.le_name.text() or fid
-                printer.newPage()
-                self._pdf_plan_page(
-                    ctx,
-                    f"Grundriss \u2013 {fp_name}",
-                    layer="all",
-                    floor_plan_id=fid,
-                )
+            for idx, page in enumerate(enabled_pages):
+                if idx > 0:
+                    printer.newPage()
+                self._render_pdf_export_page(ctx, data, page)
         finally:
             painter.end()
 
@@ -4059,9 +4252,47 @@ class MainWindow(QMainWindow):
 
     # ── Seite: Plan-Darstellung (generisch) ──
 
+    def _render_pdf_export_page(self, ctx: '_PdfContext', data: dict, page: dict):
+        ptype = str(page.get("type", "plan")).strip().lower()
+        title = str(page.get("title") or "Seite").strip() or "Seite"
+
+        if ptype == "lengths":
+            self._pdf_lengths_page(ctx, data, title=title)
+            return
+        if ptype == "hydraulics":
+            self._pdf_hydraulics_page(ctx, data, title=title)
+            return
+        if ptype == "elektro":
+            self._pdf_elektro_page(
+                ctx,
+                data,
+                title=title,
+                floor_plan_id=page.get("floor_plan_id"),
+                source_rect=self._page_source_rect(page),
+                show_background=bool(page.get("show_background", True)),
+                show_heating=bool(page.get("show_heating", False)),
+                show_elektro=bool(page.get("show_elektro", True)),
+            )
+            return
+
+        self._pdf_plan_page(
+            ctx,
+            title,
+            layer="all",
+            floor_plan_id=page.get("floor_plan_id"),
+            source_rect=self._page_source_rect(page),
+            show_background=bool(page.get("show_background", True)),
+            show_heating=bool(page.get("show_heating", True)),
+            show_elektro=bool(page.get("show_elektro", True)),
+        )
+
     def _pdf_plan_page(self, ctx: '_PdfContext', title: str,
                        layer: str = "all",
-                       floor_plan_id: str | None = None):
+                       floor_plan_id: str | None = None,
+                       source_rect: QRectF | None = None,
+                       show_background: bool | None = None,
+                       show_heating: bool | None = None,
+                       show_elektro: bool | None = None):
         """Render a full-page plan image with a title."""
         page = ctx.page_rect()
         ctx.stamp(page)
@@ -4086,33 +4317,38 @@ class MainWindow(QMainWindow):
             draw_rect,
             layer=layer,
             floor_plan_id=floor_plan_id,
-            source_rect=self._get_export_source_rect(),
+            source_rect=source_rect or self._default_source_rect(),
+            show_background=show_background,
+            show_heating=show_heating,
+            show_elektro=show_elektro,
             rasterize=True,
         )
 
     # ── Seite: Rohrlängen ──
 
-    def _pdf_lengths_page(self, ctx: '_PdfContext', data: dict):
+    def _pdf_lengths_page(self, ctx: '_PdfContext', data: dict,
+                          title: str = "Heizkreise – Rohrlängen"):
         page = ctx.page_rect()
         ctx.stamp(page)
-        y = ctx.title(page, "Heizkreise \u2013 Rohrlängen",
+        y = ctx.title(page, title,
                       f"Vorlauf {data['t_supply']:.1f} °C / "
                       f"Rücklauf {data['t_return']:.1f} °C")
         headers = ["Name", "Durchm. (mm)", "Abstand (mm)",
-                   "Rohr (m)", "Zuleitung (m)", "Gesamt (m)"]
+             "Rohr (m)", "Zuleitung (m)", "Gesamt (m)", "Umfang (m)", "Fläche (m²)"]
         rows = [[r["name"], f"{r['diameter_mm']:.1f}",
                  f"{r['spacing_mm']:.1f}",
                  f"{r['route_m']:.2f}", f"{r['supply_m']:.2f}",
-                 f"{r['total_m']:.2f}"]
+              f"{r['total_m']:.2f}", f"{r.get('perimeter_m', 0.0):.2f}", f"{r.get('area_m2', 0.0):.2f}"]
                 for r in data["hk_rows"]]
         ctx.draw_table(page, y, headers, rows)
 
     # ── Seite: Hydraulik & Abgleich ──
 
-    def _pdf_hydraulics_page(self, ctx: '_PdfContext', data: dict):
+    def _pdf_hydraulics_page(self, ctx: '_PdfContext', data: dict,
+                             title: str = "Hydraulische Übersicht & Abgleich"):
         page = ctx.page_rect()
         ctx.stamp(page)
-        y = ctx.title(page, "Hydraulische Übersicht & Abgleich",
+        y = ctx.title(page, title,
                       f"Vorlauf {data['t_supply']:.1f} °C / "
                       f"Rücklauf {data['t_return']:.1f} °C")
         headers = ["Name", "HKV", "Raum\n(°C)", "Belag",
@@ -4191,7 +4427,13 @@ class MainWindow(QMainWindow):
 
     # ── Seite: Elektro (Plan + Tabelle) ──
 
-    def _pdf_elektro_page(self, ctx: '_PdfContext', data: dict):
+    def _pdf_elektro_page(self, ctx: '_PdfContext', data: dict,
+                          title: str = "Elektro – Übersicht",
+                          floor_plan_id: str | None = None,
+                          source_rect: QRectF | None = None,
+                          show_background: bool | None = True,
+                          show_heating: bool | None = False,
+                          show_elektro: bool | None = True):
         """Elektro page: plan with only elektro elements, then table below."""
         page = ctx.page_rect()
         ctx.stamp(page)
@@ -4202,7 +4444,7 @@ class MainWindow(QMainWindow):
         ctx.painter.drawText(
             QRectF(page.x(), page.y(), page.width(), title_h),
             Qt.AlignCenter,
-            "Elektro \u2013 \u00dcbersicht",
+            title,
         )
         ctx.painter.restore()
 
@@ -4213,8 +4455,12 @@ class MainWindow(QMainWindow):
         self._render_plan_to_painter(
             ctx.painter,
             plan_rect,
-            layer="elektro",
-            source_rect=self._get_export_source_rect(),
+            layer="all",
+            floor_plan_id=floor_plan_id,
+            source_rect=source_rect or self._default_source_rect(),
+            show_background=show_background,
+            show_heating=show_heating,
+            show_elektro=show_elektro,
             rasterize=True,
         )
 

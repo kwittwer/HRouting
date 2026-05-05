@@ -244,6 +244,10 @@ class HeatingCircuitPanel(QWidget):
         self.lbl_area.setStyleSheet("font-weight:bold; color:#ffffff; padding:2px;")
         form.addRow("Fl\u00e4che:", self.lbl_area)
 
+        self.lbl_perimeter = QLabel("Umfang: \u2013")
+        self.lbl_perimeter.setStyleSheet("font-weight:bold; color:#9ad1ff; padding:2px;")
+        form.addRow("Umfang:", self.lbl_perimeter)
+
         self.lbl_length = QLabel("Rohrl\u00e4nge: \u2013")
         self.lbl_length.setStyleSheet("font-weight:bold; color:#2dc653; padding:2px;")
         form.addRow(self.lbl_length)
@@ -312,6 +316,9 @@ class HeatingCircuitPanel(QWidget):
 
     def set_area(self, area_mm2: float):
         self.lbl_area.setText(f"Fl\u00e4che: {area_mm2 / 1_000_000:.2f} m\u00b2")
+
+    def set_perimeter(self, perimeter_mm: float):
+        self.lbl_perimeter.setText(f"Umfang: {perimeter_mm / 1000:.2f} m")
 
     def set_hydraulics(self, power_w: float, volume_flow_lmin: float,
                        pressure_drop_mbar: float, q_wm2: float):
@@ -2477,6 +2484,10 @@ class ParameterPanel(QWidget):
     def set_circuit_area(self, circuit_id: str, area_mm2: float):
         if circuit_id in self.circuit_panels:
             self.circuit_panels[circuit_id].set_area(area_mm2)
+
+    def set_circuit_perimeter(self, circuit_id: str, perimeter_mm: float):
+        if circuit_id in self.circuit_panels:
+            self.circuit_panels[circuit_id].set_perimeter(perimeter_mm)
 
     def set_supply_length(self, circuit_id: str, supply_mm: float):
         if circuit_id in self.circuit_panels:

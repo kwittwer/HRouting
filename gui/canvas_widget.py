@@ -103,6 +103,7 @@ class CanvasWidget(QWidget):
     floor_plan_transform_updated = Signal(str, float, float, float)  # (fp_id, ox, oy, rot)
     floor_plan_polygon_finished = Signal(str, list)
     mode_changed = Signal()  # emitted when tool mode changes
+    export_frame_drawn = Signal(object)  # emitted with QRectF when export frame is finalized
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1646,6 +1647,9 @@ class CanvasWidget(QWidget):
         self._label_draw_pos.clear()
         self._ref_p1 = None
         self._ref_p2 = None
+        self._export_frame = None
+        self._export_frame_start = None
+        self._export_frame_current = None
         self.update()
 
     def to_dict(self) -> dict:
@@ -1734,9 +1738,6 @@ class CanvasWidget(QWidget):
                 for tid, p in self._text_annotations.items()
             },
         }
-        if self._export_frame:
-            r = self._export_frame.normalized()
-            result["export_frame"] = [r.x(), r.y(), r.width(), r.height()]
         if self._ref_p1 and self._ref_p2:
             result["ref_line"] = [
                 (self._ref_p1.x(), self._ref_p1.y()),
@@ -1805,12 +1806,9 @@ class CanvasWidget(QWidget):
                 k: bool(v) for k, v in d["ref_line_visible"].items()
             }
         
-        ef = d.get("export_frame")
-        if ef and len(ef) == 4:
-            self._export_frame = QRectF(float(ef[0]), float(ef[1]),
-                                        float(ef[2]), float(ef[3])).normalized()
-        else:
-            self._export_frame = None
+        self._export_frame = None
+        self._export_frame_start = None
+        self._export_frame_current = None
 
         for cid, pts in d.get("polygons", {}).items():
             self._polygons[cid] = [QPointF(x, y) for x, y in pts]
@@ -3540,6 +3538,7 @@ class CanvasWidget(QWidget):
                 rect = QRectF(self._export_frame_start, end_pt).normalized()
                 if rect.width() > 1.0 and rect.height() > 1.0:
                     self._export_frame = rect
+                    self.export_frame_drawn.emit(QRectF(rect))
                 self._export_frame_start = None
                 self._export_frame_current = None
                 self._mode = ToolMode.NONE
@@ -4102,9 +4101,6 @@ class CanvasWidget(QWidget):
 
         # ── Messlinien ────────────────────────────────────────────
         self._draw_measurements(painter)
-
-        # ── Export-Rahmen ─────────────────────────────────────────
-        self._draw_export_frame(painter)
 
         # ── Maße beim Verschieben anzeigen ────────────────────────
         self._draw_drag_distance_overlay(painter)
