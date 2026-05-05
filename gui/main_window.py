@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         self._floorplan_counter = 0
         self._furniture_counter = 0
         self._pdf_export_pages: list[dict] = []
+        self._pdf_export_dialog = None
         self._dirty = False
         self._copy_buffer: dict | None = None
 
@@ -2899,7 +2900,12 @@ class MainWindow(QMainWindow):
             return None
         return QRectF(x, y, w, h).normalized()
 
-    def _open_pdf_export_config_dialog(self) -> list[dict] | None:
+    def _open_pdf_export_config_dialog(self, on_accept=None):
+        if self._pdf_export_dialog is not None:
+            self._pdf_export_dialog.raise_()
+            self._pdf_export_dialog.activateWindow()
+            return
+
         dialog = PdfExportConfigDialog(
             pages=self._normalize_pdf_export_pages(self._pdf_export_pages),
             floor_plans=self._current_floor_plans_for_export_dialog(),
@@ -2907,9 +2913,27 @@ class MainWindow(QMainWindow):
             canvas=self.canvas,
             parent=self,
         )
-        if dialog.exec() != QDialog.Accepted:
-            return None
-        return self._normalize_pdf_export_pages(dialog.get_pages())
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        self._pdf_export_dialog = dialog
+
+        def _cleanup():
+            if self._pdf_export_dialog is dialog:
+                self._pdf_export_dialog = None
+            dialog.deleteLater()
+
+        def _accepted():
+            pages = self._normalize_pdf_export_pages(dialog.get_pages())
+            _cleanup()
+            if on_accept:
+                on_accept(pages)
+
+        def _rejected():
+            _cleanup()
+
+        dialog.accepted.connect(_accepted)
+        dialog.rejected.connect(_rejected)
+        dialog.open()
 
     def _render_plan_to_painter(self, painter: QPainter,
                                 target_rect: QRectF,
@@ -4197,7 +4221,9 @@ class MainWindow(QMainWindow):
         5. Elektro – Grundriss nur mit Elektro-Elementen + Tabelle
         6+. Pro Grundriss – Einzelne Seite mit Heizung + Elektro
         """
-        pages = self._open_pdf_export_config_dialog()
+        self._open_pdf_export_config_dialog(self._continue_export_pdf)
+
+    def _continue_export_pdf(self, pages: list[dict]):
         if pages is None:
             return
 

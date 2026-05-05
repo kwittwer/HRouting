@@ -1,7 +1,8 @@
 import copy
 import uuid
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,6 +22,137 @@ from PySide6.QtWidgets import (
     QWidget,
     QAbstractItemView,
 )
+
+
+class SourceRectPreview(QWidget):
+    rectChanged = Signal(object)  # QRectF
+
+    def __init__(self, svg_w: float, svg_h: float, canvas=None, parent=None):
+        super().__init__(parent)
+        self._svg_w = max(1.0, float(svg_w))
+        self._svg_h = max(1.0, float(svg_h))
+        self._canvas = canvas
+        self._snapshot: QPixmap | None = None
+        self._rect: QRectF | None = None
+        self._drag_start: QPointF | None = None
+        self._drag_current: QPointF | None = None
+        self._selection_enabled = True
+        self.setMinimumHeight(210)
+
+    def refresh_snapshot(self):
+        self._snapshot = None
+        if self._canvas and self._canvas.width() > 2 and self._canvas.height() > 2:
+            pm = self._canvas.grab()
+            if not pm.isNull():
+                self._snapshot = pm
+        self.update()
+
+    def set_selection_enabled(self, enabled: bool):
+        self._selection_enabled = bool(enabled)
+        self.update()
+
+    def set_source_rect(self, rect: QRectF | None):
+        if rect is None:
+            self._rect = None
+        else:
+            nr = QRectF(rect).normalized()
+            if nr.width() <= 0 or nr.height() <= 0:
+                self._rect = None
+            else:
+                self._rect = nr
+        self.update()
+
+    def _content_rect(self) -> QRectF:
+        m = 10.0
+        area = QRectF(m, m, max(1.0, self.width() - 2 * m), max(1.0, self.height() - 2 * m))
+        src_aspect = self._svg_w / self._svg_h if self._svg_h > 0 else 1.0
+        area_aspect = area.width() / area.height() if area.height() > 0 else 1.0
+        if area_aspect > src_aspect:
+            w = area.height() * src_aspect
+            x = area.x() + (area.width() - w) / 2.0
+            return QRectF(x, area.y(), w, area.height())
+        h = area.width() / src_aspect
+        y = area.y() + (area.height() - h) / 2.0
+        return QRectF(area.x(), y, area.width(), h)
+
+    def _widget_to_svg(self, p: QPointF) -> QPointF:
+        cr = self._content_rect()
+        if cr.width() <= 0 or cr.height() <= 0:
+            return QPointF(0.0, 0.0)
+        x = min(max(p.x(), cr.left()), cr.right())
+        y = min(max(p.y(), cr.top()), cr.bottom())
+        sx = (x - cr.left()) / cr.width() * self._svg_w
+        sy = (y - cr.top()) / cr.height() * self._svg_h
+        sx = min(max(sx, 0.0), self._svg_w)
+        sy = min(max(sy, 0.0), self._svg_h)
+        return QPointF(sx, sy)
+
+    def _svg_to_widget_rect(self, rect: QRectF) -> QRectF:
+        cr = self._content_rect()
+        if cr.width() <= 0 or cr.height() <= 0 or self._svg_w <= 0 or self._svg_h <= 0:
+            return QRectF()
+        x = cr.left() + (rect.x() / self._svg_w) * cr.width()
+        y = cr.top() + (rect.y() / self._svg_h) * cr.height()
+        w = (rect.width() / self._svg_w) * cr.width()
+        h = (rect.height() / self._svg_h) * cr.height()
+        return QRectF(x, y, w, h)
+
+    def mousePressEvent(self, event):
+        if not self._selection_enabled or event.button() != Qt.LeftButton:
+            return super().mousePressEvent(event)
+        p = QPointF(event.position())
+        self._drag_start = self._widget_to_svg(p)
+        self._drag_current = QPointF(self._drag_start)
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        if not self._selection_enabled or self._drag_start is None:
+            return super().mouseMoveEvent(event)
+        self._drag_current = self._widget_to_svg(QPointF(event.position()))
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if not self._selection_enabled or event.button() != Qt.LeftButton:
+            return super().mouseReleaseEvent(event)
+        if self._drag_start is not None and self._drag_current is not None:
+            rect = QRectF(self._drag_start, self._drag_current).normalized()
+            if rect.width() >= 1.0 and rect.height() >= 1.0:
+                self._rect = rect
+                self.rectChanged.emit(QRectF(rect))
+        self._drag_start = None
+        self._drag_current = None
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        painter.fillRect(self.rect(), QColor("#1f1f1f"))
+        cr = self._content_rect()
+        if self._snapshot and not self._snapshot.isNull():
+            painter.drawPixmap(cr, self._snapshot, QRectF(self._snapshot.rect()))
+        else:
+            painter.fillRect(cr, QColor("#2d2d2d"))
+        painter.setPen(QPen(QColor("#666666"), 1.0))
+        painter.drawRect(cr)
+
+        frame = self._rect
+        if self._drag_start is not None and self._drag_current is not None:
+            frame = QRectF(self._drag_start, self._drag_current).normalized()
+
+        if frame and frame.width() > 0 and frame.height() > 0:
+            wr = self._svg_to_widget_rect(frame)
+            painter.setBrush(QBrush(QColor(0, 230, 118, 50)))
+            painter.setPen(QPen(QColor("#00e676"), 2.0, Qt.DashLine))
+            painter.drawRect(wr)
+
+        hint = "Im Vorschaubereich ziehen, um den Export-Rahmen festzulegen"
+        if not self._selection_enabled:
+            hint = "Aktiviere 'Eigenen Export-Rahmen nutzen', um im Vorschaubereich zu ziehen"
+        painter.setPen(QPen(QColor("#d0d0d0")))
+        painter.drawText(QRectF(10, self.height() - 26, self.width() - 20, 18), Qt.AlignLeft, hint)
+        if self._snapshot is None:
+            painter.drawText(QRectF(10, 10, self.width() - 20, 18), Qt.AlignLeft, "Keine Planvorschau verfügbar")
 
 
 class PdfExportConfigDialog(QDialog):
@@ -148,19 +280,16 @@ class PdfExportConfigDialog(QDialog):
         frame_widget.setLayout(frame_grid)
         plan_form.addRow("Koordinaten", frame_widget)
 
+        self.preview = SourceRectPreview(self._svg_w, self._svg_h, canvas=self._canvas)
+        self.preview.rectChanged.connect(self._on_preview_rect_changed)
+        plan_form.addRow("Vorschau", self.preview)
+
         self.btn_full_plan = QPushButton("Voller Plan")
         self.btn_full_plan.clicked.connect(self._set_full_plan_frame)
-        self.btn_draw_on_canvas = QPushButton("⬚ Auf Canvas zeichnen…")
-        self.btn_draw_on_canvas.setToolTip(
-            "Dialog ausblenden und Rahmen direkt auf dem Canvas aufziehen"
-        )
-        self.btn_draw_on_canvas.clicked.connect(self._on_draw_on_canvas)
-        self.btn_draw_on_canvas.setEnabled(self._canvas is not None)
         frame_btns = QWidget()
         frame_btns_layout = QHBoxLayout(frame_btns)
         frame_btns_layout.setContentsMargins(0, 0, 0, 0)
         frame_btns_layout.addWidget(self.btn_full_plan)
-        frame_btns_layout.addWidget(self.btn_draw_on_canvas)
         plan_form.addRow("", frame_btns)
 
         self.lbl_non_plan = QLabel(
@@ -265,6 +394,7 @@ class PdfExportConfigDialog(QDialog):
     def _load_editor_from_current(self):
         page = self._current_page()
         has_item = page is not None
+        self.preview.refresh_snapshot()
 
         self._block_updates = True
         try:
@@ -303,11 +433,20 @@ class PdfExportConfigDialog(QDialog):
                     self.sb_y.setValue(float(rect[1]))
                     self.sb_w.setValue(max(0.1, float(rect[2])))
                     self.sb_h.setValue(max(0.1, float(rect[3])))
+                    self.preview.set_source_rect(
+                        QRectF(
+                            float(rect[0]),
+                            float(rect[1]),
+                            max(0.1, float(rect[2])),
+                            max(0.1, float(rect[3])),
+                        )
+                    )
                 else:
                     self.sb_x.setValue(0.0)
                     self.sb_y.setValue(0.0)
                     self.sb_w.setValue(max(1.0, self._svg_w))
                     self.sb_h.setValue(max(1.0, self._svg_h))
+                    self.preview.set_source_rect(None)
 
                 self._set_frame_controls_enabled(has_custom)
         finally:
@@ -318,6 +457,7 @@ class PdfExportConfigDialog(QDialog):
         self.sb_y.setEnabled(enabled)
         self.sb_w.setEnabled(enabled)
         self.sb_h.setEnabled(enabled)
+        self.preview.set_selection_enabled(enabled)
 
     def _update_current_page(self, updater):
         if self._block_updates:
@@ -358,8 +498,17 @@ class PdfExportConfigDialog(QDialog):
                     float(self.sb_w.value()),
                     float(self.sb_h.value()),
                 ]
+                self.preview.set_source_rect(
+                    QRectF(
+                        float(self.sb_x.value()),
+                        float(self.sb_y.value()),
+                        float(self.sb_w.value()),
+                        float(self.sb_h.value()),
+                    ).normalized()
+                )
             else:
                 p["source_rect"] = None
+                self.preview.set_source_rect(None)
 
         self._update_current_page(updater)
 
@@ -377,49 +526,16 @@ class PdfExportConfigDialog(QDialog):
 
         self._update_current_page(updater)
 
-    def _on_draw_on_canvas(self):
-        if not self._canvas:
-            return
-        self.cb_custom_frame.setChecked(True)
-        self._set_frame_controls_enabled(True)
-        self._canvas.export_frame_drawn.connect(self._on_canvas_frame_received)
-        self.hide()
-        # Raise main window and give canvas focus so mouse events work
-        main_win = self._canvas.window()
-        main_win.raise_()
-        main_win.activateWindow()
-        self._canvas.setFocus()
-        self._canvas.start_draw_export_frame()
-        # Connect abort handler AFTER start – so the mode_changed emitted
-        # inside start_draw_export_frame() does not immediately re-open the dialog
-        self._canvas.mode_changed.connect(self._on_canvas_draw_aborted)
+        self.preview.set_source_rect(
+            QRectF(
+                float(self.sb_x.value()),
+                float(self.sb_y.value()),
+                float(self.sb_w.value()),
+                float(self.sb_h.value()),
+            ).normalized()
+        )
 
-    def _on_canvas_draw_aborted(self):
-        """Called when canvas mode changes away from DRAW_EXPORT_FRAME (ESC / right-click)."""
-        from gui.canvas_widget import ToolMode
-        if self._canvas and self._canvas._mode != ToolMode.DRAW_EXPORT_FRAME:
-            try:
-                self._canvas.mode_changed.disconnect(self._on_canvas_draw_aborted)
-            except RuntimeError:
-                pass
-            try:
-                self._canvas.export_frame_drawn.disconnect(self._on_canvas_frame_received)
-            except RuntimeError:
-                pass
-            if not self.isVisible():
-                self.show()
-                self.raise_()
-                self.activateWindow()
-
-    def _on_canvas_frame_received(self, rect):
-        try:
-            self._canvas.export_frame_drawn.disconnect(self._on_canvas_frame_received)
-        except RuntimeError:
-            pass
-        try:
-            self._canvas.mode_changed.disconnect(self._on_canvas_draw_aborted)
-        except RuntimeError:
-            pass
+    def _on_preview_rect_changed(self, rect):
         self._block_updates = True
         try:
             self.cb_custom_frame.setChecked(True)
@@ -431,9 +547,6 @@ class PdfExportConfigDialog(QDialog):
             self._block_updates = False
         self._set_frame_controls_enabled(True)
         self._on_frame_changed()
-        self.show()
-        self.raise_()
-        self.activateWindow()
 
     def _set_full_plan_frame(self):
         self._block_updates = True
