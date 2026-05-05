@@ -1706,9 +1706,9 @@ class MainWindow(QMainWindow):
         src_fp_id = self.param_panel._element_floorplan.get(source_id)
         self._circuit_counter += 1
         new_id = f"HK-{self._circuit_counter}"
-        panel = self._create_circuit_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel = self._create_circuit_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
         panel.from_dict(src)
-        panel.le_name.setText(f"{src.get('name', source_id)} (Kopie)")
+        panel.le_name.setText(src.get('name', source_id))
         if source_id in self.canvas._polygons:
             self.canvas._polygons[new_id] = [QPointF(p.x() + 20, p.y() + 20)
                                              for p in self.canvas._polygons[source_id]]
@@ -1737,9 +1737,9 @@ class MainWindow(QMainWindow):
         src_fp_id = self.param_panel._element_floorplan.get(source_id)
         self._hkv_counter += 1
         new_id = f"HKV-{self._hkv_counter}"
-        panel = self._create_hkv_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel = self._create_hkv_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
         panel.from_dict(src)
-        panel.le_name.setText(f"{src.get('name', source_id)} (Kopie)")
+        panel.le_name.setText(src.get('name', source_id))
         if source_id in self.canvas._hkv_points:
             p = self.canvas._hkv_points[source_id]
             self.canvas._hkv_points[new_id] = QPointF(p.x() + 20, p.y() + 20)
@@ -1755,9 +1755,9 @@ class MainWindow(QMainWindow):
         src_fp_id = self.param_panel._element_floorplan.get(source_id)
         self._hkv_line_counter += 1
         new_id = f"HL-{self._hkv_line_counter}"
-        panel = self._create_hkv_line_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel = self._create_hkv_line_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
         panel.from_dict(src)
-        panel.le_name.setText(f"{src.get('name', source_id)} (Kopie)")
+        panel.le_name.setText(src.get('name', source_id))
         if source_id in self.canvas._hkv_lines:
             self.canvas._hkv_lines[new_id] = [QPointF(p.x() + 20, p.y() + 20)
                                               for p in self.canvas._hkv_lines[source_id]]
@@ -1775,9 +1775,9 @@ class MainWindow(QMainWindow):
         src_fp_id = self.param_panel._element_floorplan.get(source_id)
         self._text_counter += 1
         new_id = f"Text-{self._text_counter}"
-        panel = self._create_text_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel = self._create_text_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
         panel.set_parameters(src)
-        panel.le_name.setText(f"{src.get('name', source_id)} (Kopie)")
+        panel.le_name.setText(src.get('name', source_id))
         if source_id in self.canvas._text_annotations:
             p = self.canvas._text_annotations[source_id]
             self.canvas._text_annotations[new_id] = QPointF(p.x() + 20, p.y() + 20)
@@ -1819,9 +1819,9 @@ class MainWindow(QMainWindow):
         self._floorplan_counter += 1
         new_id = f"grundriss-{self._floorplan_counter}"
         self.canvas.add_floor_plan(new_id)
-        panel = self.param_panel.add_floorplan_panel(new_id, name=f"{src_panel.get_parameters().get('name', source_id)} (Kopie)")
+        panel = self.param_panel.add_floorplan_panel(new_id, name=src_panel.get_parameters().get('name', source_id))
         panel.from_dict(src_panel.to_dict())
-        panel.le_name.setText(f"{src_panel.get_parameters().get('name', source_id)} (Kopie)")
+        panel.le_name.setText(src_panel.get_parameters().get('name', source_id))
         if src_panel.get_parameters().get("file_path"):
             self.canvas.load_floor_plan_image(new_id, src_panel.get_parameters().get("file_path"))
         self._copy_layer_values(source_id, new_id)
@@ -1839,9 +1839,9 @@ class MainWindow(QMainWindow):
         self._furniture_counter += 1
         new_id = f"einr-{self._furniture_counter}"
         self.canvas.add_floor_plan(new_id)
-        panel = self.param_panel.add_furniture_panel(new_id, parent_fp_id, name=f"{src_panel.get_parameters().get('name', source_id)} (Kopie)")
+        panel = self.param_panel.add_furniture_panel(new_id, parent_fp_id, name=src_panel.get_parameters().get('name', source_id))
         panel.from_dict(src_panel.to_dict())
-        panel.le_name.setText(f"{src_panel.get_parameters().get('name', source_id)} (Kopie)")
+        panel.le_name.setText(src_panel.get_parameters().get('name', source_id))
         if src_panel.get_parameters().get("file_path"):
             self.canvas.load_floor_plan_image(new_id, src_panel.get_parameters().get("file_path"))
         self._copy_layer_values(source_id, new_id)
@@ -1857,7 +1857,7 @@ class MainWindow(QMainWindow):
         src_fp_id = self.param_panel._element_floorplan.get(source_id)
         self._elec_point_counter += 1
         new_id = f"AP-{self._elec_point_counter}"
-        panel = self._create_elec_point_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel = self._create_elec_point_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
         panel.sb_width.setValue(src.get("width", 30.0) / 10)
         panel.sb_height.setValue(src.get("height", 30.0) / 10)
         panel.chk_label_visible.setChecked(src.get("label_visible", True))
@@ -1901,7 +1901,7 @@ class MainWindow(QMainWindow):
         src_fp_id = self.param_panel._element_floorplan.get(source_id)
         self._elec_cable_counter += 1
         new_id = f"KV-{self._elec_cable_counter}"
-        panel = self._create_elec_cable_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
+        panel = self._create_elec_cable_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
         panel.set_type_text(src.get("type", "5x1,5"))
         panel.te_comment.setPlainText(src.get("comment", ""))
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
