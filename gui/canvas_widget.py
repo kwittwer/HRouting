@@ -552,6 +552,46 @@ class CanvasWidget(QWidget):
             return None
         return QRectF(self._export_frame.normalized())
 
+    def grab_source_rect(self, rect: QRectF) -> QPixmap:
+        """Render only a specific rectangular region to a pixmap."""
+        if rect.width() <= 0 or rect.height() <= 0:
+            return QPixmap()
+        
+        # Target pixmap size - aim for preview size
+        target_size = 400
+        scale_x = target_size / rect.width() if rect.width() > 0 else 1.0
+        scale_y = target_size / rect.height() if rect.height() > 0 else 1.0
+        scale = min(scale_x, scale_y, 2.0)  # Cap at 2x to avoid huge pixmaps
+        
+        pm_width = max(1, int(rect.width() * scale))
+        pm_height = max(1, int(rect.height() * scale))
+        
+        # Save current view state
+        old_scale = float(self._scale)
+        old_offset = QPointF(self._offset)
+        
+        try:
+            # Temporarily adjust scale/offset to show only the rect
+            self._scale = scale
+            self._offset = QPointF(-rect.x() * scale, -rect.y() * scale)
+            
+            # Resize widget temporarily to match pixmap size
+            old_size = (self.width(), self.height())
+            self.resize(pm_width, pm_height)
+            
+            # Grab the visible area
+            pm = self.grab()
+            
+            # Restore widget size
+            self.resize(old_size[0], old_size[1])
+            
+            return pm
+        finally:
+            # Always restore original view state
+            self._scale = old_scale
+            self._offset = old_offset
+            self.update()
+
     def start_move_floor_plan(self, fp_id: str):
         """Enter mode to drag-move a floor plan with the mouse."""
         if fp_id not in self._floor_plans:
@@ -1662,7 +1702,12 @@ class CanvasWidget(QWidget):
             "grid_color": [self._grid_color.red(), self._grid_color.green(),
                            self._grid_color.blue(), self._grid_color.alpha()],
             "snap_angle": self._snap_angle,
-            "export_frame": None,
+            "export_frame": [
+                float(self._export_frame.x()),
+                float(self._export_frame.y()),
+                float(self._export_frame.width()),
+                float(self._export_frame.height()),
+            ] if self._export_frame else None,
             "measure_color": self._measure_color,
             "ref_line_colors": dict(self._ref_line_colors),
             "ref_line_visible": dict(self._ref_line_visible),
@@ -1796,6 +1841,18 @@ class CanvasWidget(QWidget):
         if "snap_angle" in d:
             self._snap_angle = float(d["snap_angle"])
         
+        # Restore export frame
+        ef = d.get("export_frame")
+        if ef and len(ef) == 4:
+            try:
+                self._export_frame = QRectF(float(ef[0]), float(ef[1]), float(ef[2]), float(ef[3]))
+            except (TypeError, ValueError):
+                self._export_frame = None
+        else:
+            self._export_frame = None
+        self._export_frame_start = None
+        self._export_frame_current = None
+        
         # Restore color settings
         if "measure_color" in d:
             self._measure_color = d["measure_color"]
@@ -1805,10 +1862,6 @@ class CanvasWidget(QWidget):
             self._ref_line_visible = {
                 k: bool(v) for k, v in d["ref_line_visible"].items()
             }
-        
-        self._export_frame = None
-        self._export_frame_start = None
-        self._export_frame_current = None
 
         for cid, pts in d.get("polygons", {}).items():
             self._polygons[cid] = [QPointF(x, y) for x, y in pts]
@@ -4104,6 +4157,9 @@ class CanvasWidget(QWidget):
 
         # ── Maße beim Verschieben anzeigen ────────────────────────
         self._draw_drag_distance_overlay(painter)
+
+        # ── Export-Rahmen ──────────────────────────────────────────
+        self._draw_export_frame(painter)
 
         painter.restore()
 
