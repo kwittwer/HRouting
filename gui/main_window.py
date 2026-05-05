@@ -1860,6 +1860,7 @@ class MainWindow(QMainWindow):
         panel = self._create_elec_point_panel(new_id, fp_id=src_fp_id, name=f"{src.get('name', source_id)} (Kopie)")
         panel.sb_width.setValue(src.get("width", 30.0) / 10)
         panel.sb_height.setValue(src.get("height", 30.0) / 10)
+        panel.chk_label_visible.setChecked(src.get("label_visible", True))
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
         # Position und Höhe kopieren
         pos_idx = panel.cmb_position.findText(src.get("position", "Wand"))
