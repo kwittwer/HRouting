@@ -251,6 +251,10 @@ class MainWindow(QMainWindow):
         self._redo_action.triggered.connect(self._redo)
         self._redo_action.setEnabled(False)
 
+        edit_menu.addSeparator()
+        edit_menu.addAction("🏷️ Anschlusspunkte durchnummerieren", 
+                           self._numbering_elec_points)
+
         # ── Hilfe ──
         help_menu = mb.addMenu("&Hilfe")
         help_menu.addAction("ℹ️ Über HRouting…", self._show_about)
@@ -1654,6 +1658,49 @@ class MainWindow(QMainWindow):
         if item_id in self.param_panel.text_panels:
             return "text"
         return None
+
+    def _numbering_elec_points(self):
+        """Number all electrical connection points with the same name."""
+        if not self.canvas._elec_points:
+            self.status.showMessage("Keine Anschlusspunkte vorhanden.", 2000)
+            return
+        
+        # Push undo state before making changes
+        self._push_undo()
+        
+        # Group points by name
+        from collections import defaultdict
+        groups = defaultdict(list)
+        
+        for pid in self.canvas._elec_points:
+            name = self.canvas._label_map.get(pid, pid)
+            groups[name].append(pid)
+        
+        # Update labels: if group has > 1 point, add number to all
+        changes_made = 0
+        for name, point_ids in groups.items():
+            if len(point_ids) > 1:
+                # Sort for consistent numbering
+                point_ids_sorted = sorted(point_ids)
+                for idx, pid in enumerate(point_ids_sorted, start=1):
+                    new_name = f"{name}{idx}"
+                    self.canvas._label_map[pid] = new_name
+                    # Update panel if exists
+                    panel = self.param_panel.elec_point_panels.get(pid)
+                    if panel:
+                        panel.le_name.setText(new_name)
+                        panel.le_name.editingFinished.emit()
+                    changes_made += 1
+        
+        self.canvas.update()
+        self._mark_dirty()
+        
+        if changes_made > 0:
+            self.status.showMessage(
+                f"✅ {changes_made} Anschlusspunkt(e) durchnummeriert."
+            )
+        else:
+            self.status.showMessage("Alle Anschlusspunkte haben unterschiedliche Namen.", 2000)
 
     def _copy_selected_object(self):
         item_id = self.param_panel.get_selected_item_id()

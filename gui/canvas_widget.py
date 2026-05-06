@@ -2003,6 +2003,8 @@ class CanvasWidget(QWidget):
     def _hit_start_point(self, canvas_pt: QPointF) -> Optional[str]:
         threshold = 10.0 / self._scale
         for cid, sp in self._start_points.items():
+            if not self._circuit_visible.get(cid, True):
+                continue
             if _qdist(canvas_pt, sp) < threshold:
                 return cid
         return None
@@ -2010,6 +2012,8 @@ class CanvasWidget(QWidget):
     def _hit_route_point(self, canvas_pt: QPointF) -> Optional[Tuple[str, int]]:
         threshold = 10.0 / self._scale
         for cid, pts in self._manual_routes.items():
+            if not self._circuit_visible.get(cid, True):
+                continue
             for i, pt in enumerate(pts):
                 if _qdist(canvas_pt, pt) < threshold:
                     return cid, i
