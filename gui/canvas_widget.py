@@ -287,6 +287,10 @@ class CanvasWidget(QWidget):
         self._edit_selection_rect_end: Optional[QPointF] = None
         self._edit_drag_last_pos: Optional[QPointF] = None
 
+        # Selection highlight from treeview
+        self._selected_item_id: Optional[str] = None  # id of currently treeview-selected element
+        self._selected_item_type: Optional[str] = None  # type: polygon, elec_point, hkv, etc
+
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
     # ------------------------------------------------------------------ #
@@ -1690,6 +1694,37 @@ class CanvasWidget(QWidget):
         self._export_frame = None
         self._export_frame_start = None
         self._export_frame_current = None
+        self.update()
+
+    def set_selected_item(self, item_id: str):
+        """Set the item to highlight in the canvas (from treeview selection)."""
+        self._selected_item_id = item_id if item_id else None
+        # Auto-detect type from the item id
+        if item_id:
+            if item_id in self._polygons:
+                self._selected_item_type = "polygon"
+            elif item_id in self._start_points:
+                self._selected_item_type = "circuit"
+            elif item_id in self._elec_points:
+                self._selected_item_type = "elec_point"
+            elif item_id in self._elec_cables:
+                self._selected_item_type = "elec_cable"
+            elif item_id in self._hkv_points:
+                self._selected_item_type = "hkv"
+            elif item_id in self._hkv_lines:
+                self._selected_item_type = "hkv_line"
+            elif item_id in self._supply_lines:
+                self._selected_item_type = "supply_line"
+            elif item_id in self._manual_routes:
+                self._selected_item_type = "route"
+            elif item_id in self._text_annotations:
+                self._selected_item_type = "text"
+            elif item_id in self._floor_plans:
+                self._selected_item_type = "floor_polygon"
+            else:
+                self._selected_item_type = None
+        else:
+            self._selected_item_type = None
         self.update()
 
     def to_dict(self) -> dict:
@@ -4165,6 +4200,9 @@ class CanvasWidget(QWidget):
         # ── Export-Rahmen ──────────────────────────────────────────
         self._draw_export_frame(painter)
 
+        # ── Selection highlight ────────────────────────────────────
+        self._draw_selection_highlight(painter)
+
         painter.restore()
 
     # ── Measurement drawing ───────────────────────────────────────── #
@@ -4231,6 +4269,74 @@ class CanvasWidget(QWidget):
         painter.setFont(font)
         painter.setPen(QPen(QColor("#00e676")))
         painter.drawText(QPointF(frame.x(), frame.y() - 6.0 / self._scale), text)
+
+    def _draw_selection_highlight(self, painter: QPainter):
+        """Draw a highlight around the currently selected item from treeview."""
+        if not self._selected_item_id or not self._selected_item_type:
+            return
+
+        item_id = self._selected_item_id
+        item_type = self._selected_item_type
+        highlight_color = QColor("#ffff00")  # Yellow highlight
+        highlight_color.setAlpha(200)
+        pen = QPen(highlight_color, 4.0 / self._scale, Qt.SolidLine)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        # Draw highlight based on type
+        if item_type == "polygon" and item_id in self._polygons:
+            pts = self._polygons[item_id]
+            if len(pts) >= 3:
+                poly = QPolygonF(pts)
+                painter.drawPolygon(poly)
+
+        elif item_type == "circuit" and item_id in self._start_points:
+            sp = self._start_points[item_id]
+            r = 15.0 / self._scale
+            painter.drawEllipse(sp, r, r)
+
+        elif item_type == "elec_point" and item_id in self._elec_points:
+            pos = self._elec_points[item_id]
+            w, h = self._elec_point_size_px.get(item_id, (30, 30))
+            padding = 5.0 / self._scale
+            rect = QRectF(pos.x() - w/2 - padding, pos.y() - h/2 - padding,
+                         w + 2*padding, h + 2*padding)
+            painter.drawRect(rect)
+
+        elif item_type == "hkv" and item_id in self._hkv_points:
+            pos = self._hkv_points[item_id]
+            w, h = self._hkv_size_px.get(item_id, (30, 30))
+            padding = 5.0 / self._scale
+            rect = QRectF(pos.x() - w/2 - padding, pos.y() - h/2 - padding,
+                         w + 2*padding, h + 2*padding)
+            painter.drawRect(rect)
+
+        elif item_type == "route" and item_id in self._manual_routes:
+            pts = self._manual_routes[item_id]
+            if len(pts) >= 2:
+                painter.drawPolyline(QPolygonF(pts))
+
+        elif item_type == "supply_line" and item_id in self._supply_lines:
+            pts = self._supply_lines[item_id]
+            if len(pts) >= 2:
+                painter.drawPolyline(QPolygonF(pts))
+
+        elif item_type == "elec_cable" and item_id in self._elec_cables:
+            pts = self._elec_cables[item_id]
+            if len(pts) >= 2:
+                painter.drawPolyline(QPolygonF(pts))
+
+        elif item_type == "hkv_line" and item_id in self._hkv_lines:
+            pts = self._hkv_lines[item_id]
+            if len(pts) >= 2:
+                painter.drawPolyline(QPolygonF(pts))
+
+        elif item_type == "text" and item_id in self._text_annotations:
+            pos = self._text_annotations[item_id]
+            r = 8.0 / self._scale
+            painter.drawEllipse(pos, r, r)
 
     # ── Text Annotations drawing ─────────────────────────────────── #
 

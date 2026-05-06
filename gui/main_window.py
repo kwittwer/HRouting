@@ -665,6 +665,9 @@ class MainWindow(QMainWindow):
         self.canvas.floor_plan_transform_updated.connect(
             self._on_floor_plan_transform_from_canvas)
 
+        # Treeview selection sync
+        self.param_panel.item_selected.connect(self.canvas.set_selected_item)
+
         self.param_panel.delete_requested.connect(self._delete_circuit)
         self.param_panel.add_floorplan_requested.connect(self._add_floorplan)
         self.param_panel.delete_floorplan_requested.connect(self._delete_floorplan)

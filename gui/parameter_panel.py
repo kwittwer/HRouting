@@ -1710,6 +1710,7 @@ class ParameterPanel(QWidget):
     """Right-side panel: TreeView for element list + property editor for the
     currently selected element."""
 
+    item_selected               = Signal(str)   # (item_id) - emitted when tree item is selected
     delete_requested            = Signal(str)
     add_floorplan_requested     = Signal()
     delete_floorplan_requested  = Signal(str)
@@ -1985,6 +1986,7 @@ class ParameterPanel(QWidget):
 
         if not current:
             self._set_active_special("empty")
+            self.item_selected.emit("")  # Clear selection on canvas
             return
 
         item_id = current.data(0, Qt.UserRole)
@@ -1993,8 +1995,10 @@ class ParameterPanel(QWidget):
             for subs in self._fp_sub_items.values():
                 if current is subs.get("hk"):
                     self._set_active_special("heat")
+                    self.item_selected.emit("")  # Clear selection
                     return
             self._set_active_special("empty")
+            self.item_selected.emit("")  # Clear selection
             return
 
         panel = (self.floorplan_panels.get(item_id)
@@ -2007,6 +2011,7 @@ class ParameterPanel(QWidget):
                  or self.text_panels.get(item_id))
         if panel:
             self._set_active_panel(panel)
+            self.item_selected.emit(item_id)  # Highlight element on canvas
         else:
             self._set_active_special("empty")
 
