@@ -266,6 +266,9 @@ class MainWindow(QMainWindow):
         self._paste_shortcut = QShortcut(QKeySequence.Paste, self)
         self._paste_shortcut.activated.connect(self._paste_copied_object)
 
+        self._delete_shortcut = QShortcut(QKeySequence.Delete, self)
+        self._delete_shortcut.activated.connect(self._delete_selected_object)
+
     # -- Recent Projects ----------------------------------------------- #
 
     def _rebuild_recent_menu(self):
@@ -1661,6 +1664,55 @@ class MainWindow(QMainWindow):
         if item_id in self.param_panel.text_panels:
             return "text"
         return None
+
+    def _delete_selected_object(self):
+        item_id = self.param_panel.get_selected_item_id()
+        if not item_id:
+            return
+        obj_type = self._selected_object_type(item_id)
+        if not obj_type:
+            return
+
+        if obj_type in {"floorplan", "circuit"}:
+            label = "Grundriss" if obj_type == "floorplan" else "Heizkreis"
+            reply = QMessageBox.question(
+                self,
+                "Löschen bestätigen",
+                f"{label} '{item_id}' wirklich löschen?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        deleted = False
+        if obj_type == "floorplan":
+            self._delete_floorplan(item_id)
+            deleted = True
+        elif obj_type == "furniture":
+            self._delete_furniture(item_id)
+            deleted = True
+        elif obj_type == "circuit":
+            self._delete_circuit(item_id)
+            deleted = True
+        elif obj_type == "elec_point":
+            self._delete_elec_point(item_id)
+            deleted = True
+        elif obj_type == "elec_cable":
+            self._delete_elec_cable(item_id)
+            deleted = True
+        elif obj_type == "hkv":
+            self._delete_hkv(item_id)
+            deleted = True
+        elif obj_type == "hkv_line":
+            self._delete_hkv_line(item_id)
+            deleted = True
+        elif obj_type == "text":
+            self._delete_text(item_id)
+            deleted = True
+
+        if deleted:
+            self._mark_dirty()
 
     def _numbering_elec_points(self):
         """Number all electrical connection points with the same name."""
