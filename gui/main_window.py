@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self._project_path: Path | None = None
         self._circuit_counter = 0
         self._elec_point_counter = 0
+        self._elec_room_counter = 0
         self._elec_cable_counter = 0
         self._hkv_counter = 0
         self._hkv_line_counter = 0
@@ -379,6 +380,7 @@ class MainWindow(QMainWindow):
             "counters": {
                 "circuit": self._circuit_counter,
                 "elec_point": self._elec_point_counter,
+                "elec_room": self._elec_room_counter,
                 "elec_cable": self._elec_cable_counter,
                 "hkv": self._hkv_counter,
                 "hkv_line": self._hkv_line_counter,
@@ -470,6 +472,7 @@ class MainWindow(QMainWindow):
             c = snap.get("counters", {})
             self._circuit_counter = c.get("circuit", 0)
             self._elec_point_counter = c.get("elec_point", 0)
+            self._elec_room_counter = c.get("elec_room", 0)
             self._elec_cable_counter = c.get("elec_cable", 0)
             self._hkv_counter = c.get("hkv", 0)
             self._hkv_line_counter = c.get("hkv_line", 0)
@@ -573,6 +576,21 @@ class MainWindow(QMainWindow):
             if values.get("icon_path"):
                 self.canvas.set_elec_point_icon(pid, values["icon_path"])
 
+        for rid, panel in self.param_panel.elec_room_panels.items():
+            panel.draw_requested.connect(self._on_draw_elec_room)
+            panel.edit_requested.connect(self._on_edit_elec_room)
+            panel.name_changed.connect(self._on_elec_room_name_changed)
+            panel.color_changed.connect(self._on_elec_room_color_changed)
+            panel.visibility_changed.connect(self._on_elec_room_visibility_changed)
+            panel.label_size_changed.connect(self._on_label_size_changed)
+            panel.label_visibility_changed.connect(self._on_label_visibility_changed)
+            values = panel.get_parameters()
+            self.canvas._label_map[rid] = values.get("name", rid)
+            self.canvas._elec_room_visible[rid] = values.get("visible", True)
+            self.canvas.set_label_font_size(rid, values.get("label_size", 12.0))
+            self.canvas.set_label_visible(rid, values.get("label_visible", True))
+            self.canvas.set_color(rid, QColor(values.get("color", "#43aa8b")))
+
         for kid, panel in self.param_panel.elec_cable_panels.items():
             panel.draw_cable_requested.connect(self._on_draw_elec_cable)
             panel.edit_cable_requested.connect(self._on_edit_elec_cable)
@@ -647,9 +665,13 @@ class MainWindow(QMainWindow):
         for cid in self.param_panel.circuit_panels:
             self._update_supply_hkv_label(cid)
 
+        self._update_elec_point_room_assignments()
+
     def _connect_signals(self):
         self.canvas.polygon_finished.connect(self._on_polygon_finished)
+        self.canvas.elec_room_polygon_finished.connect(self._on_elec_room_polygon_finished)
         self.canvas.polygon_changed.connect(self._update_circuit_area)
+        self.canvas.elec_room_polygon_changed.connect(self._on_elec_room_polygon_changed)
         self.canvas.floor_plan_polygon_finished.connect(
             self._on_floorplan_polygon_finished)
         self.canvas.mode_changed.connect(self._on_canvas_mode_changed)
@@ -693,8 +715,10 @@ class MainWindow(QMainWindow):
         self.param_panel.floorplan_order_changed.connect(self._on_floorplan_order_changed)
         self.param_panel.add_circuit_requested.connect(self._add_circuit)
         self.param_panel.add_elec_point_requested.connect(self._add_elec_point)
+        self.param_panel.add_elec_room_requested.connect(self._add_elec_room)
         self.param_panel.add_elec_cable_requested.connect(self._add_elec_cable)
         self.param_panel.delete_elec_point_requested.connect(self._delete_elec_point)
+        self.param_panel.delete_elec_room_requested.connect(self._delete_elec_room)
         self.param_panel.delete_elec_cable_requested.connect(self._delete_elec_cable)
         self.param_panel.duplicate_elec_point_requested.connect(self._duplicate_elec_point)
         self.param_panel.duplicate_elec_cable_requested.connect(self._duplicate_elec_cable)
@@ -712,6 +736,8 @@ class MainWindow(QMainWindow):
         # Dirty-tracking: jede inhaltliche Änderung markiert als unsaved
         self.canvas.polygon_finished.connect(self._mark_dirty)
         self.canvas.polygon_changed.connect(self._mark_dirty)
+        self.canvas.elec_room_polygon_finished.connect(self._mark_dirty)
+        self.canvas.elec_room_polygon_changed.connect(self._mark_dirty)
         self.canvas.floor_plan_polygon_finished.connect(self._mark_dirty)
         self.canvas.route_changed.connect(self._mark_dirty)
         self.canvas.supply_line_changed.connect(self._mark_dirty)
@@ -1341,6 +1367,8 @@ class MainWindow(QMainWindow):
             self._on_edit_floor_polygon_requested(obj_id)
         elif obj_type == "polygon":
             self._on_edit_polygon_requested(obj_id)
+        elif obj_type == "elec_room":
+            self._on_edit_elec_room(obj_id)
 
     def _on_object_clicked(self, obj_type: str, obj_id: str):
         """Handle single-click on canvas object – select in sidebar."""
@@ -1350,6 +1378,7 @@ class MainWindow(QMainWindow):
         """Show feedback when edit mode is exited by clicking another object."""
         labels = {
             "elec_point": "Anschlusspunkt",
+            "elec_room": "Raum",
             "hkv": "HKV",
             "elec_cable": "Kabel",
             "hkv_line": "HKV-Leitung",
@@ -1532,6 +1561,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_elec_point_placed(self, point_id: str):
+        self._update_elec_point_room_assignments()
         self.status.showMessage(
             f"✅ Anschlusspunkt {point_id} platziert.")
 
@@ -1567,6 +1597,95 @@ class MainWindow(QMainWindow):
         self.canvas.delete_elec_point(point_id)
         self.param_panel.remove_elec_point_panel(point_id)
         self.status.showMessage(f"🗑️ Anschlusspunkt {point_id} gelöscht.")
+
+    def _add_elec_room(self, fp_id: str = ""):
+        self._elec_room_counter += 1
+        rid = f"R-{self._elec_room_counter}"
+        self._create_elec_room_panel(rid, fp_id=fp_id or None, name=rid)
+        self.status.showMessage(
+            f"{rid}: Klicke 'Raum-Polygon zeichnen' im Panel."
+        )
+
+    def _create_elec_room_panel(self, room_id: str,
+                                fp_id: str | None = None,
+                                name: str | None = None):
+        panel = self.param_panel.add_elec_room_panel(room_id, fp_id=fp_id, name=name)
+        panel.draw_requested.connect(self._on_draw_elec_room)
+        panel.edit_requested.connect(self._on_edit_elec_room)
+        panel.name_changed.connect(self._on_elec_room_name_changed)
+        panel.color_changed.connect(self._on_elec_room_color_changed)
+        panel.visibility_changed.connect(self._on_elec_room_visibility_changed)
+        panel.label_size_changed.connect(self._on_label_size_changed)
+        panel.label_visibility_changed.connect(self._on_label_visibility_changed)
+        return panel
+
+    def _on_draw_elec_room(self, room_id: str):
+        self.canvas.start_draw_elec_room(room_id)
+        self.status.showMessage(
+            f"{room_id}: Raum-Polygon zeichnen  |  "
+            "Linksklick = Punkt  |  Rechtsklick = Fertig  |  ESC = Abbruch"
+        )
+
+    def _on_edit_elec_room(self, room_id: str):
+        self.canvas.start_edit_elec_room_polygon(room_id)
+        self.status.showMessage(
+            "Raum-Polygon bearbeiten: Linksklick zum Verschieben, Rechtsklick auf Punkt zum Löschen, "
+            "Rechtsklick auf Kante zum Einfügen, Mitteltaste oder ESC zum Beenden."
+        )
+
+    def _on_elec_room_polygon_finished(self, room_id: str, points: list):
+        self._update_elec_point_room_assignments()
+        self.status.showMessage(f"✅ Raum {room_id} erstellt ({len(points)} Punkte).")
+
+    def _on_elec_room_polygon_changed(self, room_id: str):
+        self._update_elec_point_room_assignments()
+
+    def _on_elec_room_name_changed(self, room_id: str, name: str):
+        self.canvas._label_map[room_id] = name
+        self.canvas.update()
+        self._update_elec_point_room_assignments()
+
+    def _on_elec_room_color_changed(self, room_id: str, color: str):
+        self.canvas.set_color(room_id, QColor(color))
+
+    def _on_elec_room_visibility_changed(self, room_id: str, visible: bool):
+        self.canvas._elec_room_visible[room_id] = visible
+        self.canvas.update()
+        self._update_elec_point_room_assignments()
+
+    def _delete_elec_room(self, room_id: str):
+        self.canvas.delete_elec_room(room_id)
+        self.param_panel.remove_elec_room_panel(room_id)
+        self._update_elec_point_room_assignments()
+        self.status.showMessage(f"🗑️ Raum {room_id} gelöscht.")
+
+    def _update_elec_point_room_assignments(self):
+        room_ids = list(self.param_panel.elec_room_panels.keys())
+        if not room_ids:
+            for panel in self.param_panel.elec_point_panels.values():
+                panel.set_room_name("")
+            return
+
+        for pid, panel in self.param_panel.elec_point_panels.items():
+            pt = self.canvas._elec_points.get(pid)
+            if pt is None:
+                panel.set_room_name("")
+                continue
+            point_fp = self.param_panel._element_floorplan.get(pid, "")
+            assigned_name = ""
+            for rid in room_ids:
+                if not self.canvas._elec_room_visible.get(rid, True):
+                    continue
+                if self.param_panel._element_floorplan.get(rid, "") != point_fp:
+                    continue
+                poly = self.canvas._elec_room_polygons.get(rid, [])
+                if len(poly) < 3:
+                    continue
+                if self.canvas._point_in_polygon(pt, poly):
+                    room_panel = self.param_panel.elec_room_panels.get(rid)
+                    assigned_name = room_panel.get_parameters().get("name", rid) if room_panel else rid
+                    break
+            panel.set_room_name(assigned_name)
 
     def _add_elec_cable(self, fp_id: str = ""):
         self._elec_cable_counter += 1
@@ -1655,6 +1774,8 @@ class MainWindow(QMainWindow):
             return "circuit"
         if item_id in self.param_panel.elec_point_panels:
             return "elec_point"
+        if item_id in self.param_panel.elec_room_panels:
+            return "elec_room"
         if item_id in self.param_panel.elec_cable_panels:
             return "elec_cable"
         if item_id in self.param_panel.hkv_panels:
@@ -1697,6 +1818,9 @@ class MainWindow(QMainWindow):
             deleted = True
         elif obj_type == "elec_point":
             self._delete_elec_point(item_id)
+            deleted = True
+        elif obj_type == "elec_room":
+            self._delete_elec_room(item_id)
             deleted = True
         elif obj_type == "elec_cable":
             self._delete_elec_cable(item_id)
@@ -2390,6 +2514,7 @@ class MainWindow(QMainWindow):
         self._project_path = None
         self._circuit_counter = 0
         self._elec_point_counter = 0
+        self._elec_room_counter = 0
         self._elec_cable_counter = 0
         self._hkv_counter = 0
         self._hkv_line_counter = 0
@@ -2746,6 +2871,26 @@ class MainWindow(QMainWindow):
                 except (IndexError, ValueError):
                     pass
 
+            for rid, panel in self.param_panel.elec_room_panels.items():
+                panel.draw_requested.connect(self._on_draw_elec_room)
+                panel.edit_requested.connect(self._on_edit_elec_room)
+                panel.name_changed.connect(self._on_elec_room_name_changed)
+                panel.color_changed.connect(self._on_elec_room_color_changed)
+                panel.visibility_changed.connect(self._on_elec_room_visibility_changed)
+                panel.label_size_changed.connect(self._on_label_size_changed)
+                panel.label_visibility_changed.connect(self._on_label_visibility_changed)
+                values = panel.get_parameters()
+                self.canvas._label_map[rid] = values.get("name", rid)
+                self.canvas._elec_room_visible[rid] = values.get("visible", True)
+                self.canvas.set_label_font_size(rid, values.get("label_size", 12.0))
+                self.canvas.set_label_visible(rid, values.get("label_visible", True))
+                self.canvas.set_color(rid, QColor(values.get("color", "#43aa8b")))
+                try:
+                    num = int(rid.split("-")[1])
+                    self._elec_room_counter = max(self._elec_room_counter, num)
+                except (IndexError, ValueError):
+                    pass
+
             for kid, panel in self.param_panel.elec_cable_panels.items():
                 panel.draw_cable_requested.connect(self._on_draw_elec_cable)
                 panel.edit_cable_requested.connect(self._on_edit_elec_cable)
@@ -2824,6 +2969,8 @@ class MainWindow(QMainWindow):
             # Update supply line HKV labels
             for cid in self.param_panel.circuit_panels:
                 self._update_supply_hkv_label(cid)
+
+            self._update_elec_point_room_assignments()
 
             # Text annotation panels
             for tid, panel in self.param_panel.text_panels.items():
@@ -3750,6 +3897,7 @@ class MainWindow(QMainWindow):
 
         # AP → Kabel Zuordnung
         ap_cables = self._build_ap_cable_map(kv_rows)
+        room_ap_connections = self._build_room_ap_connection_map(kv_rows)
         ap_type_counts = self._collect_ap_type_counts()
 
         # ── HKV-Leitungen sammeln ──
@@ -4009,6 +4157,26 @@ class MainWindow(QMainWindow):
                     tbl_ap.setItem(i, 3, item)
                 kv_layout.addWidget(tbl_ap)
 
+        if room_ap_connections:
+            kv_layout.addWidget(QLabel(
+                "<b>Räume – Zugeordnete Anschlusspunkte und Kabelziele</b>"))
+            tbl_room_ap = QTableWidget(len(room_ap_connections), 7)
+            tbl_room_ap.setHorizontalHeaderLabels(
+                ["Raum", "AP", "Kabel", "Typ", "Anschluss", "Führt zu AP", "Länge (m)"])
+            tbl_room_ap.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            tbl_room_ap.setEditTriggers(QTableWidget.NoEditTriggers)
+            for i, row in enumerate(room_ap_connections):
+                tbl_room_ap.setItem(i, 0, QTableWidgetItem(row.get("room", "")))
+                tbl_room_ap.setItem(i, 1, QTableWidgetItem(row.get("ap", "")))
+                tbl_room_ap.setItem(i, 2, QTableWidgetItem(row.get("cable", "")))
+                tbl_room_ap.setItem(i, 3, QTableWidgetItem(row.get("type", "")))
+                tbl_room_ap.setItem(i, 4, QTableWidgetItem(row.get("role", "")))
+                tbl_room_ap.setItem(i, 5, QTableWidgetItem(row.get("target_ap", "")))
+                item = QTableWidgetItem(f"{row.get('length_m', 0.0):.2f}")
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                tbl_room_ap.setItem(i, 6, item)
+            kv_layout.addWidget(tbl_room_ap)
+
         tabs.addTab(kv_widget, "🔌 Elektro")
 
         # -- Buttons --
@@ -4017,7 +4185,7 @@ class MainWindow(QMainWindow):
         btn_csv.clicked.connect(
             lambda: self._save_lengths_csv(hk_rows, hk_sum, kv_rows, kv_sum,
                                            hkv_sum, ap_cables, hl_rows, hl_sum,
-                                           ap_type_counts)
+                                           ap_type_counts, room_ap_connections)
         )
         btn_box.addButton(btn_csv, QDialogButtonBox.ActionRole)
         btn_box.addButton(QDialogButtonBox.Close)
@@ -4028,7 +4196,7 @@ class MainWindow(QMainWindow):
 
     def _save_lengths_csv(self, hk_rows, hk_sum, kv_rows, kv_sum, hkv_sum,
                            ap_cables=None, hl_rows=None, hl_sum=None,
-                           ap_type_counts=None):
+                           ap_type_counts=None, room_ap_connections=None):
         path, _ = QFileDialog.getSaveFileName(
             self, "Längen als CSV speichern", "laengen.csv",
             "CSV (*.csv)")
@@ -4139,6 +4307,24 @@ class MainWindow(QMainWindow):
                     ]))
             lines.append("")
 
+        # Raumzuordnung AP → Kabelziele
+        if room_ap_connections:
+            lines.append("Elektro - Räume mit AP und Kabelzielen")
+            lines.append(sep.join([
+                "Raum", "AP", "Kabel", "Typ", "Anschluss", "Führt zu AP", "Länge (m)",
+            ]))
+            for row in room_ap_connections:
+                lines.append(sep.join([
+                    row.get("room", ""),
+                    row.get("ap", ""),
+                    row.get("cable", ""),
+                    row.get("type", ""),
+                    row.get("role", ""),
+                    row.get("target_ap", ""),
+                    f"{row.get('length_m', 0.0):.2f}",
+                ]))
+            lines.append("")
+
         # AP-Typen
         if ap_type_counts:
             lines.append("Elektro - Anschlusspunkte je Typ")
@@ -4188,6 +4374,88 @@ class MainWindow(QMainWindow):
                         "length_m": r["length_m"], "role": role,
                     })
         return dict(ap_map)
+
+    def _build_room_ap_connection_map(self, kv_rows: list[dict]) -> list[dict]:
+        """Build rows for report: Raum -> AP -> Kabel -> Ziel-AP.
+
+        Returns list of rows with keys:
+        room, ap, cable, type, role, target_ap, length_m
+        """
+        point_id_to_name: dict[str, str] = {}
+        point_id_to_room_name: dict[str, str] = {}
+
+        for pid, panel in self.param_panel.elec_point_panels.items():
+            params = panel.get_parameters()
+            ap_name = (params.get("name") or pid).strip() or pid
+            point_id_to_name[pid] = ap_name
+
+            room_name = "(ohne Raum)"
+            point = self.canvas._elec_points.get(pid)
+            point_fp_id = self.param_panel._element_floorplan.get(pid, "")
+            if point is not None:
+                for rid, poly in self.canvas._elec_room_polygons.items():
+                    if len(poly) < 3:
+                        continue
+                    room_fp_id = self.param_panel._element_floorplan.get(rid, "")
+                    if point_fp_id != room_fp_id:
+                        continue
+                    if self.canvas._point_in_polygon(point, poly):
+                        room_panel = self.param_panel.elec_room_panels.get(rid)
+                        if room_panel:
+                            room_name = room_panel.get_parameters().get("name", rid)
+                        else:
+                            room_name = rid
+                        break
+            point_id_to_room_name[pid] = room_name
+
+        # cable name -> length/type (from kv rows) for robust display order
+        cable_meta: dict[str, dict] = {
+            r.get("name", ""): {
+                "type": r.get("type", ""),
+                "length_m": float(r.get("length_m", 0.0)),
+            }
+            for r in kv_rows
+        }
+
+        rows: list[dict] = []
+        for cable_id, panel in self.param_panel.elec_cable_panels.items():
+            cable_params = panel.get_parameters()
+            cable_name = cable_params.get("name", cable_id)
+            cable_type = cable_meta.get(cable_name, {}).get("type", cable_params.get("type", ""))
+            cable_len = cable_meta.get(cable_name, {}).get("length_m", 0.0)
+
+            start_id, end_id = self.canvas.get_cable_ap(cable_id)
+
+            if start_id:
+                rows.append({
+                    "room": point_id_to_room_name.get(start_id, "(ohne Raum)"),
+                    "ap": point_id_to_name.get(start_id, start_id),
+                    "cable": cable_name,
+                    "type": cable_type,
+                    "role": "Start",
+                    "target_ap": point_id_to_name.get(end_id, end_id) if end_id else "(offenes Ende)",
+                    "length_m": cable_len,
+                })
+            if end_id:
+                rows.append({
+                    "room": point_id_to_room_name.get(end_id, "(ohne Raum)"),
+                    "ap": point_id_to_name.get(end_id, end_id),
+                    "cable": cable_name,
+                    "type": cable_type,
+                    "role": "Ende",
+                    "target_ap": point_id_to_name.get(start_id, start_id) if start_id else "(offenes Ende)",
+                    "length_m": cable_len,
+                })
+
+        return sorted(
+            rows,
+            key=lambda r: (
+                (r.get("room") or "").lower(),
+                (r.get("ap") or "").lower(),
+                (r.get("cable") or "").lower(),
+                (r.get("role") or "").lower(),
+            ),
+        )
 
     def _collect_export_data(self) -> dict:
         """Collect circuit + elektro data for export."""
@@ -4276,6 +4544,7 @@ class MainWindow(QMainWindow):
             kv_sum[r["type"]] += r["length_m"]
 
         ap_cables = self._build_ap_cable_map(kv_rows)
+        room_ap_connections = self._build_room_ap_connection_map(kv_rows)
         ap_type_counts = self._collect_ap_type_counts()
 
         # ── HKV-Leitungen sammeln ──
@@ -4307,6 +4576,7 @@ class MainWindow(QMainWindow):
             "hk_rows": hk_rows, "hkv_sum": hkv_sum,
             "kv_rows": kv_rows, "kv_sum": kv_sum,
             "ap_cables": ap_cables,
+            "room_ap_connections": room_ap_connections,
             "ap_type_counts": ap_type_counts,
             "hl_rows": hl_rows, "hl_sum": hl_sum,
         }
@@ -4663,7 +4933,32 @@ class MainWindow(QMainWindow):
                 for c in ap_cables[ap_name]:
                     ap_rows.append([ap_name, c["cable"], c["type"],
                                     c["role"], f"{c['length_m']:.2f}"])
-            ctx.draw_table(page, y_after, ap_headers, ap_rows)
+            y_after = ctx.draw_table(page, y_after, ap_headers, ap_rows)
+
+        room_ap_connections = data.get("room_ap_connections", [])
+        if room_ap_connections:
+            y_after += ctx.mm(4)
+            ctx.painter.save()
+            ctx.painter.setFont(QFont("Arial", 9, QFont.Bold))
+            ctx.painter.drawText(
+                int(page.x()), int(y_after + ctx.mm(3)),
+                "Räume – AP und Kabelziele:")
+            ctx.painter.restore()
+            y_after += ctx.mm(5)
+            room_headers = ["Raum", "AP", "Kabel", "Typ", "Anschluss", "Führt zu AP", "Länge (m)"]
+            room_rows = [
+                [
+                    r.get("room", ""),
+                    r.get("ap", ""),
+                    r.get("cable", ""),
+                    r.get("type", ""),
+                    r.get("role", ""),
+                    r.get("target_ap", ""),
+                    f"{r.get('length_m', 0.0):.2f}",
+                ]
+                for r in room_ap_connections
+            ]
+            ctx.draw_table(page, y_after, room_headers, room_rows)
 
 
 # ====================================================================== #

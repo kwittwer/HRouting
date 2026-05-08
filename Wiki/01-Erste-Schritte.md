@@ -25,3 +25,6 @@ Nach dem Splash Screen öffnet sich das Hauptfenster mit:
 ## Letztes Projekt automatisch laden
 
 HRouting merkt sich das zuletzt geöffnete Projekt und lädt es beim nächsten Start automatisch.
+
+|  |  |  |
+| - | - | - |

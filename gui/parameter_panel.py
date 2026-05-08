@@ -516,6 +516,10 @@ class ElektroPointPanel(QWidget):
         )
         form.addRow(self.btn_delete)
 
+        self.lbl_room = QLabel("Raum: –")
+        self.lbl_room.setStyleSheet("color:#9ad1ff; padding:2px;")
+        form.addRow(self.lbl_room)
+
         layout.addLayout(form)
 
     def _choose_color(self):
@@ -589,6 +593,9 @@ class ElektroPointPanel(QWidget):
         d["point_id"] = self.point_id
         return d
 
+    def set_room_name(self, room_name: str):
+        self.lbl_room.setText(f"Raum: {room_name or '–'}")
+
     def from_dict(self, d: dict):
         self.le_name.setText(d.get("name", self.point_id))
         c = d.get("color", self._color.name())
@@ -624,6 +631,119 @@ class ElektroPointPanel(QWidget):
             if icon:
                 self._icon_path = icon
                 self.btn_icon.setText(icon.split("/")[-1].split("\\")[-1])
+
+
+# ================================================================== #
+#  Elektro: Raum Panel                                                #
+# ================================================================== #
+
+class ElektroRoomPanel(QWidget):
+    delete_requested = Signal(str)
+    name_changed = Signal(str, str)
+    color_changed = Signal(str, str)
+    visibility_changed = Signal(str, bool)
+    label_size_changed = Signal(str, float)
+    label_visibility_changed = Signal(str, bool)
+    draw_requested = Signal(str)
+    edit_requested = Signal(str)
+
+    def __init__(self, room_id: str, name: str | None = None,
+                 color: str | None = None, parent=None):
+        super().__init__(parent)
+        self.room_id = room_id
+        self._name = name or room_id
+        self._color = QColor(color or "#43aa8b")
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+
+        self.chk_visible = QCheckBox("Sichtbar")
+        self.chk_visible.setChecked(True)
+        self.chk_visible.toggled.connect(
+            lambda c: self.visibility_changed.emit(self.room_id, c)
+        )
+        form.addRow(self.chk_visible)
+
+        self.chk_label_visible = QCheckBox("Beschriftung")
+        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.toggled.connect(
+            lambda c: self.label_visibility_changed.emit(self.room_id, c)
+        )
+        form.addRow(self.chk_label_visible)
+
+        self.le_name = QLineEdit(self._name)
+        self.le_name.textChanged.connect(
+            lambda v: self.name_changed.emit(self.room_id, v)
+        )
+        form.addRow("Name:", self.le_name)
+
+        self.btn_color = QPushButton("Farbe")
+        self.btn_color.clicked.connect(self._choose_color)
+        self._update_color_button()
+        form.addRow("Farbe:", self.btn_color)
+
+        self.sb_label_size = SafeDoubleSpinBox()
+        self.sb_label_size.setRange(0.1, 999999.0)
+        self.sb_label_size.setSingleStep(1.0)
+        self.sb_label_size.setValue(12.0)
+        self.sb_label_size.setSuffix(" pt")
+        self.sb_label_size.valueChanged.connect(
+            lambda v: self.label_size_changed.emit(self.room_id, v)
+        )
+        form.addRow("Schriftgröße:", self.sb_label_size)
+
+        self.btn_draw = QPushButton("✏️ Raum-Polygon zeichnen")
+        self.btn_draw.clicked.connect(lambda: self.draw_requested.emit(self.room_id))
+        form.addRow(self.btn_draw)
+
+        self.btn_edit = QPushButton("✏️ Raum-Polygon bearbeiten")
+        self.btn_edit.clicked.connect(lambda: self.edit_requested.emit(self.room_id))
+        form.addRow(self.btn_edit)
+
+        self.btn_delete = QPushButton("🗑️ Löschen")
+        self.btn_delete.clicked.connect(lambda: self.delete_requested.emit(self.room_id))
+        form.addRow(self.btn_delete)
+
+        layout.addLayout(form)
+
+    def _choose_color(self):
+        color = QColorDialog.getColor(self._color, self, "Raum-Farbe")
+        if color.isValid():
+            self._color = color
+            self._update_color_button()
+            self.color_changed.emit(self.room_id, self._color.name())
+
+    def _update_color_button(self):
+        self.btn_color.setStyleSheet(f"background:{self._color.name()}; color:white;")
+
+    def get_parameters(self) -> dict:
+        return {
+            "name": self.le_name.text().strip() or self.room_id,
+            "color": self._color.name(),
+            "visible": self.chk_visible.isChecked(),
+            "label_visible": self.chk_label_visible.isChecked(),
+            "label_size": self.sb_label_size.value(),
+        }
+
+    def to_dict(self) -> dict:
+        d = self.get_parameters()
+        d["room_id"] = self.room_id
+        return d
+
+    def from_dict(self, d: dict):
+        self.le_name.setText(d.get("name", self.room_id))
+        c = d.get("color", self._color.name())
+        self._color = QColor(c)
+        self._update_color_button()
+        self.chk_visible.setChecked(d.get("visible", True))
+        self.chk_label_visible.setChecked(d.get("label_visible", True))
+        self.sb_label_size.setValue(d.get("label_size", 12.0))
 
 
 # ================================================================== #
@@ -1731,10 +1851,12 @@ class ParameterPanel(QWidget):
     ref_length_confirmed        = Signal(float)
     add_circuit_requested       = Signal(str)   # fp_id
     add_elec_point_requested    = Signal(str)   # fp_id
+    add_elec_room_requested     = Signal(str)   # fp_id
     add_elec_cable_requested    = Signal(str)   # fp_id
     add_hkv_requested           = Signal(str)   # fp_id
     add_hkv_line_requested      = Signal(str)   # fp_id
     delete_elec_point_requested = Signal(str)
+    delete_elec_room_requested  = Signal(str)
     delete_elec_cable_requested = Signal(str)
     delete_hkv_requested        = Signal(str)
     delete_hkv_line_requested   = Signal(str)
@@ -1753,6 +1875,7 @@ class ParameterPanel(QWidget):
         super().__init__(parent)
         self.circuit_panels: dict[str, HeatingCircuitPanel] = {}
         self.elec_point_panels: dict[str, ElektroPointPanel] = {}
+        self.elec_room_panels: dict[str, ElektroRoomPanel] = {}
         self.elec_cable_panels: dict[str, ElektroCablePanel] = {}
         self.hkv_panels: dict[str, HkvPanel] = {}
         self.hkv_line_panels: dict[str, HkvLinePanel] = {}
@@ -1761,7 +1884,7 @@ class ParameterPanel(QWidget):
         self.furniture_panels: dict[str, FloorPlanPanel] = {}
         self._furniture_parent: dict[str, str] = {}  # furniture_id -> parent_fp_id
         self._tree_items: dict[str, QTreeWidgetItem] = {}
-        self._fp_sub_items: dict[str, dict] = {}      # fp_id -> {hk, hkv, hkv_line, ap, kv}
+        self._fp_sub_items: dict[str, dict] = {}      # fp_id -> {hk, hkv, hkv_line, ap, room, kv, text}
         self._element_floorplan: dict[str, str] = {}  # element_id -> fp_id
         self._loading = False
         self._active_panel: QWidget | None = None
@@ -1803,6 +1926,14 @@ class ParameterPanel(QWidget):
         self.btn_add_point.clicked.connect(
             lambda: self.add_elec_point_requested.emit(self.get_active_floorplan_id() or ""))
         btn_row.addWidget(self.btn_add_point)
+
+        self.btn_add_room = QPushButton("➕ Raum")
+        self.btn_add_room.setStyleSheet(
+            "background:#43aa8b; color:white; padding:4px;"
+        )
+        self.btn_add_room.clicked.connect(
+            lambda: self.add_elec_room_requested.emit(self.get_active_floorplan_id() or ""))
+        btn_row.addWidget(self.btn_add_room)
 
         self.btn_add_cable = QPushButton("\u2795 Kabel")
         self.btn_add_cable.setStyleSheet(
@@ -2005,6 +2136,7 @@ class ParameterPanel(QWidget):
                  or self.furniture_panels.get(item_id)
                  or self.circuit_panels.get(item_id)
                  or self.elec_point_panels.get(item_id)
+                 or self.elec_room_panels.get(item_id)
                  or self.elec_cable_panels.get(item_id)
                  or self.hkv_panels.get(item_id)
                  or self.hkv_line_panels.get(item_id)
@@ -2078,6 +2210,7 @@ class ParameterPanel(QWidget):
                 if fid == item_id:
                     panel = (self.circuit_panels.get(eid)
                              or self.elec_point_panels.get(eid)
+                             or self.elec_room_panels.get(eid)
                              or self.elec_cable_panels.get(eid)
                              or self.hkv_panels.get(eid)
                              or self.hkv_line_panels.get(eid)
@@ -2106,6 +2239,8 @@ class ParameterPanel(QWidget):
                         panel = self.hkv_line_panels.get(eid)
                     elif item is subs["ap"]:
                         panel = self.elec_point_panels.get(eid)
+                    elif item is subs["room"]:
+                        panel = self.elec_room_panels.get(eid)
                     elif item is subs["kv"]:
                         panel = self.elec_cable_panels.get(eid)
                     elif item is subs["text"]:
@@ -2119,6 +2254,7 @@ class ParameterPanel(QWidget):
             panel = (self.furniture_panels.get(item_id)
                      or self.circuit_panels.get(item_id)
                      or self.elec_point_panels.get(item_id)
+                     or self.elec_room_panels.get(item_id)
                      or self.elec_cable_panels.get(item_id)
                      or self.hkv_panels.get(item_id)
                      or self.hkv_line_panels.get(item_id)
@@ -2158,6 +2294,8 @@ class ParameterPanel(QWidget):
             return "hkv_line"
         if item_id in self.elec_point_panels:
             return "ap"
+        if item_id in self.elec_room_panels:
+            return "room"
         if item_id in self.elec_cable_panels:
             return "kv"
         if item_id in self.text_panels:
@@ -2296,6 +2434,10 @@ class ParameterPanel(QWidget):
         ap_item.setFlags((ap_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         ap_item.setCheckState(0, Qt.Checked)
 
+        room_item = QTreeWidgetItem(fp_item, ["🏠 Räume"])
+        room_item.setFlags((room_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
+        room_item.setCheckState(0, Qt.Checked)
+
         kv_item = QTreeWidgetItem(fp_item, ["Kabelverbindungen"])
         kv_item.setFlags((kv_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         kv_item.setCheckState(0, Qt.Checked)
@@ -2306,7 +2448,7 @@ class ParameterPanel(QWidget):
 
         self._fp_sub_items[fp_id] = {
             "hk": hk_item, "hkv": hkv_item, "hkv_line": hkv_line_item,
-            "ap": ap_item, "kv": kv_item, "text": text_item,
+            "ap": ap_item, "room": room_item, "kv": kv_item, "text": text_item,
         }
         fp_item.setExpanded(True)
         if not self._loading:
@@ -2549,6 +2691,43 @@ class ParameterPanel(QWidget):
         return panel.get_parameters() if panel else None
 
     # ──────────────────────────────────────────────────────────────── #
+    #  Elektro: Räume                                                  #
+    # ──────────────────────────────────────────────────────────────── #
+
+    def add_elec_room_panel(self, room_id: str,
+                            fp_id: str | None = None,
+                            name: str | None = None,
+                            color: str | None = None) -> ElektroRoomPanel:
+        panel = ElektroRoomPanel(room_id, name=name, color=color)
+        panel.delete_requested.connect(self.delete_elec_room_requested)
+        panel.name_changed.connect(self._update_tree_item_name)
+        panel.visibility_changed.connect(
+            lambda rid, c: self._sync_tree_checkbox(rid, c)
+        )
+        self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
+        panel.hide()
+        self.elec_room_panels[room_id] = panel
+        resolved = self._resolve_fp_id(fp_id)
+        self._element_floorplan[room_id] = resolved or ""
+        parent_item = self._fp_sub_items.get(resolved or "", {}).get("room") if resolved else None
+        if parent_item:
+            self._add_tree_item(parent_item, room_id, name or room_id)
+        return panel
+
+    def remove_elec_room_panel(self, room_id: str):
+        self._remove_tree_item(room_id)
+        self._element_floorplan.pop(room_id, None)
+        panel = self.elec_room_panels.pop(room_id, None)
+        if panel:
+            self._prop_layout.removeWidget(panel)
+            panel.deleteLater()
+        self._show_placeholder_if_empty()
+
+    def get_elec_room_params(self, room_id: str) -> dict | None:
+        panel = self.elec_room_panels.get(room_id)
+        return panel.get_parameters() if panel else None
+
+    # ──────────────────────────────────────────────────────────────── #
     #  Elektro: Kabelverbindungen                                       #
     # ──────────────────────────────────────────────────────────────── #
 
@@ -2723,6 +2902,7 @@ class ParameterPanel(QWidget):
                    list(self.furniture_panels.values()) +
                    list(self.circuit_panels.values()) +
                    list(self.elec_point_panels.values()) +
+                 list(self.elec_room_panels.values()) +
                    list(self.elec_cable_panels.values()) +
                    list(self.hkv_panels.values()) +
                    list(self.hkv_line_panels.values()) +
@@ -2755,6 +2935,8 @@ class ParameterPanel(QWidget):
             self.remove_hkv_panel(hid)
         for cid in list(self.elec_cable_panels):
             self.remove_elec_cable_panel(cid)
+        for rid in list(self.elec_room_panels):
+            self.remove_elec_room_panel(rid)
         for pid in list(self.elec_point_panels):
             self.remove_elec_point_panel(pid)
         for cid in list(self.circuit_panels):
@@ -2786,6 +2968,10 @@ class ParameterPanel(QWidget):
             "elec_points": {
                 pid: {**p.to_dict(), "floor_plan_id": self._element_floorplan.get(pid, "")}
                 for pid, p in self.elec_point_panels.items()
+            },
+            "elec_rooms": {
+                rid: {**p.to_dict(), "floor_plan_id": self._element_floorplan.get(rid, "")}
+                for rid, p in self.elec_room_panels.items()
             },
             "elec_cables": {
                 cid: {**p.to_dict(), "floor_plan_id": self._element_floorplan.get(cid, "")}
@@ -2858,6 +3044,13 @@ class ParameterPanel(QWidget):
                 pid, fp_id=values.get("floor_plan_id"),
                 name=values.get("name", pid),
                 color=values.get("color", "#4fc3f7"),
+            )
+            panel.from_dict(values)
+        for rid, values in d.get("elec_rooms", {}).items():
+            panel = self.add_elec_room_panel(
+                rid, fp_id=values.get("floor_plan_id"),
+                name=values.get("name", rid),
+                color=values.get("color", "#43aa8b"),
             )
             panel.from_dict(values)
         for cid, values in d.get("elec_cables", {}).items():

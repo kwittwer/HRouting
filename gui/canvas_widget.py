@@ -88,10 +88,12 @@ class ToolMode(Enum):
 
 class CanvasWidget(QWidget):
     polygon_finished  = Signal(str, list)
+    elec_room_polygon_finished = Signal(str, list)
     ref_line_set      = Signal()          # Linie fertig, Länge kommt vom Panel
     start_point_moved = Signal(str, tuple)
     route_changed     = Signal(str)
     polygon_changed   = Signal(str)       # emitted when polygon is edited (point moved/added/deleted)
+    elec_room_polygon_changed = Signal(str)
     elec_point_placed  = Signal(str)
     elec_cable_changed = Signal(str)
     hkv_placed         = Signal(str)
@@ -174,6 +176,8 @@ class CanvasWidget(QWidget):
 
         # Elektro
         self._elec_points:        Dict[str, QPointF]              = {}
+        self._elec_room_polygons: Dict[str, List[QPointF]]        = {}
+        self._elec_room_visible:  Dict[str, bool]                 = {}
         self._elec_point_size_px: Dict[str, Tuple[float, float]]  = {}
         self._elec_point_icons:   Dict[str, Optional[QPixmap]]    = {}
         self._elec_point_svgs:    Dict[str, Optional[QSvgRenderer]] = {}
@@ -252,6 +256,7 @@ class CanvasWidget(QWidget):
 
         # Elektro edit state
         self._placing_elec_point_id: Optional[str] = None
+        self._current_elec_room_id: Optional[str] = None
         self._current_elec_cable_id: Optional[str] = None
         self._current_elec_cable_points: List[QPointF] = []
         self._current_elec_cable_preview: Optional[QPointF] = None
@@ -278,6 +283,7 @@ class CanvasWidget(QWidget):
 
         # Edit modes
         self._edit_polygon_cid: Optional[str] = None
+        self._edit_elec_room_id: Optional[str] = None
         self._edit_floor_polygon_id: Optional[str] = None
         self._insert_between_indices: Optional[Tuple[int, int]] = None
         self._edit_route_cid: Optional[str] = None
@@ -622,8 +628,18 @@ class CanvasWidget(QWidget):
     def start_drawing(self, circuit_id: str):
         self._mode = ToolMode.DRAW_POLY
         self._current_circuit_id = circuit_id
+        self._current_elec_room_id = None
         self._current_points = []
         self._ensure_color(circuit_id)
+        self.setCursor(Qt.CrossCursor)
+
+    def start_draw_elec_room(self, room_id: str):
+        self._mode = ToolMode.DRAW_POLY
+        self._current_circuit_id = None
+        self._current_elec_room_id = room_id
+        self._current_points = []
+        self._elec_room_visible.setdefault(room_id, True)
+        self._ensure_color(room_id)
         self.setCursor(Qt.CrossCursor)
 
     def start_draw_floor_plan_polygon(self, fp_id: str):
@@ -663,6 +679,7 @@ class CanvasWidget(QWidget):
         if circuit_id not in self._polygons:
             return
         self._edit_floor_polygon_id = None
+        self._edit_elec_room_id = None
         self._edit_polygon_cid = circuit_id
         self._edit_selected_owner = None
         self._edit_selected_indices.clear()
@@ -678,7 +695,23 @@ class CanvasWidget(QWidget):
         if not layer or len(layer.polygon) < 3:
             return
         self._edit_polygon_cid = None
+        self._edit_elec_room_id = None
         self._edit_floor_polygon_id = fp_id
+        self._edit_selected_owner = None
+        self._edit_selected_indices.clear()
+        self._edit_selection_rect_start = None
+        self._edit_selection_rect_end = None
+        self._edit_drag_last_pos = None
+        self._mode = ToolMode.EDIT_POLYGON
+        self.setCursor(Qt.CrossCursor)
+        self.update()
+
+    def start_edit_elec_room_polygon(self, room_id: str):
+        if room_id not in self._elec_room_polygons:
+            return
+        self._edit_polygon_cid = None
+        self._edit_floor_polygon_id = None
+        self._edit_elec_room_id = room_id
         self._edit_selected_owner = None
         self._edit_selected_indices.clear()
         self._edit_selection_rect_start = None
@@ -811,6 +844,8 @@ class CanvasWidget(QWidget):
 
     def _hit_polygon_point(self, canvas_pt: QPointF, cid: str) -> Optional[int]:
         pts = self._polygons.get(cid, [])
+        if not pts:
+            pts = self._elec_room_polygons.get(cid, [])
         threshold = 10.0 / self._scale
         for i, pt in enumerate(pts):
             if _qdist(canvas_pt, pt) < threshold:
@@ -819,6 +854,8 @@ class CanvasWidget(QWidget):
 
     def _hit_polygon_edge(self, canvas_pt: QPointF, cid: str) -> Optional[Tuple[int, int]]:
         pts = self._polygons.get(cid, [])
+        if not pts:
+            pts = self._elec_room_polygons.get(cid, [])
         if len(pts) < 2:
             return None
         threshold = 8.0 / self._scale
@@ -852,20 +889,35 @@ class CanvasWidget(QWidget):
         return None
 
     def _delete_polygon_point(self, cid: str, idx: int):
-        if cid not in self._polygons or len(self._polygons[cid]) <= 3:
+        if cid in self._polygons:
+            if len(self._polygons[cid]) <= 3:
+                return
+            del self._polygons[cid][idx]
+            self.polygon_changed.emit(cid)
+            self.update()
             return
-        del self._polygons[cid][idx]
-        self.polygon_changed.emit(cid)
-        self.update()
+        if cid in self._elec_room_polygons:
+            if len(self._elec_room_polygons[cid]) <= 3:
+                return
+            del self._elec_room_polygons[cid][idx]
+            self.elec_room_polygon_changed.emit(cid)
+            self.update()
 
     def _insert_polygon_point(self, cid: str, idx1: int, idx2: int, pt: QPointF):
-        if cid not in self._polygons:
+        pts = self._polygons.get(cid)
+        is_room = False
+        if pts is None:
+            pts = self._elec_room_polygons.get(cid)
+            is_room = True
+        if pts is None:
             return
-        pts = self._polygons[cid]
         next_idx = (idx1 + 1) % len(pts)
         if idx2 == next_idx:
             pts.insert(next_idx, pt)
-            self.polygon_changed.emit(cid)
+            if is_room:
+                self.elec_room_polygon_changed.emit(cid)
+            else:
+                self.polygon_changed.emit(cid)
             self.update()
 
     def _delete_route_point(self, cid: str, idx: int):
@@ -906,6 +958,34 @@ class CanvasWidget(QWidget):
     def set_polygon_name(self, circuit_id: str, name: str):
         self._label_map[circuit_id] = name
         self.update()
+
+    def delete_elec_room(self, room_id: str):
+        for d in (
+            self._elec_room_polygons,
+            self._elec_room_visible,
+            self._label_positions,
+            self._label_font_sizes,
+            self._label_visible,
+            self._label_rects,
+            self._label_draw_pos,
+        ):
+            d.pop(room_id, None)
+        self._color_map.pop(room_id, None)
+        self._label_map.pop(room_id, None)
+        self.update()
+
+    def get_elec_room_for_point(self, point_id: str) -> str:
+        pt = self._elec_points.get(point_id)
+        if pt is None:
+            return ""
+        for rid, poly in self._elec_room_polygons.items():
+            if not self._elec_room_visible.get(rid, True):
+                continue
+            if len(poly) < 3:
+                continue
+            if self._point_in_polygon(pt, poly):
+                return rid
+        return ""
 
     def set_helper_line(self, circuit_id: str, points: List[Point]):
         self._helper_lines[circuit_id] = [QPointF(x, y) for x, y in points]
@@ -1262,6 +1342,13 @@ class CanvasWidget(QWidget):
             if self._point_in_polygon(canvas_pt, poly):
                 return ("polygon", cid)
 
+        # 7b. Electrical room polygons
+        for rid, poly in self._elec_room_polygons.items():
+            if not self._elec_room_visible.get(rid, True):
+                continue
+            if self._point_in_polygon(canvas_pt, poly):
+                return ("elec_room", rid)
+
         # 8. Floor plan layers (check in reverse render order, front-to-back)
         # Keep this last so background layers don't shadow foreground objects.
         for fid in reversed(self._floor_plan_order):
@@ -1297,6 +1384,8 @@ class CanvasWidget(QWidget):
             return ("route", self._edit_route_cid)
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
             return ("polygon", self._edit_polygon_cid)
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_elec_room_id:
+            return ("elec_room", self._edit_elec_room_id)
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
             return ("floor_polygon", self._edit_floor_polygon_id)
         return None
@@ -1311,6 +1400,7 @@ class CanvasWidget(QWidget):
         self._edit_hkv_line_id = None
         self._edit_route_cid = None
         self._edit_polygon_cid = None
+        self._edit_elec_room_id = None
         self._edit_floor_polygon_id = None
         self._edit_selected_owner = None
         self._edit_selected_indices.clear()
@@ -1333,6 +1423,9 @@ class CanvasWidget(QWidget):
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
             pts = self._polygons.get(self._edit_polygon_cid, [])
             return self._edit_polygon_cid, [QPointF(p) for p in pts]
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_elec_room_id:
+            pts = self._elec_room_polygons.get(self._edit_elec_room_id, [])
+            return self._edit_elec_room_id, [QPointF(p) for p in pts]
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
             fid = self._edit_floor_polygon_id
             return fid, self._floor_polygon_points_world(fid)
@@ -1354,6 +1447,10 @@ class CanvasWidget(QWidget):
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid == owner_id:
             if owner_id in self._polygons and 0 <= idx < len(self._polygons[owner_id]):
                 self._polygons[owner_id][idx] = QPointF(world_pt)
+            return
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_elec_room_id == owner_id:
+            if owner_id in self._elec_room_polygons and 0 <= idx < len(self._elec_room_polygons[owner_id]):
+                self._elec_room_polygons[owner_id][idx] = QPointF(world_pt)
             return
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id == owner_id:
             layer = self._floor_plans.get(owner_id)
@@ -1660,6 +1757,8 @@ class CanvasWidget(QWidget):
         self._circuit_visible.clear()
         self._supply_lines.clear()
         self._elec_points.clear()
+        self._elec_room_polygons.clear()
+        self._elec_room_visible.clear()
         self._elec_point_size_px.clear()
         self._elec_point_icons.clear()
         self._elec_point_svgs.clear()
@@ -1691,6 +1790,8 @@ class CanvasWidget(QWidget):
         self._label_draw_pos.clear()
         self._ref_p1 = None
         self._ref_p2 = None
+        self._current_elec_room_id = None
+        self._edit_elec_room_id = None
         self._export_frame = None
         self._export_frame_start = None
         self._export_frame_current = None
@@ -1707,6 +1808,8 @@ class CanvasWidget(QWidget):
                 self._selected_item_type = "circuit"
             elif item_id in self._elec_points:
                 self._selected_item_type = "elec_point"
+            elif item_id in self._elec_room_polygons:
+                self._selected_item_type = "elec_room"
             elif item_id in self._elec_cables:
                 self._selected_item_type = "elec_cable"
             elif item_id in self._hkv_points:
@@ -1770,6 +1873,11 @@ class CanvasWidget(QWidget):
                 pid: (p.x(), p.y())
                 for pid, p in self._elec_points.items()
             },
+            "elec_rooms": {
+                rid: [(p.x(), p.y()) for p in pts]
+                for rid, pts in self._elec_room_polygons.items()
+            },
+            "elec_room_visible": dict(self._elec_room_visible),
             "elec_point_size_px": {
                 pid: list(s)
                 for pid, s in self._elec_point_size_px.items()
@@ -1920,6 +2028,13 @@ class CanvasWidget(QWidget):
             self._supply_lines[cid] = [QPointF(x, y) for x, y in pts]
         for pid, pt in d.get("elec_points", {}).items():
             self._elec_points[pid] = QPointF(pt[0], pt[1])
+        for rid, pts in d.get("elec_rooms", {}).items():
+            self._elec_room_polygons[rid] = [QPointF(x, y) for x, y in pts]
+            self._elec_room_visible.setdefault(rid, True)
+            self._ensure_color(rid)
+        self._elec_room_visible.update(
+            {k: bool(v) for k, v in d.get("elec_room_visible", {}).items()}
+        )
         for pid, s in d.get("elec_point_size_px", {}).items():
             self._elec_point_size_px[pid] = tuple(s)
         self._elec_point_position = dict(d.get("elec_point_position", {}))
@@ -2583,6 +2698,14 @@ class CanvasWidget(QWidget):
                 self.object_double_clicked.emit("polygon", cid)
                 return
 
+        # 9. Elektro-Raum Polygon (point inside)
+        for rid, poly in self._elec_room_polygons.items():
+            if not self._elec_room_visible.get(rid, True):
+                continue
+            if self._point_in_polygon(canvas_pt, poly):
+                self.object_double_clicked.emit("elec_room", rid)
+                return
+
     def mousePressEvent(self, event):
         pos       = QPointF(event.position())
         canvas_pt = self._to_canvas(pos)
@@ -2685,14 +2808,21 @@ class CanvasWidget(QWidget):
                 self.update()
             elif event.button() == Qt.RightButton:
                 if len(self._current_points) >= 3:
-                    self._polygons[self._current_circuit_id] = \
-                        list(self._current_points)
-                    self._start_points[self._current_circuit_id] = \
-                        self._current_points[0]
                     pts = [(p.x(), p.y()) for p in self._current_points]
-                    self.polygon_finished.emit(self._current_circuit_id, pts)
+                    if self._current_elec_room_id:
+                        rid = self._current_elec_room_id
+                        self._elec_room_polygons[rid] = list(self._current_points)
+                        self._elec_room_visible.setdefault(rid, True)
+                        self.elec_room_polygon_finished.emit(rid, pts)
+                    elif self._current_circuit_id:
+                        self._polygons[self._current_circuit_id] = \
+                            list(self._current_points)
+                        self._start_points[self._current_circuit_id] = \
+                            self._current_points[0]
+                        self.polygon_finished.emit(self._current_circuit_id, pts)
                 self._mode = ToolMode.NONE
                 self._current_points = []
+                self._current_elec_room_id = None
                 self.setCursor(Qt.ArrowCursor)
                 self.update()
             return
@@ -3089,6 +3219,34 @@ class CanvasWidget(QWidget):
                 self.update()
                 return
 
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_elec_room_id:
+            rid = self._edit_elec_room_id
+            if event.button() == Qt.LeftButton:
+                hit = self._hit_polygon_point(canvas_pt, rid)
+                if hit is not None:
+                    self._dragging_route_point = (rid, hit)
+                    self.setCursor(Qt.ClosedHandCursor)
+                return
+            elif event.button() == Qt.RightButton:
+                hit = self._hit_polygon_point(canvas_pt, rid)
+                if hit is not None:
+                    self._delete_polygon_point(rid, hit)
+                    return
+                hit = self._hit_polygon_edge(canvas_pt, rid)
+                if hit is not None:
+                    idx1, idx2 = hit
+                    p1 = self._elec_room_polygons[rid][idx1]
+                    p2 = self._elec_room_polygons[rid][idx2]
+                    midpt = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+                    self._insert_polygon_point(rid, idx1, idx2, midpt)
+                return
+            elif event.button() == Qt.MiddleButton:
+                self._mode = ToolMode.NONE
+                self._edit_elec_room_id = None
+                self.setCursor(Qt.ArrowCursor)
+                self.update()
+                return
+
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
             fid = self._edit_floor_polygon_id
             if event.button() == Qt.LeftButton:
@@ -3333,6 +3491,24 @@ class CanvasWidget(QWidget):
                     self.setCursor(Qt.OpenHandCursor)
                     return
                 edge_hit = self._hit_polygon_edge(canvas_pt, self._edit_polygon_cid)
+                self.setCursor(Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
+            return
+
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_elec_room_id:
+            rid = self._edit_elec_room_id
+            if self._dragging_route_point:
+                oid, idx = self._dragging_route_point
+                if oid == rid and rid in self._elec_room_polygons:
+                    ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                    pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                    self._elec_room_polygons[rid][idx] = pt
+                    self.update()
+            else:
+                hit = self._hit_polygon_point(canvas_pt, rid)
+                if hit is not None:
+                    self.setCursor(Qt.OpenHandCursor)
+                    return
+                edge_hit = self._hit_polygon_edge(canvas_pt, rid)
                 self.setCursor(Qt.PointingHandCursor if edge_hit else Qt.CrossCursor)
             return
 
@@ -3693,7 +3869,10 @@ class CanvasWidget(QWidget):
                 if self._edit_floor_polygon_id and cid == self._edit_floor_polygon_id:
                     self.update()
                     return
-                self.polygon_changed.emit(cid)
+                if self._edit_elec_room_id and cid == self._edit_elec_room_id:
+                    self.elec_room_polygon_changed.emit(cid)
+                else:
+                    self.polygon_changed.emit(cid)
                 self.update()
                 return
             if self._dragging_route_point and self._mode == ToolMode.EDIT_ROUTE:
@@ -3814,12 +3993,14 @@ class CanvasWidget(QWidget):
             self._mode           = ToolMode.NONE
             self._current_points = []
             self._current_furniture_id = None
+            self._current_elec_room_id = None
             self._current_route_points = []
             self._current_route_cid = None
             self._current_route_preview_end = None
             self._dragging_start = None
             self._dragging_route_point = None
             self._edit_polygon_cid = None
+            self._edit_elec_room_id = None
             self._edit_floor_polygon_id = None
             self._edit_route_cid = None
             self._edit_selected_owner = None
@@ -3867,6 +4048,8 @@ class CanvasWidget(QWidget):
         elif event.key() == Qt.Key_Delete and self._dragging_route_point:
             cid, idx = self._dragging_route_point
             if self._mode == ToolMode.EDIT_POLYGON and cid == self._edit_polygon_cid:
+                self._delete_polygon_point(cid, idx)
+            elif self._mode == ToolMode.EDIT_POLYGON and cid == self._edit_elec_room_id:
                 self._delete_polygon_point(cid, idx)
             elif self._mode == ToolMode.EDIT_POLYGON and cid == self._edit_floor_polygon_id:
                 self._delete_floor_polygon_point(cid, idx)
@@ -3991,6 +4174,18 @@ class CanvasWidget(QWidget):
             self._draw_polygon(painter, pts,
                                self._color_map.get(cid, QColor("blue")), label)
 
+        # Elektro-Raum-Polygone
+        for rid, pts in self._elec_room_polygons.items():
+            if not self._elec_room_visible.get(rid, True):
+                continue
+            label = self._label_map.get(rid, rid)
+            self._draw_polygon(
+                painter,
+                pts,
+                self._color_map.get(rid, QColor("#43aa8b")),
+                label,
+            )
+
         # Collision zones (while dragging a route point or drawing a route)
         if self._dragging_route_point:
             drag_cid, drag_idx = self._dragging_route_point
@@ -4068,6 +4263,8 @@ class CanvasWidget(QWidget):
         # Edit mode visualization
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
             self._draw_edit_polygon_overlay(painter, self._edit_polygon_cid)
+        elif self._mode == ToolMode.EDIT_POLYGON and self._edit_elec_room_id:
+            self._draw_edit_polygon_overlay(painter, self._edit_elec_room_id)
         elif self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
             self._draw_edit_floor_polygon_overlay(
                 painter, self._edit_floor_polygon_id)
@@ -4130,6 +4327,26 @@ class CanvasWidget(QWidget):
                 sum(p.x() for p in pts) / len(pts),
                 sum(p.y() for p in pts) / len(pts))
             self._draw_item_label(painter, cid, default_pos, text, color)
+
+        for rid, pts in self._elec_room_polygons.items():
+            if not self._elec_room_visible.get(rid, True):
+                continue
+            if not self._label_visible.get(rid, True):
+                continue
+            if len(pts) < 3:
+                continue
+            text = self._label_map.get(rid, rid)
+            default_pos = QPointF(
+                sum(p.x() for p in pts) / len(pts),
+                sum(p.y() for p in pts) / len(pts),
+            )
+            self._draw_item_label(
+                painter,
+                rid,
+                default_pos,
+                text,
+                self._color_map.get(rid, QColor("#43aa8b")),
+            )
         for pid in self._elec_points:
             if not self._elec_visible.get(pid, True):
                 continue
@@ -4288,6 +4505,12 @@ class CanvasWidget(QWidget):
         # Draw highlight based on type
         if item_type == "polygon" and item_id in self._polygons:
             pts = self._polygons[item_id]
+            if len(pts) >= 3:
+                poly = QPolygonF(pts)
+                painter.drawPolygon(poly)
+
+        elif item_type == "elec_room" and item_id in self._elec_room_polygons:
+            pts = self._elec_room_polygons[item_id]
             if len(pts) >= 3:
                 poly = QPolygonF(pts)
                 painter.drawPolygon(poly)
