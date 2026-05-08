@@ -4,8 +4,27 @@
 
 HRouting unterstützt die Planung elektrischer Installationen auf dem Grundriss:
 
+- **Elektro-Räume (Polygon)** – Räume zur Zuordnung und Auswertung von Anschlusspunkten
 - **Anschlusspunkte (AP)** – Steckdosen, Leuchten, Schalter etc.
 - **Kabelverbindungen (KV)** – Leitungen zwischen Anschlusspunkten
+
+## Elektro-Räume definieren
+
+1. Klicken Sie auf **➕ Raum** in der Seitenleiste.
+2. Ein neuer Raum erscheint unter **🏠 Räume**.
+3. Klicken Sie auf **✏️ Raum zeichnen** und setzen Sie die Polygonpunkte.
+4. Beenden Sie den Raum per **Rechtsklick**.
+
+### Raum bearbeiten
+
+- **Doppelklick** auf das Raum-Polygon oder **✏️ Raum bearbeiten** startet den Edit-Modus.
+- Punkte können verschoben, eingefügt und gelöscht werden.
+
+### AP-Zuordnung zu Räumen
+
+- Die Zuordnung erfolgt automatisch über die Polygonlage.
+- Liegt ein AP innerhalb eines Raum-Polygons, wird er diesem Raum zugeordnet.
+- Bei Verschieben von AP oder Raum-Polygon wird die Zuordnung automatisch aktualisiert.
 
 ## Anschlusspunkt platzieren
 
@@ -80,3 +99,8 @@ Folgende Standardsymbole stehen zur Verfügung:
 | **Länge** | Kabellänge in m |
 | **Start-AP** | Automatisch erkannter Start-Anschlusspunkt |
 | **End-AP** | Automatisch erkannter End-Anschlusspunkt |
+
+## Auswertung in der Projektübersicht
+
+- Pro definiertem Elektro-Raum wird ein eigener Reiter mit den zugeordneten APs und Kabelzielen angezeigt.
+- Zusätzlich enthält die Gesamtübersicht kabelbezogene Summen und Detailtabellen.

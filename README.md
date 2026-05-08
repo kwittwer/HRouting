@@ -8,6 +8,19 @@ Entwickelt mit **Python 3** und **PySide6** (Qt for Python).
 
 ## Release Notes
 
+### V 0.1.16 (08.05.2026)
+
+#### Features ✨
+- **Elektro-Räume als Polygone**: Räume für die Elektroplanung können jetzt je Grundriss als Polygon gezeichnet und bearbeitet werden
+- **Automatische AP-Raumzuordnung**: Liegt ein Anschlusspunkt innerhalb eines Raum-Polygons, wird er automatisch diesem Raum zugeordnet
+- **Projektübersicht mit Raum-Reitern**: Für jeden Elektro-Raum wird ein eigener Reiter in der Projektübersicht erzeugt
+- **Eigener Reiter für AP-Verkabelung**: Die AP-Kabelzuordnung wurde aus dem Elektro-Tab ausgelagert und in einen separaten Reiter verschoben
+
+#### Verbesserungen 🔧
+- **Elektro-Tab entschlackt**: Der Elektro-Reiter zeigt jetzt fokussiert nur Kabellängen-Summen pro Typ und eine vollständige Kabelliste
+- **Erweiterte Kabelliste**: Zusätzlich zu Name, Typ und Länge werden jetzt Start-/End-AP sowie Start-/End-Raum ausgewiesen
+- **Erweiterter Projektbericht**: Raumbezogene AP-Listen mit Kabelziel-Referenzen in Projektübersicht, CSV und PDF
+
 ### V 0.1.1 (27.04.2026)
 
 #### Features ✨

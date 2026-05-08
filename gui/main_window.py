@@ -3849,6 +3849,27 @@ class MainWindow(QMainWindow):
         hk_rows = calc_balancing(hk_rows)
 
         # ── Elektro-Kabel sammeln ──
+        point_id_to_room_name: dict[str, str] = {}
+        for pid, _panel in self.param_panel.elec_point_panels.items():
+            room_name = "(ohne Raum)"
+            point = self.canvas._elec_points.get(pid)
+            point_fp_id = self.param_panel._element_floorplan.get(pid, "")
+            if point is not None:
+                for rid, poly in self.canvas._elec_room_polygons.items():
+                    if len(poly) < 3:
+                        continue
+                    room_fp_id = self.param_panel._element_floorplan.get(rid, "")
+                    if point_fp_id != room_fp_id:
+                        continue
+                    if self.canvas._point_in_polygon(point, poly):
+                        room_panel = self.param_panel.elec_room_panels.get(rid)
+                        if room_panel:
+                            room_name = room_panel.get_parameters().get("name", rid)
+                        else:
+                            room_name = rid
+                        break
+            point_id_to_room_name[pid] = room_name
+
         kv_rows: list[dict] = []
         for kid, panel in self.param_panel.elec_cable_panels.items():
             params = panel.get_parameters()
@@ -3884,6 +3905,8 @@ class MainWindow(QMainWindow):
                 "length_m": length_m,
                 "start_ap": start_name,
                 "end_ap": end_name,
+                "start_room": point_id_to_room_name.get(start_ap_id, "(ohne Raum)") if start_ap_id else "",
+                "end_room": point_id_to_room_name.get(end_ap_id, "(ohne Raum)") if end_ap_id else "",
                 "start_height_cm": start_height,
                 "end_height_cm": end_height,
                 "start_position": start_position,
@@ -4081,29 +4104,22 @@ class MainWindow(QMainWindow):
         kv_widget = QWidget()
         kv_layout = QVBoxLayout(kv_widget)
 
-        kv_layout.addWidget(QLabel("<b>Kabelverbindungen – Einzellängen</b>"))
-        tbl_kv = QTableWidget(len(kv_rows), 9)
+        kv_layout.addWidget(QLabel("<b>Kabelliste – alle Kabel</b>"))
+        tbl_kv = QTableWidget(len(kv_rows), 7)
         tbl_kv.setHorizontalHeaderLabels(
-            ["Name", "Typ", "Start-AP", "Start-Pos.", "Start-H. (cm)",
-             "End-AP", "End-Pos.", "End-H. (cm)", "Länge (m)"])
+            ["Name", "Typ", "Länge (m)", "Start-AP", "End-AP", "Start-Raum", "End-Raum"])
         tbl_kv.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         tbl_kv.setEditTriggers(QTableWidget.NoEditTriggers)
         for i, r in enumerate(kv_rows):
             tbl_kv.setItem(i, 0, QTableWidgetItem(r["name"]))
             tbl_kv.setItem(i, 1, QTableWidgetItem(r["type"]))
-            tbl_kv.setItem(i, 2, QTableWidgetItem(r.get("start_ap", "")))
-            tbl_kv.setItem(i, 3, QTableWidgetItem(r.get("start_position", "")))
-            item = QTableWidgetItem(f"{r.get('start_height_cm', 0.0):.1f}")
-            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            tbl_kv.setItem(i, 4, item)
-            tbl_kv.setItem(i, 5, QTableWidgetItem(r.get("end_ap", "")))
-            tbl_kv.setItem(i, 6, QTableWidgetItem(r.get("end_position", "")))
-            item = QTableWidgetItem(f"{r.get('end_height_cm', 0.0):.1f}")
-            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            tbl_kv.setItem(i, 7, item)
             item = QTableWidgetItem(f"{r['length_m']:.2f}")
             item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            tbl_kv.setItem(i, 8, item)
+            tbl_kv.setItem(i, 2, item)
+            tbl_kv.setItem(i, 3, QTableWidgetItem(r.get("start_ap", "")))
+            tbl_kv.setItem(i, 4, QTableWidgetItem(r.get("end_ap", "")))
+            tbl_kv.setItem(i, 5, QTableWidgetItem(r.get("start_room", "")))
+            tbl_kv.setItem(i, 6, QTableWidgetItem(r.get("end_room", "")))
         kv_layout.addWidget(tbl_kv)
 
         kv_layout.addWidget(QLabel("<b>Summe pro Leitungstyp</b>"))
@@ -4134,13 +4150,20 @@ class MainWindow(QMainWindow):
                 tbl_ap_types.setItem(i, 1, item)
             kv_layout.addWidget(tbl_ap_types)
 
-        # AP-Anschlüsse
-        if ap_cables:
+        if room_ap_connections:
             kv_layout.addWidget(QLabel(
-                "<b>Anschlusspunkte – Kabelverbindungen</b>"))
+                "<b>Räume – Details sind in separaten Raum-Reitern verfügbar</b>"))
+
+        tabs.addTab(kv_widget, "🔌 Elektro")
+
+        # -- Tab: Anschlusspunkte Verkabelung --
+        ap_widget = QWidget()
+        ap_layout = QVBoxLayout(ap_widget)
+        ap_layout.addWidget(QLabel("<b>Anschlusspunkte – Kabelverbindungen</b>"))
+        if ap_cables:
             for ap_name in sorted(ap_cables.keys()):
                 cables = ap_cables[ap_name]
-                kv_layout.addWidget(QLabel(f"<i>{ap_name}</i>"))
+                ap_layout.addWidget(QLabel(f"<i>{ap_name}</i>"))
                 tbl_ap = QTableWidget(len(cables), 4)
                 tbl_ap.setHorizontalHeaderLabels(
                     ["Kabel", "Typ", "Anschluss", "Länge (m)"])
@@ -4155,29 +4178,60 @@ class MainWindow(QMainWindow):
                     item = QTableWidgetItem(f"{c['length_m']:.2f}")
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     tbl_ap.setItem(i, 3, item)
-                kv_layout.addWidget(tbl_ap)
+                ap_layout.addWidget(tbl_ap)
+        else:
+            ap_layout.addWidget(QLabel("Keine AP-Kabelverbindungen vorhanden."))
+        tabs.addTab(ap_widget, "🔗 AP-Verkabelung")
 
-        if room_ap_connections:
-            kv_layout.addWidget(QLabel(
-                "<b>Räume – Zugeordnete Anschlusspunkte und Kabelziele</b>"))
-            tbl_room_ap = QTableWidget(len(room_ap_connections), 7)
-            tbl_room_ap.setHorizontalHeaderLabels(
-                ["Raum", "AP", "Kabel", "Typ", "Anschluss", "Führt zu AP", "Länge (m)"])
-            tbl_room_ap.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-            tbl_room_ap.setEditTriggers(QTableWidget.NoEditTriggers)
-            for i, row in enumerate(room_ap_connections):
-                tbl_room_ap.setItem(i, 0, QTableWidgetItem(row.get("room", "")))
-                tbl_room_ap.setItem(i, 1, QTableWidgetItem(row.get("ap", "")))
-                tbl_room_ap.setItem(i, 2, QTableWidgetItem(row.get("cable", "")))
-                tbl_room_ap.setItem(i, 3, QTableWidgetItem(row.get("type", "")))
-                tbl_room_ap.setItem(i, 4, QTableWidgetItem(row.get("role", "")))
-                tbl_room_ap.setItem(i, 5, QTableWidgetItem(row.get("target_ap", "")))
-                item = QTableWidgetItem(f"{row.get('length_m', 0.0):.2f}")
-                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                tbl_room_ap.setItem(i, 6, item)
-            kv_layout.addWidget(tbl_room_ap)
+        # -- Zusätzliche Tabs: Elektro je Raum --
+        ordered_room_names: list[str] = []
+        for _, panel in self.param_panel.elec_room_panels.items():
+            room_name = (panel.get_parameters().get("name") or "").strip()
+            if room_name and room_name not in ordered_room_names:
+                ordered_room_names.append(room_name)
 
-        tabs.addTab(kv_widget, "🔌 Elektro")
+        for row in room_ap_connections:
+            room_name = row.get("room", "")
+            if room_name and room_name not in ordered_room_names:
+                ordered_room_names.append(room_name)
+
+        for room_name in ordered_room_names:
+            room_rows = [r for r in room_ap_connections if r.get("room", "") == room_name]
+
+            room_widget = QWidget()
+            room_layout = QVBoxLayout(room_widget)
+
+            room_layout.addWidget(QLabel(f"<b>Raum: {room_name}</b>"))
+
+            ap_names = sorted({r.get("ap", "") for r in room_rows if r.get("ap", "")})
+            cable_count = len({r.get("cable", "") for r in room_rows if r.get("cable", "")})
+            room_layout.addWidget(QLabel(
+                f"AP im Bericht: {len(ap_names)}   |   Kabelverbindungen: {cable_count}"
+            ))
+
+            if room_rows:
+                tbl_room = QTableWidget(len(room_rows), 6)
+                tbl_room.setHorizontalHeaderLabels(
+                    ["AP", "Kabel", "Typ", "Anschluss", "Führt zu AP", "Länge (m)"]
+                )
+                tbl_room.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+                tbl_room.setEditTriggers(QTableWidget.NoEditTriggers)
+
+                for i, row in enumerate(room_rows):
+                    tbl_room.setItem(i, 0, QTableWidgetItem(row.get("ap", "")))
+                    tbl_room.setItem(i, 1, QTableWidgetItem(row.get("cable", "")))
+                    tbl_room.setItem(i, 2, QTableWidgetItem(row.get("type", "")))
+                    tbl_room.setItem(i, 3, QTableWidgetItem(row.get("role", "")))
+                    tbl_room.setItem(i, 4, QTableWidgetItem(row.get("target_ap", "")))
+                    item = QTableWidgetItem(f"{row.get('length_m', 0.0):.2f}")
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    tbl_room.setItem(i, 5, item)
+
+                room_layout.addWidget(tbl_room)
+            else:
+                room_layout.addWidget(QLabel("Keine Kabelverbindungen für diesen Raum vorhanden."))
+
+            tabs.addTab(room_widget, f"🏠 {room_name}")
 
         # -- Buttons --
         btn_box = QDialogButtonBox()

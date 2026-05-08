@@ -68,10 +68,30 @@ Klicken Sie auf **📊 Projektübersicht**, um eine detaillierte Aufstellung zu 
 
 Pro HKV werden alle angeschlossenen Heizkreise mit Kv-Wert und Ventil-Differenzdruck berechnet. Basiert auf einer gemeinsamen Pumpe.
 
-### Tab: Kabel & HKV-Leitungen
+### Tab: Elektro
 
-Übersicht aller Kabelverbindungen und HKV-Leitungen mit Längen und zugeordneten Anschlusspunkten/Verteilern.
+Der Elektro-Reiter zeigt:
+- **Summe pro Leitungstyp** (Gesamtlänge je Kabeltyp)
+- **Kabelliste** mit Name, Typ, Länge, Start-AP, End-AP, Start-Raum und End-Raum
+
+### Tab: AP-Verkabelung
+
+Eigener Reiter für die Anschlusspunkt-Sicht:
+- je AP alle verbundenen Kabel
+- Kabeltyp, Anschlussrolle (Start/Ende) und Länge
+
+### Tabs: Räume (Elektro)
+
+Für jeden definierten Elektro-Raum wird ein separater Reiter erzeugt mit:
+- zugeordneten Anschlusspunkten
+- zugehörigen Kabeln
+- Ziel-AP je Verbindung
+- Verbindungslängen
+
+### Tab: HKV-Leitungen
+
+Übersicht aller HKV-Leitungen mit Längen und zugeordneten Start-/Endverteilern.
 
 ### CSV-Export
 
-Aus der Projektübersicht können die Daten als CSV-Datei exportiert werden.
+Aus der Projektübersicht können die Daten als CSV-Datei exportiert werden, inklusive raumbezogener Elektro-Auswertung.
