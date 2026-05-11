@@ -2707,6 +2707,20 @@ class MainWindow(QMainWindow):
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
+            # Ensure project load always starts from a clean state
+            self.canvas.clear_data()
+            self.param_panel.clear_all_panels()
+            self._svg_path = ""
+            self._circuit_counter = 0
+            self._elec_point_counter = 0
+            self._elec_room_counter = 0
+            self._elec_cable_counter = 0
+            self._hkv_counter = 0
+            self._hkv_line_counter = 0
+            self._text_counter = 0
+            self._floorplan_counter = 0
+            self._furniture_counter = 0
+
             # --- resolve svg_path relative to project dir ---------------
             svg_rel = data.get("svg_path", "")
             svg_abs = self._to_absolute(svg_rel, project_dir)

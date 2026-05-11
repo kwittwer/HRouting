@@ -2385,6 +2385,15 @@ class ParameterPanel(QWidget):
 
     def add_floorplan_panel(self, fp_id: str,
                             name: str | None = None) -> FloorPlanPanel:
+        existing = self.floorplan_panels.get(fp_id)
+        if existing:
+            if name:
+                existing.le_name.setText(name)
+            tree_item = self._tree_items.get(fp_id)
+            if tree_item and name:
+                tree_item.setText(0, name)
+            return existing
+
         panel = FloorPlanPanel(fp_id, name=name)
         panel.delete_requested.connect(self.delete_floorplan_requested)
         panel.name_changed.connect(self._update_tree_item_name)
@@ -2909,6 +2918,25 @@ class ParameterPanel(QWidget):
                    list(self.text_panels.values())):
             self._set_active_special("empty")
 
+    def _dedupe_floorplan_tree(self):
+        """Remove duplicate top-level floorplan entries from the tree."""
+        seen: dict[str, QTreeWidgetItem] = {}
+        remove_indices: list[int] = []
+
+        for i in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(i)
+            fp_id = item.data(0, Qt.UserRole)
+            if not fp_id or fp_id not in self.floorplan_panels:
+                continue
+            if fp_id in seen:
+                remove_indices.append(i)
+                continue
+            seen[fp_id] = item
+            self._tree_items[fp_id] = item
+
+        for i in reversed(remove_indices):
+            self._tree.takeTopLevelItem(i)
+
     # ──────────────────────────────────────────────────────────────── #
     #  General heating params                                           #
     # ──────────────────────────────────────────────────────────────── #
@@ -3076,6 +3104,8 @@ class ParameterPanel(QWidget):
                 color=values.get("color", "#ffffff"),
             )
             panel.set_parameters(values)
+
+        self._dedupe_floorplan_tree()
 
         self._loading = False
 
