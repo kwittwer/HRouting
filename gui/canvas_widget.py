@@ -102,6 +102,7 @@ class CanvasWidget(QWidget):
     object_clicked     = Signal(str, str)  # (object_type, object_id) – single click selection
     object_switched_from_edit = Signal(str, str)  # (object_type, object_id)
     object_double_clicked = Signal(str, str)  # (object_type, object_id)
+    context_menu_requested = Signal(str, str, object, object)  # (object_type, object_id, canvas_pt, global_pos)
     floor_plan_transform_updated = Signal(str, float, float, float)  # (fp_id, ox, oy, rot)
     floor_plan_polygon_finished = Signal(str, list)
     mode_changed = Signal()  # emitted when tool mode changes
@@ -950,6 +951,166 @@ class CanvasWidget(QWidget):
             pts.insert(idx2, pt)
             self.route_changed.emit(cid)
             self.update()
+
+    def context_insert_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF) -> bool:
+        if self._mode != ToolMode.NONE:
+            return False
+
+        if obj_type == "elec_cable":
+            hit = self._hit_elec_cable_edge(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            idx1, idx2 = hit
+            pts = self._elec_cables.get(obj_id)
+            if not pts:
+                return False
+            p1, p2 = pts[idx1], pts[idx2]
+            mid = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+            pts.insert(idx2, mid)
+            self.elec_cable_changed.emit(obj_id)
+            self.update()
+            return True
+
+        if obj_type == "supply_line":
+            hit = self._hit_supply_line_edge(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            idx1, idx2 = hit
+            pts = self._supply_lines.get(obj_id)
+            if not pts:
+                return False
+            p1, p2 = pts[idx1], pts[idx2]
+            mid = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+            pts.insert(idx2, mid)
+            self.supply_line_changed.emit(obj_id)
+            self.update()
+            return True
+
+        if obj_type == "hkv_line":
+            hit = self._hit_hkv_line_edge(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            idx1, idx2 = hit
+            pts = self._hkv_lines.get(obj_id)
+            if not pts:
+                return False
+            p1, p2 = pts[idx1], pts[idx2]
+            mid = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+            pts.insert(idx2, mid)
+            self.hkv_line_changed.emit(obj_id)
+            self.update()
+            return True
+
+        if obj_type == "route":
+            hit = self._hit_route_edge(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            idx1, idx2 = hit
+            pts = self._manual_routes.get(obj_id)
+            if not pts:
+                return False
+            p1, p2 = pts[idx1], pts[idx2]
+            mid = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+            self._insert_route_point(obj_id, idx1, idx2, mid)
+            return True
+
+        if obj_type in {"polygon", "elec_room"}:
+            hit = self._hit_polygon_edge(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            idx1, idx2 = hit
+            pts = self._polygons.get(obj_id)
+            if pts is None:
+                pts = self._elec_room_polygons.get(obj_id)
+            if not pts:
+                return False
+            p1, p2 = pts[idx1], pts[idx2]
+            mid = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+            self._insert_polygon_point(obj_id, idx1, idx2, mid)
+            return True
+
+        if obj_type == "floor_polygon":
+            hit = self._hit_floor_polygon_edge(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            idx1, idx2 = hit
+            self._insert_floor_polygon_point(obj_id, idx1, idx2, canvas_pt)
+            return True
+
+        return False
+
+    def context_delete_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF) -> bool:
+        if self._mode != ToolMode.NONE:
+            return False
+
+        if obj_type == "elec_cable":
+            hit = self._hit_elec_cable_point(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            pts = self._elec_cables.get(obj_id, [])
+            if len(pts) <= 2:
+                return False
+            del pts[hit]
+            self.elec_cable_changed.emit(obj_id)
+            self.update()
+            return True
+
+        if obj_type == "supply_line":
+            hit = self._hit_supply_line_point(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            pts = self._supply_lines.get(obj_id, [])
+            if len(pts) <= 2:
+                return False
+            del pts[hit]
+            self.supply_line_changed.emit(obj_id)
+            self.update()
+            return True
+
+        if obj_type == "hkv_line":
+            hit = self._hit_hkv_line_point(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            pts = self._hkv_lines.get(obj_id, [])
+            if len(pts) <= 2:
+                return False
+            del pts[hit]
+            self.hkv_line_changed.emit(obj_id)
+            self.update()
+            return True
+
+        if obj_type == "route":
+            hit = self._hit_route_point_in_circuit(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            pts = self._manual_routes.get(obj_id, [])
+            if len(pts) <= 2:
+                return False
+            self._delete_route_point(obj_id, hit)
+            return True
+
+        if obj_type in {"polygon", "elec_room"}:
+            hit = self._hit_polygon_point(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            before = len(self._polygons.get(obj_id, self._elec_room_polygons.get(obj_id, [])))
+            self._delete_polygon_point(obj_id, hit)
+            after = len(self._polygons.get(obj_id, self._elec_room_polygons.get(obj_id, [])))
+            return after < before
+
+        if obj_type == "floor_polygon":
+            hit = self._hit_floor_polygon_point(canvas_pt, obj_id)
+            if hit is None:
+                return False
+            layer = self._floor_plans.get(obj_id)
+            if not layer:
+                return False
+            before = len(layer.polygon)
+            self._delete_floor_polygon_point(obj_id, hit)
+            after = len(layer.polygon)
+            return after < before
+
+        return False
 
     def set_color(self, circuit_id: str, color: QColor):
         self._color_map[circuit_id] = color
@@ -2713,6 +2874,13 @@ class CanvasWidget(QWidget):
         if event.button() == Qt.MiddleButton:
             self._pan_start = pos
             self._panning   = True
+            return
+
+        if event.button() == Qt.RightButton and self._mode == ToolMode.NONE:
+            obj = self._hit_any_object(canvas_pt)
+            obj_type = obj[0] if obj else ""
+            obj_id = obj[1] if obj else ""
+            self.context_menu_requested.emit(obj_type, obj_id, QPointF(canvas_pt), event.globalPosition())
             return
 
         # ── Referenzlinie ──

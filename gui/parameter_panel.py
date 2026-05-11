@@ -757,6 +757,7 @@ class ElektroCablePanel(QWidget):
     name_changed         = Signal(str, str)
     color_changed        = Signal(str, str)
     type_changed         = Signal(str, str)
+    comment_changed      = Signal(str, str)
     draw_cable_requested = Signal(str)
     edit_cable_requested = Signal(str)
     visibility_changed   = Signal(str, bool)
@@ -765,11 +766,14 @@ class ElektroCablePanel(QWidget):
     duplicate_requested  = Signal(str)
 
     def __init__(self, cable_id: str, name: str | None = None,
-                 color: str | None = None, parent=None):
+                 color: str | None = None,
+                 defaults: dict | None = None,
+                 parent=None):
         super().__init__(parent)
         self.cable_id = cable_id
-        self._name = name or cable_id
-        self._color = QColor(color or "#ff9800")
+        self._defaults = defaults or {}
+        self._name = name or self._defaults.get("name") or cable_id
+        self._color = QColor(color or self._defaults.get("color", "#ff9800"))
         self._start_ap: str = ""
         self._end_ap: str = ""
         self._build_ui()
@@ -783,14 +787,14 @@ class ElektroCablePanel(QWidget):
         form.setRowWrapPolicy(QFormLayout.WrapAllRows)
 
         self.chk_visible = QCheckBox("Sichtbar")
-        self.chk_visible.setChecked(True)
+        self.chk_visible.setChecked(bool(self._defaults.get("visible", True)))
         self.chk_visible.toggled.connect(
             lambda c: self.visibility_changed.emit(self.cable_id, c)
         )
         form.addRow(self.chk_visible)
 
         self.chk_label_visible = QCheckBox("Beschriftung")
-        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.setChecked(bool(self._defaults.get("label_visible", True)))
         self.chk_label_visible.toggled.connect(
             lambda c: self.label_visibility_changed.emit(self.cable_id, c)
         )
@@ -809,8 +813,9 @@ class ElektroCablePanel(QWidget):
 
         self.cmb_type = SafeComboBox()
         self.cmb_type.setEditable(True)
-        self.cmb_type.addItem(self.DEFAULT_CABLE_TYPE)
-        self.cmb_type.setCurrentText(self.DEFAULT_CABLE_TYPE)
+        default_type = (self._defaults.get("type") or self.DEFAULT_CABLE_TYPE).strip()
+        self.cmb_type.addItem(default_type)
+        self.cmb_type.setCurrentText(default_type)
         self.cmb_type.editTextChanged.connect(
             lambda value: self.type_changed.emit(self.cable_id, value)
         )
@@ -819,12 +824,14 @@ class ElektroCablePanel(QWidget):
         self.te_comment = QTextEdit()
         self.te_comment.setMaximumHeight(50)
         self.te_comment.setPlaceholderText("Kommentar...")
+        self.te_comment.setPlainText(self._defaults.get("comment", ""))
+        self.te_comment.textChanged.connect(self._on_comment_changed)
         form.addRow("Kommentar:", self.te_comment)
 
         self.sb_label_size = SafeDoubleSpinBox()
         self.sb_label_size.setRange(0.1, 999999.0)
         self.sb_label_size.setSingleStep(1.0)
-        self.sb_label_size.setValue(12.0)
+        self.sb_label_size.setValue(float(self._defaults.get("label_size", 12.0)))
         self.sb_label_size.setSuffix(" pt")
         self.sb_label_size.valueChanged.connect(
             lambda v: self.label_size_changed.emit(self.cable_id, v)
@@ -875,6 +882,9 @@ class ElektroCablePanel(QWidget):
             self._color = color
             self._update_color_button()
             self.color_changed.emit(self.cable_id, self._color.name())
+
+    def _on_comment_changed(self):
+        self.comment_changed.emit(self.cable_id, self.te_comment.toPlainText())
 
     def _update_color_button(self):
         self.btn_color.setStyleSheet(f"background:{self._color.name()}; color:white;")
@@ -1877,6 +1887,7 @@ class ParameterPanel(QWidget):
         self.elec_point_panels: dict[str, ElektroPointPanel] = {}
         self.elec_room_panels: dict[str, ElektroRoomPanel] = {}
         self.elec_cable_panels: dict[str, ElektroCablePanel] = {}
+        self._last_elec_cable_defaults: dict = self._default_elec_cable_defaults()
         self.hkv_panels: dict[str, HkvPanel] = {}
         self.hkv_line_panels: dict[str, HkvLinePanel] = {}
         self.text_panels: dict[str, TextAnnotationPanel] = {}
@@ -2744,14 +2755,26 @@ class ParameterPanel(QWidget):
                              fp_id: str | None = None,
                              name: str | None = None,
                              color: str | None = None) -> ElektroCablePanel:
-        panel = ElektroCablePanel(cable_id, name=name, color=color)
+        effective_name = name or self._last_elec_cable_defaults.get("name") or cable_id
+        panel = ElektroCablePanel(
+            cable_id,
+            name=effective_name,
+            color=color,
+            defaults=self._last_elec_cable_defaults,
+        )
         panel.delete_requested.connect(self.delete_elec_cable_requested)
         panel.duplicate_requested.connect(self.duplicate_elec_cable_requested)
         panel.name_changed.connect(self._update_tree_item_name)
+        panel.name_changed.connect(self._on_elec_cable_name_changed)
         panel.type_changed.connect(self._on_elec_cable_type_changed)
+        panel.comment_changed.connect(self._on_elec_cable_comment_changed)
         panel.visibility_changed.connect(
             lambda cid, c: self._sync_tree_checkbox(cid, c)
         )
+        panel.visibility_changed.connect(self._on_elec_cable_visibility_changed)
+        panel.color_changed.connect(self._on_elec_cable_color_changed)
+        panel.label_size_changed.connect(self._on_elec_cable_label_size_changed)
+        panel.label_visibility_changed.connect(self._on_elec_cable_label_visibility_changed)
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.elec_cable_panels[cable_id] = panel
@@ -2759,7 +2782,7 @@ class ParameterPanel(QWidget):
         self._element_floorplan[cable_id] = resolved or ""
         parent_item = self._fp_sub_items.get(resolved or "", {}).get("kv") if resolved else None
         if parent_item:
-            self._add_tree_item(parent_item, cable_id, name or cable_id)
+            self._add_tree_item(parent_item, cable_id, effective_name)
         self.update_all_elec_cable_type_choices()
         return panel
 
@@ -2776,7 +2799,87 @@ class ParameterPanel(QWidget):
     def _on_elec_cable_type_changed(self, cable_id: str, value: str):
         if self._loading:
             return
+        self._update_last_elec_cable_defaults(cable_id)
         self.update_all_elec_cable_type_choices()
+
+    def _on_elec_cable_name_changed(self, cable_id: str, value: str):
+        if self._loading:
+            return
+        self._update_last_elec_cable_defaults(cable_id)
+
+    def _on_elec_cable_comment_changed(self, cable_id: str, value: str):
+        if self._loading:
+            return
+        self._update_last_elec_cable_defaults(cable_id)
+
+    def _on_elec_cable_visibility_changed(self, cable_id: str, value: bool):
+        if self._loading:
+            return
+        self._update_last_elec_cable_defaults(cable_id)
+
+    def _on_elec_cable_color_changed(self, cable_id: str, value: str):
+        if self._loading:
+            return
+        self._update_last_elec_cable_defaults(cable_id)
+
+    def _on_elec_cable_label_size_changed(self, cable_id: str, value: float):
+        if self._loading:
+            return
+        self._update_last_elec_cable_defaults(cable_id)
+
+    def _on_elec_cable_label_visibility_changed(self, cable_id: str, value: bool):
+        if self._loading:
+            return
+        self._update_last_elec_cable_defaults(cable_id)
+
+    def _default_elec_cable_defaults(self) -> dict:
+        return {
+            "name": "",
+            "color": "#ff9800",
+            "type": ElektroCablePanel.DEFAULT_CABLE_TYPE,
+            "comment": "",
+            "visible": True,
+            "label_visible": True,
+            "label_size": 12.0,
+        }
+
+    def _sanitize_elec_cable_defaults(self, defaults: dict | None) -> dict:
+        sanitized = self._default_elec_cable_defaults()
+        if not defaults:
+            return sanitized
+        if defaults.get("name"):
+            sanitized["name"] = str(defaults.get("name"))
+        if defaults.get("color"):
+            sanitized["color"] = str(defaults.get("color"))
+        if defaults.get("type"):
+            sanitized["type"] = str(defaults.get("type"))
+        if "comment" in defaults:
+            sanitized["comment"] = str(defaults.get("comment", ""))
+        if "visible" in defaults:
+            sanitized["visible"] = bool(defaults.get("visible", True))
+        if "label_visible" in defaults:
+            sanitized["label_visible"] = bool(defaults.get("label_visible", True))
+        if "label_size" in defaults:
+            try:
+                sanitized["label_size"] = float(defaults.get("label_size", 12.0))
+            except (TypeError, ValueError):
+                pass
+        return sanitized
+
+    def _update_last_elec_cable_defaults(self, cable_id: str):
+        panel = self.elec_cable_panels.get(cable_id)
+        if not panel:
+            return
+        params = panel.get_parameters()
+        self._last_elec_cable_defaults = self._sanitize_elec_cable_defaults({
+            "name": params.get("name", ""),
+            "color": params.get("color", "#ff9800"),
+            "type": params.get("type", ElektroCablePanel.DEFAULT_CABLE_TYPE),
+            "comment": params.get("comment", ""),
+            "visible": params.get("visible", True),
+            "label_visible": params.get("label_visible", True),
+            "label_size": params.get("label_size", 12.0),
+        })
 
     def _collect_elec_cable_types(self) -> list[str]:
         cable_types: list[str] = []
@@ -2954,6 +3057,7 @@ class ParameterPanel(QWidget):
 
     def clear_all_panels(self):
         """Remove all object panels (circuits, elec, HKV, floorplans) from the tree + layout."""
+        self._last_elec_cable_defaults = self._default_elec_cable_defaults()
         # Remove children first (they live under floorplan tree items)
         for tid in list(self.text_panels):
             self.remove_text_panel(tid)
@@ -2980,6 +3084,7 @@ class ParameterPanel(QWidget):
             "t_supply": self.sb_vorlauf.value(),
             "t_return": self.sb_ruecklauf.value(),
             "t_norm_outdoor": self.sb_norm_aussen.value(),
+            "elec_cable_defaults": dict(self._last_elec_cable_defaults),
             "floorplans_order": self.get_floorplan_order(),
             "floorplans": {
                 fid: p.to_dict() for fid, p in self.floorplan_panels.items()
@@ -3025,6 +3130,9 @@ class ParameterPanel(QWidget):
         self.sb_vorlauf.setValue(d.get("t_supply", 35.0))
         self.sb_ruecklauf.setValue(d.get("t_return", 30.0))
         self.sb_norm_aussen.setValue(d.get("t_norm_outdoor", -12.0))
+        self._last_elec_cable_defaults = self._sanitize_elec_cable_defaults(
+            d.get("elec_cable_defaults")
+        )
 
         # Floorplans (in saved order)
         fp_order = d.get("floorplans_order", [])
@@ -3089,6 +3197,9 @@ class ParameterPanel(QWidget):
             )
             panel.from_dict(values)
         self.update_all_elec_cable_type_choices()
+        if not d.get("elec_cable_defaults") and self.elec_cable_panels:
+            last_cable_id = next(reversed(self.elec_cable_panels))
+            self._update_last_elec_cable_defaults(last_cable_id)
         for lid, values in d.get("hkv_lines", {}).items():
             panel = self.add_hkv_line_panel(
                 lid, fp_id=values.get("floor_plan_id"),

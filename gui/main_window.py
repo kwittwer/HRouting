@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QToolBar,
     QFileDialog, QMessageBox, QStatusBar, QColorDialog,
     QComboBox, QLabel, QDialog, QTableWidget, QTableWidgetItem,
-    QDialogButtonBox, QTabWidget, QPushButton, QHeaderView,
+    QDialogButtonBox, QTabWidget, QPushButton, QHeaderView, QMenu,
     QApplication, QCheckBox, QSpinBox, QDoubleSpinBox,
 )
 from PySide6.QtGui import (
@@ -687,6 +687,7 @@ class MainWindow(QMainWindow):
         self.canvas.object_clicked.connect(self._on_object_clicked)
         self.canvas.object_switched_from_edit.connect(self._on_object_switched_from_edit)
         self.canvas.object_double_clicked.connect(self._on_object_double_clicked)
+        self.canvas.context_menu_requested.connect(self._show_canvas_context_menu)
         self.canvas.floor_plan_transform_updated.connect(
             self._on_floor_plan_transform_from_canvas)
 
@@ -1374,6 +1375,131 @@ class MainWindow(QMainWindow):
         """Handle single-click on canvas object – select in sidebar."""
         self.param_panel.select_item(obj_id)
 
+    def _show_canvas_context_menu(self, obj_type: str, obj_id: str,
+                                  canvas_pt, global_pos):
+        if obj_id:
+            self.param_panel.select_item(obj_id)
+
+        selected_id = self.param_panel.get_selected_item_id()
+        selected_type = self._selected_object_type(selected_id) if selected_id else None
+        context_type = obj_type or selected_type
+        context_id = obj_id or selected_id
+
+        menu = QMenu(self)
+
+        if selected_id:
+            copy_action = menu.addAction("📋 Kopieren")
+            copy_action.triggered.connect(self._copy_selected_object)
+
+            duplicate_action = menu.addAction("📄 Duplizieren")
+            duplicate_action.triggered.connect(self._duplicate_selected_object_via_clipboard)
+
+            delete_action = menu.addAction("🗑️ Löschen")
+            delete_action.triggered.connect(self._delete_selected_object)
+
+            if context_type in {"elec_point", "hkv", "text"}:
+                move_hint = menu.addAction("✥ Verschieben")
+                move_hint.triggered.connect(
+                    lambda checked=False, t=context_type: self._show_move_hint(t)
+                )
+
+            if selected_type in {"floorplan", "furniture"}:
+                submenu = menu.addMenu("✥ Bearbeiten")
+                move_action = submenu.addAction("Verschieben")
+                move_action.triggered.connect(
+                    lambda checked=False, item_id=selected_id: self._on_floorplan_move(item_id)
+                )
+                rotate_action = submenu.addAction("Drehen")
+                rotate_action.triggered.connect(
+                    lambda checked=False, item_id=selected_id: self._on_floorplan_rotate(item_id)
+                )
+
+            edit_action = self._context_edit_action(context_type, context_id)
+            if edit_action is not None:
+                menu.addSeparator()
+                menu.addAction(edit_action)
+
+            if context_type in {
+                "elec_cable", "hkv_line", "supply_line", "route",
+                "polygon", "elec_room", "floor_polygon",
+            }:
+                add_point_action = menu.addAction("➕ Punkt hinzufügen")
+                add_point_action.triggered.connect(
+                    lambda checked=False, t=context_type, i=context_id, p=QPointF(canvas_pt): self._context_insert_point(t, i, p)
+                )
+                delete_point_action = menu.addAction("➖ Punkt löschen")
+                delete_point_action.triggered.connect(
+                    lambda checked=False, t=context_type, i=context_id, p=QPointF(canvas_pt): self._context_delete_point(t, i, p)
+                )
+
+        if self._copy_buffer:
+            if selected_id:
+                menu.addSeparator()
+            paste_action = menu.addAction("📥 Einfügen")
+            paste_action.triggered.connect(self._paste_copied_object)
+
+        if menu.isEmpty():
+            return
+
+        pos = global_pos.toPoint() if hasattr(global_pos, "toPoint") else global_pos
+        menu.exec(pos)
+
+    def _context_edit_action(self, selected_type: str | None, selected_id: str):
+        if not selected_type or not selected_id:
+            return None
+        if selected_type == "elec_cable":
+            return QAction("✏️ Kabel bearbeiten", self, triggered=lambda: self._on_edit_elec_cable(selected_id))
+        if selected_type == "hkv_line":
+            return QAction("✂️ HKV-Leitung bearbeiten", self, triggered=lambda: self._on_edit_hkv_line(selected_id))
+        if selected_type == "supply_line":
+            return QAction("✂️ Zuleitung bearbeiten", self, triggered=lambda: self._on_edit_supply_requested(selected_id))
+        if selected_type == "route":
+            return QAction("✂️ Rohrverlauf bearbeiten", self, triggered=lambda: self._on_edit_route_requested(selected_id))
+        if selected_type == "floor_polygon":
+            return QAction("✏️ Einrichtungs-Polygon bearbeiten", self, triggered=lambda: self._on_edit_floor_polygon_requested(selected_id))
+        if selected_type == "polygon":
+            return QAction("✏️ Polygon bearbeiten", self, triggered=lambda: self._on_edit_polygon_requested(selected_id))
+        if selected_type == "elec_room":
+            return QAction("✏️ Raum-Polygon bearbeiten", self, triggered=lambda: self._on_edit_elec_room(selected_id))
+        return None
+
+    def _show_move_hint(self, obj_type: str):
+        labels = {
+            "elec_point": "Anschlusspunkt",
+            "hkv": "HKV",
+            "text": "Text",
+        }
+        label = labels.get(obj_type, "Objekt")
+        self.status.showMessage(
+            f"{label} verschieben: Mit linker Maustaste im Zeichenfeld ziehen.",
+            3500,
+        )
+
+    def _context_insert_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF):
+        if not obj_type or not obj_id:
+            return
+        if self.canvas.context_insert_point(obj_type, obj_id, canvas_pt):
+            self._mark_dirty()
+            self.status.showMessage("Punkt hinzugefügt.", 2000)
+        else:
+            self.status.showMessage("Keine passende Kante für neuen Punkt gefunden.", 2500)
+
+    def _context_delete_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF):
+        if not obj_type or not obj_id:
+            return
+        if self.canvas.context_delete_point(obj_type, obj_id, canvas_pt):
+            self._mark_dirty()
+            self.status.showMessage("Punkt gelöscht.", 2000)
+        else:
+            self.status.showMessage("Kein löschbarer Punkt an dieser Stelle.", 2500)
+
+    def _duplicate_selected_object_via_clipboard(self):
+        item_id = self.param_panel.get_selected_item_id()
+        if not item_id:
+            return
+        self._copy_selected_object()
+        self._paste_copied_object()
+
     def _on_object_switched_from_edit(self, obj_type: str, obj_id: str):
         """Show feedback when edit mode is exited by clicking another object."""
         labels = {
@@ -1690,7 +1816,7 @@ class MainWindow(QMainWindow):
     def _add_elec_cable(self, fp_id: str = ""):
         self._elec_cable_counter += 1
         cid = f"KV-{self._elec_cable_counter}"
-        panel = self._create_elec_cable_panel(cid, fp_id=fp_id or None, name=cid)
+        panel = self._create_elec_cable_panel(cid, fp_id=fp_id or None, name=None)
         self.status.showMessage(
             f"{cid}: Klicke 'Kabel zeichnen' im Panel."
         )
@@ -1919,10 +2045,31 @@ class MainWindow(QMainWindow):
             new_id = self._duplicate_floorplan(source_id)
         elif obj_type == "furniture":
             new_id = self._duplicate_furniture(source_id)
+        elif obj_type == "elec_room":
+            new_id = self._duplicate_elec_room(source_id)
 
         if new_id:
             self.param_panel.select_item(new_id)
             self._mark_dirty()
+
+    def _duplicate_elec_room(self, source_id: str) -> str | None:
+        src_panel = self.param_panel.elec_room_panels.get(source_id)
+        if not src_panel:
+            return None
+        src = src_panel.to_dict()
+        src_fp_id = self.param_panel._element_floorplan.get(source_id)
+        self._elec_room_counter += 1
+        new_id = f"R-{self._elec_room_counter}"
+        panel = self._create_elec_room_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
+        panel.from_dict(src)
+        panel.le_name.setText(src.get('name', source_id))
+        if source_id in self.canvas._elec_room_polygons:
+            self.canvas._elec_room_polygons[new_id] = [QPointF(p.x() + 20, p.y() + 20)
+                                                       for p in self.canvas._elec_room_polygons[source_id]]
+            self.canvas._elec_room_visible[new_id] = self.canvas._elec_room_visible.get(source_id, True)
+        self.status.showMessage(f"📋 {source_id} dupliziert → {new_id}")
+        self.canvas.update()
+        return new_id
 
     def _duplicate_circuit(self, source_id: str) -> str | None:
         src_panel = self.param_panel.circuit_panels.get(source_id)
