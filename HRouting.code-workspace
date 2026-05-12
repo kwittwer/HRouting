@@ -4,5 +4,11 @@
 			"path": "."
 		}
 	],
-	"settings": {}
+	"settings": {
+		"chat.mcp.discovery.enabled": true,
+		"chat.mcp.enabled": true,
+		"files.associations": {
+			"*.hrp": "json"
+		}
+	}
 }

@@ -19,7 +19,7 @@ import ctypes
 import re
 from pathlib import Path
 
-VERSION = "0.1.20"
+VERSION = "0.1.21"
 
 # Windows: AppUserModelID muss VOR allen Qt-Imports gesetzt werden,
 # damit die Taskleiste das App-Icon statt des Python-Icons zeigt.
@@ -182,6 +182,17 @@ def main():
         window.setWindowIcon(QIcon(str(ico_path)))
     elif svg_path.exists():
         window.setWindowIcon(QIcon(str(svg_path)))
+
+    # --- MCP-Server starten (optional) ---
+    try:
+        from mcp_server import start_mcp_server
+        mcp_thread = start_mcp_server(window)
+        if mcp_thread:
+            print("🔌 MCP-Server: http://127.0.0.1:3274/mcp",
+                  file=sys.stderr)
+    except Exception as e:
+        print(f"MCP-Server nicht gestartet: {e}", file=sys.stderr)
+
     window.show()
 
     if splash:
