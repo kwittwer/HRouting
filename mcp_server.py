@@ -57,7 +57,11 @@ def is_available() -> bool:
         from mcp.server.fastmcp import FastMCP  # noqa: F401
         import uvicorn  # noqa: F401
         return True
-    except ImportError:
+    except ImportError as e:
+        logger.info(f"MCP-Import fehlgeschlagen: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"MCP-Verfügbarkeitscheck Fehler: {e}")
         return False
 
 
@@ -938,6 +942,19 @@ def start_mcp_server(
     Returns:
         Den gestarteten Thread oder None bei Fehler.
     """
+    import sys as _sys
+
+    # Bei frozen EXE: Logger in Datei schreiben (stderr ist unsichtbar)
+    if getattr(_sys, 'frozen', False):
+        import logging as _logging
+        log_path = Path(_sys.executable).parent / "hrouting_mcp.log"
+        _fh = _logging.FileHandler(str(log_path), encoding="utf-8")
+        _fh.setLevel(_logging.DEBUG)
+        _fh.setFormatter(_logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s"))
+        logger.addHandler(_fh)
+        logger.setLevel(_logging.DEBUG)
+
     if not is_available():
         logger.info(
             "MCP-Pakete nicht installiert "

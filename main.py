@@ -19,7 +19,7 @@ import ctypes
 import re
 from pathlib import Path
 
-VERSION = "0.1.21"
+VERSION = "0.1.22"
 
 # Windows: AppUserModelID muss VOR allen Qt-Imports gesetzt werden,
 # damit die Taskleiste das App-Icon statt des Python-Icons zeigt.
@@ -191,7 +191,18 @@ def main():
             print("🔌 MCP-Server: http://127.0.0.1:3274/mcp",
                   file=sys.stderr)
     except Exception as e:
-        print(f"MCP-Server nicht gestartet: {e}", file=sys.stderr)
+        # Bei --windowed (EXE) ist stderr unsichtbar → in Logdatei schreiben
+        msg = f"MCP-Server nicht gestartet: {e}"
+        print(msg, file=sys.stderr)
+        if getattr(sys, 'frozen', False):
+            import traceback
+            log_path = Path(sys.executable).parent / "hrouting_mcp.log"
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n--- MCP-Startfehler ---\n{msg}\n")
+                    traceback.print_exc(file=f)
+            except OSError:
+                pass
 
     window.show()
 

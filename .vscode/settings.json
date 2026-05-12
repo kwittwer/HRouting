@@ -1,0 +1,17 @@
+{
+  // HRouting – VS Code Workspace-Einstellungen
+  "chat.mcp.discovery.enabled": {
+    "claude-desktop": true,
+    "windsurf": true,
+    "cursor-global": true,
+    "cursor-workspace": true
+  },
+
+  "python.defaultInterpreterPath": "python",
+  "python.analysis.typeCheckingMode": "basic",
+
+  "files.associations": {
+    "*.hrp": "json"
+  },
+  "chat.mcp.access": "all"
+}
