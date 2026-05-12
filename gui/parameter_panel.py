@@ -391,6 +391,9 @@ class ElektroPointPanel(QWidget):
     duplicate_requested = Signal(str)
     position_changed   = Signal(str, str)      # (point_id, position)
     height_changed     = Signal(str, float)    # (point_id, height_mm)
+    note_changed       = Signal(str, str)
+    smarthome_device_changed = Signal(str, str)
+    smarthome_device_color_changed = Signal(str, str)
 
     def __init__(self, point_id: str, name: str | None = None,
                  color: str | None = None, parent=None):
@@ -498,6 +501,30 @@ class ElektroPointPanel(QWidget):
         )
         form.addRow("H\u00f6he v. Boden:", self.sb_height_from_floor)
 
+        self.cmb_smarthome = SafeComboBox()
+        self.cmb_smarthome.setEditable(True)
+        self.cmb_smarthome.addItems(["", "Shelly", "Sonoff ZBMINIR2"])
+        self.cmb_smarthome.editTextChanged.connect(
+            lambda value: self.smarthome_device_changed.emit(self.point_id, value)
+        )
+        form.addRow("Unterputz-Ger\u00e4t:", self.cmb_smarthome)
+
+        self.cmb_smarthome_color = SafeComboBox()
+        self.cmb_smarthome_color.setEditable(True)
+        self.cmb_smarthome_color.addItems(["", "wei\u00df", "schwarz"])
+        self.cmb_smarthome_color.editTextChanged.connect(
+            lambda value: self.smarthome_device_color_changed.emit(self.point_id, value)
+        )
+        form.addRow("Ger\u00e4tefarbe:", self.cmb_smarthome_color)
+
+        self.te_note = QTextEdit()
+        self.te_note.setMaximumHeight(50)
+        self.te_note.setPlaceholderText("Notiz...")
+        self.te_note.textChanged.connect(
+            lambda: self.note_changed.emit(self.point_id, self.te_note.toPlainText())
+        )
+        form.addRow("Notiz:", self.te_note)
+
         self.btn_place = QPushButton("\U0001f4cd Platzieren")
         self.btn_place.clicked.connect(
             lambda: self.place_requested.emit(self.point_id)
@@ -586,7 +613,54 @@ class ElektroPointPanel(QWidget):
             "label_size": self.sb_label_size.value(),
             "position":  position,
             "height_from_floor": self.sb_height_from_floor.value(),
+            "smarthome_device": self.get_smarthome_device_text().strip(),
+            "smarthome_device_color": self.get_smarthome_device_color_text().strip(),
+            "note": self.te_note.toPlainText(),
         }
+
+    def get_smarthome_device_text(self) -> str:
+        return self.cmb_smarthome.currentText()
+
+    def set_smarthome_device_text(self, device: str):
+        value = (device or "").strip()
+        self.cmb_smarthome.setCurrentText(value)
+
+    def set_smarthome_device_choices(self, choices: list[str]):
+        current = self.get_smarthome_device_text().strip()
+        merged: list[str] = []
+        for choice in choices:
+            text = (choice or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+
+        self.cmb_smarthome.blockSignals(True)
+        self.cmb_smarthome.clear()
+        self.cmb_smarthome.addItem("")
+        self.cmb_smarthome.addItems(merged)
+        self.cmb_smarthome.setCurrentText(current)
+        self.cmb_smarthome.blockSignals(False)
+
+    def get_smarthome_device_color_text(self) -> str:
+        return self.cmb_smarthome_color.currentText()
+
+    def set_smarthome_device_color_text(self, color: str):
+        value = (color or "").strip()
+        self.cmb_smarthome_color.setCurrentText(value)
+
+    def set_smarthome_device_color_choices(self, choices: list[str]):
+        current = self.get_smarthome_device_color_text().strip()
+        merged: list[str] = []
+        for choice in choices:
+            text = (choice or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+
+        self.cmb_smarthome_color.blockSignals(True)
+        self.cmb_smarthome_color.clear()
+        self.cmb_smarthome_color.addItem("")
+        self.cmb_smarthome_color.addItems(merged)
+        self.cmb_smarthome_color.setCurrentText(current)
+        self.cmb_smarthome_color.blockSignals(False)
 
     def to_dict(self) -> dict:
         d = self.get_parameters()
@@ -619,6 +693,9 @@ class ElektroPointPanel(QWidget):
             self.le_position_custom.setText(position)
         
         self.sb_height_from_floor.setValue(d.get("height_from_floor", 0.0))
+        self.set_smarthome_device_text(d.get("smarthome_device", ""))
+        self.set_smarthome_device_color_text(d.get("smarthome_device_color", ""))
+        self.te_note.setPlainText(d.get("note", ""))
         
         # Eingebautes Symbol wiederherstellen
         builtin = d.get("builtin_symbol", "")
@@ -1885,6 +1962,8 @@ class ParameterPanel(QWidget):
         super().__init__(parent)
         self.circuit_panels: dict[str, HeatingCircuitPanel] = {}
         self.elec_point_panels: dict[str, ElektroPointPanel] = {}
+        self._last_elec_point_device: str = ""
+        self._last_elec_point_device_color: str = ""
         self.elec_room_panels: dict[str, ElektroRoomPanel] = {}
         self.elec_cable_panels: dict[str, ElektroCablePanel] = {}
         self._last_elec_cable_defaults: dict = self._default_elec_cable_defaults()
@@ -2687,14 +2766,19 @@ class ParameterPanel(QWidget):
         panel.visibility_changed.connect(
             lambda pid, c: self._sync_tree_checkbox(pid, c)
         )
+        panel.smarthome_device_changed.connect(self._on_elec_point_smarthome_device_changed)
+        panel.smarthome_device_color_changed.connect(self._on_elec_point_smarthome_device_color_changed)
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.elec_point_panels[point_id] = panel
+        panel.set_smarthome_device_text(self._last_elec_point_device)
+        panel.set_smarthome_device_color_text(self._last_elec_point_device_color)
         resolved = self._resolve_fp_id(fp_id)
         self._element_floorplan[point_id] = resolved or ""
         parent_item = self._fp_sub_items.get(resolved or "", {}).get("ap") if resolved else None
         if parent_item:
             self._add_tree_item(parent_item, point_id, name or point_id)
+        self.update_all_elec_point_smarthome_choices()
         return panel
 
     def remove_elec_point_panel(self, point_id: str):
@@ -2704,11 +2788,53 @@ class ParameterPanel(QWidget):
         if panel:
             self._prop_layout.removeWidget(panel)
             panel.deleteLater()
+        self.update_all_elec_point_smarthome_choices()
+        self.update_all_elec_point_smarthome_color_choices()
         self._show_placeholder_if_empty()
 
     def get_elec_point_params(self, point_id: str) -> dict | None:
         panel = self.elec_point_panels.get(point_id)
         return panel.get_parameters() if panel else None
+
+    def _on_elec_point_smarthome_device_changed(self, point_id: str, value: str):
+        if self._loading:
+            return
+        text = (value or "").strip()
+        self._last_elec_point_device = text
+        self.update_all_elec_point_smarthome_choices()
+
+    def _on_elec_point_smarthome_device_color_changed(self, point_id: str, value: str):
+        if self._loading:
+            return
+        text = (value or "").strip()
+        self._last_elec_point_device_color = text
+        self.update_all_elec_point_smarthome_color_choices()
+
+    def _collect_elec_point_smarthome_devices(self) -> list[str]:
+        values: list[str] = []
+        for panel in self.elec_point_panels.values():
+            text = panel.get_smarthome_device_text().strip()
+            if text and text not in values:
+                values.append(text)
+        return values
+
+    def update_all_elec_point_smarthome_choices(self):
+        choices = self._collect_elec_point_smarthome_devices()
+        for panel in self.elec_point_panels.values():
+            panel.set_smarthome_device_choices(choices)
+
+    def _collect_elec_point_smarthome_colors(self) -> list[str]:
+        values: list[str] = []
+        for panel in self.elec_point_panels.values():
+            text = panel.get_smarthome_device_color_text().strip()
+            if text and text not in values:
+                values.append(text)
+        return values
+
+    def update_all_elec_point_smarthome_color_choices(self):
+        choices = self._collect_elec_point_smarthome_colors()
+        for panel in self.elec_point_panels.values():
+            panel.set_smarthome_device_color_choices(choices)
 
     # ──────────────────────────────────────────────────────────────── #
     #  Elektro: Räume                                                  #
@@ -3182,6 +3308,13 @@ class ParameterPanel(QWidget):
                 color=values.get("color", "#4fc3f7"),
             )
             panel.from_dict(values)
+        self.update_all_elec_point_smarthome_choices()
+        self.update_all_elec_point_smarthome_color_choices()
+        if self.elec_point_panels:
+            last_point_id = next(reversed(self.elec_point_panels))
+            last_params = self.elec_point_panels[last_point_id].get_parameters()
+            self._last_elec_point_device = str(last_params.get("smarthome_device", "")).strip()
+            self._last_elec_point_device_color = str(last_params.get("smarthome_device_color", "")).strip()
         for rid, values in d.get("elec_rooms", {}).items():
             panel = self.add_elec_room_panel(
                 rid, fp_id=values.get("floor_plan_id"),

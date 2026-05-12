@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QStatusBar, QColorDialog,
     QComboBox, QLabel, QDialog, QTableWidget, QTableWidgetItem,
     QDialogButtonBox, QTabWidget, QPushButton, QHeaderView, QMenu,
-    QApplication, QCheckBox, QSpinBox, QDoubleSpinBox,
+    QApplication, QCheckBox, QSpinBox, QDoubleSpinBox, QInputDialog,
 )
 from PySide6.QtGui import (
     QAction, QColor, QFont, QPainter, QPageLayout,
@@ -565,11 +565,17 @@ class MainWindow(QMainWindow):
             panel.label_visibility_changed.connect(self._on_label_visibility_changed)
             panel.position_changed.connect(self._on_elec_point_position_changed)
             panel.height_changed.connect(self._on_elec_point_height_changed)
+            panel.note_changed.connect(self._on_elec_point_note_changed)
+            panel.smarthome_device_changed.connect(self._on_elec_point_smarthome_changed)
+            panel.smarthome_device_color_changed.connect(self._on_elec_point_smarthome_color_changed)
             values = panel.get_parameters()
             self.canvas._label_map[pid] = values.get("name", pid)
             self.canvas._elec_visible[pid] = values.get("visible", True)
             self.canvas._elec_point_position[pid] = values.get("position", "Wand")
             self.canvas._elec_point_height[pid] = values.get("height_from_floor", 0.0)
+            self.canvas._elec_point_notes[pid] = values.get("note", "")
+            self.canvas._elec_point_smarthome_device[pid] = values.get("smarthome_device", "")
+            self.canvas._elec_point_smarthome_device_color[pid] = values.get("smarthome_device_color", "")
             self.canvas.set_label_font_size(pid, values.get("label_size", 12.0))
             self.canvas.set_label_visible(pid, values.get("label_visible", True))
             self.canvas.set_color(pid, QColor(values.get("color", "#4fc3f7")))
@@ -596,12 +602,14 @@ class MainWindow(QMainWindow):
             panel.edit_cable_requested.connect(self._on_edit_elec_cable)
             panel.name_changed.connect(self._on_elec_cable_name_changed)
             panel.color_changed.connect(self._on_elec_cable_color_changed)
+            panel.comment_changed.connect(self._on_elec_cable_comment_changed)
             panel.visibility_changed.connect(self._on_elec_visibility_changed)
             panel.label_size_changed.connect(self._on_label_size_changed)
             panel.label_visibility_changed.connect(self._on_label_visibility_changed)
             values = panel.get_parameters()
             self.canvas._label_map[kid] = values.get("name", kid)
             self.canvas._elec_visible[kid] = values.get("visible", True)
+            self.canvas._elec_cable_notes[kid] = values.get("comment", "")
             self.canvas.set_label_font_size(kid, values.get("label_size", 12.0))
             self.canvas.set_label_visible(kid, values.get("label_visible", True))
             self.canvas.set_color(kid, QColor(values.get("color", "#ff9800")))
@@ -1387,6 +1395,13 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
 
+        info_lines = self._context_info_lines(context_type, context_id)
+        if info_lines:
+            for line in info_lines:
+                info_action = menu.addAction(line)
+                info_action.setEnabled(False)
+            menu.addSeparator()
+
         if selected_id:
             copy_action = menu.addAction("📋 Kopieren")
             copy_action.triggered.connect(self._copy_selected_object)
@@ -1432,6 +1447,21 @@ class MainWindow(QMainWindow):
                     lambda checked=False, t=context_type, i=context_id, p=QPointF(canvas_pt): self._context_delete_point(t, i, p)
                 )
 
+            if context_type == "elec_point" and context_id:
+                menu.addSeparator()
+                edit_device_action = menu.addAction("✏️ Unterputz-Gerät bearbeiten")
+                edit_device_action.triggered.connect(
+                    lambda checked=False, pid=context_id: self._context_edit_ap_device(pid)
+                )
+                edit_device_color_action = menu.addAction("🎨 Gerätefarbe bearbeiten")
+                edit_device_color_action.triggered.connect(
+                    lambda checked=False, pid=context_id: self._context_edit_ap_device_color(pid)
+                )
+                edit_note_action = menu.addAction("📝 Notiz bearbeiten")
+                edit_note_action.triggered.connect(
+                    lambda checked=False, pid=context_id: self._context_edit_ap_note(pid)
+                )
+
         if self._copy_buffer:
             if selected_id:
                 menu.addSeparator()
@@ -1443,6 +1473,111 @@ class MainWindow(QMainWindow):
 
         pos = global_pos.toPoint() if hasattr(global_pos, "toPoint") else global_pos
         menu.exec(pos)
+
+    def _context_info_lines(self, context_type: str | None, context_id: str | None) -> list[str]:
+        if not context_type or not context_id:
+            return []
+
+        lines: list[str] = []
+        if context_type == "elec_point":
+            panel = self.param_panel.elec_point_panels.get(context_id)
+            if not panel:
+                return []
+            params = panel.get_parameters()
+            device = str(params.get("smarthome_device", "") or "").strip()
+            device_color = str(params.get("smarthome_device_color", "") or "").strip()
+            note = str(params.get("note", "") or "").strip()
+            if device:
+                lines.append(f"ℹ Unterputz-Gerät: {device}")
+            if device_color:
+                lines.append(f"🎨 Gerätefarbe: {device_color}")
+            if note:
+                lines.append(f"📝 Notiz: {note}")
+            return lines
+
+        if context_type == "elec_cable":
+            panel = self.param_panel.elec_cable_panels.get(context_id)
+            if not panel:
+                return []
+            params = panel.get_parameters()
+            cable_type = str(params.get("type", "") or "").strip()
+            note = str(params.get("comment", "") or "").strip()
+            if cable_type:
+                lines.append(f"ℹ Typ: {cable_type}")
+            if note:
+                lines.append(f"📝 Notiz: {note}")
+            return lines
+
+        return []
+
+    def _context_edit_ap_device(self, point_id: str):
+        panel = self.param_panel.elec_point_panels.get(point_id)
+        if not panel:
+            return
+        current = panel.get_smarthome_device_text().strip()
+        choices = [""]
+        for p in self.param_panel.elec_point_panels.values():
+            value = p.get_smarthome_device_text().strip()
+            if value and value not in choices:
+                choices.append(value)
+        if current and current not in choices:
+            choices.append(current)
+        value, ok = QInputDialog.getItem(
+            self,
+            "Unterputz-Gerät bearbeiten",
+            "Gerät:",
+            choices,
+            choices.index(current) if current in choices else 0,
+            True,
+        )
+        if not ok:
+            return
+        panel.set_smarthome_device_text(value)
+        self.canvas._elec_point_smarthome_device[point_id] = value
+        self._mark_dirty_debounced()
+
+    def _context_edit_ap_device_color(self, point_id: str):
+        panel = self.param_panel.elec_point_panels.get(point_id)
+        if not panel:
+            return
+        current = panel.get_smarthome_device_color_text().strip()
+        choices = ["", "weiß", "schwarz"]
+        for p in self.param_panel.elec_point_panels.values():
+            value = p.get_smarthome_device_color_text().strip()
+            if value and value not in choices:
+                choices.append(value)
+        if current and current not in choices:
+            choices.append(current)
+        value, ok = QInputDialog.getItem(
+            self,
+            "Gerätefarbe bearbeiten",
+            "Farbe:",
+            choices,
+            choices.index(current) if current in choices else 0,
+            True,
+        )
+        if not ok:
+            return
+        panel.set_smarthome_device_color_text(value)
+        self.canvas._elec_point_smarthome_device_color[point_id] = value
+        self._mark_dirty_debounced()
+
+    def _context_edit_ap_note(self, point_id: str):
+        panel = self.param_panel.elec_point_panels.get(point_id)
+        if not panel:
+            return
+        current = panel.get_parameters().get("note", "")
+        value, ok = QInputDialog.getMultiLineText(
+            self,
+            "AP-Notiz bearbeiten",
+            "Notiz:",
+            current,
+        )
+        if not ok:
+            return
+        panel.te_note.setPlainText(value)
+        self.canvas._elec_point_notes[point_id] = value
+        self._mark_dirty_debounced()
 
     def _context_edit_action(self, selected_type: str | None, selected_id: str):
         if not selected_type or not selected_id:
@@ -1672,12 +1807,18 @@ class MainWindow(QMainWindow):
         panel.label_visibility_changed.connect(self._on_label_visibility_changed)
         panel.position_changed.connect(self._on_elec_point_position_changed)
         panel.height_changed.connect(self._on_elec_point_height_changed)
+        panel.note_changed.connect(self._on_elec_point_note_changed)
+        panel.smarthome_device_changed.connect(self._on_elec_point_smarthome_changed)
+        panel.smarthome_device_color_changed.connect(self._on_elec_point_smarthome_color_changed)
         return panel
 
     def _on_place_elec_point(self, point_id: str):
         params = self.param_panel.get_elec_point_params(point_id)
         if not params:
             return
+        self.canvas._elec_point_notes[point_id] = params.get("note", "")
+        self.canvas._elec_point_smarthome_device[point_id] = params.get("smarthome_device", "")
+        self.canvas._elec_point_smarthome_device_color[point_id] = params.get("smarthome_device_color", "")
         self.canvas.set_color(point_id, QColor(params.get("color", "#4fc3f7")))
         self.canvas.start_place_elec_point(
             point_id, params["width"], params["height"])
@@ -1714,6 +1855,18 @@ class MainWindow(QMainWindow):
     def _on_elec_point_height_changed(self, point_id: str, height: float):
         self.canvas._elec_point_height[point_id] = height
         self._mark_dirty()
+
+    def _on_elec_point_note_changed(self, point_id: str, note: str):
+        self.canvas._elec_point_notes[point_id] = note
+        self._mark_dirty_debounced()
+
+    def _on_elec_point_smarthome_changed(self, point_id: str, device: str):
+        self.canvas._elec_point_smarthome_device[point_id] = device
+        self._mark_dirty_debounced()
+
+    def _on_elec_point_smarthome_color_changed(self, point_id: str, color: str):
+        self.canvas._elec_point_smarthome_device_color[point_id] = color
+        self._mark_dirty_debounced()
 
     def _on_elec_visibility_changed(self, item_id: str, visible: bool):
         self.canvas._elec_visible[item_id] = visible
@@ -1829,6 +1982,7 @@ class MainWindow(QMainWindow):
         panel.edit_cable_requested.connect(self._on_edit_elec_cable)
         panel.name_changed.connect(self._on_elec_cable_name_changed)
         panel.color_changed.connect(self._on_elec_cable_color_changed)
+        panel.comment_changed.connect(self._on_elec_cable_comment_changed)
         panel.visibility_changed.connect(self._on_elec_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
         panel.label_visibility_changed.connect(self._on_label_visibility_changed)
@@ -1838,6 +1992,7 @@ class MainWindow(QMainWindow):
         panel = self.param_panel.elec_cable_panels.get(cable_id)
         if panel:
             self.canvas.set_color(cable_id, QColor(panel._color.name()))
+            self.canvas._elec_cable_notes[cable_id] = panel.get_parameters().get("comment", "")
         self.canvas.start_draw_elec_cable(cable_id)
         self.status.showMessage(
             f"{cable_id}: Kabel zeichnen  |  "
@@ -1885,6 +2040,10 @@ class MainWindow(QMainWindow):
 
     def _on_elec_cable_color_changed(self, cable_id: str, color: str):
         self.canvas.set_color(cable_id, QColor(color))
+
+    def _on_elec_cable_comment_changed(self, cable_id: str, comment: str):
+        self.canvas._elec_cable_notes[cable_id] = comment
+        self._mark_dirty_debounced()
 
     def _delete_elec_cable(self, cable_id: str):
         self.canvas.delete_elec_cable(cable_id)
@@ -2242,6 +2401,9 @@ class MainWindow(QMainWindow):
         panel.sb_height_from_floor.setValue(src.get("height_from_floor", 0.0))
         self.canvas._elec_point_position[new_id] = src.get("position", "Wand")
         self.canvas._elec_point_height[new_id] = src.get("height_from_floor", 0.0)
+        self.canvas._elec_point_notes[new_id] = src.get("note", "")
+        self.canvas._elec_point_smarthome_device[new_id] = src.get("smarthome_device", "")
+        self.canvas._elec_point_smarthome_device_color[new_id] = src.get("smarthome_device_color", "")
         c = src.get("color", "#4fc3f7")
         panel._color = QColor(c)
         panel._update_color_button()
@@ -2277,6 +2439,7 @@ class MainWindow(QMainWindow):
         panel = self._create_elec_cable_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
         panel.set_type_text(src.get("type", "5x1,5"))
         panel.te_comment.setPlainText(src.get("comment", ""))
+        self.canvas._elec_cable_notes[new_id] = src.get("comment", "")
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
         c = src.get("color", "#ff9800")
         panel._color = QColor(c)
@@ -4040,21 +4203,37 @@ class MainWindow(QMainWindow):
             start_name = ""
             start_height = 0.0
             start_position = ""
+            start_device = ""
+            start_device_color = ""
+            start_note = ""
             if start_ap_id:
                 ap_p = self.param_panel.elec_point_panels.get(start_ap_id)
                 start_name = (ap_p.get_parameters()["name"]
                               if ap_p else start_ap_id)
                 start_height = self.canvas._elec_point_height.get(start_ap_id, 0.0)
                 start_position = self.canvas._elec_point_position.get(start_ap_id, "")
+                if ap_p:
+                    ap_params = ap_p.get_parameters()
+                    start_device = ap_params.get("smarthome_device", "")
+                    start_device_color = ap_params.get("smarthome_device_color", "")
+                    start_note = ap_params.get("note", "")
             end_name = ""
             end_height = 0.0
             end_position = ""
+            end_device = ""
+            end_device_color = ""
+            end_note = ""
             if end_ap_id:
                 ap_p = self.param_panel.elec_point_panels.get(end_ap_id)
                 end_name = (ap_p.get_parameters()["name"]
                             if ap_p else end_ap_id)
                 end_height = self.canvas._elec_point_height.get(end_ap_id, 0.0)
                 end_position = self.canvas._elec_point_position.get(end_ap_id, "")
+                if ap_p:
+                    ap_params = ap_p.get_parameters()
+                    end_device = ap_params.get("smarthome_device", "")
+                    end_device_color = ap_params.get("smarthome_device_color", "")
+                    end_note = ap_params.get("note", "")
             
             # Höhen zu Kabellänge addieren (in cm, zu m umrechnen: cm / 100)
             total_height_cm = start_height + end_height
@@ -4063,6 +4242,7 @@ class MainWindow(QMainWindow):
             kv_rows.append({
                 "name": params["name"],
                 "type": params["type"],
+                "comment": params.get("comment", ""),
                 "length_m": length_m,
                 "start_ap": start_name,
                 "end_ap": end_name,
@@ -4072,6 +4252,12 @@ class MainWindow(QMainWindow):
                 "end_height_cm": end_height,
                 "start_position": start_position,
                 "end_position": end_position,
+                "start_device": start_device,
+                "start_device_color": start_device_color,
+                "start_note": start_note,
+                "end_device": end_device,
+                "end_device_color": end_device_color,
+                "end_note": end_note,
             })
 
         # Summe pro Kabel-Typ
@@ -4083,6 +4269,38 @@ class MainWindow(QMainWindow):
         ap_cables = self._build_ap_cable_map(kv_rows)
         room_ap_connections = self._build_room_ap_connection_map(kv_rows)
         ap_type_counts = self._collect_ap_type_counts()
+
+        # AP-Liste (Detailinfos)
+        ap_rows: list[dict] = []
+        for pid, panel in self.param_panel.elec_point_panels.items():
+            params = panel.get_parameters()
+            symbol = (params.get("builtin_symbol") or "").strip()
+            icon_path = (params.get("icon_path") or "").strip()
+            if symbol and symbol != "(kein Symbol)":
+                type_name = symbol
+            elif icon_path:
+                type_name = Path(icon_path).stem.replace("_", " ").replace("-", " ").strip() or "Eigenes Symbol"
+            else:
+                type_name = "(kein Symbol)"
+
+            ap_rows.append({
+                "name": (params.get("name") or pid).strip() or pid,
+                "type": type_name,
+                "room": point_id_to_room_name.get(pid, "(ohne Raum)"),
+                "position": str(self.canvas._elec_point_position.get(pid, "") or "").strip(),
+                "height_cm": float(self.canvas._elec_point_height.get(pid, 0.0) or 0.0),
+                "device_color": str(params.get("smarthome_device_color", "") or "").strip(),
+                "device": str(params.get("smarthome_device", "") or "").strip(),
+                "note": str(params.get("note", "") or "").strip(),
+            })
+
+        ap_rows = sorted(
+            ap_rows,
+            key=lambda r: (
+                (r.get("room") or "").lower(),
+                (r.get("name") or "").lower(),
+            ),
+        )
 
         # ── HKV-Leitungen sammeln ──
         hl_rows: list[dict] = []
@@ -4266,21 +4484,34 @@ class MainWindow(QMainWindow):
         kv_layout = QVBoxLayout(kv_widget)
 
         kv_layout.addWidget(QLabel("<b>Kabelliste – alle Kabel</b>"))
-        tbl_kv = QTableWidget(len(kv_rows), 7)
+        tbl_kv = QTableWidget(len(kv_rows), 14)
         tbl_kv.setHorizontalHeaderLabels(
-            ["Name", "Typ", "Länge (m)", "Start-AP", "End-AP", "Start-Raum", "End-Raum"])
+            [
+                "Name", "Typ", "Kabel-Notiz", "Länge (m)",
+                "Start-AP", "Start-Gerät", "Start-Farbe", "Start-Notiz",
+                "End-AP", "End-Gerät", "End-Farbe", "End-Notiz",
+                "Start-Raum", "End-Raum",
+            ]
+        )
         tbl_kv.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         tbl_kv.setEditTriggers(QTableWidget.NoEditTriggers)
         for i, r in enumerate(kv_rows):
             tbl_kv.setItem(i, 0, QTableWidgetItem(r["name"]))
             tbl_kv.setItem(i, 1, QTableWidgetItem(r["type"]))
+            tbl_kv.setItem(i, 2, QTableWidgetItem(r.get("comment", "")))
             item = QTableWidgetItem(f"{r['length_m']:.2f}")
             item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            tbl_kv.setItem(i, 2, item)
-            tbl_kv.setItem(i, 3, QTableWidgetItem(r.get("start_ap", "")))
-            tbl_kv.setItem(i, 4, QTableWidgetItem(r.get("end_ap", "")))
-            tbl_kv.setItem(i, 5, QTableWidgetItem(r.get("start_room", "")))
-            tbl_kv.setItem(i, 6, QTableWidgetItem(r.get("end_room", "")))
+            tbl_kv.setItem(i, 3, item)
+            tbl_kv.setItem(i, 4, QTableWidgetItem(r.get("start_ap", "")))
+            tbl_kv.setItem(i, 5, QTableWidgetItem(r.get("start_device", "")))
+            tbl_kv.setItem(i, 6, QTableWidgetItem(r.get("start_device_color", "")))
+            tbl_kv.setItem(i, 7, QTableWidgetItem(r.get("start_note", "")))
+            tbl_kv.setItem(i, 8, QTableWidgetItem(r.get("end_ap", "")))
+            tbl_kv.setItem(i, 9, QTableWidgetItem(r.get("end_device", "")))
+            tbl_kv.setItem(i, 10, QTableWidgetItem(r.get("end_device_color", "")))
+            tbl_kv.setItem(i, 11, QTableWidgetItem(r.get("end_note", "")))
+            tbl_kv.setItem(i, 12, QTableWidgetItem(r.get("start_room", "")))
+            tbl_kv.setItem(i, 13, QTableWidgetItem(r.get("end_room", "")))
         kv_layout.addWidget(tbl_kv)
 
         kv_layout.addWidget(QLabel("<b>Summe pro Leitungstyp</b>"))
@@ -4317,6 +4548,32 @@ class MainWindow(QMainWindow):
 
         tabs.addTab(kv_widget, "🔌 Elektro")
 
+        # -- Tab: AP-Liste --
+        apl_widget = QWidget()
+        apl_layout = QVBoxLayout(apl_widget)
+        apl_layout.addWidget(QLabel("<b>Anschlusspunkte – Übersicht</b>"))
+
+        tbl_ap_list = QTableWidget(len(ap_rows), 8)
+        tbl_ap_list.setHorizontalHeaderLabels(
+            ["Name", "Art", "Raum", "Position", "Höhe (cm)", "Gerätefarbe", "Unterputz-Gerät", "Notiz"]
+        )
+        tbl_ap_list.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        tbl_ap_list.setEditTriggers(QTableWidget.NoEditTriggers)
+        for i, r in enumerate(ap_rows):
+            tbl_ap_list.setItem(i, 0, QTableWidgetItem(r.get("name", "")))
+            tbl_ap_list.setItem(i, 1, QTableWidgetItem(r.get("type", "")))
+            tbl_ap_list.setItem(i, 2, QTableWidgetItem(r.get("room", "")))
+            tbl_ap_list.setItem(i, 3, QTableWidgetItem(r.get("position", "")))
+            item = QTableWidgetItem(f"{r.get('height_cm', 0.0):.1f}")
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            tbl_ap_list.setItem(i, 4, item)
+            tbl_ap_list.setItem(i, 5, QTableWidgetItem(r.get("device_color", "")))
+            tbl_ap_list.setItem(i, 6, QTableWidgetItem(r.get("device", "")))
+            tbl_ap_list.setItem(i, 7, QTableWidgetItem(r.get("note", "")))
+        apl_layout.addWidget(tbl_ap_list)
+
+        tabs.addTab(apl_widget, "🔎 AP-Infos")
+
         # -- Tab: Anschlusspunkte Verkabelung --
         ap_widget = QWidget()
         ap_layout = QVBoxLayout(ap_widget)
@@ -4325,9 +4582,9 @@ class MainWindow(QMainWindow):
             for ap_name in sorted(ap_cables.keys()):
                 cables = ap_cables[ap_name]
                 ap_layout.addWidget(QLabel(f"<i>{ap_name}</i>"))
-                tbl_ap = QTableWidget(len(cables), 4)
+                tbl_ap = QTableWidget(len(cables), 8)
                 tbl_ap.setHorizontalHeaderLabels(
-                    ["Kabel", "Typ", "Anschluss", "Länge (m)"])
+                    ["Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "Länge (m)"])
                 tbl_ap.horizontalHeader().setSectionResizeMode(
                     QHeaderView.Stretch)
                 tbl_ap.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -4336,9 +4593,13 @@ class MainWindow(QMainWindow):
                     tbl_ap.setItem(i, 0, QTableWidgetItem(c["cable"]))
                     tbl_ap.setItem(i, 1, QTableWidgetItem(c["type"]))
                     tbl_ap.setItem(i, 2, QTableWidgetItem(c["role"]))
+                    tbl_ap.setItem(i, 3, QTableWidgetItem(c.get("ap_device", "")))
+                    tbl_ap.setItem(i, 4, QTableWidgetItem(c.get("ap_device_color", "")))
+                    tbl_ap.setItem(i, 5, QTableWidgetItem(c.get("ap_note", "")))
+                    tbl_ap.setItem(i, 6, QTableWidgetItem(c.get("cable_note", "")))
                     item = QTableWidgetItem(f"{c['length_m']:.2f}")
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                    tbl_ap.setItem(i, 3, item)
+                    tbl_ap.setItem(i, 7, item)
                 ap_layout.addWidget(tbl_ap)
         else:
             ap_layout.addWidget(QLabel("Keine AP-Kabelverbindungen vorhanden."))
@@ -4371,22 +4632,28 @@ class MainWindow(QMainWindow):
             ))
 
             if room_rows:
-                tbl_room = QTableWidget(len(room_rows), 6)
+                tbl_room = QTableWidget(len(room_rows), 9)
                 tbl_room.setHorizontalHeaderLabels(
-                    ["AP", "Kabel", "Typ", "Anschluss", "Führt zu AP", "Länge (m)"]
+                    [
+                        "AP", "Gerät", "Farbe", "AP-Notiz",
+                        "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)",
+                    ]
                 )
                 tbl_room.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
                 tbl_room.setEditTriggers(QTableWidget.NoEditTriggers)
 
                 for i, row in enumerate(room_rows):
                     tbl_room.setItem(i, 0, QTableWidgetItem(row.get("ap", "")))
-                    tbl_room.setItem(i, 1, QTableWidgetItem(row.get("cable", "")))
-                    tbl_room.setItem(i, 2, QTableWidgetItem(row.get("type", "")))
-                    tbl_room.setItem(i, 3, QTableWidgetItem(row.get("role", "")))
-                    tbl_room.setItem(i, 4, QTableWidgetItem(row.get("target_ap", "")))
+                    tbl_room.setItem(i, 1, QTableWidgetItem(row.get("ap_device", "")))
+                    tbl_room.setItem(i, 2, QTableWidgetItem(row.get("ap_device_color", "")))
+                    tbl_room.setItem(i, 3, QTableWidgetItem(row.get("ap_note", "")))
+                    tbl_room.setItem(i, 4, QTableWidgetItem(row.get("cable", "")))
+                    tbl_room.setItem(i, 5, QTableWidgetItem(row.get("type", "")))
+                    tbl_room.setItem(i, 6, QTableWidgetItem(row.get("cable_note", "")))
+                    tbl_room.setItem(i, 7, QTableWidgetItem(row.get("target_ap", "")))
                     item = QTableWidgetItem(f"{row.get('length_m', 0.0):.2f}")
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                    tbl_room.setItem(i, 5, item)
+                    tbl_room.setItem(i, 8, item)
 
                 room_layout.addWidget(tbl_room)
             else:
@@ -4489,15 +4756,19 @@ class MainWindow(QMainWindow):
         # Elektro Einzellängen
         lines.append("Elektro - Kabelverbindungen")
         lines.append(sep.join(["Name", "Typ", "Start-AP", "Start-Position",
-                               "Start-Höhe (cm)", "End-AP", "End-Position",
-                               "End-Höhe (cm)", "Länge (m)"]))
+                               "Start-Höhe (cm)", "Start-Gerät", "Start-Farbe", "Start-Notiz",
+                               "End-AP", "End-Position", "End-Höhe (cm)", "End-Gerät", "End-Farbe",
+                               "End-Notiz", "Kabel-Notiz", "Länge (m)"]))
         for r in kv_rows:
             lines.append(sep.join([
                 r["name"], r["type"],
                 r.get("start_ap", ""), r.get("start_position", ""),
                 f"{r.get('start_height_cm', 0.0):.1f}",
+                r.get("start_device", ""), r.get("start_device_color", ""), r.get("start_note", ""),
                 r.get("end_ap", ""), r.get("end_position", ""),
                 f"{r.get('end_height_cm', 0.0):.1f}",
+                r.get("end_device", ""), r.get("end_device_color", ""), r.get("end_note", ""),
+                r.get("comment", ""),
                 f"{r['length_m']:.2f}",
             ]))
         lines.append("")
@@ -4512,12 +4783,13 @@ class MainWindow(QMainWindow):
         # AP-Anschlüsse
         if ap_cables:
             lines.append("Elektro - Anschlusspunkte")
-            lines.append(sep.join(["AP", "Kabel", "Typ", "Anschluss",
+            lines.append(sep.join(["AP", "Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz",
                                    "Länge (m)"]))
             for ap_name in sorted(ap_cables.keys()):
                 for c in ap_cables[ap_name]:
                     lines.append(sep.join([
                         ap_name, c["cable"], c["type"], c["role"],
+                        c.get("ap_device", ""), c.get("ap_device_color", ""), c.get("ap_note", ""), c.get("cable_note", ""),
                         f"{c['length_m']:.2f}",
                     ]))
             lines.append("")
@@ -4526,15 +4798,18 @@ class MainWindow(QMainWindow):
         if room_ap_connections:
             lines.append("Elektro - Räume mit AP und Kabelzielen")
             lines.append(sep.join([
-                "Raum", "AP", "Kabel", "Typ", "Anschluss", "Führt zu AP", "Länge (m)",
+                "Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)",
             ]))
             for row in room_ap_connections:
                 lines.append(sep.join([
                     row.get("room", ""),
                     row.get("ap", ""),
+                    row.get("ap_device", ""),
+                    row.get("ap_device_color", ""),
+                    row.get("ap_note", ""),
                     row.get("cable", ""),
                     row.get("type", ""),
-                    row.get("role", ""),
+                    row.get("cable_note", ""),
                     row.get("target_ap", ""),
                     f"{row.get('length_m', 0.0):.2f}",
                 ]))
@@ -4581,12 +4856,19 @@ class MainWindow(QMainWindow):
         """Build {ap_name: [{cable_name, type, length_m, role}, ...]}."""
         ap_map: dict[str, list[dict]] = defaultdict(list)
         for r in kv_rows:
-            for role, key in [("Start", "start_ap"), ("Ende", "end_ap")]:
+            for role, key, dev_key, color_key, note_key in [
+                ("Start", "start_ap", "start_device", "start_device_color", "start_note"),
+                ("Ende", "end_ap", "end_device", "end_device_color", "end_note"),
+            ]:
                 ap = r.get(key, "")
                 if ap:
                     ap_map[ap].append({
                         "cable": r["name"], "type": r["type"],
                         "length_m": r["length_m"], "role": role,
+                        "ap_device": r.get(dev_key, ""),
+                        "ap_device_color": r.get(color_key, ""),
+                        "ap_note": r.get(note_key, ""),
+                        "cable_note": r.get("comment", ""),
                     })
         return dict(ap_map)
 
@@ -4594,15 +4876,22 @@ class MainWindow(QMainWindow):
         """Build rows for report: Raum -> AP -> Kabel -> Ziel-AP.
 
         Returns list of rows with keys:
-        room, ap, cable, type, role, target_ap, length_m
+        room, ap, cable, type, role, target_ap, length_m,
+        ap_device, ap_device_color, ap_note, cable_note
         """
         point_id_to_name: dict[str, str] = {}
         point_id_to_room_name: dict[str, str] = {}
+        point_id_to_device: dict[str, str] = {}
+        point_id_to_device_color: dict[str, str] = {}
+        point_id_to_note: dict[str, str] = {}
 
         for pid, panel in self.param_panel.elec_point_panels.items():
             params = panel.get_parameters()
             ap_name = (params.get("name") or pid).strip() or pid
             point_id_to_name[pid] = ap_name
+            point_id_to_device[pid] = str(params.get("smarthome_device", "") or "").strip()
+            point_id_to_device_color[pid] = str(params.get("smarthome_device_color", "") or "").strip()
+            point_id_to_note[pid] = str(params.get("note", "") or "").strip()
 
             room_name = "(ohne Raum)"
             point = self.canvas._elec_points.get(pid)
@@ -4628,6 +4917,7 @@ class MainWindow(QMainWindow):
             r.get("name", ""): {
                 "type": r.get("type", ""),
                 "length_m": float(r.get("length_m", 0.0)),
+                "comment": str(r.get("comment", "") or "").strip(),
             }
             for r in kv_rows
         }
@@ -4638,6 +4928,7 @@ class MainWindow(QMainWindow):
             cable_name = cable_params.get("name", cable_id)
             cable_type = cable_meta.get(cable_name, {}).get("type", cable_params.get("type", ""))
             cable_len = cable_meta.get(cable_name, {}).get("length_m", 0.0)
+            cable_note = cable_meta.get(cable_name, {}).get("comment", str(cable_params.get("comment", "") or "").strip())
 
             start_id, end_id = self.canvas.get_cable_ap(cable_id)
 
@@ -4650,6 +4941,10 @@ class MainWindow(QMainWindow):
                     "role": "Start",
                     "target_ap": point_id_to_name.get(end_id, end_id) if end_id else "(offenes Ende)",
                     "length_m": cable_len,
+                    "ap_device": point_id_to_device.get(start_id, ""),
+                    "ap_device_color": point_id_to_device_color.get(start_id, ""),
+                    "ap_note": point_id_to_note.get(start_id, ""),
+                    "cable_note": cable_note,
                 })
             if end_id:
                 rows.append({
@@ -4660,6 +4955,10 @@ class MainWindow(QMainWindow):
                     "role": "Ende",
                     "target_ap": point_id_to_name.get(start_id, start_id) if start_id else "(offenes Ende)",
                     "length_m": cable_len,
+                    "ap_device": point_id_to_device.get(end_id, ""),
+                    "ap_device_color": point_id_to_device_color.get(end_id, ""),
+                    "ap_note": point_id_to_note.get(end_id, ""),
+                    "cable_note": cable_note,
                 })
 
         return sorted(
@@ -4726,33 +5025,56 @@ class MainWindow(QMainWindow):
             start_name = ""
             start_height = 0.0
             start_position = ""
+            start_device = ""
+            start_device_color = ""
+            start_note = ""
             if start_ap_id:
                 ap_p = self.param_panel.elec_point_panels.get(start_ap_id)
                 start_name = (ap_p.get_parameters()["name"]
                               if ap_p else start_ap_id)
                 start_height = self.canvas._elec_point_height.get(start_ap_id, 0.0)
                 start_position = self.canvas._elec_point_position.get(start_ap_id, "")
+                if ap_p:
+                    ap_params = ap_p.get_parameters()
+                    start_device = ap_params.get("smarthome_device", "")
+                    start_device_color = ap_params.get("smarthome_device_color", "")
+                    start_note = ap_params.get("note", "")
             end_name = ""
             end_height = 0.0
             end_position = ""
+            end_device = ""
+            end_device_color = ""
+            end_note = ""
             if end_ap_id:
                 ap_p = self.param_panel.elec_point_panels.get(end_ap_id)
                 end_name = (ap_p.get_parameters()["name"]
                             if ap_p else end_ap_id)
                 end_height = self.canvas._elec_point_height.get(end_ap_id, 0.0)
                 end_position = self.canvas._elec_point_position.get(end_ap_id, "")
+                if ap_p:
+                    ap_params = ap_p.get_parameters()
+                    end_device = ap_params.get("smarthome_device", "")
+                    end_device_color = ap_params.get("smarthome_device_color", "")
+                    end_note = ap_params.get("note", "")
             
             # Höhen zu Kabellänge addieren (in cm, zu m umrechnen: cm / 100)
             total_height_cm = start_height + end_height
             length_m += total_height_cm / 100.0
             
             kv_rows.append({"name": params["name"], "type": params["type"],
+                            "comment": params.get("comment", ""),
                             "length_m": length_m,
                             "start_ap": start_name, "end_ap": end_name,
                             "start_height_cm": start_height,
                             "end_height_cm": end_height,
                             "start_position": start_position,
-                            "end_position": end_position})
+                            "end_position": end_position,
+                            "start_device": start_device,
+                            "start_device_color": start_device_color,
+                            "start_note": start_note,
+                            "end_device": end_device,
+                            "end_device_color": end_device_color,
+                            "end_note": end_note})
 
         kv_sum: dict[str, float] = defaultdict(float)
         for r in kv_rows:
@@ -5093,13 +5415,20 @@ class MainWindow(QMainWindow):
             ctx.painter.restore()
             table_y += ctx.mm(6)
 
-            headers = ["Name", "Typ", "Start-AP", "Start-H. (cm)", "End-AP", "End-H. (cm)", "L\u00e4nge (m)"]
+            headers = [
+                "Name", "Typ", "Kabel-Notiz",
+                "Start-AP", "Start-Gerät", "Start-Farbe", "Start-Notiz", "Start-H. (cm)",
+                "End-AP", "End-Gerät", "End-Farbe", "End-Notiz", "End-H. (cm)",
+                "L\u00e4nge (m)",
+            ]
             rows = [[r["name"], r["type"],
-                     r.get("start_ap", ""), f"{r.get('start_height_cm', 0.0):.1f}",
-                     r.get("end_ap", ""), f"{r.get('end_height_cm', 0.0):.1f}",
+                     r.get("comment", ""),
+                     r.get("start_ap", ""), r.get("start_device", ""), r.get("start_device_color", ""), r.get("start_note", ""), f"{r.get('start_height_cm', 0.0):.1f}",
+                     r.get("end_ap", ""), r.get("end_device", ""), r.get("end_device_color", ""), r.get("end_note", ""), f"{r.get('end_height_cm', 0.0):.1f}",
                      f"{r['length_m']:.2f}"]
                     for r in data["kv_rows"]]
-            y_after = ctx.draw_table(page, table_y, headers, rows)
+            col_w = [1.0, 0.9, 1.5, 0.9, 0.9, 0.8, 1.2, 0.7, 0.9, 0.9, 0.8, 1.2, 0.7, 0.8]
+            y_after = ctx.draw_table(page, table_y, headers, rows, col_widths=col_w)
 
             kv_sum = data["kv_sum"]
             if kv_sum:
@@ -5142,12 +5471,12 @@ class MainWindow(QMainWindow):
             ctx.painter.restore()
             y_after += ctx.mm(5)
             ap_headers = ["AP", "Kabel", "Typ", "Anschluss",
-                          "L\u00e4nge (m)"]
+                          "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "L\u00e4nge (m)"]
             ap_rows = []
             for ap_name in sorted(ap_cables.keys()):
                 for c in ap_cables[ap_name]:
                     ap_rows.append([ap_name, c["cable"], c["type"],
-                                    c["role"], f"{c['length_m']:.2f}"])
+                                    c["role"], c.get("ap_device", ""), c.get("ap_device_color", ""), c.get("ap_note", ""), c.get("cable_note", ""), f"{c['length_m']:.2f}"])
             y_after = ctx.draw_table(page, y_after, ap_headers, ap_rows)
 
         room_ap_connections = data.get("room_ap_connections", [])
@@ -5160,14 +5489,17 @@ class MainWindow(QMainWindow):
                 "Räume – AP und Kabelziele:")
             ctx.painter.restore()
             y_after += ctx.mm(5)
-            room_headers = ["Raum", "AP", "Kabel", "Typ", "Anschluss", "Führt zu AP", "Länge (m)"]
+            room_headers = ["Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)"]
             room_rows = [
                 [
                     r.get("room", ""),
                     r.get("ap", ""),
+                    r.get("ap_device", ""),
+                    r.get("ap_device_color", ""),
+                    r.get("ap_note", ""),
                     r.get("cable", ""),
                     r.get("type", ""),
-                    r.get("role", ""),
+                    r.get("cable_note", ""),
                     r.get("target_ap", ""),
                     f"{r.get('length_m', 0.0):.2f}",
                 ]

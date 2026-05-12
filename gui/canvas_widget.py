@@ -184,7 +184,11 @@ class CanvasWidget(QWidget):
         self._elec_point_svgs:    Dict[str, Optional[QSvgRenderer]] = {}
         self._elec_point_position: Dict[str, str]                 = {}  # "Wand", "Decke", "Boden", "Freitext"
         self._elec_point_height:   Dict[str, float]               = {}  # Höhe vom Boden in mm
+        self._elec_point_notes:    Dict[str, str]                 = {}
+        self._elec_point_smarthome_device: Dict[str, str]         = {}
+        self._elec_point_smarthome_device_color: Dict[str, str]   = {}
         self._elec_cables:        Dict[str, List[QPointF]]        = {}
+        self._elec_cable_notes:   Dict[str, str]                  = {}
         self._elec_visible:       Dict[str, bool]                 = {}
 
         # Cable ↔ AP connections  (cable_id → point_id or "")
@@ -1329,6 +1333,8 @@ class CanvasWidget(QWidget):
         for d in (self._elec_points, self._elec_point_size_px,
                   self._elec_point_icons, self._elec_visible,
                   self._elec_point_position, self._elec_point_height,
+                  self._elec_point_notes, self._elec_point_smarthome_device,
+                  self._elec_point_smarthome_device_color,
                   self._label_positions, self._label_font_sizes, self._label_visible,
                   self._label_rects, self._label_draw_pos):
             d.pop(point_id, None)
@@ -1337,6 +1343,7 @@ class CanvasWidget(QWidget):
 
     def delete_elec_cable(self, cable_id: str):
         for d in (self._elec_cables, self._elec_visible,
+                  self._elec_cable_notes,
                   self._cable_start_ap, self._cable_end_ap,
                   self._label_positions, self._label_font_sizes, self._label_visible,
                   self._label_rects, self._label_draw_pos):
@@ -1929,7 +1936,13 @@ class CanvasWidget(QWidget):
         self._elec_point_size_px.clear()
         self._elec_point_icons.clear()
         self._elec_point_svgs.clear()
+        self._elec_point_position.clear()
+        self._elec_point_height.clear()
+        self._elec_point_notes.clear()
+        self._elec_point_smarthome_device.clear()
+        self._elec_point_smarthome_device_color.clear()
         self._elec_cables.clear()
+        self._elec_cable_notes.clear()
         self._elec_visible.clear()
         self._cable_start_ap.clear()
         self._cable_end_ap.clear()
@@ -2051,10 +2064,14 @@ class CanvasWidget(QWidget):
             },
             "elec_point_position": dict(self._elec_point_position),
             "elec_point_height": dict(self._elec_point_height),
+            "elec_point_notes": dict(self._elec_point_notes),
+            "elec_point_smarthome_device": dict(self._elec_point_smarthome_device),
+            "elec_point_smarthome_device_color": dict(self._elec_point_smarthome_device_color),
             "elec_cables": {
                 cid: [(p.x(), p.y()) for p in pts]
                 for cid, pts in self._elec_cables.items()
             },
+            "elec_cable_notes": dict(self._elec_cable_notes),
             "cable_start_ap": dict(self._cable_start_ap),
             "cable_end_ap": dict(self._cable_end_ap),
             "elec_visible": dict(self._elec_visible),
@@ -2208,9 +2225,21 @@ class CanvasWidget(QWidget):
         self._elec_point_height = {
             pid: float(h) for pid, h in d.get("elec_point_height", {}).items()
         }
+        self._elec_point_notes = {
+            pid: str(v) for pid, v in d.get("elec_point_notes", {}).items()
+        }
+        self._elec_point_smarthome_device = {
+            pid: str(v) for pid, v in d.get("elec_point_smarthome_device", {}).items()
+        }
+        self._elec_point_smarthome_device_color = {
+            pid: str(v) for pid, v in d.get("elec_point_smarthome_device_color", {}).items()
+        }
         for cid, pts in d.get("elec_cables", {}).items():
             self._elec_cables[cid] = [QPointF(x, y) for x, y in pts]
             self._ensure_color(cid)
+        self._elec_cable_notes = {
+            cid: str(v) for cid, v in d.get("elec_cable_notes", {}).items()
+        }
         self._cable_start_ap = dict(d.get("cable_start_ap", {}))
         self._cable_end_ap = dict(d.get("cable_end_ap", {}))
         self._elec_visible = {
@@ -4056,44 +4085,77 @@ class CanvasWidget(QWidget):
             self._constraint_violation_point = None
             self._constraint_violation_line = None
             self._constraint_violation_reason = ""
-            
+            hover_cursor = Qt.ArrowCursor
+
             # ── Check if hovering over elec cable point ──
             threshold = 20.0 / self._scale
             for cid, pts in self._elec_cables.items():
                 if not self._elec_visible.get(cid, True):
                     continue
-                for i, pt in enumerate(pts):
-                    if _qdist(canvas_pt, pt) < threshold:
-                        self.setCursor(Qt.OpenHandCursor)
-                        if state_cleared:
-                            self.update()
-                        return
-            
-            label_hit = self._hit_label(canvas_pt)
-            if label_hit:
-                self.setCursor(Qt.SizeAllCursor)
-                if state_cleared:
-                    self.update()
-                return
-            route_hit = self._hit_route_point(canvas_pt)
-            if route_hit:
-                self.setCursor(Qt.OpenHandCursor)
-                if state_cleared:
-                    self.update()
-                return
-            hit = self._hit_start_point(canvas_pt)
-            self.setCursor(Qt.OpenHandCursor if hit else Qt.ArrowCursor)
+                if any(_qdist(canvas_pt, pt) < threshold for pt in pts):
+                    hover_cursor = Qt.OpenHandCursor
+                    break
+
+            if hover_cursor == Qt.ArrowCursor:
+                label_hit = self._hit_label(canvas_pt)
+                if label_hit:
+                    hover_cursor = Qt.SizeAllCursor
+
+            if hover_cursor == Qt.ArrowCursor:
+                route_hit = self._hit_route_point(canvas_pt)
+                if route_hit:
+                    hover_cursor = Qt.OpenHandCursor
+
+            if hover_cursor == Qt.ArrowCursor:
+                ap_hit = self._hit_elec_point(canvas_pt)
+                if ap_hit:
+                    hover_cursor = Qt.OpenHandCursor
+
+            if hover_cursor == Qt.ArrowCursor:
+                hit = self._hit_start_point(canvas_pt)
+                if hit:
+                    hover_cursor = Qt.OpenHandCursor
+
+            self.setCursor(hover_cursor)
             if state_cleared:
                 self.update()
 
-        # Tooltip for text annotations on hover
-        text_hit = self._hit_text_annotation(canvas_pt)
-        if text_hit:
-            comment = self._text_comments.get(text_hit, "")
-            if comment:
-                QToolTip.showText(event.globalPosition().toPoint(), comment, self)
-            else:
-                QToolTip.hideText()
+        # Tooltip for APs, cables and text annotations on hover
+        tooltip_text = ""
+
+        ap_hit = self._hit_elec_point(canvas_pt)
+        if ap_hit:
+            device = self._elec_point_smarthome_device.get(ap_hit, "").strip()
+            device_color = self._elec_point_smarthome_device_color.get(ap_hit, "").strip()
+            note = self._elec_point_notes.get(ap_hit, "").strip()
+            parts: list[str] = []
+            if device:
+                parts.append(f"Unterputz-Gerät: {device}")
+            if device_color:
+                parts.append(f"Gerätefarbe: {device_color}")
+            if note:
+                parts.append(note)
+            tooltip_text = "\n".join(parts)
+
+        if not tooltip_text:
+            for cid, pts in self._elec_cables.items():
+                if not self._elec_visible.get(cid, True) or len(pts) < 2:
+                    continue
+                hit_point = self._hit_elec_cable_point(canvas_pt, cid)
+                hit_edge = self._hit_elec_cable_edge(canvas_pt, cid)
+                if hit_point is not None or hit_edge is not None:
+                    note = self._elec_cable_notes.get(cid, "").strip()
+                    if note:
+                        tooltip_text = note
+                    break
+
+        if not tooltip_text:
+            text_hit = self._hit_text_annotation(canvas_pt)
+            if text_hit:
+                tooltip_text = self._text_comments.get(text_hit, "").strip()
+
+        if tooltip_text:
+            QToolTip.showText(event.globalPosition().toPoint(), tooltip_text, self)
         else:
             QToolTip.hideText()
 
