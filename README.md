@@ -52,6 +52,8 @@ HRouting/
 ├── main.py                  # Einstiegspunkt, Versionsverwaltung, Splash Screen
 ├── build.py                 # Build-Script (Version-Bump + PyInstaller)
 ├── generate_splash.py       # Splash Screen Generator
+├── hrp_schema.json          # JSON-Schema für .hrp-Dateien (Agent-/Validierung)
+├── validate_hrp.py          # HRP-Datei-Validator (Schema + semantische Prüfung)
 ├── gui/
 │   ├── main_window.py       # Hauptfenster, Toolbar, Menüs, Export, Projektlogik
 │   ├── canvas_widget.py     # Zeichenfläche (Polygone, Routen, Kabel, Raster, …)
@@ -63,6 +65,10 @@ HRouting/
 │   ├── icon.ico / icon.svg  # App-Icon
 │   ├── splash.png           # Splash Screen
 │   └── symbols/             # DIN EN 60617 Schaltsymbole
+├── examples/
+│   └── minimal.hrp          # Beispiel-HRP-Projekt
+├── .github/
+│   └── copilot-instructions.md  # Anleitung für KI-Agenten
 └── Wiki/                    # Benutzerdokumentation
 ```
 
@@ -188,31 +194,50 @@ param_panel.add_circuit  →  main_window._add_circuit
 ...
 ```
 
-### Projekt-Format (JSON)
+### Projekt-Format (.hrp)
 
-Projekte werden als JSON gespeichert mit folgender Grundstruktur:
+Projekte werden als **JSON** (UTF-8, `indent=2`) mit der Dateiendung `.hrp` gespeichert.
 
 ```json
 {
-  "svg_path": "relative/path/to/floorplan.svg",
-  "canvas": {
-    "polygons": {},
-    "manual_routes": {},
-    "elec_points": {},
-    "elec_cables": {},
-    "hkv_points": {},
-    "hkv_lines": {},
-    "mm_per_px": 26.48
-  },
-  "params": {
-    "t_supply": 35,
-    "t_return": 30,
-    "circuits": {},
-    "elec_points": {},
-    "elec_cables": {}
-  }
+  "svg_path": "",
+  "canvas": { "polygons": {}, "elec_points": {}, "hkv_points": {}, ... },
+  "params": { "t_supply": 35, "circuits": {}, "elec_points": {}, ... },
+  "pdf_export_pages": []
 }
 ```
+
+Die vollständige Dokumentation des Dateiformats:
+
+| Datei | Beschreibung |
+|-------|-------------|
+| [`hrp_schema.json`](hrp_schema.json) | Formales JSON-Schema (Draft 2020-12) mit allen Feldern, Typen, Enums und Wertebereichen |
+| [`.github/copilot-instructions.md`](.github/copilot-instructions.md) | Agenten-Anleitung: Koordinatensystem, ID-Konventionen, Beziehungen, Beispiele |
+| [`examples/minimal.hrp`](examples/minimal.hrp) | Vollständiges Beispielprojekt (2 Heizkreise, 3 Elektropunkte, 1 HKV) |
+
+#### HRP-Datei validieren
+
+```bash
+# Schema + semantische Prüfung
+python validate_hrp.py projekt.hrp
+
+# Nur Schema-Validierung
+python validate_hrp.py --schema-only projekt.hrp
+
+# Maschinenlesbares JSON-Format (für KI-Agenten)
+python validate_hrp.py --json projekt.hrp
+```
+
+Der Validator prüft: JSON-Schema-Konformität, referentielle Integrität (IDs/Verweise), Polygon-Konsistenz (≥3 Punkte), Canvas↔Params-Synchronisation, gültige Bodenbeläge und Farbformate.
+
+#### KI-Agent-Integration
+
+KI-Agenten (GitHub Copilot, Claude, etc.) können HRP-Dateien programmatisch erstellen und bearbeiten:
+
+1. **Schema lesen:** `hrp_schema.json` als Kontext laden
+2. **Anleitung lesen:** `.github/copilot-instructions.md` (wird von Copilot automatisch geladen)
+3. **Datei erzeugen/bearbeiten:** JSON nach Schema erstellen
+4. **Validieren:** `python validate_hrp.py --json datei.hrp` → maschinenlesbares Ergebnis
 
 ### Tipps
 

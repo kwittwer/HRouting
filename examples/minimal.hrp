@@ -1,0 +1,280 @@
+{
+  "svg_path": "",
+  "canvas": {
+    "view_scale": 1.0,
+    "view_offset": [0, 0],
+    "bg_color": "#2b2b2b",
+    "grid_visible": true,
+    "grid_spacing_mm": 100,
+    "grid_color": [255, 255, 255, 30],
+    "snap_angle": 0,
+    "export_frame": null,
+    "measure_color": "#ffdd00",
+    "mm_per_px": 25.0,
+    "ref_line": null,
+    "ref_line_colors": {},
+    "ref_line_visible": {},
+    "polygons": {
+      "HK-1": [[100, 100], [500, 100], [500, 400], [100, 400]],
+      "HK-2": [[550, 100], [800, 100], [800, 400], [550, 400]]
+    },
+    "start_points": {
+      "HK-1": [100, 100],
+      "HK-2": [550, 100]
+    },
+    "manual_routes": {},
+    "route_wall_dist_px": {},
+    "route_line_dist_px": {},
+    "supply_lines": {},
+    "elec_points": {
+      "AP-1": [200, 250],
+      "AP-2": [650, 200],
+      "AP-3": [350, 300]
+    },
+    "elec_point_size_px": {
+      "AP-1": [1.2, 1.2],
+      "AP-2": [1.2, 1.2],
+      "AP-3": [1.2, 1.2]
+    },
+    "elec_point_position": {},
+    "elec_point_height": {},
+    "elec_point_notes": {},
+    "elec_point_smarthome_device": {},
+    "elec_point_smarthome_device_color": {},
+    "elec_rooms": {
+      "ER-1": [[100, 100], [500, 100], [500, 400], [100, 400]]
+    },
+    "elec_room_visible": {
+      "ER-1": true
+    },
+    "elec_cables": {
+      "EK-1": [[200, 250], [350, 300]]
+    },
+    "elec_cable_notes": {},
+    "cable_start_ap": {
+      "EK-1": "AP-1"
+    },
+    "cable_end_ap": {
+      "EK-1": "AP-3"
+    },
+    "elec_visible": {
+      "AP-1": true,
+      "AP-2": true,
+      "AP-3": true,
+      "EK-1": true
+    },
+    "hkv_points": {
+      "HKV-1": [50, 250]
+    },
+    "hkv_size_px": {
+      "HKV-1": [2.0, 2.0]
+    },
+    "hkv_visible": {
+      "HKV-1": true
+    },
+    "supply_hkv": {
+      "HK-1": "HKV-1",
+      "HK-2": "HKV-1"
+    },
+    "hkv_lines": {},
+    "hkv_line_start": {},
+    "hkv_line_end": {},
+    "hkv_line_visible": {},
+    "label_positions": {},
+    "label_font_sizes": {},
+    "label_visible": {},
+    "text_annotations": {
+      "TEXT-1": {
+        "pos": [300, 50],
+        "content": "Erdgeschoss",
+        "font_size": 18.0,
+        "color": "#ffffff",
+        "comment": "",
+        "visible": true
+      }
+    },
+    "floor_plans": [
+      {
+        "fp_id": "grundriss-1",
+        "offset_x": 0.0,
+        "offset_y": 0.0,
+        "rotation": 0.0,
+        "opacity": 1.0,
+        "visible": true,
+        "mm_per_px": 25.0,
+        "ref_length_mm": 5000.0,
+        "fixed_width_mm": 0.0,
+        "fixed_height_mm": 0.0,
+        "polygon_color": "#8d99ae",
+        "ref_line": [[100, 500], [300, 500]],
+        "polygon": []
+      }
+    ]
+  },
+  "params": {
+    "t_supply": 35.0,
+    "t_return": 30.0,
+    "t_norm_outdoor": -12.0,
+    "elec_cable_defaults": {},
+    "floorplans_order": ["grundriss-1"],
+    "floorplans": {
+      "grundriss-1": {
+        "name": "Erdgeschoss",
+        "visible": true,
+        "file_path": "",
+        "polygon_color": "#8d99ae",
+        "ref_line_visible": true,
+        "ref_line_color": "#ffdd00",
+        "opacity": 1.0,
+        "offset_x": 0.0,
+        "offset_y": 0.0,
+        "rotation": 0.0,
+        "ref_length_mm": 5000.0,
+        "fixed_width_mm": 0.0,
+        "fixed_height_mm": 0.0
+      }
+    },
+    "furniture": {},
+    "circuits": {
+      "HK-1": {
+        "circuit_id": "HK-1",
+        "floor_plan_id": "grundriss-1",
+        "name": "Wohnzimmer",
+        "color": "#2a9d8f",
+        "diameter": 16.0,
+        "spacing": 150.0,
+        "wall_dist": 200.0,
+        "visible": true,
+        "label_visible": true,
+        "label_size": 12.0,
+        "room_temp": 20.0,
+        "floor_covering": "Fliesen / Keramik",
+        "distributor": ""
+      },
+      "HK-2": {
+        "circuit_id": "HK-2",
+        "floor_plan_id": "grundriss-1",
+        "name": "Badezimmer",
+        "color": "#e76f51",
+        "diameter": 16.0,
+        "spacing": 100.0,
+        "wall_dist": 150.0,
+        "visible": true,
+        "label_visible": true,
+        "label_size": 12.0,
+        "room_temp": 24.0,
+        "floor_covering": "Fliesen / Keramik",
+        "distributor": ""
+      }
+    },
+    "elec_points": {
+      "AP-1": {
+        "point_id": "AP-1",
+        "floor_plan_id": "grundriss-1",
+        "name": "Steckdose Wohnzimmer",
+        "color": "#4fc3f7",
+        "width": 30.0,
+        "height": 30.0,
+        "icon_path": "",
+        "builtin_symbol": "Steckdose",
+        "visible": true,
+        "label_visible": true,
+        "label_size": 12.0,
+        "position": "Wand",
+        "height_from_floor": 30.0,
+        "smarthome_device": "",
+        "smarthome_device_color": "",
+        "note": ""
+      },
+      "AP-2": {
+        "point_id": "AP-2",
+        "floor_plan_id": "grundriss-1",
+        "name": "Licht Bad",
+        "color": "#4fc3f7",
+        "width": 30.0,
+        "height": 30.0,
+        "icon_path": "",
+        "builtin_symbol": "Licht",
+        "visible": true,
+        "label_visible": true,
+        "label_size": 12.0,
+        "position": "Decke",
+        "height_from_floor": 0.0,
+        "smarthome_device": "Shelly",
+        "smarthome_device_color": "weiß",
+        "note": ""
+      },
+      "AP-3": {
+        "point_id": "AP-3",
+        "floor_plan_id": "grundriss-1",
+        "name": "Steckdose 2 Wohnzimmer",
+        "color": "#4fc3f7",
+        "width": 30.0,
+        "height": 30.0,
+        "icon_path": "",
+        "builtin_symbol": "Steckdose 2fach",
+        "visible": true,
+        "label_visible": true,
+        "label_size": 12.0,
+        "position": "Wand",
+        "height_from_floor": 30.0,
+        "smarthome_device": "",
+        "smarthome_device_color": "",
+        "note": ""
+      }
+    },
+    "elec_rooms": {
+      "ER-1": {
+        "room_id": "ER-1",
+        "floor_plan_id": "grundriss-1",
+        "name": "Wohnzimmer",
+        "color": "#43aa8b",
+        "visible": true,
+        "label_visible": true,
+        "label_size": 12.0
+      }
+    },
+    "elec_cables": {
+      "EK-1": {
+        "cable_id": "EK-1",
+        "floor_plan_id": "grundriss-1",
+        "name": "Kabel AP-1 → AP-3",
+        "color": "#ff9800",
+        "type": "3x1,5",
+        "comment": "",
+        "visible": true,
+        "label_visible": true,
+        "label_size": 12.0,
+        "start_ap": "AP-1",
+        "end_ap": "AP-3"
+      }
+    },
+    "hkv_points": {
+      "HKV-1": {
+        "hkv_id": "HKV-1",
+        "floor_plan_id": "grundriss-1",
+        "name": "Verteiler EG",
+        "color": "#e53935",
+        "width": 50.0,
+        "height": 50.0,
+        "icon_path": "",
+        "visible": true,
+        "label_visible": true,
+        "label_size": 12.0
+      }
+    },
+    "hkv_lines": {},
+    "text_annotations": {
+      "TEXT-1": {
+        "floor_plan_id": "grundriss-1",
+        "name": "Titel",
+        "content": "Erdgeschoss",
+        "font_size": 18.0,
+        "color": "#ffffff",
+        "comment": "",
+        "visible": true
+      }
+    }
+  },
+  "pdf_export_pages": []
+}

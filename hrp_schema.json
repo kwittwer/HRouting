@@ -1,0 +1,778 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/HRouting/hrp-schema/v1",
+  "title": "HRouting Project File (.hrp)",
+  "description": "Schema für HRouting-Projektdateien. HRP-Dateien sind UTF-8-kodiertes JSON (indent=2, ensure_ascii=false).",
+  "type": "object",
+  "required": ["canvas", "params"],
+  "additionalProperties": true,
+  "properties": {
+    "svg_path": {
+      "type": "string",
+      "default": "",
+      "description": "Legacy: relativer POSIX-Pfad zum Hintergrund-SVG (kann leer sein)."
+    },
+    "canvas": { "$ref": "#/$defs/Canvas" },
+    "params": { "$ref": "#/$defs/Params" },
+    "pdf_export_pages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/PdfExportPage" },
+      "default": [],
+      "description": "PDF-Export-Seitendefinitionen."
+    }
+  },
+
+  "$defs": {
+
+    "Point2D": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "Punkt [x, y] in Canvas-Pixelkoordinaten."
+    },
+
+    "Polygon": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Point2D" },
+      "minItems": 3,
+      "description": "Polygon als Array von mindestens 3 Punkten."
+    },
+
+    "Polyline": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Point2D" },
+      "minItems": 2,
+      "description": "Polylinie als Array von mindestens 2 Punkten."
+    },
+
+    "HexColor": {
+      "type": "string",
+      "pattern": "^#[0-9a-fA-F]{6}$",
+      "description": "Hex-Farbwert, z.B. '#2b2b2b'."
+    },
+
+    "RGBA": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "minItems": 4,
+      "maxItems": 4,
+      "description": "Farbe als [R, G, B, A] (0–255)."
+    },
+
+    "RefLine": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Point2D" },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "Referenzlinie: zwei Endpunkte [[x1,y1],[x2,y2]]."
+    },
+
+    "ExportFrame": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 4,
+          "maxItems": 4,
+          "description": "Export-Rahmen [x, y, breite, höhe] in Canvas-Koordinaten."
+        },
+        { "type": "null" }
+      ]
+    },
+
+    "SizePx": {
+      "type": "array",
+      "items": { "type": "number", "minimum": 0 },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "Größe [breite, höhe] in Canvas-Pixeln."
+    },
+
+    "FloorCovering": {
+      "type": "string",
+      "enum": [
+        "Estrich (kein Belag)",
+        "Fliesen / Keramik",
+        "Naturstein",
+        "PVC / Vinyl",
+        "Laminat",
+        "Parkett dünn (≤ 10 mm)",
+        "Parkett dick (> 10 mm)",
+        "Teppich dünn",
+        "Teppich dick"
+      ],
+      "description": "Bodenbelag mit zugehörigem Wärmeleitwiderstand R_λ,B."
+    },
+
+    "Canvas": {
+      "type": "object",
+      "description": "Zustand des Canvas-Widgets: Ansicht, Geometrie, alle gezeichneten Objekte.",
+      "additionalProperties": true,
+      "properties": {
+        "view_scale": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 50.0,
+          "default": 1.0,
+          "description": "Zoom-Faktor."
+        },
+        "view_offset": {
+          "$ref": "#/$defs/Point2D",
+          "description": "Pan-Offset [x, y] in Bildschirmpixeln.",
+          "default": [0, 0]
+        },
+        "bg_color": {
+          "$ref": "#/$defs/HexColor",
+          "default": "#2b2b2b",
+          "description": "Hintergrundfarbe des Canvas."
+        },
+        "grid_visible": {
+          "type": "boolean",
+          "default": true,
+          "description": "Raster sichtbar."
+        },
+        "grid_spacing_mm": {
+          "type": "number",
+          "minimum": 1,
+          "default": 100,
+          "description": "Rasterabstand in Millimetern."
+        },
+        "grid_color": {
+          "$ref": "#/$defs/RGBA",
+          "default": [255, 255, 255, 30],
+          "description": "Rasterfarbe [R,G,B,A]."
+        },
+        "snap_angle": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "Winkel-Einrastung in Grad (0 = aus)."
+        },
+        "export_frame": {
+          "$ref": "#/$defs/ExportFrame",
+          "default": null,
+          "description": "Export-Rahmen [x, y, w, h] oder null."
+        },
+        "measure_color": {
+          "$ref": "#/$defs/HexColor",
+          "default": "#ffdd00",
+          "description": "Farbe des Messwerkzeugs."
+        },
+        "mm_per_px": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.0,
+          "description": "Globaler Maßstab: Millimeter pro Pixel."
+        },
+        "ref_line": {
+          "oneOf": [
+            { "$ref": "#/$defs/RefLine" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "Globale Referenzlinie (Legacy, pro Layer bevorzugt)."
+        },
+        "ref_line_colors": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/HexColor" },
+          "default": {},
+          "description": "Referenzlinien-Farbe pro Grundriss-ID."
+        },
+        "ref_line_visible": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "default": {},
+          "description": "Referenzlinien-Sichtbarkeit pro Grundriss-ID."
+        },
+
+        "polygons": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Point2D" },
+            "minItems": 3
+          },
+          "default": {},
+          "description": "Raum-Polygone pro Heizkreis-ID (z.B. 'HK-1')."
+        },
+        "start_points": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Point2D" },
+          "default": {},
+          "description": "Rohr-Startpunkt pro Heizkreis-ID."
+        },
+        "manual_routes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Point2D" },
+            "minItems": 2
+          },
+          "default": {},
+          "description": "Manuelle Rohrrouten als Polylinien pro Heizkreis-ID."
+        },
+        "route_wall_dist_px": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "default": {},
+          "description": "Wandabstand in Canvas-Pixeln pro Heizkreis-ID."
+        },
+        "route_line_dist_px": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "default": {},
+          "description": "Leitungsabstand in Canvas-Pixeln pro Heizkreis-ID."
+        },
+        "supply_lines": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Point2D" },
+            "minItems": 2
+          },
+          "default": {},
+          "description": "Versorgungsleitungen als Polylinien pro Heizkreis-ID."
+        },
+
+        "elec_points": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Point2D" },
+          "default": {},
+          "description": "Position von Elektro-Anschlusspunkten pro Punkt-ID (z.B. 'AP-1')."
+        },
+        "elec_point_size_px": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/SizePx" },
+          "default": {},
+          "description": "Symbolgröße [w, h] in Canvas-Pixeln pro Punkt-ID."
+        },
+        "elec_point_position": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Einbauort pro Punkt-ID ('Wand', 'Decke', 'Boden' oder Freitext)."
+        },
+        "elec_point_height": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "default": {},
+          "description": "Einbauhöhe (cm) pro Punkt-ID."
+        },
+        "elec_point_notes": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Notizen pro Punkt-ID."
+        },
+        "elec_point_smarthome_device": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Smarthome-Gerät pro Punkt-ID."
+        },
+        "elec_point_smarthome_device_color": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Smarthome-Gerätefarbe pro Punkt-ID."
+        },
+
+        "elec_rooms": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Point2D" },
+            "minItems": 3
+          },
+          "default": {},
+          "description": "Elektro-Raum-Polygone pro Raum-ID (z.B. 'ER-1')."
+        },
+        "elec_room_visible": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "default": {},
+          "description": "Sichtbarkeit pro Elektro-Raum-ID."
+        },
+
+        "elec_cables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Point2D" },
+            "minItems": 2
+          },
+          "default": {},
+          "description": "Kabelverläufe als Polylinien pro Kabel-ID (z.B. 'EK-1')."
+        },
+        "elec_cable_notes": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Kabelnotizen pro Kabel-ID."
+        },
+        "cable_start_ap": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Start-Anschlusspunkt-ID pro Kabel-ID."
+        },
+        "cable_end_ap": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "End-Anschlusspunkt-ID pro Kabel-ID."
+        },
+        "elec_visible": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "default": {},
+          "description": "Sichtbarkeit pro Elektro-Element-ID."
+        },
+
+        "hkv_points": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Point2D" },
+          "default": {},
+          "description": "Position von Heizkreisverteilern pro HKV-ID (z.B. 'HKV-1')."
+        },
+        "hkv_size_px": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/SizePx" },
+          "default": {},
+          "description": "HKV-Symbolgröße [w, h] in Canvas-Pixeln pro HKV-ID."
+        },
+        "hkv_visible": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "default": {},
+          "description": "HKV-Sichtbarkeit pro HKV-ID."
+        },
+        "supply_hkv": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Zuordnung Heizkreis-ID → HKV-ID."
+        },
+        "hkv_lines": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Point2D" },
+            "minItems": 2
+          },
+          "default": {},
+          "description": "HKV-Verbindungsleitungen als Polylinien pro Leitungs-ID (z.B. 'HKVL-1')."
+        },
+        "hkv_line_start": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Start-HKV-ID pro HKV-Leitungs-ID."
+        },
+        "hkv_line_end": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "End-HKV-ID pro HKV-Leitungs-ID."
+        },
+        "hkv_line_visible": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "default": {},
+          "description": "Sichtbarkeit pro HKV-Leitungs-ID."
+        },
+
+        "label_positions": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Point2D" },
+          "default": {},
+          "description": "Verschobene Labelpositionen pro Element-ID."
+        },
+        "label_font_sizes": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 1 },
+          "default": {},
+          "description": "Schriftgröße pro Label-ID."
+        },
+        "label_visible": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "default": {},
+          "description": "Label-Sichtbarkeit pro Element-ID."
+        },
+
+        "text_annotations": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/CanvasTextAnnotation" },
+          "default": {},
+          "description": "Text-Annotationen pro Text-ID (z.B. 'TEXT-1')."
+        },
+
+        "floor_plans": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CanvasFloorPlan" },
+          "default": [],
+          "description": "Grundriss-Layer-Liste (geordnet von hinten nach vorne)."
+        }
+      }
+    },
+
+    "CanvasTextAnnotation": {
+      "type": "object",
+      "required": ["pos"],
+      "properties": {
+        "pos": { "$ref": "#/$defs/Point2D" },
+        "content": { "type": "string", "default": "" },
+        "font_size": { "type": "number", "minimum": 1, "default": 14.0 },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#ffffff" },
+        "comment": { "type": "string", "default": "" },
+        "visible": { "type": "boolean", "default": true }
+      }
+    },
+
+    "CanvasFloorPlan": {
+      "type": "object",
+      "required": ["fp_id"],
+      "properties": {
+        "fp_id": {
+          "type": "string",
+          "description": "Eindeutige Layer-ID, z.B. 'grundriss-1' oder 'einrichtung-2'."
+        },
+        "offset_x": { "type": "number", "default": 0.0 },
+        "offset_y": { "type": "number", "default": 0.0 },
+        "rotation": { "type": "number", "default": 0.0, "description": "Rotation in Grad." },
+        "opacity": { "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0 },
+        "visible": { "type": "boolean", "default": true },
+        "mm_per_px": { "type": "number", "exclusiveMinimum": 0, "default": 1.0 },
+        "ref_length_mm": { "type": "number", "exclusiveMinimum": 0, "default": 1000.0 },
+        "fixed_width_mm": { "type": "number", "minimum": 0, "default": 0.0, "description": "Feste Breite in mm (0 = auto)." },
+        "fixed_height_mm": { "type": "number", "minimum": 0, "default": 0.0, "description": "Feste Höhe in mm (0 = auto)." },
+        "polygon_color": { "$ref": "#/$defs/HexColor", "default": "#8d99ae" },
+        "ref_line": {
+          "oneOf": [
+            { "$ref": "#/$defs/RefLine" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "polygon": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Point2D" },
+          "default": [],
+          "description": "Optionales Polygon für Layer-Kontur."
+        }
+      }
+    },
+
+    "Params": {
+      "type": "object",
+      "description": "Parameter-Panel-Zustand: globale Einstellungen und alle Element-Definitionen.",
+      "additionalProperties": true,
+      "properties": {
+        "t_supply": {
+          "type": "number",
+          "minimum": 20,
+          "maximum": 90,
+          "default": 35.0,
+          "description": "Vorlauftemperatur in °C."
+        },
+        "t_return": {
+          "type": "number",
+          "minimum": 15,
+          "maximum": 80,
+          "default": 30.0,
+          "description": "Rücklauftemperatur in °C."
+        },
+        "t_norm_outdoor": {
+          "type": "number",
+          "minimum": -30,
+          "maximum": 5,
+          "default": -12.0,
+          "description": "Normaußentemperatur in °C."
+        },
+        "elec_cable_defaults": {
+          "type": "object",
+          "default": {},
+          "description": "Zuletzt verwendete Kabel-Standardwerte."
+        },
+        "floorplans_order": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Geordnete Liste der Grundriss-IDs."
+        },
+        "floorplans": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamFloorPlan" },
+          "default": {},
+          "description": "Grundriss-Definitionen pro ID."
+        },
+        "furniture": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamFurniture" },
+          "default": {},
+          "description": "Einrichtungsgegenstände pro ID."
+        },
+        "circuits": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamCircuit" },
+          "default": {},
+          "description": "Heizkreis-Definitionen pro ID (z.B. 'HK-1')."
+        },
+        "elec_points": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamElecPoint" },
+          "default": {},
+          "description": "Elektro-Anschlusspunkt-Definitionen pro ID (z.B. 'AP-1')."
+        },
+        "elec_rooms": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamElecRoom" },
+          "default": {},
+          "description": "Elektro-Raum-Definitionen pro ID (z.B. 'ER-1')."
+        },
+        "elec_cables": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamElecCable" },
+          "default": {},
+          "description": "Elektrokabel-Definitionen pro ID (z.B. 'EK-1')."
+        },
+        "hkv_points": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamHkv" },
+          "default": {},
+          "description": "Heizkreisverteiler-Definitionen pro ID (z.B. 'HKV-1')."
+        },
+        "hkv_lines": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamHkvLine" },
+          "default": {},
+          "description": "HKV-Verbindungsleitungen pro ID (z.B. 'HKVL-1')."
+        },
+        "text_annotations": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamTextAnnotation" },
+          "default": {},
+          "description": "Text-Annotationen pro ID (z.B. 'TEXT-1')."
+        }
+      }
+    },
+
+    "ParamFloorPlan": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Anzeigename." },
+        "visible": { "type": "boolean", "default": true },
+        "file_path": { "type": "string", "default": "", "description": "Relativer POSIX-Pfad zum Bild im images/-Ordner." },
+        "polygon_color": { "$ref": "#/$defs/HexColor", "default": "#8d99ae" },
+        "ref_line_visible": { "type": "boolean", "default": true },
+        "ref_line_color": { "$ref": "#/$defs/HexColor", "default": "#ffdd00" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1, "default": 1.0 },
+        "offset_x": { "type": "number", "default": 0.0 },
+        "offset_y": { "type": "number", "default": 0.0 },
+        "rotation": { "type": "number", "default": 0.0 },
+        "ref_length_mm": { "type": "number", "exclusiveMinimum": 0, "default": 1000.0 },
+        "fixed_width_mm": { "type": "number", "minimum": 0, "default": 0.0 },
+        "fixed_height_mm": { "type": "number", "minimum": 0, "default": 0.0 }
+      }
+    },
+
+    "ParamFurniture": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "parent_fp_id": { "type": "string", "default": "", "description": "Zugeordneter Grundriss-ID." },
+        "visible": { "type": "boolean", "default": true },
+        "file_path": { "type": "string", "default": "" },
+        "polygon_color": { "$ref": "#/$defs/HexColor", "default": "#8d99ae" },
+        "ref_line_visible": { "type": "boolean", "default": true },
+        "ref_line_color": { "$ref": "#/$defs/HexColor", "default": "#ffdd00" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1, "default": 1.0 },
+        "offset_x": { "type": "number", "default": 0.0 },
+        "offset_y": { "type": "number", "default": 0.0 },
+        "rotation": { "type": "number", "default": 0.0 },
+        "ref_length_mm": { "type": "number", "exclusiveMinimum": 0, "default": 1000.0 },
+        "fixed_width_mm": { "type": "number", "minimum": 0, "default": 0.0 },
+        "fixed_height_mm": { "type": "number", "minimum": 0, "default": 0.0 }
+      }
+    },
+
+    "ParamCircuit": {
+      "type": "object",
+      "required": ["circuit_id"],
+      "properties": {
+        "circuit_id": { "type": "string", "pattern": "^HK-\\d+$", "description": "Eindeutige Heizkreis-ID." },
+        "floor_plan_id": { "type": "string", "default": "", "description": "Zugeordneter Grundriss." },
+        "name": { "type": "string" },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#2a9d8f" },
+        "diameter": { "type": "number", "minimum": 1, "default": 16.0, "description": "Rohraußendurchmesser in mm." },
+        "spacing": { "type": "number", "minimum": 1, "default": 150.0, "description": "Verlegeabstand in mm." },
+        "wall_dist": { "type": "number", "minimum": 0, "default": 200.0, "description": "Wandabstand in mm." },
+        "visible": { "type": "boolean", "default": true },
+        "label_visible": { "type": "boolean", "default": true },
+        "label_size": { "type": "number", "minimum": 1, "default": 12.0, "description": "Schriftgröße in pt." },
+        "room_temp": { "type": "number", "minimum": 5, "maximum": 40, "default": 20.0, "description": "Raum-Solltemperatur in °C." },
+        "floor_covering": { "$ref": "#/$defs/FloorCovering", "default": "Fliesen / Keramik" },
+        "distributor": { "type": "string", "default": "", "description": "Name des zugeordneten Heizkreisverteilers." }
+      }
+    },
+
+    "ParamElecPoint": {
+      "type": "object",
+      "required": ["point_id"],
+      "properties": {
+        "point_id": { "type": "string", "pattern": "^AP-\\d+$", "description": "Eindeutige Punkt-ID." },
+        "floor_plan_id": { "type": "string", "default": "" },
+        "name": { "type": "string" },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#4fc3f7" },
+        "width": { "type": "number", "minimum": 1, "default": 30.0, "description": "Breite in mm." },
+        "height": { "type": "number", "minimum": 1, "default": 30.0, "description": "Höhe in mm." },
+        "icon_path": { "type": "string", "default": "", "description": "Relativer Pfad zu eigenem Symbol (im images/-Ordner) oder leer." },
+        "builtin_symbol": {
+          "type": "string",
+          "default": "",
+          "description": "Name eines Builtin-Symbols (z.B. 'Steckdose', 'Licht'). Leer = kein Symbol."
+        },
+        "visible": { "type": "boolean", "default": true },
+        "label_visible": { "type": "boolean", "default": true },
+        "label_size": { "type": "number", "minimum": 1, "default": 12.0 },
+        "position": {
+          "type": "string",
+          "default": "Wand",
+          "description": "Einbauort: 'Wand', 'Decke', 'Boden' oder Freitext."
+        },
+        "height_from_floor": { "type": "number", "minimum": 0, "default": 0.0, "description": "Einbauhöhe vom Boden in cm." },
+        "smarthome_device": { "type": "string", "default": "" },
+        "smarthome_device_color": { "type": "string", "default": "" },
+        "note": { "type": "string", "default": "" }
+      }
+    },
+
+    "ParamElecRoom": {
+      "type": "object",
+      "required": ["room_id"],
+      "properties": {
+        "room_id": { "type": "string", "pattern": "^ER-\\d+$" },
+        "floor_plan_id": { "type": "string", "default": "" },
+        "name": { "type": "string" },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#43aa8b" },
+        "visible": { "type": "boolean", "default": true },
+        "label_visible": { "type": "boolean", "default": true },
+        "label_size": { "type": "number", "minimum": 1, "default": 12.0 }
+      }
+    },
+
+    "ParamElecCable": {
+      "type": "object",
+      "required": ["cable_id"],
+      "properties": {
+        "cable_id": { "type": "string", "pattern": "^EK-\\d+$" },
+        "floor_plan_id": { "type": "string", "default": "" },
+        "name": { "type": "string" },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#ff9800" },
+        "type": { "type": "string", "default": "5x1,5", "description": "Kabeltyp, z.B. '5x1,5', '3x1,5'." },
+        "comment": { "type": "string", "default": "" },
+        "visible": { "type": "boolean", "default": true },
+        "label_visible": { "type": "boolean", "default": true },
+        "label_size": { "type": "number", "minimum": 1, "default": 12.0 },
+        "start_ap": { "type": "string", "default": "", "description": "Start-Anschlusspunkt-ID (z.B. 'AP-1')." },
+        "end_ap": { "type": "string", "default": "", "description": "End-Anschlusspunkt-ID (z.B. 'AP-2')." }
+      }
+    },
+
+    "ParamHkv": {
+      "type": "object",
+      "required": ["hkv_id"],
+      "properties": {
+        "hkv_id": { "type": "string", "pattern": "^HKV-\\d+$" },
+        "floor_plan_id": { "type": "string", "default": "" },
+        "name": { "type": "string" },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#e53935" },
+        "width": { "type": "number", "minimum": 1, "default": 50.0, "description": "Breite in mm." },
+        "height": { "type": "number", "minimum": 1, "default": 50.0, "description": "Höhe in mm." },
+        "icon_path": { "type": "string", "default": "" },
+        "visible": { "type": "boolean", "default": true },
+        "label_visible": { "type": "boolean", "default": true },
+        "label_size": { "type": "number", "minimum": 1, "default": 12.0 }
+      }
+    },
+
+    "ParamHkvLine": {
+      "type": "object",
+      "required": ["line_id"],
+      "properties": {
+        "line_id": { "type": "string", "pattern": "^HKVL-\\d+$" },
+        "floor_plan_id": { "type": "string", "default": "" },
+        "name": { "type": "string" },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#e53935" },
+        "type": { "type": "string", "default": "DN20", "description": "Leitungstyp, z.B. 'DN20', 'DN25'." },
+        "visible": { "type": "boolean", "default": true },
+        "label_visible": { "type": "boolean", "default": true },
+        "label_size": { "type": "number", "minimum": 1, "default": 12.0 },
+        "start_hkv": { "type": "string", "default": "", "description": "Start-HKV-ID." },
+        "end_hkv": { "type": "string", "default": "", "description": "End-HKV-ID." }
+      }
+    },
+
+    "ParamTextAnnotation": {
+      "type": "object",
+      "properties": {
+        "floor_plan_id": { "type": "string", "default": "" },
+        "name": { "type": "string" },
+        "content": { "type": "string", "default": "Text" },
+        "font_size": { "type": "number", "minimum": 1, "default": 14.0 },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#ffffff" },
+        "comment": { "type": "string", "default": "" },
+        "visible": { "type": "boolean", "default": true }
+      }
+    },
+
+    "PdfExportPage": {
+      "type": "object",
+      "required": ["id", "type", "title"],
+      "properties": {
+        "id": { "type": "string", "description": "Eindeutige Seiten-ID." },
+        "type": {
+          "type": "string",
+          "enum": ["plan", "heating", "elektro", "lengths", "hydraulics"],
+          "description": "Seitentyp."
+        },
+        "title": { "type": "string" },
+        "enabled": { "type": "boolean", "default": true },
+        "show_background": { "type": "boolean", "default": true },
+        "show_heating": { "type": "boolean", "default": true },
+        "show_elektro": { "type": "boolean", "default": true },
+        "element_visibility": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "default": {}
+        },
+        "table_sections": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "floor_plan_id": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "source_rect": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 4,
+              "maxItems": 4
+            },
+            { "type": "null" }
+          ],
+          "default": null
+        }
+      }
+    }
+  }
+}
