@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QComboBox, QLabel, QDialog, QTableWidget, QTableWidgetItem,
     QDialogButtonBox, QTabWidget, QPushButton, QHeaderView, QMenu,
     QApplication, QCheckBox, QSpinBox, QDoubleSpinBox, QInputDialog,
+    QProgressDialog,
 )
 from PySide6.QtGui import (
     QAction, QColor, QFont, QPainter, QPageLayout,
@@ -3342,6 +3343,28 @@ class MainWindow(QMainWindow):
                 return name
         return floor_plan_id
 
+    @staticmethod
+    def _default_pdf_element_visibility() -> dict:
+        return {
+            "background": True,
+            "furniture": True,
+            "hk": True,
+            "hkv": True,
+            "hkv_line": True,
+            "ap": True,
+            "room": True,
+            "kv": True,
+            "text": True,
+        }
+
+    @staticmethod
+    def _default_pdf_table_sections(ptype: str) -> list[str]:
+        if ptype == "heating":
+            return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
+        if ptype == "elektro":
+            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos"]
+        return []
+
     def _default_pdf_export_pages(self) -> list[dict]:
         pages: list[dict] = [
             {
@@ -3357,12 +3380,19 @@ class MainWindow(QMainWindow):
             },
             {
                 "id": "plan-heating",
-                "type": "plan",
+                "type": "heating",
                 "title": "Fußbodenheizung – Verlegeplan",
                 "enabled": True,
                 "show_background": True,
                 "show_heating": True,
                 "show_elektro": False,
+                "element_visibility": {
+                    **self._default_pdf_element_visibility(),
+                    "ap": False,
+                    "room": False,
+                    "kv": False,
+                },
+                "table_sections": self._default_pdf_table_sections("heating"),
                 "floor_plan_id": None,
                 "source_rect": None,
             },
@@ -3386,6 +3416,13 @@ class MainWindow(QMainWindow):
                 "show_background": True,
                 "show_heating": False,
                 "show_elektro": True,
+                "element_visibility": {
+                    **self._default_pdf_element_visibility(),
+                    "hk": False,
+                    "hkv": False,
+                    "hkv_line": False,
+                },
+                "table_sections": self._default_pdf_table_sections("elektro"),
                 "floor_plan_id": None,
                 "source_rect": None,
             },
@@ -3403,6 +3440,7 @@ class MainWindow(QMainWindow):
                 "show_background": True,
                 "show_heating": True,
                 "show_elektro": True,
+                "element_visibility": self._default_pdf_element_visibility(),
                 "floor_plan_id": fid,
                 "source_rect": None,
             })
@@ -3417,7 +3455,9 @@ class MainWindow(QMainWindow):
             if not isinstance(src, dict):
                 continue
             ptype = str(src.get("type", "plan")).strip().lower()
-            if ptype not in ("plan", "lengths", "hydraulics", "elektro"):
+            if ptype == "plan" and str(src.get("id", "")) == "plan-heating":
+                ptype = "heating"
+            if ptype not in ("plan", "heating", "lengths", "hydraulics", "elektro"):
                 continue
 
             page = {
@@ -3427,10 +3467,34 @@ class MainWindow(QMainWindow):
                 "enabled": bool(src.get("enabled", True)),
             }
 
-            if ptype in ("plan", "elektro"):
+            if ptype in ("plan", "heating", "elektro"):
                 page["show_background"] = bool(src.get("show_background", True))
                 page["show_heating"] = bool(src.get("show_heating", True))
                 page["show_elektro"] = bool(src.get("show_elektro", True))
+                vis_src = src.get("element_visibility")
+                default_vis = self._default_pdf_element_visibility()
+                if isinstance(vis_src, dict):
+                    for key in list(default_vis.keys()):
+                        default_vis[key] = bool(vis_src.get(key, default_vis[key]))
+                # Enforce core groups for page type
+                if ptype == "heating":
+                    default_vis["hk"] = True
+                    default_vis["hkv"] = True
+                    default_vis["hkv_line"] = True
+                elif ptype == "elektro":
+                    default_vis["ap"] = True
+                    default_vis["room"] = True
+                    default_vis["kv"] = True
+                page["element_visibility"] = default_vis
+
+                if ptype in ("heating", "elektro"):
+                    allowed = set(self._default_pdf_table_sections(ptype))
+                    sections_src = src.get("table_sections")
+                    if isinstance(sections_src, list):
+                        sections = [str(v) for v in sections_src if str(v) in allowed]
+                    else:
+                        sections = self._default_pdf_table_sections(ptype)
+                    page["table_sections"] = sections
                 floor_plan_id = src.get("floor_plan_id")
                 page["floor_plan_id"] = floor_plan_id if floor_plan_id else None
 
@@ -3473,6 +3537,36 @@ class MainWindow(QMainWindow):
         if w <= 0 or h <= 0:
             return None
         return QRectF(x, y, w, h).normalized()
+
+    def _effective_pdf_source_rect(self, page: dict | None) -> QRectF:
+        """Determine the source rectangle for a PDF page.
+
+        Priority:
+        1. Explicit source_rect stored in the page configuration
+        2. Canvas export frame (drawn by the user on the canvas)
+        3. Default computed from visible floor plan bounds
+        """
+        default_rect = self._default_source_rect()
+
+        # 1. Check page-level source_rect
+        custom = self._page_source_rect(page)
+
+        # 2. Fallback to canvas export frame
+        if custom is None:
+            canvas_frame = self.canvas.get_export_frame()
+            if canvas_frame is not None:
+                nr = QRectF(canvas_frame).normalized()
+                if nr.width() > 0 and nr.height() > 0:
+                    custom = nr
+
+        if custom is None:
+            return default_rect
+
+        # Use the custom rect directly (it defines the user's desired crop)
+        if custom.width() > 0 and custom.height() > 0:
+            return custom
+
+        return default_rect
 
     def _open_pdf_export_config_dialog(self, on_accept=None):
         if self._pdf_export_dialog is not None:
@@ -3517,6 +3611,7 @@ class MainWindow(QMainWindow):
                                 show_background: bool | None = None,
                                 show_heating: bool | None = None,
                                 show_elektro: bool | None = None,
+                                element_visibility: dict | None = None,
                                 rasterize: bool = False):
         """Render the floor plan with overlays directly onto *painter*.
 
@@ -3541,17 +3636,20 @@ class MainWindow(QMainWindow):
                 show_background=show_background,
                 show_heating=show_heating,
                 show_elektro=show_elektro,
+                element_visibility=element_visibility,
                 rasterize=False,
             )
             ip.end()
             painter.drawImage(target_rect, img)
             return
 
-        svg_w, svg_h = self.canvas._svg_size
+        full_src = self._default_source_rect()
         if source_rect:
             src = QRectF(source_rect.normalized())
+            if src.width() <= 0 or src.height() <= 0:
+                src = full_src
         else:
-            src = QRectF(0.0, 0.0, svg_w, svg_h)
+            src = full_src
         if src.width() <= 0 or src.height() <= 0:
             return
 
@@ -3578,6 +3676,11 @@ class MainWindow(QMainWindow):
             f.setPixelSize(max(4, int(pixel_size)))
             return f
 
+        group_vis = element_visibility or {}
+
+        def _group_visible(key: str, default: bool = True) -> bool:
+            return bool(group_vis.get(key, default))
+
         # Background: floor plan layers
         ref_mpp = self.canvas._mm_per_px if self.canvas._mm_per_px > 0 else 1.0
         rendered_floor = False
@@ -3588,6 +3691,11 @@ class MainWindow(QMainWindow):
             for fid in fp_ids:
                 fp_layer = self.canvas._floor_plans.get(fid)
                 if not fp_layer or not fp_layer.visible:
+                    continue
+                is_furniture = fid in self.param_panel.furniture_panels
+                if is_furniture and not _group_visible("furniture"):
+                    continue
+                if (not is_furniture) and not _group_visible("background"):
                     continue
                 rendered_floor = True
                 painter.save()
@@ -3625,215 +3733,247 @@ class MainWindow(QMainWindow):
 
         # ── Heating elements ──────────────────────────────────────
         if show_heating:
-            # Polygons
-            for cid, pts in self.canvas._polygons.items():
-                if not self.canvas._circuit_visible.get(cid, True):
-                    continue
-                if len(pts) < 3:
-                    continue
-                color = self.canvas._color_map.get(cid, QColor("#ff0000"))
-                fill = QColor(color)
-                fill.setAlpha(35)
-                painter.setBrush(QBrush(fill))
-                painter.setPen(QPen(color, 2.0))
-                poly = QPolygonF(pts)
-                painter.drawPolygon(poly)
-
-            # Manual routes
-            for cid, pts in self.canvas._manual_routes.items():
-                if not self.canvas._circuit_visible.get(cid, True):
-                    continue
-                if len(pts) < 2:
-                    continue
-                color = self.canvas._color_map.get(cid, QColor("#ff0000"))
-                line_dist = self.canvas._route_line_dist_px.get(cid, 0.0)
-                offset = line_dist / 2.0
-                line1 = self.canvas._offset_route_points(pts, offset)
-                line2 = self.canvas._offset_route_points(pts, -offset)
-                combined = list(line1) + list(reversed(line2))
-                if len(combined) < 2:
-                    continue
-                qpath = self.canvas._smooth_polyline_path(combined, offset)
-                painter.setPen(QPen(color, 2.0, Qt.SolidLine,
-                                    Qt.RoundCap, Qt.RoundJoin))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawPath(qpath)
-
-            # Supply lines
-            for cid, pts in self.canvas._supply_lines.items():
-                if not self.canvas._circuit_visible.get(cid, True):
-                    continue
-                if len(pts) < 2:
-                    continue
-                color = self.canvas._color_map.get(cid, QColor("#ff0000"))
-                line_dist = self.canvas._route_line_dist_px.get(cid, 0.0)
-                offset = line_dist / 2.0
-                line1 = self.canvas._offset_route_points(pts, offset)
-                line2 = self.canvas._offset_route_points(pts, -offset)
-                combined = list(line1) + list(reversed(line2))
-                if len(combined) < 2:
-                    continue
-                qpath = self.canvas._smooth_polyline_path(combined, offset)
-                pen = QPen(color, 2.0, Qt.DashDotLine,
-                           Qt.RoundCap, Qt.RoundJoin)
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
-                painter.drawPath(qpath)
-
-            # Labels for circuits
-            for cid in self.canvas._polygons:
-                if not self.canvas._circuit_visible.get(cid, True):
-                    continue
-                if not self.canvas._label_visible.get(cid, True):
-                    continue
-                label = self.canvas._label_map.get(cid, cid)
-                pts = self.canvas._polygons.get(cid, [])
-                if len(pts) < 3:
-                    continue
-                cx = sum(p.x() for p in pts) / len(pts)
-                cy = sum(p.y() for p in pts) / len(pts)
-                color = self.canvas._color_map.get(cid, QColor("#ffffff"))
-                font_size = self.canvas._label_font_sizes.get(cid, 12.0)
-                painter.setFont(_svg_font(font_size))
-                painter.setPen(QPen(color))
-                painter.drawText(QPointF(cx, cy), label)
-
-            # Heizkreisverteiler
-            for hid, pos in self.canvas._hkv_points.items():
-                if not self.canvas._hkv_visible.get(hid, True):
-                    continue
-                w, h = self.canvas._hkv_size_px.get(hid, (30, 30))
-                x = pos.x() - w / 2
-                y = pos.y() - h / 2
-                color = self.canvas._color_map.get(hid, QColor("#e53935"))
-                fill = QColor(color)
-                fill.setAlpha(60)
-                svg_r = self.canvas._hkv_svgs.get(hid)
-                icon_pm = self.canvas._hkv_icons.get(hid)
-                if svg_r and svg_r.isValid():
-                    svg_r.render(painter, QRectF(x, y, w, h))
-                elif icon_pm and not icon_pm.isNull():
-                    painter.drawPixmap(QRectF(x, y, w, h),
-                                       icon_pm,
-                                       QRectF(icon_pm.rect()))
-                else:
+            if _group_visible("hk"):
+                # Polygons
+                for cid, pts in self.canvas._polygons.items():
+                    if not self.canvas._circuit_visible.get(cid, True):
+                        continue
+                    if len(pts) < 3:
+                        continue
+                    color = self.canvas._color_map.get(cid, QColor("#ff0000"))
+                    fill = QColor(color)
+                    fill.setAlpha(35)
                     painter.setBrush(QBrush(fill))
                     painter.setPen(QPen(color, 2.0))
-                    painter.drawRoundedRect(QRectF(x, y, w, h), 4.0, 4.0)
-                if not self.canvas._label_visible.get(hid, True):
-                    continue
-                label = self.canvas._label_map.get(hid, hid)
-                font_size = self.canvas._label_font_sizes.get(hid, 10.0)
-                painter.setFont(_svg_font(font_size))
-                painter.setPen(QPen(color))
-                painter.drawText(
-                    QPointF(pos.x() - w / 4,
-                            pos.y() + h / 2 + font_size + 2),
-                    label)
+                    poly = QPolygonF(pts)
+                    painter.drawPolygon(poly)
 
-            # HKV Verbindungsleitungen
-            for lid, pts in self.canvas._hkv_lines.items():
-                if not self.canvas._hkv_line_visible.get(lid, True):
-                    continue
-                if len(pts) < 2:
-                    continue
-                color = self.canvas._color_map.get(lid, QColor("#e53935"))
-                offset = 3.0
-                line1 = self.canvas._offset_route_points(pts, offset)
-                line2 = self.canvas._offset_route_points(pts, -offset)
-                pen = QPen(color, 2.0, Qt.SolidLine,
-                           Qt.RoundCap, Qt.RoundJoin)
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
-                for line in (line1, line2):
-                    if len(line) > 1:
-                        path = QPainterPath()
-                        path.moveTo(line[0])
-                        for p in line[1:]:
-                            path.lineTo(p)
-                        painter.drawPath(path)
-                if line1 and line2:
-                    painter.drawLine(line1[-1], line2[-1])
-                    painter.drawLine(line1[0], line2[0])
-                if not self.canvas._label_visible.get(lid, True):
-                    continue
-                label = self.canvas._label_map.get(lid, lid)
-                if len(pts) >= 2:
-                    mi = len(pts) // 2
-                    mid = pts[mi]
-                    font_size = self.canvas._label_font_sizes.get(lid, 10.0)
+                # Manual routes
+                for cid, pts in self.canvas._manual_routes.items():
+                    if not self.canvas._circuit_visible.get(cid, True):
+                        continue
+                    if len(pts) < 2:
+                        continue
+                    color = self.canvas._color_map.get(cid, QColor("#ff0000"))
+                    line_dist = self.canvas._route_line_dist_px.get(cid, 0.0)
+                    offset = line_dist / 2.0
+                    line1 = self.canvas._offset_route_points(pts, offset)
+                    line2 = self.canvas._offset_route_points(pts, -offset)
+                    combined = list(line1) + list(reversed(line2))
+                    if len(combined) < 2:
+                        continue
+                    qpath = self.canvas._smooth_polyline_path(combined, offset)
+                    painter.setPen(QPen(color, 2.0, Qt.SolidLine,
+                                        Qt.RoundCap, Qt.RoundJoin))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawPath(qpath)
+
+                # Supply lines
+                for cid, pts in self.canvas._supply_lines.items():
+                    if not self.canvas._circuit_visible.get(cid, True):
+                        continue
+                    if len(pts) < 2:
+                        continue
+                    color = self.canvas._color_map.get(cid, QColor("#ff0000"))
+                    line_dist = self.canvas._route_line_dist_px.get(cid, 0.0)
+                    offset = line_dist / 2.0
+                    line1 = self.canvas._offset_route_points(pts, offset)
+                    line2 = self.canvas._offset_route_points(pts, -offset)
+                    combined = list(line1) + list(reversed(line2))
+                    if len(combined) < 2:
+                        continue
+                    qpath = self.canvas._smooth_polyline_path(combined, offset)
+                    pen = QPen(color, 2.0, Qt.DashDotLine,
+                               Qt.RoundCap, Qt.RoundJoin)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawPath(qpath)
+
+                # Labels for circuits
+                for cid in self.canvas._polygons:
+                    if not self.canvas._circuit_visible.get(cid, True):
+                        continue
+                    if not self.canvas._label_visible.get(cid, True):
+                        continue
+                    label = self.canvas._label_map.get(cid, cid)
+                    pts = self.canvas._polygons.get(cid, [])
+                    if len(pts) < 3:
+                        continue
+                    cx = sum(p.x() for p in pts) / len(pts)
+                    cy = sum(p.y() for p in pts) / len(pts)
+                    color = self.canvas._color_map.get(cid, QColor("#ffffff"))
+                    font_size = self.canvas._label_font_sizes.get(cid, 12.0)
                     painter.setFont(_svg_font(font_size))
                     painter.setPen(QPen(color))
-                    painter.drawText(QPointF(mid.x() + 4, mid.y() - 4), label)
+                    painter.drawText(QPointF(cx, cy), label)
+
+            if _group_visible("hkv"):
+                # Heizkreisverteiler
+                for hid, pos in self.canvas._hkv_points.items():
+                    if not self.canvas._hkv_visible.get(hid, True):
+                        continue
+                    w, h = self.canvas._hkv_size_px.get(hid, (30, 30))
+                    x = pos.x() - w / 2
+                    y = pos.y() - h / 2
+                    color = self.canvas._color_map.get(hid, QColor("#e53935"))
+                    fill = QColor(color)
+                    fill.setAlpha(60)
+                    svg_r = self.canvas._hkv_svgs.get(hid)
+                    icon_pm = self.canvas._hkv_icons.get(hid)
+                    if svg_r and svg_r.isValid():
+                        svg_r.render(painter, QRectF(x, y, w, h))
+                    elif icon_pm and not icon_pm.isNull():
+                        painter.drawPixmap(QRectF(x, y, w, h),
+                                           icon_pm,
+                                           QRectF(icon_pm.rect()))
+                    else:
+                        painter.setBrush(QBrush(fill))
+                        painter.setPen(QPen(color, 2.0))
+                        painter.drawRoundedRect(QRectF(x, y, w, h), 4.0, 4.0)
+                    if not self.canvas._label_visible.get(hid, True):
+                        continue
+                    label = self.canvas._label_map.get(hid, hid)
+                    font_size = self.canvas._label_font_sizes.get(hid, 10.0)
+                    painter.setFont(_svg_font(font_size))
+                    painter.setPen(QPen(color))
+                    painter.drawText(
+                        QPointF(pos.x() - w / 4,
+                                pos.y() + h / 2 + font_size + 2),
+                        label)
+
+            if _group_visible("hkv_line"):
+                # HKV Verbindungsleitungen
+                for lid, pts in self.canvas._hkv_lines.items():
+                    if not self.canvas._hkv_line_visible.get(lid, True):
+                        continue
+                    if len(pts) < 2:
+                        continue
+                    color = self.canvas._color_map.get(lid, QColor("#e53935"))
+                    offset = 3.0
+                    line1 = self.canvas._offset_route_points(pts, offset)
+                    line2 = self.canvas._offset_route_points(pts, -offset)
+                    pen = QPen(color, 2.0, Qt.SolidLine,
+                               Qt.RoundCap, Qt.RoundJoin)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    for line in (line1, line2):
+                        if len(line) > 1:
+                            path = QPainterPath()
+                            path.moveTo(line[0])
+                            for p in line[1:]:
+                                path.lineTo(p)
+                            painter.drawPath(path)
+                    if line1 and line2:
+                        painter.drawLine(line1[-1], line2[-1])
+                        painter.drawLine(line1[0], line2[0])
+                    if not self.canvas._label_visible.get(lid, True):
+                        continue
+                    label = self.canvas._label_map.get(lid, lid)
+                    if len(pts) >= 2:
+                        mi = len(pts) // 2
+                        mid = pts[mi]
+                        font_size = self.canvas._label_font_sizes.get(lid, 10.0)
+                        painter.setFont(_svg_font(font_size))
+                        painter.setPen(QPen(color))
+                        painter.drawText(QPointF(mid.x() + 4, mid.y() - 4), label)
 
         # ── Elektro elements ──────────────────────────────────────
         if show_elektro:
-            # Anschlusspunkte
-            for pid, pos in self.canvas._elec_points.items():
-                if not self.canvas._elec_visible.get(pid, True):
-                    continue
-                ew, eh = self.canvas._elec_point_size_px.get(pid, (30, 30))
-                x = pos.x() - ew / 2
-                y = pos.y() - eh / 2
-                color = self.canvas._color_map.get(pid, QColor("#4fc3f7"))
-                fill = QColor(color)
-                fill.setAlpha(60)
+            if _group_visible("room"):
+                for rid, pts in self.canvas._elec_room_polygons.items():
+                    if not self.canvas._elec_visible.get(rid, True):
+                        continue
+                    if len(pts) < 3:
+                        continue
+                    color = self.canvas._color_map.get(rid, QColor("#43aa8b"))
+                    fill = QColor(color)
+                    fill.setAlpha(35)
+                    painter.setBrush(QBrush(fill))
+                    painter.setPen(QPen(color, 2.0))
+                    painter.drawPolygon(QPolygonF(pts))
 
-                # Try SVG renderer first, then pixmap, then plain rect
-                svg_r = self.canvas._elec_point_svgs.get(pid)
-                icon_pm = self.canvas._elec_point_icons.get(pid)
-                if svg_r and svg_r.isValid():
-                    svg_r.render(painter, QRectF(x, y, ew, eh))
-                elif icon_pm and not icon_pm.isNull():
-                    painter.drawPixmap(QRectF(x, y, ew, eh),
-                                       icon_pm,
-                                       QRectF(icon_pm.rect()))
-                else:
+            if _group_visible("ap"):
+                # Anschlusspunkte
+                for pid, pos in self.canvas._elec_points.items():
+                    if not self.canvas._elec_visible.get(pid, True):
+                        continue
+                    ew, eh = self.canvas._elec_point_size_px.get(pid, (30, 30))
+                    x = pos.x() - ew / 2
+                    y = pos.y() - eh / 2
+                    color = self.canvas._color_map.get(pid, QColor("#4fc3f7"))
+                    fill = QColor(color)
+                    fill.setAlpha(60)
+
+                    # Always draw border rect (like on canvas)
                     painter.setBrush(QBrush(fill))
                     painter.setPen(QPen(color, 2.0))
                     painter.drawRect(QRectF(x, y, ew, eh))
 
-                if not self.canvas._label_visible.get(pid, True):
-                    continue
+                    # Draw icon/SVG on top
+                    svg_r = self.canvas._elec_point_svgs.get(pid)
+                    icon_pm = self.canvas._elec_point_icons.get(pid)
+                    if svg_r and svg_r.isValid():
+                        svg_r.render(painter, QRectF(x, y, ew, eh))
+                    elif icon_pm and not icon_pm.isNull():
+                        painter.drawPixmap(QRectF(x, y, ew, eh),
+                                           icon_pm,
+                                           QRectF(icon_pm.rect()))
 
-                label = self.canvas._label_map.get(pid, pid)
-                font_size = self.canvas._label_font_sizes.get(pid, 10.0)
-                painter.setFont(_svg_font(font_size))
-                painter.setPen(QPen(color))
-                painter.drawText(
-                    QPointF(pos.x() - ew / 4,
-                            pos.y() + eh / 2 + font_size + 2),
-                    label,
-                )
+                    if not self.canvas._label_visible.get(pid, True):
+                        continue
 
-            # Kabelverbindungen
-            for kid, pts in self.canvas._elec_cables.items():
-                if not self.canvas._elec_visible.get(kid, True):
-                    continue
-                if len(pts) < 2:
-                    continue
-                color = self.canvas._color_map.get(kid, QColor("#ff9800"))
-                rounding = 8.0
-                qpath = self.canvas._smooth_polyline_path(pts, rounding)
-                painter.setPen(QPen(color, 2.0, Qt.SolidLine,
-                                    Qt.RoundCap, Qt.RoundJoin))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawPath(qpath)
-
-                if not self.canvas._label_visible.get(kid, True):
-                    continue
-
-                label = self.canvas._label_map.get(kid, kid)
-                if len(pts) >= 2:
-                    mid_idx = len(pts) // 2
-                    mid = pts[mid_idx]
-                    font_size = self.canvas._label_font_sizes.get(
-                        kid, 10.0)
+                    label = self.canvas._label_map.get(pid, pid)
+                    font_size = self.canvas._label_font_sizes.get(pid, 10.0)
                     painter.setFont(_svg_font(font_size))
                     painter.setPen(QPen(color))
                     painter.drawText(
-                        QPointF(mid.x() + 4, mid.y() - 4), label
+                        QPointF(pos.x() - ew / 4,
+                                pos.y() + eh / 2 + font_size + 2),
+                        label,
                     )
+
+            if _group_visible("kv"):
+                # Kabelverbindungen
+                for kid, pts in self.canvas._elec_cables.items():
+                    if not self.canvas._elec_visible.get(kid, True):
+                        continue
+                    if len(pts) < 2:
+                        continue
+                    color = self.canvas._color_map.get(kid, QColor("#ff9800"))
+                    rounding = 8.0
+                    qpath = self.canvas._smooth_polyline_path(pts, rounding)
+                    painter.setPen(QPen(color, 2.0, Qt.SolidLine,
+                                        Qt.RoundCap, Qt.RoundJoin))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawPath(qpath)
+
+                    if not self.canvas._label_visible.get(kid, True):
+                        continue
+
+                    label = self.canvas._label_map.get(kid, kid)
+                    if len(pts) >= 2:
+                        mid_idx = len(pts) // 2
+                        mid = pts[mid_idx]
+                        font_size = self.canvas._label_font_sizes.get(
+                            kid, 10.0)
+                        painter.setFont(_svg_font(font_size))
+                        painter.setPen(QPen(color))
+                        painter.drawText(
+                            QPointF(mid.x() + 4, mid.y() - 4), label
+                        )
+
+        if _group_visible("text"):
+            for tid, pos in self.canvas._text_annotations.items():
+                if not self.canvas._text_visible.get(tid, True):
+                    continue
+                content = self.canvas._text_contents.get(tid, "")
+                if not content:
+                    continue
+                color = QColor(self.canvas._text_colors.get(tid, "#ffffff"))
+                font_size = self.canvas._text_font_sizes.get(tid, 12.0)
+                painter.setFont(_svg_font(font_size))
+                painter.setPen(QPen(color))
+                painter.drawText(pos, content)
 
         painter.restore()
 
@@ -3971,8 +4111,81 @@ class MainWindow(QMainWindow):
         return lines
 
     def _default_source_rect(self) -> QRectF:
+        floor_xs: list[float] = []
+        floor_ys: list[float] = []
+        overlay_xs: list[float] = []
+        overlay_ys: list[float] = []
+
+        def _add_floor_point(x: float, y: float):
+            floor_xs.append(float(x))
+            floor_ys.append(float(y))
+
+        def _add_overlay_point(x: float, y: float):
+            overlay_xs.append(float(x))
+            overlay_ys.append(float(y))
+
+        # Floor plan / furniture layers (with transform)
+        ref_mpp = self.canvas._mm_per_px if self.canvas._mm_per_px > 0 else 1.0
+        for fid in self.canvas._floor_plan_order:
+            layer = self.canvas._floor_plans.get(fid)
+            if not layer or not layer.visible:
+                continue
+            w, h = layer.size
+            ls = layer.mm_per_px / ref_mpp if layer.mm_per_px > 0 else 1.0
+            sw, sh = w * ls, h * ls
+            cx = sw / 2 + layer.offset_x
+            cy = sh / 2 + layer.offset_y
+            rad = math.radians(layer.rotation)
+            cos_r, sin_r = math.cos(rad), math.sin(rad)
+            for dx, dy in [(-sw / 2, -sh / 2), (sw / 2, -sh / 2), (sw / 2, sh / 2), (-sw / 2, sh / 2)]:
+                rx = dx * cos_r - dy * sin_r
+                ry = dx * sin_r + dy * cos_r
+                _add_floor_point(cx + rx, cy + ry)
+
+        # Polyline/polygon based overlays
+        for collection in (
+            self.canvas._polygons,
+            self.canvas._manual_routes,
+            self.canvas._supply_lines,
+            self.canvas._elec_room_polygons,
+            self.canvas._elec_cables,
+            self.canvas._hkv_lines,
+        ):
+            for pts in collection.values():
+                for p in pts:
+                    _add_overlay_point(p.x(), p.y())
+
+        # Point-based overlays
+        for collection in (
+            self.canvas._start_points,
+            self.canvas._elec_points,
+            self.canvas._hkv_points,
+            self.canvas._text_annotations,
+        ):
+            for p in collection.values():
+                _add_overlay_point(p.x(), p.y())
+
+        def _rect_from_points(xs: list[float], ys: list[float], pad: float) -> QRectF | None:
+            if not xs or not ys:
+                return None
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            w = max(1.0, max_x - min_x)
+            h = max(1.0, max_y - min_y)
+            return QRectF(min_x - pad, min_y - pad, w + 2 * pad, h + 2 * pad)
+
+        # Primary: fit to visible floor/furniture layers (stable for plan exports)
+        floor_rect = _rect_from_points(floor_xs, floor_ys, pad=20.0)
+        if floor_rect is not None:
+            return floor_rect
+
+        # Fallback: overlays only (projects without floor plan image)
+        overlay_rect = _rect_from_points(overlay_xs, overlay_ys, pad=20.0)
+        if overlay_rect is not None:
+            return overlay_rect
+
         w, h = self.canvas._svg_size
-        return QRectF(0.0, 0.0, float(w), float(h))
+        return QRectF(0.0, 0.0, max(1.0, float(w)), max(1.0, float(h)))
 
     @staticmethod
     def _clamp_raster_size(width_px: int,
@@ -4002,6 +4215,7 @@ class MainWindow(QMainWindow):
                               show_background: bool | None = None,
                               show_heating: bool | None = None,
                               show_elektro: bool | None = None,
+                              element_visibility: dict | None = None,
                               floor_plan_id: str | None = None) -> QImage:
         """Rasterize current plan/crop to an in-memory image."""
         rw, rh, _ = self._clamp_raster_size(width_px, height_px)
@@ -4019,6 +4233,7 @@ class MainWindow(QMainWindow):
             show_background=show_background,
             show_heating=show_heating,
             show_elektro=show_elektro,
+            element_visibility=element_visibility,
         )
         p.end()
         return img
@@ -4270,6 +4485,52 @@ class MainWindow(QMainWindow):
         room_ap_connections = self._build_room_ap_connection_map(kv_rows)
         ap_type_counts = self._collect_ap_type_counts()
 
+        point_id_to_room_name: dict[str, str] = {}
+        for pid, panel in self.param_panel.elec_point_panels.items():
+            room_name = "(ohne Raum)"
+            point = self.canvas._elec_points.get(pid)
+            point_fp_id = self.param_panel._element_floorplan.get(pid, "")
+            if point is not None:
+                for rid, poly in self.canvas._elec_room_polygons.items():
+                    if len(poly) < 3:
+                        continue
+                    room_fp_id = self.param_panel._element_floorplan.get(rid, "")
+                    if point_fp_id != room_fp_id:
+                        continue
+                    if self.canvas._point_in_polygon(point, poly):
+                        room_panel = self.param_panel.elec_room_panels.get(rid)
+                        room_name = room_panel.get_parameters().get("name", rid) if room_panel else rid
+                        break
+            point_id_to_room_name[pid] = room_name
+
+        ap_info_rows: list[dict] = []
+        for pid, panel in self.param_panel.elec_point_panels.items():
+            params = panel.get_parameters()
+            symbol = (params.get("builtin_symbol") or "").strip()
+            icon_path = (params.get("icon_path") or "").strip()
+            if symbol and symbol != "(kein Symbol)":
+                type_name = symbol
+            elif icon_path:
+                type_name = Path(icon_path).stem.replace("_", " ").replace("-", " ").strip() or "Eigenes Symbol"
+            else:
+                type_name = "(kein Symbol)"
+
+            ap_info_rows.append({
+                "name": (params.get("name") or pid).strip() or pid,
+                "type": type_name,
+                "room": point_id_to_room_name.get(pid, "(ohne Raum)"),
+                "position": str(self.canvas._elec_point_position.get(pid, "") or "").strip(),
+                "height_cm": float(self.canvas._elec_point_height.get(pid, 0.0) or 0.0),
+                "device_color": str(params.get("smarthome_device_color", "") or "").strip(),
+                "device": str(params.get("smarthome_device", "") or "").strip(),
+                "note": str(params.get("note", "") or "").strip(),
+            })
+
+        ap_info_rows = sorted(
+            ap_info_rows,
+            key=lambda r: ((r.get("room") or "").lower(), (r.get("name") or "").lower()),
+        )
+
         # AP-Liste (Detailinfos)
         ap_rows: list[dict] = []
         for pid, panel in self.param_panel.elec_point_panels.items():
@@ -4335,6 +4596,7 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("📊 Längenübersicht")
         dlg.resize(900, 620)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
         dlg_layout = QVBoxLayout(dlg)
 
         tabs = QTabWidget()
@@ -5084,6 +5346,52 @@ class MainWindow(QMainWindow):
         room_ap_connections = self._build_room_ap_connection_map(kv_rows)
         ap_type_counts = self._collect_ap_type_counts()
 
+        point_id_to_room_name: dict[str, str] = {}
+        for pid, _panel in self.param_panel.elec_point_panels.items():
+            room_name = "(ohne Raum)"
+            point = self.canvas._elec_points.get(pid)
+            point_fp_id = self.param_panel._element_floorplan.get(pid, "")
+            if point is not None:
+                for rid, poly in self.canvas._elec_room_polygons.items():
+                    if len(poly) < 3:
+                        continue
+                    room_fp_id = self.param_panel._element_floorplan.get(rid, "")
+                    if point_fp_id != room_fp_id:
+                        continue
+                    if self.canvas._point_in_polygon(point, poly):
+                        room_panel = self.param_panel.elec_room_panels.get(rid)
+                        room_name = room_panel.get_parameters().get("name", rid) if room_panel else rid
+                        break
+            point_id_to_room_name[pid] = room_name
+
+        ap_info_rows: list[dict] = []
+        for pid, panel in self.param_panel.elec_point_panels.items():
+            params = panel.get_parameters()
+            symbol = (params.get("builtin_symbol") or "").strip()
+            icon_path = (params.get("icon_path") or "").strip()
+            if symbol and symbol != "(kein Symbol)":
+                type_name = symbol
+            elif icon_path:
+                type_name = Path(icon_path).stem.replace("_", " ").replace("-", " ").strip() or "Eigenes Symbol"
+            else:
+                type_name = "(kein Symbol)"
+
+            ap_info_rows.append({
+                "name": (params.get("name") or pid).strip() or pid,
+                "type": type_name,
+                "room": point_id_to_room_name.get(pid, "(ohne Raum)"),
+                "position": str(self.canvas._elec_point_position.get(pid, "") or "").strip(),
+                "height_cm": float(self.canvas._elec_point_height.get(pid, 0.0) or 0.0),
+                "device_color": str(params.get("smarthome_device_color", "") or "").strip(),
+                "device": str(params.get("smarthome_device", "") or "").strip(),
+                "note": str(params.get("note", "") or "").strip(),
+            })
+
+        ap_info_rows = sorted(
+            ap_info_rows,
+            key=lambda r: ((r.get("room") or "").lower(), (r.get("name") or "").lower()),
+        )
+
         # ── HKV-Leitungen sammeln ──
         hl_rows: list[dict] = []
         for lid, panel in self.param_panel.hkv_line_panels.items():
@@ -5115,6 +5423,7 @@ class MainWindow(QMainWindow):
             "ap_cables": ap_cables,
             "room_ap_connections": room_ap_connections,
             "ap_type_counts": ap_type_counts,
+            "ap_info_rows": ap_info_rows,
             "hl_rows": hl_rows, "hl_sum": hl_sum,
         }
 
@@ -5155,6 +5464,19 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
+        # ── Save current visibility state ──
+        saved_vis = self._save_all_visibility()
+
+        # ── Progress dialog ──
+        progress = QProgressDialog(
+            "PDF wird exportiert…", "Abbrechen", 0, len(enabled_pages), self
+        )
+        progress.setWindowTitle("PDF-Export")
+        progress.setMinimumDuration(0)
+        progress.setModal(True)
+        progress.setValue(0)
+        QApplication.processEvents()
+
         printer = QPrinter(QPrinter.HighResolution)
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(path)
@@ -5164,10 +5486,13 @@ class MainWindow(QMainWindow):
 
         painter = QPainter()
         if not painter.begin(printer):
+            self._restore_all_visibility(saved_vis)
+            progress.close()
             QMessageBox.warning(self, "Fehler",
                                 "PDF konnte nicht erstellt werden.")
             return
 
+        cancelled = False
         try:
             dpi = printer.resolution()
             ctx = _PdfContext(printer, painter, dpi)
@@ -5178,19 +5503,153 @@ class MainWindow(QMainWindow):
             self._write_plan_svg(svg_path)
 
             for idx, page in enumerate(enabled_pages):
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+
+                page_title = page.get("title", f"Seite {idx + 1}")
+                progress.setLabelText(f"Exportiere: {page_title}")
+                QApplication.processEvents()
+
+                # Apply visibility for this page
+                self._apply_page_visibility(page)
+
                 if idx > 0:
                     printer.newPage()
                 self._render_pdf_export_page(ctx, data, page)
+
+                progress.setValue(idx + 1)
+                QApplication.processEvents()
         finally:
             painter.end()
+            # ── Restore original visibility ──
+            self._restore_all_visibility(saved_vis)
+            self.canvas.update()
+            progress.close()
 
-        self.status.showMessage(f"\U0001f4c4 PDF exportiert: {path}")
+        if cancelled:
+            import os
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.status.showMessage("PDF-Export abgebrochen.")
+        else:
+            self.status.showMessage(f"\U0001f4c4 PDF exportiert: {path}")
+
+    # ── Visibility save / apply / restore for PDF export ──
+
+    def _save_all_visibility(self) -> dict:
+        """Snapshot all canvas-level per-item visibility dictionaries."""
+        return {
+            "circuit_visible": dict(self.canvas._circuit_visible),
+            "hkv_visible": dict(self.canvas._hkv_visible),
+            "hkv_line_visible": dict(self.canvas._hkv_line_visible),
+            "elec_visible": dict(self.canvas._elec_visible),
+            "text_visible": dict(self.canvas._text_visible),
+            "label_visible": dict(self.canvas._label_visible),
+            "floor_plan_visible": {
+                fid: layer.visible
+                for fid, layer in self.canvas._floor_plans.items()
+            },
+        }
+
+    def _restore_all_visibility(self, saved: dict):
+        """Restore all per-item visibility from a snapshot."""
+        self.canvas._circuit_visible.update(saved.get("circuit_visible", {}))
+        self.canvas._hkv_visible.update(saved.get("hkv_visible", {}))
+        self.canvas._hkv_line_visible.update(saved.get("hkv_line_visible", {}))
+        self.canvas._elec_visible.update(saved.get("elec_visible", {}))
+        self.canvas._text_visible.update(saved.get("text_visible", {}))
+        self.canvas._label_visible.update(saved.get("label_visible", {}))
+        for fid, vis in saved.get("floor_plan_visible", {}).items():
+            layer = self.canvas._floor_plans.get(fid)
+            if layer:
+                layer.visible = vis
+
+    def _apply_page_visibility(self, page: dict):
+        """Set canvas visibility according to the page's element_visibility config.
+
+        This makes ALL items in the included groups visible, and hides all
+        items in excluded groups, so the render shows exactly what the page
+        configuration specifies.
+        """
+        elem_vis = page.get("element_visibility") or self._default_pdf_element_visibility()
+        ptype = str(page.get("type", "plan")).strip().lower()
+
+        show_bg = bool(elem_vis.get("background", True))
+        show_furniture = bool(elem_vis.get("furniture", True))
+        show_hk = bool(elem_vis.get("hk", True))
+        show_hkv = bool(elem_vis.get("hkv", True))
+        show_hkv_line = bool(elem_vis.get("hkv_line", True))
+        show_ap = bool(elem_vis.get("ap", True))
+        show_room = bool(elem_vis.get("room", True))
+        show_kv = bool(elem_vis.get("kv", True))
+        show_text = bool(elem_vis.get("text", True))
+
+        # Floor plans / furniture layers
+        for fid in self.canvas._floor_plan_order:
+            layer = self.canvas._floor_plans.get(fid)
+            if not layer:
+                continue
+            is_furniture = fid in self.param_panel.furniture_panels
+            if is_furniture:
+                layer.visible = show_furniture
+            else:
+                layer.visible = show_bg
+
+        # Heating circuits (polygons, routes, supply lines)
+        for cid in self.canvas._polygons:
+            self.canvas._circuit_visible[cid] = show_hk
+        for cid in self.canvas._manual_routes:
+            if cid not in self.canvas._circuit_visible:
+                self.canvas._circuit_visible[cid] = show_hk
+            else:
+                self.canvas._circuit_visible[cid] = show_hk
+        for cid in self.canvas._supply_lines:
+            if cid not in self.canvas._circuit_visible:
+                self.canvas._circuit_visible[cid] = show_hk
+            else:
+                self.canvas._circuit_visible[cid] = show_hk
+
+        # HKV
+        for hid in self.canvas._hkv_points:
+            self.canvas._hkv_visible[hid] = show_hkv
+
+        # HKV lines
+        for lid in self.canvas._hkv_lines:
+            self.canvas._hkv_line_visible[lid] = show_hkv_line
+
+        # Elektro: APs
+        for pid in self.canvas._elec_points:
+            self.canvas._elec_visible[pid] = show_ap
+
+        # Elektro: rooms
+        for rid in self.canvas._elec_room_polygons:
+            self.canvas._elec_visible[rid] = show_room
+
+        # Elektro: cables
+        for kid in self.canvas._elec_cables:
+            self.canvas._elec_visible[kid] = show_kv
+
+        # Text annotations
+        for tid in self.canvas._text_annotations:
+            self.canvas._text_visible[tid] = show_text
+
+        # Labels: always show in export
+        for key in self.canvas._label_visible:
+            self.canvas._label_visible[key] = True
 
     # ── Seite: Plan-Darstellung (generisch) ──
 
     def _render_pdf_export_page(self, ctx: '_PdfContext', data: dict, page: dict):
         ptype = str(page.get("type", "plan")).strip().lower()
         title = str(page.get("title") or "Seite").strip() or "Seite"
+        elem_vis = page.get("element_visibility") or self._default_pdf_element_visibility()
+
+        show_bg = bool(elem_vis.get("background", page.get("show_background", True)))
+        show_heating_groups = any(bool(elem_vis.get(k, True)) for k in ("hk", "hkv", "hkv_line"))
+        show_elektro_groups = any(bool(elem_vis.get(k, True)) for k in ("ap", "room", "kv"))
 
         if ptype == "lengths":
             self._pdf_lengths_page(ctx, data, title=title)
@@ -5198,16 +5657,32 @@ class MainWindow(QMainWindow):
         if ptype == "hydraulics":
             self._pdf_hydraulics_page(ctx, data, title=title)
             return
+        if ptype == "heating":
+            self._pdf_heating_page(
+                ctx,
+                data,
+                title=title,
+                floor_plan_id=page.get("floor_plan_id"),
+                source_rect=self._effective_pdf_source_rect(page),
+                show_background=show_bg,
+                show_heating=show_heating_groups,
+                show_elektro=show_elektro_groups,
+                element_visibility=page.get("element_visibility"),
+                table_sections=page.get("table_sections"),
+            )
+            return
         if ptype == "elektro":
             self._pdf_elektro_page(
                 ctx,
                 data,
                 title=title,
                 floor_plan_id=page.get("floor_plan_id"),
-                source_rect=self._page_source_rect(page),
-                show_background=bool(page.get("show_background", True)),
-                show_heating=bool(page.get("show_heating", False)),
-                show_elektro=bool(page.get("show_elektro", True)),
+                source_rect=self._effective_pdf_source_rect(page),
+                show_background=show_bg,
+                show_heating=show_heating_groups,
+                show_elektro=show_elektro_groups,
+                element_visibility=page.get("element_visibility"),
+                table_sections=page.get("table_sections"),
             )
             return
 
@@ -5216,10 +5691,11 @@ class MainWindow(QMainWindow):
             title,
             layer="all",
             floor_plan_id=page.get("floor_plan_id"),
-            source_rect=self._page_source_rect(page),
-            show_background=bool(page.get("show_background", True)),
-            show_heating=bool(page.get("show_heating", True)),
-            show_elektro=bool(page.get("show_elektro", True)),
+            source_rect=self._effective_pdf_source_rect(page),
+            show_background=show_bg,
+            show_heating=show_heating_groups,
+            show_elektro=show_elektro_groups,
+            element_visibility=page.get("element_visibility"),
         )
 
     def _pdf_plan_page(self, ctx: '_PdfContext', title: str,
@@ -5228,7 +5704,8 @@ class MainWindow(QMainWindow):
                        source_rect: QRectF | None = None,
                        show_background: bool | None = None,
                        show_heating: bool | None = None,
-                       show_elektro: bool | None = None):
+                       show_elektro: bool | None = None,
+                       element_visibility: dict | None = None):
         """Render a full-page plan image with a title."""
         page = ctx.page_rect()
         ctx.stamp(page)
@@ -5257,6 +5734,7 @@ class MainWindow(QMainWindow):
             show_background=show_background,
             show_heating=show_heating,
             show_elektro=show_elektro,
+            element_visibility=element_visibility,
             rasterize=True,
         )
 
@@ -5361,6 +5839,104 @@ class MainWindow(QMainWindow):
                           for t in sorted(hl_sum.keys())]
                 ctx.draw_table(page, y_after, hl_s_h, hl_s_r)
 
+    # ── Seite: Heizung (Plan + optional Tabellen) ──
+
+    def _pdf_heating_page(self, ctx: '_PdfContext', data: dict,
+                          title: str = "Fußbodenheizung – Verlegeplan",
+                          floor_plan_id: str | None = None,
+                          source_rect: QRectF | None = None,
+                          show_background: bool | None = True,
+                          show_heating: bool | None = True,
+                          show_elektro: bool | None = False,
+                          element_visibility: dict | None = None,
+                          table_sections: list[str] | None = None):
+        page = ctx.page_rect()
+        ctx.stamp(page)
+
+        sections = set(table_sections or ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"])
+
+        title_h = ctx.mm(8)
+        ctx.painter.save()
+        ctx.painter.setFont(QFont("Arial", 14, QFont.Bold))
+        ctx.painter.drawText(
+            QRectF(page.x(), page.y(), page.width(), title_h),
+            Qt.AlignCenter,
+            title,
+        )
+        ctx.painter.restore()
+
+        plan_top = page.y() + title_h + ctx.mm(2)
+        plan_h = page.height() - title_h - ctx.mm(6)
+        plan_rect = QRectF(page.x(), plan_top, page.width(), plan_h)
+        self._render_plan_to_painter(
+            ctx.painter,
+            plan_rect,
+            layer="all",
+            floor_plan_id=floor_plan_id,
+            source_rect=source_rect or self._default_source_rect(),
+            show_background=show_background,
+            show_heating=show_heating,
+            show_elektro=show_elektro,
+            element_visibility=element_visibility,
+            rasterize=True,
+        )
+
+        table_available = (
+            ("hk_lengths" in sections and data.get("hk_rows"))
+            or ("hk_hydraulics" in sections and data.get("hk_rows"))
+            or ("hk_hkv_lines" in sections and data.get("hl_rows"))
+        )
+        if not table_available:
+            return
+
+        ctx.printer.newPage()
+        page = ctx.page_rect()
+        ctx.stamp(page)
+        y_after = ctx.title(page, f"{title} – Tabellen")
+
+        if "hk_lengths" in sections and data.get("hk_rows"):
+            headers = ["Name", "Durchm. (mm)", "Abstand (mm)", "Rohr (m)", "Zuleitung (m)", "Gesamt (m)"]
+            rows = [
+                [
+                    r["name"],
+                    f"{r['diameter_mm']:.1f}",
+                    f"{r['spacing_mm']:.1f}",
+                    f"{r['route_m']:.2f}",
+                    f"{r['supply_m']:.2f}",
+                    f"{r['total_m']:.2f}",
+                ]
+                for r in data["hk_rows"]
+            ]
+            y_after = ctx.draw_table(page, y_after, headers, rows)
+
+        if "hk_hydraulics" in sections and data.get("hk_rows"):
+            y_after += ctx.mm(4)
+            headers = ["Name", "HKV", "Leistung (W)", "V̇ (l/min)", "Δp Rohr (mbar)"]
+            rows = [
+                [
+                    r["name"],
+                    r.get("distributor", ""),
+                    f"{r.get('power_w', 0.0):.0f}",
+                    f"{r.get('volume_flow_lmin', 0.0):.2f}",
+                    f"{r.get('pressure_drop_mbar', 0.0):.1f}",
+                ]
+                for r in data["hk_rows"]
+            ]
+            y_after = ctx.draw_table(page, y_after, headers, rows)
+
+        if "hk_hkv_lines" in sections and data.get("hl_rows"):
+            y_after += ctx.mm(4)
+            headers = ["Name", "Typ", "Start-HKV", "End-HKV", "Länge (m)"]
+            rows = [
+                [
+                    r["name"], r["type"],
+                    r.get("start_hkv", ""), r.get("end_hkv", ""),
+                    f"{r.get('length_m', 0.0):.2f}",
+                ]
+                for r in data["hl_rows"]
+            ]
+            ctx.draw_table(page, y_after, headers, rows)
+
     # ── Seite: Elektro (Plan + Tabelle) ──
 
     def _pdf_elektro_page(self, ctx: '_PdfContext', data: dict,
@@ -5369,10 +5945,14 @@ class MainWindow(QMainWindow):
                           source_rect: QRectF | None = None,
                           show_background: bool | None = True,
                           show_heating: bool | None = False,
-                          show_elektro: bool | None = True):
+                          show_elektro: bool | None = True,
+                          element_visibility: dict | None = None,
+                          table_sections: list[str] | None = None):
         """Elektro page: plan with only elektro elements, then table below."""
         page = ctx.page_rect()
         ctx.stamp(page)
+
+        sections = set(table_sections or ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos"])
 
         title_h = ctx.mm(8)
         ctx.painter.save()
@@ -5386,7 +5966,7 @@ class MainWindow(QMainWindow):
 
         # Upper half: plan image (elektro only)
         plan_top = page.y() + title_h + ctx.mm(2)
-        plan_h = page.height() * 0.48
+        plan_h = page.height() - title_h - ctx.mm(6)
         plan_rect = QRectF(page.x(), plan_top, page.width(), plan_h)
         self._render_plan_to_painter(
             ctx.painter,
@@ -5397,24 +5977,26 @@ class MainWindow(QMainWindow):
             show_background=show_background,
             show_heating=show_heating,
             show_elektro=show_elektro,
+            element_visibility=element_visibility,
             rasterize=True,
         )
 
-        # Lower half: table
-        table_y = plan_top + plan_h + ctx.mm(4)
-        y_after = table_y
+        table_available = (
+            ("el_kabel" in sections and data.get("kv_rows"))
+            or ("el_ap_types" in sections and data.get("ap_type_counts"))
+            or ("el_ap_connections" in sections and data.get("ap_cables"))
+            or ("el_rooms" in sections and data.get("room_ap_connections"))
+            or ("el_ap_infos" in sections and data.get("ap_info_rows"))
+        )
+        if not table_available:
+            return
 
-        if data["kv_rows"]:
-            ctx.painter.save()
-            ctx.painter.setFont(QFont("Arial", 10, QFont.Bold))
-            ctx.painter.drawText(
-                QRectF(page.x(), table_y, page.width(), ctx.mm(5)),
-                Qt.AlignLeft | Qt.AlignVCenter,
-                "Kabelverbindungen",
-            )
-            ctx.painter.restore()
-            table_y += ctx.mm(6)
+        ctx.printer.newPage()
+        page = ctx.page_rect()
+        ctx.stamp(page)
+        y_after = ctx.title(page, f"{title} – Tabellen")
 
+        if "el_kabel" in sections and data.get("kv_rows"):
             headers = [
                 "Name", "Typ", "Kabel-Notiz",
                 "Start-AP", "Start-Gerät", "Start-Farbe", "Start-Notiz", "Start-H. (cm)",
@@ -5428,67 +6010,39 @@ class MainWindow(QMainWindow):
                      f"{r['length_m']:.2f}"]
                     for r in data["kv_rows"]]
             col_w = [1.0, 0.9, 1.5, 0.9, 0.9, 0.8, 1.2, 0.7, 0.9, 0.9, 0.8, 1.2, 0.7, 0.8]
-            y_after = ctx.draw_table(page, table_y, headers, rows, col_widths=col_w)
+            y_after = ctx.draw_table(page, y_after, headers, rows, col_widths=col_w)
 
-            kv_sum = data["kv_sum"]
+            kv_sum = data.get("kv_sum", {})
             if kv_sum:
                 y_after += ctx.mm(4)
-                ctx.painter.save()
-                ctx.painter.setFont(QFont("Arial", 9, QFont.Bold))
-                ctx.painter.drawText(
-                    int(page.x()), int(y_after + ctx.mm(3)),
-                    "Summe pro Leitungstyp:")
-                ctx.painter.restore()
-                y_after += ctx.mm(5)
                 h2 = ["Leitungstyp", "Gesamtl\u00e4nge (m)"]
-                r2 = [[t, f"{kv_sum[t]:.2f}"]
-                      for t in sorted(kv_sum.keys())]
+                r2 = [[t, f"{kv_sum[t]:.2f}"] for t in sorted(kv_sum.keys())]
                 y_after = ctx.draw_table(page, y_after, h2, r2)
 
         ap_type_counts = data.get("ap_type_counts", {})
-        if ap_type_counts:
+        if "el_ap_types" in sections and ap_type_counts:
             y_after += ctx.mm(4)
-            ctx.painter.save()
-            ctx.painter.setFont(QFont("Arial", 9, QFont.Bold))
-            ctx.painter.drawText(
-                int(page.x()), int(y_after + ctx.mm(3)),
-                "Anschlusspunkte je Typ:")
-            ctx.painter.restore()
-            y_after += ctx.mm(5)
             h_types = ["Typ", "Anzahl"]
             r_types = [[t, str(ap_type_counts[t])] for t in sorted(ap_type_counts.keys())]
             y_after = ctx.draw_table(page, y_after, h_types, r_types)
 
-        # AP connection summary
         ap_cables = data.get("ap_cables", {})
-        if ap_cables:
+        if "el_ap_connections" in sections and ap_cables:
             y_after += ctx.mm(4)
-            ctx.painter.save()
-            ctx.painter.setFont(QFont("Arial", 9, QFont.Bold))
-            ctx.painter.drawText(
-                int(page.x()), int(y_after + ctx.mm(3)),
-                "Anschlusspunkte \u2013 Kabelverbindungen:")
-            ctx.painter.restore()
-            y_after += ctx.mm(5)
-            ap_headers = ["AP", "Kabel", "Typ", "Anschluss",
-                          "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "L\u00e4nge (m)"]
+            ap_headers = ["AP", "Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "L\u00e4nge (m)"]
             ap_rows = []
             for ap_name in sorted(ap_cables.keys()):
                 for c in ap_cables[ap_name]:
-                    ap_rows.append([ap_name, c["cable"], c["type"],
-                                    c["role"], c.get("ap_device", ""), c.get("ap_device_color", ""), c.get("ap_note", ""), c.get("cable_note", ""), f"{c['length_m']:.2f}"])
+                    ap_rows.append([
+                        ap_name, c["cable"], c["type"], c["role"],
+                        c.get("ap_device", ""), c.get("ap_device_color", ""),
+                        c.get("ap_note", ""), c.get("cable_note", ""), f"{c['length_m']:.2f}",
+                    ])
             y_after = ctx.draw_table(page, y_after, ap_headers, ap_rows)
 
         room_ap_connections = data.get("room_ap_connections", [])
-        if room_ap_connections:
+        if "el_rooms" in sections and room_ap_connections:
             y_after += ctx.mm(4)
-            ctx.painter.save()
-            ctx.painter.setFont(QFont("Arial", 9, QFont.Bold))
-            ctx.painter.drawText(
-                int(page.x()), int(y_after + ctx.mm(3)),
-                "Räume – AP und Kabelziele:")
-            ctx.painter.restore()
-            y_after += ctx.mm(5)
             room_headers = ["Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)"]
             room_rows = [
                 [
@@ -5505,7 +6059,26 @@ class MainWindow(QMainWindow):
                 ]
                 for r in room_ap_connections
             ]
-            ctx.draw_table(page, y_after, room_headers, room_rows)
+            y_after = ctx.draw_table(page, y_after, room_headers, room_rows)
+
+        ap_info_rows = data.get("ap_info_rows", [])
+        if "el_ap_infos" in sections and ap_info_rows:
+            y_after += ctx.mm(4)
+            headers = ["Name", "Art", "Raum", "Position", "Höhe (cm)", "Gerätefarbe", "Unterputz-Gerät", "Notiz"]
+            rows = [
+                [
+                    r.get("name", ""),
+                    r.get("type", ""),
+                    r.get("room", ""),
+                    r.get("position", ""),
+                    f"{r.get('height_cm', 0.0):.1f}",
+                    r.get("device_color", ""),
+                    r.get("device", ""),
+                    r.get("note", ""),
+                ]
+                for r in ap_info_rows
+            ]
+            ctx.draw_table(page, y_after, headers, rows)
 
 
 # ====================================================================== #
@@ -5577,26 +6150,53 @@ class _PdfContext:
         header_h = self.mm(8)
         row_h = self.mm(5.5)
         x0 = page.x()
+        top_margin = self.mm(6)
+        bottom_margin = self.mm(6)
+
+        def _page_bottom() -> float:
+            return page.bottom() - bottom_margin
+
+        def _new_page():
+            self.printer.newPage()
+            new_page = self.page_rect()
+            self.stamp(new_page)
+            return new_page
+
+        def _draw_header(y_pos: float):
+            self.painter.setFont(QFont("Arial", 7, QFont.Bold))
+            cx = x0
+            for j, h in enumerate(headers):
+                r = QRectF(cx, y_pos, widths[j], header_h)
+                self.painter.fillRect(r, QBrush(QColor("#e0e0e0")))
+                self.painter.drawRect(r)
+                self.painter.drawText(
+                    r.adjusted(self.mm(1), 0, -self.mm(1), 0),
+                    Qt.AlignCenter | Qt.TextWordWrap, h)
+                cx += widths[j]
+
+        y = y_start
+        if y + header_h > _page_bottom():
+            page = _new_page()
+            x0 = page.x()
+            y = page.y() + top_margin
 
         self.painter.save()
         self.painter.setPen(QPen(Qt.black, max(1, self.mm(0.15))))
 
         # Header
-        self.painter.setFont(QFont("Arial", 7, QFont.Bold))
-        cx = x0
-        for j, h in enumerate(headers):
-            r = QRectF(cx, y_start, widths[j], header_h)
-            self.painter.fillRect(r, QBrush(QColor("#e0e0e0")))
-            self.painter.drawRect(r)
-            self.painter.drawText(
-                r.adjusted(self.mm(1), 0, -self.mm(1), 0),
-                Qt.AlignCenter | Qt.TextWordWrap, h)
-            cx += widths[j]
-        y = y_start + header_h
+        _draw_header(y)
+        y += header_h
 
         # Data rows
         self.painter.setFont(QFont("Arial", 7))
         for ri, row in enumerate(rows):
+            if y + row_h > _page_bottom():
+                page = _new_page()
+                x0 = page.x()
+                y = page.y() + top_margin
+                _draw_header(y)
+                y += header_h
+
             if ri % 2 == 1:
                 cx = x0
                 for j in range(n_cols):

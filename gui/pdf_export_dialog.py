@@ -23,6 +23,29 @@ from PySide6.QtWidgets import (
 
 
 class PdfExportConfigDialog(QDialog):
+    ELEMENT_LABELS: list[tuple[str, str]] = [
+        ("background", "Grundrisse"),
+        ("furniture", "Einrichtung"),
+        ("hk", "Heizkreise"),
+        ("hkv", "Heizkreisverteiler"),
+        ("hkv_line", "HKV-Leitungen"),
+        ("ap", "Anschlusspunkte"),
+        ("room", "Räume"),
+        ("kv", "Kabelverbindungen"),
+        ("text", "Beschriftungen"),
+    ]
+
+    TABLE_LABELS: dict[str, str] = {
+        "hk_lengths": "Heizkreise – Einzellängen",
+        "hk_hydraulics": "Hydraulische Übersicht",
+        "hk_hkv_lines": "HKV-Leitungen",
+        "el_kabel": "Kabelverbindungen",
+        "el_ap_types": "Anschlusspunkte je Typ",
+        "el_ap_connections": "AP – Kabelverbindungen",
+        "el_rooms": "Räume – AP und Kabelziele",
+        "el_ap_infos": "AP-Infos",
+    }
+
     def __init__(
         self,
         pages: list[dict],
@@ -41,6 +64,8 @@ class PdfExportConfigDialog(QDialog):
         self._svg_h = float(svg_size[1] if svg_size else 0.0)
         self._block_updates = False
         self._canvas = canvas
+        self._element_checks: dict[str, QCheckBox] = {}
+        self._table_checks: dict[str, QCheckBox] = {}
 
         self._build_ui()
         self._connect_canvas_signals()
@@ -70,17 +95,13 @@ class PdfExportConfigDialog(QDialog):
 
     def _apply_rect_to_controls(self, rect: QRectF):
         nr = QRectF(rect).normalized()
-        self._block_updates = True
-        try:
-            self.cb_custom_frame.setChecked(True)
-            self.sb_x.setValue(float(nr.x()))
-            self.sb_y.setValue(float(nr.y()))
-            self.sb_w.setValue(max(0.1, float(nr.width())))
-            self.sb_h.setValue(max(0.1, float(nr.height())))
-        finally:
-            self._block_updates = False
-        self._set_frame_controls_enabled(True)
-        self._on_frame_changed()
+        rect_data = [
+            float(nr.x()),
+            float(nr.y()),
+            float(nr.width()),
+            float(nr.height()),
+        ]
+        self._update_current_page(lambda p: p.__setitem__("source_rect", rect_data))
 
     def _on_canvas_export_frame_drawn(self, rect):
         if rect is None:
@@ -163,6 +184,16 @@ class PdfExportConfigDialog(QDialog):
         vis_layout.addWidget(self.cb_show_background)
         vis_layout.addWidget(self.cb_show_heating)
         vis_layout.addWidget(self.cb_show_elektro)
+
+        self.grp_elements = QGroupBox("Elemente")
+        elem_layout = QVBoxLayout(self.grp_elements)
+        elem_layout.setContentsMargins(6, 6, 6, 6)
+        for key, label in self.ELEMENT_LABELS:
+            cb = QCheckBox(label)
+            cb.toggled.connect(self._on_element_visibility_changed)
+            self._element_checks[key] = cb
+            elem_layout.addWidget(cb)
+        vis_layout.addWidget(self.grp_elements)
         plan_form.addRow("Sichtbarkeit", vis_wrap)
 
         self.preview_hint = QLabel("Export-Rahmen wird aus dem Plan übernommen.")
@@ -174,6 +205,16 @@ class PdfExportConfigDialog(QDialog):
         )
         self.lbl_non_plan.setWordWrap(True)
         right.addWidget(self.lbl_non_plan)
+
+        self.table_group = QGroupBox("Tabellen")
+        table_layout = QVBoxLayout(self.table_group)
+        table_layout.setContentsMargins(6, 6, 6, 6)
+        for key, label in self.TABLE_LABELS.items():
+            cb = QCheckBox(label)
+            cb.toggled.connect(self._on_table_sections_changed)
+            self._table_checks[key] = cb
+            table_layout.addWidget(cb)
+        right.addWidget(self.table_group)
 
         right.addStretch(1)
 
@@ -188,10 +229,41 @@ class PdfExportConfigDialog(QDialog):
         ptype = page.get("type", "plan")
         return {
             "plan": "Plan",
+            "heating": "Heizung",
             "lengths": "Rohrlängen",
             "hydraulics": "Hydraulik",
             "elektro": "Elektro",
         }.get(ptype, ptype)
+
+    @staticmethod
+    def _default_element_visibility() -> dict[str, bool]:
+        return {
+            "background": True,
+            "furniture": True,
+            "hk": True,
+            "hkv": True,
+            "hkv_line": True,
+            "ap": True,
+            "room": True,
+            "kv": True,
+            "text": True,
+        }
+
+    @staticmethod
+    def _default_table_sections(ptype: str) -> list[str]:
+        if ptype == "heating":
+            return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
+        if ptype == "elektro":
+            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos"]
+        return []
+
+    @staticmethod
+    def _allowed_table_sections(ptype: str) -> set[str]:
+        if ptype == "heating":
+            return {"hk_lengths", "hk_hydraulics", "hk_hkv_lines"}
+        if ptype == "elektro":
+            return {"el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos"}
+        return set()
 
     def _load_pages_into_tree(self):
         self.tree.clear()
@@ -281,8 +353,10 @@ class PdfExportConfigDialog(QDialog):
             self.cb_enabled.setChecked(bool(page.get("enabled", True)))
 
             ptype = page.get("type", "plan")
-            is_plan_like = ptype in ("plan", "elektro")
+            is_plan_like = ptype in ("plan", "heating", "elektro")
+            supports_tables = ptype in ("heating", "elektro")
             self.plan_group.setVisible(is_plan_like)
+            self.table_group.setVisible(supports_tables)
             self.lbl_non_plan.setVisible(not is_plan_like)
 
             if is_plan_like:
@@ -294,20 +368,24 @@ class PdfExportConfigDialog(QDialog):
                 self.cb_show_heating.setChecked(bool(page.get("show_heating", True)))
                 self.cb_show_elektro.setChecked(bool(page.get("show_elektro", True)))
 
-                # Use canvas export frame
-                canvas_rect = self._canvas_export_frame()
-                if canvas_rect is not None:
-                    rect = [
-                        float(canvas_rect.x()),
-                        float(canvas_rect.y()),
-                        float(canvas_rect.width()),
-                        float(canvas_rect.height()),
-                    ]
-                    page["source_rect"] = rect
-                    self._store_current_page(page)
-                else:
-                    page["source_rect"] = None
-                    self._store_current_page(page)
+                elem_vis = page.get("element_visibility")
+                if not isinstance(elem_vis, dict):
+                    elem_vis = self._default_element_visibility()
+                for key, cb in self._element_checks.items():
+                    cb.setChecked(bool(elem_vis.get(key, True)))
+
+            if supports_tables:
+                allowed = self._allowed_table_sections(ptype)
+                selected = page.get("table_sections")
+                if not isinstance(selected, list):
+                    selected = self._default_table_sections(ptype)
+                selected_set = {str(v) for v in selected if str(v) in allowed}
+                for key, cb in self._table_checks.items():
+                    cb.setVisible(key in allowed)
+                    cb.setChecked(key in selected_set)
+            else:
+                for cb in self._table_checks.values():
+                    cb.setVisible(False)
         finally:
             self._block_updates = False
 
@@ -340,6 +418,30 @@ class PdfExportConfigDialog(QDialog):
 
         self._update_current_page(updater)
 
+    def _on_element_visibility_changed(self, *_args):
+        def updater(p: dict):
+            vis = {}
+            for key, cb in self._element_checks.items():
+                vis[key] = bool(cb.isChecked())
+            p["element_visibility"] = vis
+
+        self._update_current_page(updater)
+
+    def _on_table_sections_changed(self, *_args):
+        page = self._current_page()
+        if not page:
+            return
+        ptype = str(page.get("type", "")).strip().lower()
+        allowed = self._allowed_table_sections(ptype)
+
+        def updater(p: dict):
+            p["table_sections"] = [
+                key for key, cb in self._table_checks.items()
+                if key in allowed and cb.isChecked()
+            ]
+
+        self._update_current_page(updater)
+
 
 
 
@@ -353,6 +455,7 @@ class PdfExportConfigDialog(QDialog):
             "show_background": True,
             "show_heating": True,
             "show_elektro": True,
+            "element_visibility": self._default_element_visibility(),
             "floor_plan_id": None,
             "source_rect": None,
         }

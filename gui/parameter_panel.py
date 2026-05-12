@@ -2337,6 +2337,14 @@ class ParameterPanel(QWidget):
                         panel = self.text_panels.get(eid)
                     if panel:
                         panel.chk_visible.setChecked(checked)
+
+                if item is subs.get("furniture"):
+                    for fur_id, parent_id in self._furniture_parent.items():
+                        if parent_id != fp_id:
+                            continue
+                        panel = self.furniture_panels.get(fur_id)
+                        if panel:
+                            panel.chk_visible.setChecked(checked)
                 return
 
         # Individual leaf element (furniture or element) toggled
@@ -2376,6 +2384,8 @@ class ParameterPanel(QWidget):
         return item_id or None
 
     def _expected_subcategory_key(self, item_id: str) -> str | None:
+        if item_id in self.furniture_panels:
+            return "furniture"
         if item_id in self.circuit_panels:
             return "hk"
         if item_id in self.hkv_panels:
@@ -2432,8 +2442,6 @@ class ParameterPanel(QWidget):
                     cid = child.data(0, Qt.UserRole)
                     if not cid:
                         continue
-                    if cid in self.furniture_panels:
-                        continue
                     expected = self._expected_subcategory_key(cid)
                     if expected and expected in subs:
                         self._move_child_item(child, subs[expected])
@@ -2443,9 +2451,6 @@ class ParameterPanel(QWidget):
                     for child in sub_children:
                         cid = child.data(0, Qt.UserRole)
                         if not cid:
-                            continue
-                        if cid in self.furniture_panels:
-                            self._move_child_item(child, fp_item)
                             continue
                         expected = self._expected_subcategory_key(cid)
                         if expected and expected != key and expected in subs:
@@ -2545,9 +2550,14 @@ class ParameterPanel(QWidget):
         text_item.setFlags((text_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         text_item.setCheckState(0, Qt.Checked)
 
+        furniture_item = QTreeWidgetItem(fp_item, ["🪑 Einrichtung"])
+        furniture_item.setFlags((furniture_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
+        furniture_item.setCheckState(0, Qt.Checked)
+
         self._fp_sub_items[fp_id] = {
             "hk": hk_item, "hkv": hkv_item, "hkv_line": hkv_line_item,
             "ap": ap_item, "room": room_item, "kv": kv_item, "text": text_item,
+            "furniture": furniture_item,
         }
         fp_item.setExpanded(True)
         if not self._loading:
@@ -2581,10 +2591,10 @@ class ParameterPanel(QWidget):
         panel.hide()
         self.furniture_panels[fur_id] = panel
         self._furniture_parent[fur_id] = parent_fp_id
-        parent_tree_item = self._tree_items.get(parent_fp_id)
+        parent_tree_item = self._fp_sub_items.get(parent_fp_id, {}).get("furniture")
         if parent_tree_item is None and self.floorplan_panels:
             first_fp = next(iter(self.floorplan_panels))
-            parent_tree_item = self._tree_items.get(first_fp)
+            parent_tree_item = self._fp_sub_items.get(first_fp, {}).get("furniture")
         if parent_tree_item:
             self._add_tree_item(parent_tree_item, fur_id, name or fur_id)
         return panel
@@ -2659,11 +2669,14 @@ class ParameterPanel(QWidget):
             fp_id = fp_item.data(0, Qt.UserRole)
             if fp_id and fp_id in self.floorplan_panels:
                 order.append(fp_id)
-                for j in range(fp_item.childCount()):
-                    child = fp_item.child(j)
-                    fur_id = child.data(0, Qt.UserRole)
-                    if fur_id and fur_id in self.furniture_panels:
-                        order.append(fur_id)
+                subs = self._fp_sub_items.get(fp_id, {})
+                fur_group = subs.get("furniture")
+                if fur_group:
+                    for j in range(fur_group.childCount()):
+                        child = fur_group.child(j)
+                        fur_id = child.data(0, Qt.UserRole)
+                        if fur_id and fur_id in self.furniture_panels:
+                            order.append(fur_id)
         return order
 
     def get_active_floorplan_id(self) -> str | None:
