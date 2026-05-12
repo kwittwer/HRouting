@@ -261,6 +261,7 @@ class CanvasWidget(QWidget):
         self._current_elec_cable_id: Optional[str] = None
         self._current_elec_cable_points: List[QPointF] = []
         self._current_elec_cable_preview: Optional[QPointF] = None
+        self._drawing_cable_from_start: bool = False  # True wenn vom Anfang des Kabels aus gezeichnet wird
         self._edit_elec_cable_id: Optional[str] = None
         self._dragging_elec_point: Optional[str] = None
 
@@ -1301,6 +1302,7 @@ class CanvasWidget(QWidget):
         existing = self._elec_cables.get(cable_id, [])
         self._current_elec_cable_points = list(existing) if existing else []
         self._current_elec_cable_id = cable_id
+        self._drawing_cable_from_start = False
         self._current_elec_cable_preview = None
         self._mode = ToolMode.DRAW_ELEC_CABLE
         self.setCursor(Qt.CrossCursor)
@@ -1365,7 +1367,7 @@ class CanvasWidget(QWidget):
     def _hit_elec_cable_point(self, canvas_pt: QPointF,
                                cable_id: str) -> Optional[int]:
         pts = self._elec_cables.get(cable_id, [])
-        threshold = 10.0 / self._scale
+        threshold = 20.0 / self._scale  # Increased from 10.0 for more reliable hit detection
         for i, pt in enumerate(pts):
             if _qdist(canvas_pt, pt) < threshold:
                 return i
@@ -2669,6 +2671,7 @@ class CanvasWidget(QWidget):
                     self._elec_cables[cid] = list(self._current_elec_cable_points)
                 self._current_elec_cable_id = None
                 self._current_elec_cable_points = []
+                self._drawing_cable_from_start = False
                 self._current_elec_cable_preview = None
                 self._mode = ToolMode.NONE
                 self.setCursor(Qt.ArrowCursor)
@@ -2754,15 +2757,26 @@ class CanvasWidget(QWidget):
             self.object_double_clicked.emit("hkv", hkv_hit)
             return
 
-        # 3. Elektro-Kabel – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
+        # 3. Elektro-Kabel – Doppelklick auf Anfang oder Ende → Zeichenmodus fortsetzen
         for kid, pts in self._elec_cables.items():
             if not self._elec_visible.get(kid, True):
                 continue
             if len(pts) >= 2:
-                # Last point hit → resume drawing
+                # Last point hit → resume drawing from the end
                 if _qdist(canvas_pt, pts[-1]) < threshold:
                     self._current_elec_cable_points = list(pts)
                     self._current_elec_cable_id = kid
+                    self._drawing_cable_from_start = False
+                    self._mode = ToolMode.DRAW_ELEC_CABLE
+                    self._current_elec_cable_preview = None
+                    self.setCursor(Qt.CrossCursor)
+                    self.update()
+                    return
+                # First point hit → resume drawing from the start
+                if _qdist(canvas_pt, pts[0]) < threshold:
+                    self._current_elec_cable_points = list(reversed(pts))
+                    self._current_elec_cable_id = kid
+                    self._drawing_cable_from_start = True
                     self._mode = ToolMode.DRAW_ELEC_CABLE
                     self._current_elec_cable_preview = None
                     self.setCursor(Qt.CrossCursor)
@@ -2875,6 +2889,22 @@ class CanvasWidget(QWidget):
             self._pan_start = pos
             self._panning   = True
             return
+
+        # ── EARLY CHECK: Click on any elec cable point to drag it directly ──
+        # This allows quick editing without needing to enter edit mode first
+        if event.button() == Qt.LeftButton and self._mode == ToolMode.NONE:
+            # Check all cables for a point hit
+            for cid, pts in self._elec_cables.items():
+                if not self._elec_visible.get(cid, True):
+                    continue
+                threshold = 20.0 / self._scale
+                for i, pt in enumerate(pts):
+                    if _qdist(canvas_pt, pt) < threshold:
+                        # Found a cable point - start dragging it
+                        self._dragging_route_point = (cid, i)
+                        self.setCursor(Qt.ClosedHandCursor)
+                        self.update()
+                        return
 
         if event.button() == Qt.RightButton and self._mode == ToolMode.NONE:
             obj = self._hit_any_object(canvas_pt)
@@ -3097,15 +3127,31 @@ class CanvasWidget(QWidget):
                 ap = self._find_nearest_ap(snapped)
                 if ap:
                     snapped = QPointF(self._elec_points[ap])
-                    # First point → start AP
-                    if len(self._current_elec_cable_points) == 0:
+                    # First point → start AP (only if drawing from end)
+                    if len(self._current_elec_cable_points) == 1 and not self._drawing_cable_from_start:
                         self._cable_start_ap[self._current_elec_cable_id] = ap
+                    # First point when drawing from start → this is new first point (becomes end AP)
+                    elif len(self._current_elec_cable_points) == 1 and self._drawing_cable_from_start:
+                        pass  # Will be handled at right-click
                 self._current_elec_cable_points.append(snapped)
                 self._current_elec_cable_preview = None
                 self.update()
             elif event.button() == Qt.RightButton and self._current_elec_cable_id:
                 cid = self._current_elec_cable_id
                 if len(self._current_elec_cable_points) >= 2:
+                    # If we were drawing from the start, reverse the points back to normal order
+                    if self._drawing_cable_from_start:
+                        self._current_elec_cable_points = list(reversed(self._current_elec_cable_points))
+                        
+                        # The first point of reversed list is the new start AP
+                        first_pt = self._current_elec_cable_points[0]
+                        start_ap = self._find_nearest_ap(first_pt)
+                        if start_ap:
+                            self._current_elec_cable_points[0] = QPointF(self._elec_points[start_ap])
+                            self._cable_start_ap[cid] = start_ap
+                        else:
+                            self._cable_start_ap.pop(cid, None)
+                    
                     # Check if last point is near an AP → end AP
                     last_pt = self._current_elec_cable_points[-1]
                     end_ap = self._find_nearest_ap(last_pt)
@@ -3122,6 +3168,7 @@ class CanvasWidget(QWidget):
                     self._cable_end_ap.pop(cid, None)
                 self._current_elec_cable_id = None
                 self._current_elec_cable_points = []
+                self._drawing_cable_from_start = False
                 self._current_elec_cable_preview = None
                 self._mode = ToolMode.NONE
                 self.setCursor(Qt.ArrowCursor)
@@ -3129,23 +3176,7 @@ class CanvasWidget(QWidget):
                 self.update()
             return
 
-        # ── Kabel bearbeiten ──
-        if event.button() == Qt.LeftButton and self._is_edit_mode_active():
-            clicked_obj = self._hit_any_object(canvas_pt)
-            current_target = self._current_edit_target()
-            # Don't leave edit mode when clicking only on floor/background.
-            # This enables marquee selection drag over the floor plan.
-            is_background_floor_hit = (
-                clicked_obj is not None
-                and clicked_obj[0] == "floor_polygon"
-                and (current_target is None or current_target[0] != "floor_polygon")
-            )
-            if clicked_obj and clicked_obj != current_target and not is_background_floor_hit:
-                self._exit_edit_mode()
-                self.object_clicked.emit(clicked_obj[0], clicked_obj[1])
-                self.object_switched_from_edit.emit(clicked_obj[0], clicked_obj[1])
-                return
-
+        # ── Edit Elec Cable: handle point dragging ──
         if self._mode == ToolMode.EDIT_ELEC_CABLE and self._edit_elec_cable_id:
             cid = self._edit_elec_cable_id
             if event.button() == Qt.LeftButton:
@@ -3153,6 +3184,7 @@ class CanvasWidget(QWidget):
                 if hit is not None:
                     self._dragging_route_point = (cid, hit)
                     self.setCursor(Qt.ClosedHandCursor)
+                    self.update()
                 return
             elif event.button() == Qt.RightButton:
                 hit = self._hit_elec_cable_point(canvas_pt, cid)
@@ -3179,6 +3211,23 @@ class CanvasWidget(QWidget):
                 self._edit_elec_cable_id = None
                 self.setCursor(Qt.ArrowCursor)
                 self.update()
+                return
+            # Consume any other button event while in edit mode
+            return
+
+            clicked_obj = self._hit_any_object(canvas_pt)
+            current_target = self._current_edit_target()
+            # Don't leave edit mode when clicking only on floor/background.
+            # This enables marquee selection drag over the floor plan.
+            is_background_floor_hit = (
+                clicked_obj is not None
+                and clicked_obj[0] == "floor_polygon"
+                and (current_target is None or current_target[0] != "floor_polygon")
+            )
+            if clicked_obj and clicked_obj != current_target and not is_background_floor_hit:
+                self._exit_edit_mode()
+                self.object_clicked.emit(clicked_obj[0], clicked_obj[1])
+                self.object_switched_from_edit.emit(clicked_obj[0], clicked_obj[1])
                 return
 
         # ── Anschlussleitung zeichnen ──
@@ -3548,6 +3597,25 @@ class CanvasWidget(QWidget):
             self._constraint_violation_reason = ""
             self.update()
             return
+
+        # ── Handle dragging of elec cable points (at any time, not just in edit mode) ──
+        if self._dragging_route_point and self._mode == ToolMode.NONE:
+            cid, idx = self._dragging_route_point
+            if cid in self._elec_cables:
+                pts = self._elec_cables[cid]
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                base_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                # Snap first/last point to nearest AP while dragging
+                if idx == 0 or idx == len(pts) - 1:
+                    ap = self._find_nearest_ap(base_pt)
+                    if ap:
+                        pts[idx] = QPointF(self._elec_points[ap])
+                    else:
+                        pts[idx] = base_pt
+                else:
+                    pts[idx] = base_pt
+                self.update()
+                return
 
         # ── Grundriss verschieben ──
         if self._mode == ToolMode.MOVE_FLOOR_PLAN and self._active_floor_id:
@@ -3933,6 +4001,19 @@ class CanvasWidget(QWidget):
             self._constraint_violation_point = None
             self._constraint_violation_line = None
             self._constraint_violation_reason = ""
+            
+            # ── Check if hovering over elec cable point ──
+            threshold = 20.0 / self._scale
+            for cid, pts in self._elec_cables.items():
+                if not self._elec_visible.get(cid, True):
+                    continue
+                for i, pt in enumerate(pts):
+                    if _qdist(canvas_pt, pt) < threshold:
+                        self.setCursor(Qt.OpenHandCursor)
+                        if state_cleared:
+                            self.update()
+                        return
+            
             label_hit = self._hit_label(canvas_pt)
             if label_hit:
                 self.setCursor(Qt.SizeAllCursor)
@@ -3968,6 +4049,31 @@ class CanvasWidget(QWidget):
             return
 
         if event.button() == Qt.LeftButton:
+            # ── Handle dragging of elec cable points (in NONE mode) ──
+            if self._dragging_route_point and self._mode == ToolMode.NONE:
+                cid, idx = self._dragging_route_point
+                self._dragging_route_point = None
+                self.setCursor(Qt.ArrowCursor)
+                # Update AP binding if first or last point was moved
+                pts = self._elec_cables.get(cid, [])
+                if pts and (idx == 0 or idx == len(pts) - 1):
+                    ap = self._find_nearest_ap(pts[idx])
+                    if idx == 0:
+                        if ap:
+                            self._cable_start_ap[cid] = ap
+                            self._elec_cables[cid][0] = QPointF(self._elec_points[ap])
+                        else:
+                            self._cable_start_ap.pop(cid, None)
+                    else:
+                        if ap:
+                            self._cable_end_ap[cid] = ap
+                            self._elec_cables[cid][-1] = QPointF(self._elec_points[ap])
+                        else:
+                            self._cable_end_ap.pop(cid, None)
+                self.elec_cable_changed.emit(cid)
+                self.update()
+                return
+
             # ── Export-Rahmen Zeichnen abschliessen ──
             if self._mode == ToolMode.DRAW_EXPORT_FRAME and self._export_frame_start:
                 end_pt = self._export_frame_current or self._export_frame_start
@@ -4183,6 +4289,7 @@ class CanvasWidget(QWidget):
             self._placing_elec_point_id = None
             self._current_elec_cable_id = None
             self._current_elec_cable_points = []
+            self._drawing_cable_from_start = False
             self._current_elec_cable_preview = None
             self._edit_elec_cable_id = None
             self._dragging_elec_point = None
