@@ -21,6 +21,12 @@ import re
 import subprocess
 import sys
 import shutil
+import os
+import argparse
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import markdown
@@ -35,16 +41,46 @@ WIKI = ROOT / "Wiki"
 # ---------------------------------------------------------------------------
 # 1. Version in main.py lesen & ggf. inkrementieren oder manuell setzen
 # ---------------------------------------------------------------------------
-def bump_version() -> str:
+def _read_current_version() -> str:
     text = MAIN_PY.read_text(encoding="utf-8")
     m = re.search(r'VERSION\s*=\s*"(\d+\.\d+\.\d+)"', text)
     if not m:
         print("FEHLER: VERSION = \"x.y.z\" nicht in main.py gefunden!")
         sys.exit(1)
 
-    old_ver = m.group(1)
+    return m.group(1)
+
+
+def _write_version(old_ver: str, new_ver: str) -> None:
+    text = MAIN_PY.read_text(encoding="utf-8")
+    new_text = text.replace(f'VERSION = "{old_ver}"', f'VERSION = "{new_ver}"')
+    MAIN_PY.write_text(new_text, encoding="utf-8")
+
+
+def set_version(new_ver: str) -> str:
+    if not re.fullmatch(r"\d+\.\d+\.\d+", new_ver):
+        print(f"FEHLER: Ungültiges Format '{new_ver}' – erwartet: x.y.z")
+        sys.exit(1)
+
+    old_ver = _read_current_version()
+    if old_ver != new_ver:
+        _write_version(old_ver, new_ver)
+        print(f"Version: {old_ver} → {new_ver}")
+    else:
+        print(f"Version unverändert: {new_ver}")
+    return new_ver
+
+
+def bump_version(interactive: bool = True) -> str:
+    old_ver = _read_current_version()
     major, minor, patch = old_ver.split(".")
     auto_ver = f"{major}.{minor}.{int(patch) + 1}"
+
+    if not interactive:
+        new_ver = auto_ver
+        _write_version(old_ver, new_ver)
+        print(f"Version: {old_ver} → {new_ver}")
+        return new_ver
 
     print(f"Aktuelle Version: {old_ver}")
     print(f"  [Enter] → automatisch inkrement: {auto_ver}")
@@ -59,10 +95,128 @@ def bump_version() -> str:
         print(f"FEHLER: Ungültiges Format '{choice}' – erwartet: x.y.z")
         sys.exit(1)
 
-    new_text = text.replace(f'VERSION = "{old_ver}"', f'VERSION = "{new_ver}"')
-    MAIN_PY.write_text(new_text, encoding="utf-8")
+    _write_version(old_ver, new_ver)
     print(f"Version: {old_ver} → {new_ver}")
     return new_ver
+
+
+def _github_request(url: str, token: str, method: str = "GET", data: bytes | None = None,
+                    content_type: str = "application/json") -> tuple[int, dict]:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if data is not None:
+        headers["Content-Type"] = content_type
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8") if resp.length != 0 else "{}"
+            return resp.status, json.loads(body or "{}")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8") if exc.fp else ""
+        parsed = {}
+        if body:
+            try:
+                parsed = json.loads(body)
+            except Exception:
+                parsed = {"message": body}
+        return exc.code, parsed
+
+
+def upload_msi_to_github_release(
+    version: str,
+    installer_path: Path,
+    repo: str,
+    token: str,
+    tag: str | None = None,
+    release_name: str | None = None,
+) -> None:
+    if not installer_path.exists():
+        print(f"FEHLER: MSI nicht gefunden: {installer_path}")
+        sys.exit(1)
+
+    tag_name = tag or f"v{version}"
+    rel_name = release_name or f"HRouting v{version}"
+    api_base = f"https://api.github.com/repos/{repo}"
+
+    print(f"\nGitHub Release vorbereiten: {repo} / {tag_name}")
+    status, release_data = _github_request(
+        f"{api_base}/releases/tags/{urllib.parse.quote(tag_name, safe='')}",
+        token,
+    )
+
+    if status == 404:
+        payload = {
+            "tag_name": tag_name,
+            "name": rel_name,
+            "draft": False,
+            "prerelease": False,
+            "generate_release_notes": True,
+        }
+        status, release_data = _github_request(
+            f"{api_base}/releases",
+            token,
+            method="POST",
+            data=json.dumps(payload).encode("utf-8"),
+        )
+        if status not in (200, 201):
+            print(f"FEHLER: Release konnte nicht erstellt werden ({status}): {release_data}")
+            sys.exit(1)
+    elif status not in (200, 201):
+        print(f"FEHLER: Release konnte nicht geladen werden ({status}): {release_data}")
+        sys.exit(1)
+
+    release_id = release_data.get("id")
+    upload_url_tpl = release_data.get("upload_url", "")
+    upload_url = upload_url_tpl.split("{")[0] if upload_url_tpl else ""
+    if not release_id or not upload_url:
+        print("FEHLER: Ungültige Release-Antwort von GitHub.")
+        sys.exit(1)
+
+    asset_name = installer_path.name
+    for asset in release_data.get("assets", []):
+        if asset.get("name") == asset_name and asset.get("id"):
+            del_status, del_resp = _github_request(
+                f"{api_base}/releases/assets/{asset['id']}",
+                token,
+                method="DELETE",
+            )
+            if del_status not in (200, 204):
+                print(f"FEHLER: Bestehendes Asset konnte nicht gelöscht werden ({del_status}): {del_resp}")
+                sys.exit(1)
+
+    with installer_path.open("rb") as f:
+        msi_data = f.read()
+
+    upload_target = f"{upload_url}?name={urllib.parse.quote(asset_name)}"
+    up_status, up_resp = _github_request(
+        upload_target,
+        token,
+        method="POST",
+        data=msi_data,
+        content_type="application/x-msi",
+    )
+    if up_status not in (200, 201):
+        print(f"FEHLER: MSI-Upload fehlgeschlagen ({up_status}): {up_resp}")
+        sys.exit(1)
+
+    print(f"✓ MSI als Release-Asset hochgeladen: {asset_name}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="HRouting Build-Script")
+    parser.add_argument("--version", help="Setzt explizite Version x.y.z in main.py")
+    parser.add_argument("--no-bump", action="store_true", help="Verwendet aktuelle Version ohne Änderung")
+    parser.add_argument("--non-interactive", action="store_true", help="Kein Prompt; Auto-Inkrement")
+    parser.add_argument("--github-release", action="store_true", help="MSI als GitHub Release Asset hochladen")
+    parser.add_argument("--github-repo", help="Repo owner/name (default: env GITHUB_REPOSITORY)")
+    parser.add_argument("--github-token", help="GitHub Token (default: env GITHUB_TOKEN)")
+    parser.add_argument("--release-tag", help="Release Tag (default: v<version>)")
+    parser.add_argument("--release-name", help="Release Name (default: HRouting v<version>)")
+    return parser.parse_args()
 
 
 # ---------------------------------------------------------------------------
@@ -524,11 +678,47 @@ def register_filetype(exe_path: Path):
 # Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    ver = bump_version()
+    args = parse_args()
+
+    if args.version and args.no_bump:
+        print("FEHLER: --version und --no-bump können nicht kombiniert werden.")
+        sys.exit(2)
+
+    if args.version:
+        ver = set_version(args.version)
+    elif args.no_bump:
+        ver = _read_current_version()
+        print(f"Version unverändert: {ver}")
+    else:
+        ver = bump_version(interactive=not args.non_interactive)
+
     regenerate_splash()
     exe = build_exe(ver)
     build_wiki_pdf(ver)
     installer_result = build_installer(ver, exe)
+
+    if args.github_release:
+        if installer_result is None:
+            print("FEHLER: Kein Installer erzeugt – Upload übersprungen.")
+            sys.exit(1)
+
+        repo = args.github_repo or os.environ.get("GITHUB_REPOSITORY", "")
+        token = args.github_token or os.environ.get("GITHUB_TOKEN", "")
+        if not repo:
+            print("FEHLER: GitHub-Repo fehlt. Nutze --github-repo oder GITHUB_REPOSITORY.")
+            sys.exit(1)
+        if not token:
+            print("FEHLER: GitHub-Token fehlt. Nutze --github-token oder GITHUB_TOKEN.")
+            sys.exit(1)
+
+        upload_msi_to_github_release(
+            version=ver,
+            installer_path=installer_result,
+            repo=repo,
+            token=token,
+            tag=args.release_tag,
+            release_name=args.release_name,
+        )
     
     # Only register filetype for the PyInstaller EXE, not the installer
     # (The installer handles file association via Registry integration)
