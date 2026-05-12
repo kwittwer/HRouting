@@ -37,6 +37,7 @@
       <ComponentRef Id="cmpWikiPdf" />
       <?endif?>
       <ComponentRef Id="cmpStartMenuShortcut" />
+      <ComponentRef Id="cmpStartMenuShortcutMcp" />
       <ComponentRef Id="cmpFileAssociation" />
       <ComponentRef Id="cmpDefaultAppsRegistration" />
       <ComponentRef Id="cmpAppPaths" />
@@ -78,6 +79,19 @@
         Advertise="no" />
       <RemoveFolder Id="RemoveProgramsFolder" On="uninstall" />
       <RegistryValue Root="HKLM" Key="Software\HRouting" Name="StartMenu" Value="1" Type="integer" KeyPath="yes" />
+    </Component>
+
+    <Component Id="cmpStartMenuShortcutMcp" Guid="{A3F1D842-7C2E-4B95-9E10-F3D56C8A1E07}" Directory="ApplicationProgramsFolder">
+      <Shortcut
+        Id="scStartMenuHRoutingMcp"
+        Name="HRouting (MCP Server)"
+        Description="HRouting mit MCP Server starten"
+        Target="[INSTALLFOLDER]$(var.ExeName)"
+        Arguments="--mcp"
+        WorkingDirectory="INSTALLFOLDER"
+        Icon="AppIcon"
+        Advertise="no" />
+      <RegistryValue Root="HKLM" Key="Software\HRouting" Name="StartMenuMcp" Value="1" Type="integer" KeyPath="yes" />
     </Component>
 
     <Component Id="cmpFileAssociation" Guid="{7FEA0CB3-D46D-4D19-8A48-838421D6D145}" Directory="INSTALLFOLDER">

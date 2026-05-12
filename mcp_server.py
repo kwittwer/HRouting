@@ -35,6 +35,7 @@ Konfiguration für Claude Desktop (claude_desktop_config.json):
 from __future__ import annotations
 
 import logging
+import sys as _sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -947,7 +948,11 @@ def start_mcp_server(
     # Bei frozen EXE: Logger in Datei schreiben (stderr ist unsichtbar)
     if getattr(_sys, 'frozen', False):
         import logging as _logging
-        log_path = Path(_sys.executable).parent / "hrouting_mcp.log"
+        import os as _os
+        _appdata = Path(_os.environ.get("LOCALAPPDATA", Path.home()))
+        _log_dir = _appdata / "HRouting"
+        _log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = _log_dir / "hrouting_mcp.log"
         _fh = _logging.FileHandler(str(log_path), encoding="utf-8")
         _fh.setLevel(_logging.DEBUG)
         _fh.setFormatter(_logging.Formatter(
@@ -975,6 +980,22 @@ def start_mcp_server(
             logger.info(
                 f"MCP-Server startet auf "
                 f"http://{MCP_HOST}:{port}/mcp")
+            # uvicorn.config.Config bindet LOGGING_CONFIG als Default-Parameter
+            # bei der Klassendefinition (log_config=LOGGING_CONFIG). Ein einfaches
+            # Neusetzen der Modulvariable ändert diesen Default nicht mehr.
+            # In-place Mutation des Dicts greift hingegen, da der Default-Parameter
+            # weiterhin auf dasselbe Dict-Objekt zeigt.
+            try:
+                import uvicorn.config as _uvc
+                _uvc.LOGGING_CONFIG.clear()
+                _uvc.LOGGING_CONFIG.update({
+                    "version": 1,
+                    "disable_existing_loggers": False,
+                    "handlers": {},
+                    "loggers": {},
+                })
+            except Exception:
+                pass
             mcp.run(transport="streamable-http")
         except OSError as e:
             msg = str(e).lower()

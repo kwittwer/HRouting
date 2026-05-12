@@ -19,7 +19,7 @@ import ctypes
 import re
 from pathlib import Path
 
-VERSION = "0.1.22"
+VERSION = "0.1.30"
 
 # Windows: AppUserModelID muss VOR allen Qt-Imports gesetzt werden,
 # damit die Taskleiste das App-Icon statt des Python-Icons zeigt.
@@ -140,6 +140,12 @@ def _refresh_hrp_association_if_outdated():
 def main():
     _refresh_hrp_association_if_outdated()
 
+    # --mcp Flag vor QApplication herausfiltern (QApplication würde unbekannte
+    # Argumente ignorieren, aber wir wollen es sauber aus sys.argv entfernen)
+    _enable_mcp = "--mcp" in sys.argv
+    if _enable_mcp:
+        sys.argv.remove("--mcp")
+
     # --- Schnellstart: nur minimale Qt-Imports für Splash ---
     from PySide6.QtWidgets import QApplication, QSplashScreen
     from PySide6.QtGui import QPixmap, QIcon
@@ -167,7 +173,86 @@ def main():
         app.processEvents()
 
     # --- Jetzt die schweren Imports (MainWindow, Canvas, etc.) ---
+    from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLabel
+    from PySide6.QtGui import QFont, QColor
+    from PySide6.QtCore import Signal, QObject
     from gui.main_window import MainWindow
+    import logging as _logging
+
+    # --- MCP Log-Fenster (wird nur bei --mcp verwendet) ---
+    class _McpLogHandler(_logging.Handler, QObject):
+        log_signal = Signal(str, str)  # (nachricht, level)
+
+        def __init__(self):
+            _logging.Handler.__init__(self)
+            QObject.__init__(self)
+
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                self.log_signal.emit(msg, record.levelname)
+            except Exception:
+                pass
+
+    class McpLogWindow(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle("HRouting – MCP Server Log")
+            self.resize(750, 420)
+            ico_path = BASE_DIR / "assets" / "icon.ico"
+            svg_path = BASE_DIR / "assets" / "icon.svg"
+            if ico_path.exists():
+                from PySide6.QtGui import QIcon
+                self.setWindowIcon(QIcon(str(ico_path)))
+            elif svg_path.exists():
+                from PySide6.QtGui import QIcon
+                self.setWindowIcon(QIcon(str(svg_path)))
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(6)
+
+            url_label = QLabel(
+                "<b>MCP Server läuft:</b> "
+                "<a href='http://127.0.0.1:3274/mcp'>http://127.0.0.1:3274/mcp</a>"
+            )
+            url_label.setOpenExternalLinks(True)
+            layout.addWidget(url_label)
+
+            self._text = QTextEdit()
+            self._text.setReadOnly(True)
+            self._text.setFont(QFont("Courier New", 9))
+            self._text.setStyleSheet(
+                "QTextEdit { background:#1e1e1e; color:#d4d4d4; border:none; }"
+            )
+            layout.addWidget(self._text)
+
+            self._handler = _McpLogHandler()
+            self._handler.setFormatter(_logging.Formatter(
+                "%(asctime)s  [%(levelname)-8s]  %(message)s",
+                datefmt="%H:%M:%S",
+            ))
+            self._handler.log_signal.connect(self._append)
+            _logging.getLogger("hrouting.mcp").addHandler(self._handler)
+            _logging.getLogger("hrouting.mcp").setLevel(_logging.DEBUG)
+
+        def _append(self, msg: str, level: str):
+            colors = {
+                "DEBUG":    "#9cdcfe",
+                "INFO":     "#d4d4d4",
+                "WARNING":  "#dcdcaa",
+                "ERROR":    "#f44747",
+                "CRITICAL": "#f44747",
+            }
+            color = colors.get(level, "#d4d4d4")
+            import html
+            self._text.append(
+                f'<span style="color:{color}">{html.escape(msg)}</span>'
+            )
+
+        def closeEvent(self, event):
+            _logging.getLogger("hrouting.mcp").removeHandler(self._handler)
+            super().closeEvent(event)
 
     window = MainWindow()
 
@@ -183,26 +268,21 @@ def main():
     elif svg_path.exists():
         window.setWindowIcon(QIcon(str(svg_path)))
 
-    # --- MCP-Server starten (optional) ---
-    try:
-        from mcp_server import start_mcp_server
-        mcp_thread = start_mcp_server(window)
-        if mcp_thread:
-            print("🔌 MCP-Server: http://127.0.0.1:3274/mcp",
-                  file=sys.stderr)
-    except Exception as e:
-        # Bei --windowed (EXE) ist stderr unsichtbar → in Logdatei schreiben
-        msg = f"MCP-Server nicht gestartet: {e}"
-        print(msg, file=sys.stderr)
-        if getattr(sys, 'frozen', False):
+    # --- MCP-Server starten (nur mit --mcp) ---
+    _mcp_log_window = None
+    if _enable_mcp:
+        _mcp_log_window = McpLogWindow()
+        _mcp_log_window.show()
+        try:
+            from mcp_server import start_mcp_server
+            start_mcp_server(window)
+        except Exception as e:
             import traceback
-            log_path = Path(sys.executable).parent / "hrouting_mcp.log"
-            try:
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(f"\n--- MCP-Startfehler ---\n{msg}\n")
-                    traceback.print_exc(file=f)
-            except OSError:
-                pass
+            _mcp_log_window._append(
+                f"FEHLER beim Starten des MCP-Servers: {e}\n"
+                + traceback.format_exc(),
+                "ERROR",
+            )
 
     window.show()
 
