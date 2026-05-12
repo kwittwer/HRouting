@@ -228,6 +228,10 @@ class CanvasWidget(QWidget):
         self._color_index   = 0
         self._dragging_start: Optional[str] = None
         self._dragging_route_point: Optional[Tuple[str, int]] = None
+        self._dragging_elec_cable_id: Optional[str] = None
+        self._dragging_elec_cable_start: Optional[QPointF] = None
+        self._dragging_elec_cable_origin: List[QPointF] = []
+        self._dragging_elec_cable_fixed_indices: set[int] = set()
         self._last_clicked_object: Optional[Tuple[str, str]] = None  # (obj_type, obj_id)
         self._mode          = ToolMode.NONE
         self._mouse_pos:    Optional[QPointF] = None
@@ -2906,6 +2910,27 @@ class CanvasWidget(QWidget):
                         self.update()
                         return
 
+            # Check cable edges for whole-cable drag
+            for cid, pts in self._elec_cables.items():
+                if not self._elec_visible.get(cid, True) or len(pts) < 2:
+                    continue
+                if self._hit_elec_cable_edge(canvas_pt, cid) is None:
+                    continue
+                self.object_clicked.emit("elec_cable", cid)
+                self._dragging_elec_cable_id = cid
+                self._dragging_elec_cable_start = QPointF(canvas_pt)
+                self._dragging_elec_cable_origin = [QPointF(p) for p in pts]
+                self._dragging_elec_cable_fixed_indices = set()
+                start_ap = self._cable_start_ap.get(cid)
+                end_ap = self._cable_end_ap.get(cid)
+                if start_ap and start_ap in self._elec_points:
+                    self._dragging_elec_cable_fixed_indices.add(0)
+                if end_ap and end_ap in self._elec_points:
+                    self._dragging_elec_cable_fixed_indices.add(len(pts) - 1)
+                self.setCursor(Qt.ClosedHandCursor)
+                self.update()
+                return
+
         if event.button() == Qt.RightButton and self._mode == ToolMode.NONE:
             obj = self._hit_any_object(canvas_pt)
             obj_type = obj[0] if obj else ""
@@ -3598,6 +3623,36 @@ class CanvasWidget(QWidget):
             self.update()
             return
 
+        # ── Handle dragging of whole elec cable (NONE mode) ──
+        if (
+            self._mode == ToolMode.NONE
+            and self._dragging_elec_cable_id
+            and self._dragging_elec_cable_start
+        ):
+            cid = self._dragging_elec_cable_id
+            pts = self._elec_cables.get(cid)
+            origin = self._dragging_elec_cable_origin
+            if pts and len(pts) == len(origin):
+                dx = canvas_pt.x() - self._dragging_elec_cable_start.x()
+                dy = canvas_pt.y() - self._dragging_elec_cable_start.y()
+                for i, orig in enumerate(origin):
+                    if i in self._dragging_elec_cable_fixed_indices:
+                        continue
+                    pts[i] = QPointF(orig.x() + dx, orig.y() + dy)
+
+                # Keep AP-bound endpoints fixed at AP position
+                if 0 in self._dragging_elec_cable_fixed_indices:
+                    start_ap = self._cable_start_ap.get(cid)
+                    if start_ap and start_ap in self._elec_points:
+                        pts[0] = QPointF(self._elec_points[start_ap])
+                if (len(pts) - 1) in self._dragging_elec_cable_fixed_indices:
+                    end_ap = self._cable_end_ap.get(cid)
+                    if end_ap and end_ap in self._elec_points:
+                        pts[-1] = QPointF(self._elec_points[end_ap])
+
+                self.update()
+            return
+
         # ── Handle dragging of elec cable points (at any time, not just in edit mode) ──
         if self._dragging_route_point and self._mode == ToolMode.NONE:
             cid, idx = self._dragging_route_point
@@ -4049,6 +4104,17 @@ class CanvasWidget(QWidget):
             return
 
         if event.button() == Qt.LeftButton:
+            if self._mode == ToolMode.NONE and self._dragging_elec_cable_id:
+                cid = self._dragging_elec_cable_id
+                self._dragging_elec_cable_id = None
+                self._dragging_elec_cable_start = None
+                self._dragging_elec_cable_origin = []
+                self._dragging_elec_cable_fixed_indices = set()
+                self.setCursor(Qt.ArrowCursor)
+                self.elec_cable_changed.emit(cid)
+                self.update()
+                return
+
             # ── Handle dragging of elec cable points (in NONE mode) ──
             if self._dragging_route_point and self._mode == ToolMode.NONE:
                 cid, idx = self._dragging_route_point
@@ -4273,6 +4339,10 @@ class CanvasWidget(QWidget):
             self._current_route_preview_end = None
             self._dragging_start = None
             self._dragging_route_point = None
+            self._dragging_elec_cable_id = None
+            self._dragging_elec_cable_start = None
+            self._dragging_elec_cable_origin = []
+            self._dragging_elec_cable_fixed_indices = set()
             self._edit_polygon_cid = None
             self._edit_elec_room_id = None
             self._edit_floor_polygon_id = None
