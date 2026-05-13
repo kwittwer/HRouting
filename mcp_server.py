@@ -151,6 +151,88 @@ def _create_mcp(window: MainWindow, bridge):
 
     invoke = bridge.invoke
 
+    # ── Tool-Logging: Jeden Tool-Aufruf ins Log-Fenster schreiben ──
+    import functools as _functools
+    import inspect as _inspect
+
+    _orig_mcp_tool = mcp.tool
+
+    def _logged_tool(*tool_args, **tool_kw):
+        """Wrapper um mcp.tool() – loggt jeden Aufruf mit Parametern
+        und Ergebnis ins MCP-Log-Fenster."""
+        # @mcp.tool  (ohne Klammern – fn direkt übergeben)
+        if tool_args and callable(tool_args[0]):
+            fn = tool_args[0]
+            return _logged_tool()(fn)
+
+        # @mcp.tool() oder @mcp.tool(**kw)
+        orig_decorator = _orig_mcp_tool(*tool_args, **tool_kw)
+
+        def decorator(fn):
+            @_functools.wraps(fn)
+            def wrapper(*args, **kwargs):
+                # ── Parameter-Zusammenfassung erstellen ──
+                try:
+                    sig = _inspect.signature(fn)
+                    bound = sig.bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    parts = []
+                    for k, v in bound.arguments.items():
+                        if isinstance(v, list) and len(v) > 3:
+                            parts.append(f"{k}=[…{len(v)} Punkte]")
+                        else:
+                            s = repr(v)
+                            if len(s) > 100:
+                                s = s[:97] + "…"
+                            parts.append(f"{k}={s}")
+                    params_str = ", ".join(parts)
+                except Exception:
+                    params_str = "…"
+
+                logger.info(f"⚙ {fn.__name__}({params_str})")
+
+                # ── Tool ausführen ──
+                try:
+                    result = fn(*args, **kwargs)
+
+                    # ── Ergebnis-Zusammenfassung loggen ──
+                    if isinstance(result, dict):
+                        if "error" in result:
+                            logger.warning(
+                                f"  ✗ {result['error']}")
+                        else:
+                            status = result.get("status", "ok")
+                            # Relevante IDs/Namen extrahieren
+                            ids = {
+                                k: result[k] for k in result
+                                if k.endswith("_id") or k == "path"
+                                or k == "name"
+                            }
+                            summary = [f"status={status}"]
+                            summary += [
+                                f"{k}={v}" for k, v in ids.items()]
+                            logger.info(
+                                f"  ✓ {', '.join(summary)}")
+                    elif isinstance(result, list):
+                        logger.info(
+                            f"  ✓ {len(result)} Einträge")
+                    elif isinstance(result, str):
+                        logger.info(
+                            f"  ✓ {len(result)} Zeichen")
+                    else:
+                        logger.info(f"  ✓ ok")
+
+                    return result
+
+                except Exception as e:
+                    logger.error(f"  ✗ Exception: {e}")
+                    raise
+
+            return orig_decorator(wrapper)
+        return decorator
+
+    mcp.tool = _logged_tool
+
     # ── Resources ──────────────────────────────────────────────────
 
     @mcp.resource("hrp://schema")
