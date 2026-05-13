@@ -48,15 +48,50 @@ Folgende Standardsymbole stehen zur Verfügung:
 | Symbol | Beschreibung |
 |--------|-------------|
 | Steckdose | Einfache Steckdose |
-| Doppelsteckdose | Doppelte Steckdose |
-| Leuchte | Deckenleuchte |
+| Steckdose 2fach | Doppelte Steckdose |
+| Steckdose 5fach | 5-fach Steckdosenleiste |
+| Steckdose schaltbar | Schaltbare Steckdose |
+| Steckdose Starkstrom | CEE-Steckdose |
+| Licht | Deckenlicht |
+| Lichtquelle | Deckenleuchte |
+| Lichtquelle dimmbar | Dimmbare Deckenleuchte |
+| Lichtquelle Wand | Wandleuchte |
+| Taster | Taster (Klingel etc.) |
+| Taster 4fach | 4-fach Taster |
 | Ausschalter | Einfacher Ausschalter |
 | Wechselschalter | Wechselschalter (2 Schaltstellen) |
 | Serienschalter | Serienschalter (2 Kreise) |
 | Kreuzschalter | Kreuzschalter (3+ Schaltstellen) |
-| Taster | Taster (Klingel etc.) |
+| LAN | LAN-Dose |
+| LAN 2fach | Doppelte LAN-Dose |
+| HDMI | HDMI-Anschluss |
+| TV | TV-Anschlussdose |
+| Audio | Audio-Anschluss |
+| Audiobuchse | Audio-Buchse |
+| Rauchmelder | Rauchmelder |
+| Hitzemelder | Hitzemelder |
+| Bewegungsmelder | Bewegungsmelder |
+| Praesenzmelder | Präsenzmelder |
+| Temperaturfuehler | Temperaturfühler |
+| Temperaturmessung | Temperaturmessung |
+| Thermostat | Thermostat |
+| Fensterkontakt | Fensterkontakt |
+| Türkontakt | Türkontakt |
+| E-Rollladen | Elektrischer Rollladen |
+| E-Rollo | Elektrisches Rollo |
+| Markise | Markise |
+| Garagentor | Garagentor |
+| Gong | Gong / Klingel |
+| Heizkreisverteiler | HKV-Symbol |
+| Wetterstation | Wetterstation |
+| WLanHotspot | WLAN-Hotspot |
+| Zutritt | Zutrittskontrolle |
 
 Über **Eigenes Bild…** kann ein beliebiges Symbol (PNG, JPG, SVG, BMP) geladen werden.
+
+## Anschlusspunkte durchnummerieren
+
+Über das Menü **Bearbeiten → 🏷️ Anschlusspunkte durchnummerieren** können gleichnamige Anschlusspunkte automatisch nummeriert werden. Beispiel: Drei APs mit dem Namen „Steckdose" werden zu „Steckdose1", „Steckdose2", „Steckdose3" umbenannt. Nur Gruppen mit mehr als einem gleichnamigen AP werden nummeriert.
 
 ### AP-Parameter
 
@@ -66,7 +101,14 @@ Folgende Standardsymbole stehen zur Verfügung:
 | **Farbe** | Darstellungsfarbe | Farbauswahl |
 | **Breite / Höhe** | Symbolgröße | 0,5–20 cm |
 | **Symbol** | Schaltzeichen-Typ | Dropdown |
+| **Einbauort** | Montageposition | Wand / Decke / Boden / Freitext |
+| **Einbauhöhe** | Höhe ab Boden in cm | 0–999 cm |
+| **Unterputz-Gerät** | Smarthome-Gerät (z.B. „Shelly") | Freitext |
+| **Gerätefarbe** | Farbe des Smarthome-Geräts (z.B. „weiß") | Freitext |
+| **Notiz** | Freitext-Notiz (z.B. „Hinter dem Kühlschrank") | Freitext |
 | **Schriftgröße** | Label-Schriftgröße | 4–80 pt |
+
+> **Smarthome-Geräte**: Die Felder „Unterputz-Gerät" und „Gerätefarbe" dienen der zusätzlichen Dokumentation verbauter Smart-Home-Aktoren (z.B. Shelly, Sonoff). Die Angaben werden im Kontextmenü (Rechtsklick) angezeigt und im Projektbericht mit exportiert. Über das Kontextmenü können diese auch direkt bearbeitet werden.
 
 ## Kabelverbindung zeichnen
 

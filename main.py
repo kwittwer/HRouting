@@ -19,7 +19,7 @@ import ctypes
 import re
 from pathlib import Path
 
-VERSION = "0.1.32"
+VERSION = "0.1.35"
 
 # Windows: AppUserModelID muss VOR allen Qt-Imports gesetzt werden,
 # damit die Taskleiste das App-Icon statt des Python-Icons zeigt.
@@ -283,6 +283,16 @@ def main():
                 + traceback.format_exc(),
                 "ERROR",
             )
+
+    # Log-Fenster schließen wenn Hauptfenster geschlossen wird
+    if _mcp_log_window:
+        _orig_close = window.closeEvent
+
+        def _close_with_log(event):
+            _mcp_log_window.close()
+            _orig_close(event)
+
+        window.closeEvent = _close_with_log
 
     window.show()
 
