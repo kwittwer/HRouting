@@ -4,7 +4,7 @@
 
 HRouting enthält einen integrierten **MCP-Server** (Model Context Protocol), über den KI-Agenten wie GitHub Copilot, Claude oder andere MCP-fähige Assistenten das Programm fernsteuern können.
 
-Der MCP-Server bietet **42 Tools** zum Lesen, Erstellen, Bearbeiten und Löschen aller Projektelemente sowie zur Durchführung von Heizlastberechnungen.
+Der MCP-Server bietet **44 Tools** zum Lesen, Erstellen, Bearbeiten und Löschen aller Projektelemente sowie zur Durchführung von Heizlastberechnungen.
 
 ## MCP-Server starten
 
@@ -96,13 +96,15 @@ Das Log-Fenster schließt sich automatisch, wenn das Hauptprogramm beendet wird.
 | `set_circuit_route` | Manuellen Rohrverlauf setzen/aktualisieren |
 | `set_supply_line` | Zuleitung setzen/aktualisieren (inkl. HKV-Zuordnung) |
 
-### Elektro-Punkt-Tools (3)
+### Elektro-Punkt-Tools (5)
 
 | Tool | Beschreibung |
 |------|-------------|
 | `add_elec_point` | Elektro-Anschlusspunkt platzieren (inkl. Symbol, Smarthome-Gerät, Notiz) |
 | `modify_elec_point` | Parameter eines AP ändern |
 | `delete_elec_point` | Anschlusspunkt löschen |
+| `configure_uv_distribution` | UV-/Verteilungsraster und Belegung für einen AP setzen |
+| `clear_uv_distribution` | UV-/Verteilungsbelegung eines AP leeren |
 
 ### Elektro-Raum-Tools (3)
 

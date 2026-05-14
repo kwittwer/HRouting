@@ -43,7 +43,7 @@ Entwickelt mit **Python 3** und **PySide6** (Qt for Python).
 - **Projektübersicht** – Tabs für Längen, Hydraulik, Abgleich, Elektro, Räume, HKV-Leitungen
 
 ### KI-Integration (MCP-Server)
-- **42 MCP-Tools** – Vollständige Steuerung per KI-Agent (GitHub Copilot, Claude, etc.)
+- **44 MCP-Tools** – Vollständige Steuerung per KI-Agent (GitHub Copilot, Claude, etc.)
 - **Log-Fenster** – Echtzeit-Protokollierung aller Agent-Aktivitäten
 - **Start**: `python main.py --mcp`
 
@@ -93,7 +93,7 @@ Entwickelt mit **Python 3** und **PySide6** (Qt for Python).
 ```
 HRouting/
 ├── main.py                  # Einstiegspunkt, Versionsverwaltung, Splash Screen
-├── mcp_server.py            # MCP-Server für KI-Agenten (42 Tools)
+├── mcp_server.py            # MCP-Server für KI-Agenten (44 Tools)
 ├── build.py                 # Build-Script (Version-Bump + PyInstaller)
 ├── generate_splash.py       # Splash Screen Generator
 ├── hrp_schema.json          # JSON-Schema für .hrp-Dateien (Agent-/Validierung)
