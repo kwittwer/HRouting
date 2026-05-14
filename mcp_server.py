@@ -261,6 +261,25 @@ def _create_mcp(window: MainWindow, bridge):
         value = str(ap_type or "standard").strip().lower()
         return "uv" if value == "uv" else "standard"
 
+    def _resolve_ap_type_for_uv(
+        ap_type: str | None,
+        uv_config: dict,
+        *,
+        current_ap_type: str = "standard",
+    ) -> tuple[str, str | None]:
+        effective_ap_type = (
+            _normalize_ap_type(ap_type)
+            if ap_type is not None else _normalize_ap_type(current_ap_type)
+        )
+        if uv_config and ap_type is None:
+            return "uv", None
+        if uv_config and effective_ap_type != "uv":
+            return effective_ap_type, (
+                "uv_config erfordert ap_type='uv' "
+                "oder keinen expliziten ap_type-Wert."
+            )
+        return effective_ap_type, None
+
     def _normalize_uv_config(
         uv_config: dict | None,
         *,
@@ -684,13 +703,13 @@ def _create_mcp(window: MainWindow, bridge):
             w._elec_point_counter += 1
             pid = f"AP-{w._elec_point_counter}"
             normalized_uv_config = _normalize_uv_config(uv_config)
-            effective_ap_type = _normalize_ap_type(ap_type)
-            if normalized_uv_config and ap_type is None:
-                effective_ap_type = "uv"
-            elif normalized_uv_config and effective_ap_type != "uv":
+            effective_ap_type, ap_type_error = _resolve_ap_type_for_uv(
+                ap_type,
+                normalized_uv_config,
+            )
+            if ap_type_error:
                 return {
-                    "error": "uv_config erfordert ap_type='uv' "
-                             "oder keinen expliziten ap_type-Wert."
+                    "error": ap_type_error
                 }
 
             panel = w._create_elec_point_panel(
@@ -842,14 +861,14 @@ def _create_mcp(window: MainWindow, bridge):
             normalized_uv_config = None
             if uv_config is not None:
                 normalized_uv_config = _normalize_uv_config(uv_config)
-                requested_ap_type = (
-                    _normalize_ap_type(ap_type)
-                    if ap_type is not None else panel.get_ap_type()
+                _, ap_type_error = _resolve_ap_type_for_uv(
+                    ap_type,
+                    normalized_uv_config,
+                    current_ap_type=panel.get_ap_type(),
                 )
-                if normalized_uv_config and requested_ap_type != "uv":
+                if ap_type_error:
                     return {
-                        "error": "uv_config erfordert ap_type='uv' "
-                                 "oder keinen expliziten ap_type-Wert."
+                        "error": ap_type_error
                     }
             if ap_type is not None:
                 panel.set_ap_type(ap_type)
