@@ -642,7 +642,7 @@ def _create_mcp(window: MainWindow, bridge):
         smarthome_device: str = "",
         smarthome_device_color: str = "",
         note: str = "",
-        ap_type: str = "standard",
+        ap_type: str | None = None,
         uv_config: dict | None = None,
     ) -> dict:
         """Elektro-Anschlusspunkt platzieren.
@@ -683,10 +683,15 @@ def _create_mcp(window: MainWindow, bridge):
             w = window
             w._elec_point_counter += 1
             pid = f"AP-{w._elec_point_counter}"
-            effective_ap_type = _normalize_ap_type(ap_type)
             normalized_uv_config = _normalize_uv_config(uv_config)
-            if normalized_uv_config:
+            effective_ap_type = _normalize_ap_type(ap_type)
+            if normalized_uv_config and ap_type is None:
                 effective_ap_type = "uv"
+            elif normalized_uv_config and effective_ap_type != "uv":
+                return {
+                    "error": "uv_config erfordert ap_type='uv' "
+                             "oder keinen expliziten ap_type-Wert."
+                }
 
             panel = w._create_elec_point_panel(
                 pid, fp_id=floor_plan_id or None, name=name)
@@ -782,7 +787,8 @@ def _create_mcp(window: MainWindow, bridge):
             note: Neue Notiz
             ap_type: Neuer AP-Typ – 'standard' oder 'uv'
             uv_config: Neue UV-Belegung als vollständiges Objekt;
-                übergib {} zum Leeren
+                übergib {} zum Leeren; bei gesetzter UV-Belegung muss
+                ap_type 'uv' sein oder leer bleiben
             visible: Sichtbarkeit
         """
         def _modify():
@@ -833,10 +839,21 @@ def _create_mcp(window: MainWindow, bridge):
             if note is not None:
                 panel.te_note.setPlainText(note)
                 window.canvas._elec_point_notes[point_id] = note
-            if ap_type is not None:
-                panel.set_ap_type(ap_type)
+            normalized_uv_config = None
             if uv_config is not None:
                 normalized_uv_config = _normalize_uv_config(uv_config)
+                requested_ap_type = (
+                    _normalize_ap_type(ap_type)
+                    if ap_type is not None else panel.get_ap_type()
+                )
+                if normalized_uv_config and requested_ap_type != "uv":
+                    return {
+                        "error": "uv_config erfordert ap_type='uv' "
+                                 "oder keinen expliziten ap_type-Wert."
+                    }
+            if ap_type is not None:
+                panel.set_ap_type(ap_type)
+            if normalized_uv_config is not None:
                 panel.set_uv_config(normalized_uv_config)
                 if normalized_uv_config and ap_type is None:
                     panel.set_ap_type("uv")
