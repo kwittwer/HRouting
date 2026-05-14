@@ -383,6 +383,8 @@ class HeatingCircuitPanel(QWidget):
 # ================================================================== #
 
 class UvConfigDialog(QDialog):
+    MAX_UV_ROWS = 12
+    MAX_UV_MODULES = 36
     UV_PRESETS: list[tuple[str, tuple[int, int]]] = [
         ("1-reihig / 12 TE", (1, 12)),
         ("2-reihig / 12 TE", (2, 12)),
@@ -426,12 +428,12 @@ class UvConfigDialog(QDialog):
 
         dims_row = QHBoxLayout()
         self.sb_rows = QSpinBox()
-        self.sb_rows.setRange(1, 12)
+        self.sb_rows.setRange(1, self.MAX_UV_ROWS)
         self.sb_rows.valueChanged.connect(self._on_dimensions_changed)
         dims_row.addWidget(self.sb_rows)
 
         self.sb_modules = QSpinBox()
-        self.sb_modules.setRange(1, 36)
+        self.sb_modules.setRange(1, self.MAX_UV_MODULES)
         self.sb_modules.valueChanged.connect(self._on_dimensions_changed)
         dims_row.addWidget(QLabel("×"))
         dims_row.addWidget(self.sb_modules)

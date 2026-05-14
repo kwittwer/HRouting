@@ -355,7 +355,7 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
                 f"[Value] elec_points.{pid}.uv_config.rows/modules_per_row dürfen nicht negativ sein."
             )
             continue
-        if (rows == 0 and modules_per_row != 0) or (rows != 0 and modules_per_row == 0):
+        if bool(rows) != bool(modules_per_row):
             errors.append(
                 f"[Value] elec_points.{pid}.uv_config benötigt rows und modules_per_row gemeinsam."
             )
