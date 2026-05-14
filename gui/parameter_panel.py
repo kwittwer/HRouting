@@ -14,12 +14,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import copy
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QLabel,
     QLineEdit, QDoubleSpinBox, QPushButton, QGroupBox,
     QScrollArea, QHBoxLayout, QFrame, QColorDialog,
     QCheckBox, QFileDialog, QTextEdit, QComboBox,
     QTreeWidget, QTreeWidgetItem, QSplitter, QAbstractItemView,
+    QDialog, QDialogButtonBox, QSpinBox, QTableWidget,
+    QTableWidgetItem, QHeaderView,
 )
 from pathlib import Path
 from PySide6.QtGui import QColor, QPixmap
@@ -375,6 +379,233 @@ class HeatingCircuitPanel(QWidget):
 
 
 # ================================================================== #
+#  Elektro: UV-Planung                                                 #
+# ================================================================== #
+
+class UvConfigDialog(QDialog):
+    MAX_UV_ROWS = 12
+    MAX_UV_MODULES = 36
+    UV_PRESETS: list[tuple[str, tuple[int, int]]] = [
+        ("1-reihig / 12 TE", (1, 12)),
+        ("2-reihig / 12 TE", (2, 12)),
+        ("3-reihig / 12 TE", (3, 12)),
+        ("4-reihig / 12 TE", (4, 12)),
+        ("2-reihig / 18 TE", (2, 18)),
+        ("3-reihig / 18 TE", (3, 18)),
+        ("Benutzerdefiniert", (0, 0)),
+    ]
+    UV_DEVICE_TYPES: list[str] = [
+        "",
+        "Reserve",
+        "FI",
+        "LS",
+        "FI/LS",
+        "Überspannungsschutz",
+        "Klemme",
+        "Freitext",
+    ]
+
+    def __init__(self, config: dict | None = None,
+                 cable_choices: list[str] | None = None,
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("UV planen")
+        self.resize(860, 620)
+        self._cable_choices = list(cable_choices or [])
+        self._building = False
+        self._build_ui()
+        self._load_config(config or {})
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+
+        form = QFormLayout()
+        self.cmb_preset = SafeComboBox()
+        for label, dims in self.UV_PRESETS:
+            self.cmb_preset.addItem(label, dims)
+        self.cmb_preset.currentIndexChanged.connect(self._on_preset_changed)
+        form.addRow("Preset:", self.cmb_preset)
+
+        dims_row = QHBoxLayout()
+        self.sb_rows = QSpinBox()
+        self.sb_rows.setRange(1, self.MAX_UV_ROWS)
+        self.sb_rows.valueChanged.connect(self._on_dimensions_changed)
+        dims_row.addWidget(self.sb_rows)
+
+        self.sb_modules = QSpinBox()
+        self.sb_modules.setRange(1, self.MAX_UV_MODULES)
+        self.sb_modules.valueChanged.connect(self._on_dimensions_changed)
+        dims_row.addWidget(QLabel("×"))
+        dims_row.addWidget(self.sb_modules)
+        form.addRow("Raster (Reihen × TE):", dims_row)
+
+        self.lbl_summary = QLabel("")
+        form.addRow("Zusammenfassung:", self.lbl_summary)
+        root.addLayout(form)
+
+        self.tbl_slots = QTableWidget(0, 6)
+        self.tbl_slots.setHorizontalHeaderLabels(
+            ["Reihe", "TE", "Belegung", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
+        )
+        self.tbl_slots.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_slots.verticalHeader().setVisible(False)
+        root.addWidget(self.tbl_slots, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _capture_current_slots(self) -> list[dict]:
+        slots: list[dict] = []
+        for row_idx in range(self.tbl_slots.rowCount()):
+            row_item = self.tbl_slots.item(row_idx, 0)
+            slot_item = self.tbl_slots.item(row_idx, 1)
+            if row_item is None or slot_item is None:
+                continue
+            try:
+                row_no = int(row_item.text())
+                slot_no = int(slot_item.text())
+            except (TypeError, ValueError):
+                continue
+            device_combo = self.tbl_slots.cellWidget(row_idx, 2)
+            assignment_combo = self.tbl_slots.cellWidget(row_idx, 4)
+            label_item = self.tbl_slots.item(row_idx, 3)
+            note_item = self.tbl_slots.item(row_idx, 5)
+            slots.append({
+                "row": row_no,
+                "slot": slot_no,
+                "device_type": device_combo.currentText().strip() if isinstance(device_combo, QComboBox) else "",
+                "label": label_item.text().strip() if label_item else "",
+                "assignment": assignment_combo.currentText().strip() if isinstance(assignment_combo, QComboBox) else "",
+                "note": note_item.text().strip() if note_item else "",
+            })
+        return slots
+
+    def _indexed_slots(self, slots: list[dict], rows: int, modules_per_row: int) -> dict[tuple[int, int], dict]:
+        indexed: dict[tuple[int, int], dict] = {}
+        for slot in slots:
+            try:
+                row_no = int(slot.get("row", 0))
+                slot_no = int(slot.get("slot", 0))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= row_no <= rows and 1 <= slot_no <= modules_per_row:
+                indexed[(row_no, slot_no)] = {
+                    "row": row_no,
+                    "slot": slot_no,
+                    "device_type": str(slot.get("device_type", "") or "").strip(),
+                    "label": str(slot.get("label", "") or "").strip(),
+                    "assignment": str(slot.get("assignment", "") or "").strip(),
+                    "note": str(slot.get("note", "") or "").strip(),
+                }
+        return indexed
+
+    def _rebuild_table(self, slots: list[dict] | None = None):
+        rows = self.sb_rows.value()
+        modules_per_row = self.sb_modules.value()
+        slot_map = self._indexed_slots(slots or [], rows, modules_per_row)
+        self.tbl_slots.setRowCount(rows * modules_per_row)
+        for row_no in range(1, rows + 1):
+            for slot_no in range(1, modules_per_row + 1):
+                idx = (row_no - 1) * modules_per_row + (slot_no - 1)
+                slot = slot_map.get((row_no, slot_no), {})
+
+                row_item = QTableWidgetItem(str(row_no))
+                row_item.setFlags(row_item.flags() & ~Qt.ItemIsEditable)
+                self.tbl_slots.setItem(idx, 0, row_item)
+
+                slot_item = QTableWidgetItem(str(slot_no))
+                slot_item.setFlags(slot_item.flags() & ~Qt.ItemIsEditable)
+                self.tbl_slots.setItem(idx, 1, slot_item)
+
+                cmb_device = SafeComboBox()
+                cmb_device.addItems(self.UV_DEVICE_TYPES)
+                cmb_device.setCurrentText(str(slot.get("device_type", "") or "").strip())
+                self.tbl_slots.setCellWidget(idx, 2, cmb_device)
+
+                self.tbl_slots.setItem(
+                    idx, 3, QTableWidgetItem(str(slot.get("label", "") or "").strip())
+                )
+
+                cmb_assignment = SafeComboBox()
+                cmb_assignment.setEditable(True)
+                cmb_assignment.addItem("")
+                for choice in self._cable_choices:
+                    if choice and cmb_assignment.findText(choice) < 0:
+                        cmb_assignment.addItem(choice)
+                cmb_assignment.setCurrentText(str(slot.get("assignment", "") or "").strip())
+                self.tbl_slots.setCellWidget(idx, 4, cmb_assignment)
+
+                self.tbl_slots.setItem(
+                    idx, 5, QTableWidgetItem(str(slot.get("note", "") or "").strip())
+                )
+
+        self.lbl_summary.setText(f"{rows} Reihen mit je {modules_per_row} TE")
+
+    def _preset_index_for_dims(self, rows: int, modules_per_row: int) -> int:
+        for idx, (_label, dims) in enumerate(self.UV_PRESETS):
+            if dims == (rows, modules_per_row):
+                return idx
+        return len(self.UV_PRESETS) - 1
+
+    def _load_config(self, config: dict):
+        rows = int(config.get("rows", 2) or 2)
+        modules_per_row = int(config.get("modules_per_row", 12) or 12)
+        slots = config.get("slots", [])
+        self._building = True
+        self.sb_rows.setValue(rows)
+        self.sb_modules.setValue(modules_per_row)
+        self.cmb_preset.setCurrentIndex(self._preset_index_for_dims(rows, modules_per_row))
+        self._building = False
+        self._rebuild_table(slots if isinstance(slots, list) else [])
+
+    def _on_preset_changed(self):
+        if self._building:
+            return
+        slots = self._capture_current_slots()
+        dims = self.cmb_preset.currentData()
+        if isinstance(dims, tuple) and dims != (0, 0):
+            self._building = True
+            self.sb_rows.setValue(int(dims[0]))
+            self.sb_modules.setValue(int(dims[1]))
+            self._building = False
+        self._rebuild_table(slots)
+
+    def _on_dimensions_changed(self):
+        if self._building:
+            return
+        slots = self._capture_current_slots()
+        self._building = True
+        self.cmb_preset.setCurrentIndex(
+            self._preset_index_for_dims(self.sb_rows.value(), self.sb_modules.value())
+        )
+        self._building = False
+        self._rebuild_table(slots)
+
+    def get_config(self) -> dict:
+        rows = self.sb_rows.value()
+        modules_per_row = self.sb_modules.value()
+        slots: list[dict] = []
+        for slot in self._capture_current_slots():
+            if self._slot_has_content(slot):
+                slots.append(slot)
+        return {
+            "rows": rows,
+            "modules_per_row": modules_per_row,
+            "preset": self.cmb_preset.currentText(),
+            "slots": slots,
+        }
+
+    @staticmethod
+    def _slot_has_content(slot: dict) -> bool:
+        return any(
+            str(slot.get(key, "") or "").strip()
+            for key in ("device_type", "label", "assignment", "note")
+        )
+
+
+# ================================================================== #
 #  Elektro: Anschlusspunkt Panel                                       #
 # ================================================================== #
 
@@ -394,6 +625,8 @@ class ElektroPointPanel(QWidget):
     note_changed       = Signal(str, str)
     smarthome_device_changed = Signal(str, str)
     smarthome_device_color_changed = Signal(str, str)
+    ap_type_changed    = Signal(str, str)
+    uv_config_changed  = Signal(str)
 
     def __init__(self, point_id: str, name: str | None = None,
                  color: str | None = None, parent=None):
@@ -402,6 +635,9 @@ class ElektroPointPanel(QWidget):
         self._name = name or point_id
         self._icon_path: str | None = None
         self._color = QColor(color or "#4fc3f7")
+        self._ap_type = "standard"
+        self._uv_config: dict = {}
+        self._uv_cable_choices: list[str] = []
         self._build_ui()
 
     def _build_ui(self):
@@ -462,6 +698,16 @@ class ElektroPointPanel(QWidget):
         self.btn_icon = QPushButton("Eigenes Bild…")
         self.btn_icon.clicked.connect(self._load_icon)
         form.addRow("", self.btn_icon)
+
+        self.cmb_ap_type = SafeComboBox()
+        self.cmb_ap_type.addItem("Standard", "standard")
+        self.cmb_ap_type.addItem("Unterverteilung (UV)", "uv")
+        self.cmb_ap_type.currentIndexChanged.connect(self._on_ap_type_changed)
+        form.addRow("AP-Typ:", self.cmb_ap_type)
+
+        self.btn_uv_plan = QPushButton("🗂️ UV planen…")
+        self.btn_uv_plan.clicked.connect(self._open_uv_dialog)
+        form.addRow(self.btn_uv_plan)
 
         self.sb_label_size = SafeDoubleSpinBox()
         self.sb_label_size.setRange(0.1, 999999.0)
@@ -548,6 +794,7 @@ class ElektroPointPanel(QWidget):
         form.addRow(self.lbl_room)
 
         layout.addLayout(form)
+        self._update_uv_controls()
 
     def _choose_color(self):
         color = QColorDialog.getColor(self._color, self, "Anschlusspunkt-Farbe")
@@ -595,6 +842,51 @@ class ElektroPointPanel(QWidget):
             self.btn_icon.setText(path.split("/")[-1].split("\\")[-1])
             self.icon_changed.emit(self.point_id, path)
 
+    def _on_ap_type_changed(self):
+        data = self.cmb_ap_type.currentData()
+        self._ap_type = str(data or "standard")
+        self._update_uv_controls()
+        self.ap_type_changed.emit(self.point_id, self._ap_type)
+
+    def _update_uv_controls(self):
+        is_uv = self.get_ap_type() == "uv"
+        self.btn_uv_plan.setVisible(is_uv)
+
+    def get_ap_type(self) -> str:
+        return self._ap_type or "standard"
+
+    def set_ap_type(self, ap_type: str):
+        value = "uv" if str(ap_type).strip().lower() == "uv" else "standard"
+        self._ap_type = value
+        idx = self.cmb_ap_type.findData(value)
+        if idx < 0:
+            idx = 0
+        self.cmb_ap_type.blockSignals(True)
+        self.cmb_ap_type.setCurrentIndex(idx)
+        self.cmb_ap_type.blockSignals(False)
+        self._update_uv_controls()
+
+    def set_uv_config(self, config: dict | None):
+        self._uv_config = copy.deepcopy(config or {})
+
+    def set_uv_cable_choices(self, choices: list[str]):
+        merged: list[str] = []
+        for choice in choices:
+            text = str(choice or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+        self._uv_cable_choices = merged
+
+    def _open_uv_dialog(self):
+        dlg = UvConfigDialog(
+            config=self._uv_config,
+            cable_choices=self._uv_cable_choices,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.Accepted:
+            self._uv_config = dlg.get_config()
+            self.uv_config_changed.emit(self.point_id)
+
     def get_parameters(self) -> dict:
         # Wenn Freitext ausgewählt ist, speichere den benutzerdefinierten Text
         position = self.cmb_position.currentText()
@@ -611,11 +903,13 @@ class ElektroPointPanel(QWidget):
             "visible":   self.chk_visible.isChecked(),
             "label_visible": self.chk_label_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
+            "ap_type": self.get_ap_type(),
             "position":  position,
             "height_from_floor": self.sb_height_from_floor.value(),
             "smarthome_device": self.get_smarthome_device_text().strip(),
             "smarthome_device_color": self.get_smarthome_device_color_text().strip(),
             "note": self.te_note.toPlainText(),
+            "uv_config": copy.deepcopy(self._uv_config),
         }
 
     def get_smarthome_device_text(self) -> str:
@@ -680,6 +974,8 @@ class ElektroPointPanel(QWidget):
         self.chk_visible.setChecked(d.get("visible", True))
         self.chk_label_visible.setChecked(d.get("label_visible", True))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
+        self.set_ap_type(d.get("ap_type", "standard"))
+        self.set_uv_config(d.get("uv_config"))
         
         # Position und Höhe vom Boden
         position = d.get("position", "Wand")
@@ -2786,6 +3082,7 @@ class ParameterPanel(QWidget):
         self.elec_point_panels[point_id] = panel
         panel.set_smarthome_device_text(self._last_elec_point_device)
         panel.set_smarthome_device_color_text(self._last_elec_point_device_color)
+        panel.set_uv_cable_choices(self._collect_elec_cable_names())
         resolved = self._resolve_fp_id(fp_id)
         self._element_floorplan[point_id] = resolved or ""
         parent_item = self._fp_sub_items.get(resolved or "", {}).get("ap") if resolved else None
@@ -2848,6 +3145,19 @@ class ParameterPanel(QWidget):
         choices = self._collect_elec_point_smarthome_colors()
         for panel in self.elec_point_panels.values():
             panel.set_smarthome_device_color_choices(choices)
+
+    def _collect_elec_cable_names(self) -> list[str]:
+        values: list[str] = []
+        for cable_id, panel in self.elec_cable_panels.items():
+            text = str(panel.get_parameters().get("name", cable_id) or "").strip() or cable_id
+            if text and text not in values:
+                values.append(text)
+        return values
+
+    def update_all_elec_point_uv_cable_choices(self):
+        choices = self._collect_elec_cable_names()
+        for panel in self.elec_point_panels.values():
+            panel.set_uv_cable_choices(choices)
 
     # ──────────────────────────────────────────────────────────────── #
     #  Elektro: Räume                                                  #
@@ -2923,6 +3233,7 @@ class ParameterPanel(QWidget):
         if parent_item:
             self._add_tree_item(parent_item, cable_id, effective_name)
         self.update_all_elec_cable_type_choices()
+        self.update_all_elec_point_uv_cable_choices()
         return panel
 
     def remove_elec_cable_panel(self, cable_id: str):
@@ -2933,6 +3244,7 @@ class ParameterPanel(QWidget):
             self._prop_layout.removeWidget(panel)
             panel.deleteLater()
         self.update_all_elec_cable_type_choices()
+        self.update_all_elec_point_uv_cable_choices()
         self._show_placeholder_if_empty()
 
     def _on_elec_cable_type_changed(self, cable_id: str, value: str):
@@ -2945,6 +3257,7 @@ class ParameterPanel(QWidget):
         if self._loading:
             return
         self._update_last_elec_cable_defaults(cable_id)
+        self.update_all_elec_point_uv_cable_choices()
 
     def _on_elec_cable_comment_changed(self, cable_id: str, value: str):
         if self._loading:
@@ -3346,6 +3659,7 @@ class ParameterPanel(QWidget):
         if not d.get("elec_cable_defaults") and self.elec_cable_panels:
             last_cable_id = next(reversed(self.elec_cable_panels))
             self._update_last_elec_cable_defaults(last_cable_id)
+        self.update_all_elec_point_uv_cable_choices()
         for lid, values in d.get("hkv_lines", {}).items():
             panel = self.add_hkv_line_panel(
                 lid, fp_id=values.get("floor_plan_id"),
@@ -3365,4 +3679,3 @@ class ParameterPanel(QWidget):
         self._dedupe_floorplan_tree()
 
         self._loading = False
-

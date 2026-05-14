@@ -110,6 +110,18 @@ Folgende Standardsymbole stehen zur Verfügung:
 
 > **Smarthome-Geräte**: Die Felder „Unterputz-Gerät" und „Gerätefarbe" dienen der zusätzlichen Dokumentation verbauter Smart-Home-Aktoren (z.B. Shelly, Sonoff). Die Angaben werden im Kontextmenü (Rechtsklick) angezeigt und im Projektbericht mit exportiert. Über das Kontextmenü können diese auch direkt bearbeitet werden.
 
+## Unterverteilung (UV) planen
+
+Ein Anschlusspunkt kann zusätzlich als **Unterverteilung (UV)** markiert werden.
+
+1. Öffnen Sie den gewünschten AP.
+2. Stellen Sie **AP-Typ** auf **Unterverteilung (UV)**.
+3. Klicken Sie auf **🗂️ UV planen…**.
+4. Wählen Sie ein Preset oder definieren Sie Reihen und TE manuell.
+5. Hinterlegen Sie pro Platz die **Belegung**, eine **Bezeichnung** sowie optional **Kabel/Stromkreis** und **Notiz**.
+
+Die UV-Belegung wird im Projekt gespeichert und in **Projektübersicht**, **CSV** und **PDF-Export** ausgegeben.
+
 ## Kabelverbindung zeichnen
 
 1. Klicken Sie auf **➕ Kabel** in der Seitenleiste.

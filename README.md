@@ -16,8 +16,9 @@ Entwickelt mit **Python 3** und **PySide6** (Qt for Python).
 
 ### Elektroplanung
 - **Elektro-Räume** – Raum-Polygone für automatische AP-Zuordnung
-- **Anschlusspunkte (AP)** – 35+ DIN-Symbole, Smarthome-Geräteverwaltung, Einbauhöhe, Notizen
+- **Anschlusspunkte (AP)** – 35+ DIN-Symbole, Smarthome-Geräteverwaltung, Einbauhöhe, Notizen und UV-Untertyp
 - **Kabelverbindungen** – Polylinie mit Auto-Snap an APs, Kabeltyp-Verwaltung
+- **Unterverteilungen (UV)** – Rasterbasierte Platzplanung mit Belegung und optionaler Kabel-/Stromkreis-Zuordnung
 - **Automatische Durchnummerierung** – Gleichnamige APs nummerieren
 
 ### Grundrisse & Ansicht
