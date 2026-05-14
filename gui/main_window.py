@@ -4915,7 +4915,7 @@ class MainWindow(QMainWindow):
             for i, r in enumerate(uv_rows):
                 tbl_uv.setItem(i, 0, QTableWidgetItem(r.get("ap", "")))
                 tbl_uv.setItem(i, 1, QTableWidgetItem(r.get("room", "")))
-                tbl_uv.setItem(i, 2, QTableWidgetItem(f"{r.get('rows', 0)}×{r.get('modules_per_row', 0)}"))
+                tbl_uv.setItem(i, 2, QTableWidgetItem(f"{r.get('rows', 0)}x{r.get('modules_per_row', 0)}"))
                 tbl_uv.setItem(i, 3, QTableWidgetItem(str(r.get("row", ""))))
                 tbl_uv.setItem(i, 4, QTableWidgetItem(str(r.get("slot", ""))))
                 tbl_uv.setItem(i, 5, QTableWidgetItem(r.get("device_type", "")))
@@ -6175,7 +6175,7 @@ class MainWindow(QMainWindow):
                 [
                     r.get("ap", ""),
                     r.get("room", ""),
-                    f"{r.get('rows', 0)}×{r.get('modules_per_row', 0)}",
+                    f"{r.get('rows', 0)}x{r.get('modules_per_row', 0)}",
                     str(r.get("row", "")),
                     str(r.get("slot", "")),
                     r.get("device_type", ""),

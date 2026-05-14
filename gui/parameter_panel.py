@@ -586,7 +586,7 @@ class UvConfigDialog(QDialog):
         modules_per_row = self.sb_modules.value()
         slots: list[dict] = []
         for slot in self._capture_current_slots():
-            if any(str(slot.get(key, "") or "").strip() for key in ("device_type", "label", "assignment", "note")):
+            if self._slot_has_content(slot):
                 slots.append(slot)
         return {
             "rows": rows,
@@ -594,6 +594,13 @@ class UvConfigDialog(QDialog):
             "preset": self.cmb_preset.currentText(),
             "slots": slots,
         }
+
+    @staticmethod
+    def _slot_has_content(slot: dict) -> bool:
+        return any(
+            str(slot.get(key, "") or "").strip()
+            for key in ("device_type", "label", "assignment", "note")
+        )
 
 
 # ================================================================== #
