@@ -1811,6 +1811,8 @@ class MainWindow(QMainWindow):
         panel.note_changed.connect(self._on_elec_point_note_changed)
         panel.smarthome_device_changed.connect(self._on_elec_point_smarthome_changed)
         panel.smarthome_device_color_changed.connect(self._on_elec_point_smarthome_color_changed)
+        panel.ap_type_changed.connect(self._on_elec_point_ap_type_changed)
+        panel.uv_config_changed.connect(self._on_elec_point_uv_config_changed)
         return panel
 
     def _on_place_elec_point(self, point_id: str):
@@ -1868,6 +1870,12 @@ class MainWindow(QMainWindow):
     def _on_elec_point_smarthome_color_changed(self, point_id: str, color: str):
         self.canvas._elec_point_smarthome_device_color[point_id] = color
         self._mark_dirty_debounced()
+
+    def _on_elec_point_ap_type_changed(self, point_id: str, ap_type: str):
+        self._mark_dirty()
+
+    def _on_elec_point_uv_config_changed(self, point_id: str):
+        self._mark_dirty()
 
     def _on_elec_visibility_changed(self, item_id: str, visible: bool):
         self.canvas._elec_visible[item_id] = visible
@@ -2395,6 +2403,8 @@ class MainWindow(QMainWindow):
         panel.sb_height.setValue(src.get("height", 30.0) / 10)
         panel.chk_label_visible.setChecked(src.get("label_visible", True))
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
+        panel.set_ap_type(src.get("ap_type", "standard"))
+        panel.set_uv_config(copy.deepcopy(src.get("uv_config") or {}))
         # Position und Höhe kopieren
         pos_idx = panel.cmb_position.findText(src.get("position", "Wand"))
         if pos_idx >= 0:
@@ -3180,6 +3190,8 @@ class MainWindow(QMainWindow):
                 panel.label_visibility_changed.connect(self._on_label_visibility_changed)
                 panel.position_changed.connect(self._on_elec_point_position_changed)
                 panel.height_changed.connect(self._on_elec_point_height_changed)
+                panel.ap_type_changed.connect(self._on_elec_point_ap_type_changed)
+                panel.uv_config_changed.connect(self._on_elec_point_uv_config_changed)
                 values = panel.get_parameters()
                 self.canvas._label_map[pid] = values.get("name", pid)
                 self.canvas._elec_visible[pid] = values.get("visible", True)
@@ -3362,7 +3374,7 @@ class MainWindow(QMainWindow):
         if ptype == "heating":
             return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
         if ptype == "elektro":
-            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos"]
+            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv"]
         return []
 
     def _default_pdf_export_pages(self) -> list[dict]:
@@ -4294,20 +4306,108 @@ class MainWindow(QMainWindow):
     #  Längen-Export                                                       #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _describe_ap_type(params: dict) -> str:
+        if str(params.get("ap_type", "standard") or "").strip().lower() == "uv":
+            return "Unterverteilung (UV)"
+        symbol = (params.get("builtin_symbol") or "").strip()
+        icon_path = (params.get("icon_path") or "").strip()
+
+        if symbol and symbol != "(kein Symbol)":
+            return symbol
+        if icon_path:
+            return Path(icon_path).stem.replace("_", " ").replace("-", " ").strip() or "Eigenes Symbol"
+        return "(kein Symbol)"
+
+    def _collect_point_id_to_room_name(self) -> dict[str, str]:
+        point_id_to_room_name: dict[str, str] = {}
+        for pid in self.param_panel.elec_point_panels:
+            room_name = "(ohne Raum)"
+            point = self.canvas._elec_points.get(pid)
+            point_fp_id = self.param_panel._element_floorplan.get(pid, "")
+            if point is not None:
+                for rid, poly in self.canvas._elec_room_polygons.items():
+                    if len(poly) < 3:
+                        continue
+                    room_fp_id = self.param_panel._element_floorplan.get(rid, "")
+                    if point_fp_id != room_fp_id:
+                        continue
+                    if self.canvas._point_in_polygon(point, poly):
+                        room_panel = self.param_panel.elec_room_panels.get(rid)
+                        room_name = room_panel.get_parameters().get("name", rid) if room_panel else rid
+                        break
+            point_id_to_room_name[pid] = room_name
+        return point_id_to_room_name
+
+    def _collect_uv_rows(self, point_id_to_room_name: dict[str, str] | None = None) -> list[dict]:
+        point_id_to_room_name = point_id_to_room_name or self._collect_point_id_to_room_name()
+        rows: list[dict] = []
+        for pid, panel in self.param_panel.elec_point_panels.items():
+            params = panel.get_parameters()
+            if str(params.get("ap_type", "standard") or "").strip().lower() != "uv":
+                continue
+            uv_config = params.get("uv_config") or {}
+            try:
+                uv_rows = int(uv_config.get("rows", 0) or 0)
+            except (TypeError, ValueError):
+                uv_rows = 0
+            try:
+                uv_modules = int(uv_config.get("modules_per_row", 0) or 0)
+            except (TypeError, ValueError):
+                uv_modules = 0
+            ap_name = (params.get("name") or pid).strip() or pid
+            room_name = point_id_to_room_name.get(pid, "(ohne Raum)")
+            slots = uv_config.get("slots", [])
+            if not isinstance(slots, list):
+                slots = []
+            normalized_slots = sorted(
+                [
+                    {
+                        "row": int(slot.get("row", 0) or 0),
+                        "slot": int(slot.get("slot", 0) or 0),
+                        "device_type": str(slot.get("device_type", "") or "").strip(),
+                        "label": str(slot.get("label", "") or "").strip(),
+                        "assignment": str(slot.get("assignment", "") or "").strip(),
+                        "note": str(slot.get("note", "") or "").strip(),
+                    }
+                    for slot in slots if isinstance(slot, dict)
+                ],
+                key=lambda slot: (slot["row"], slot["slot"]),
+            )
+            if not normalized_slots:
+                rows.append({
+                    "ap": ap_name,
+                    "room": room_name,
+                    "rows": uv_rows,
+                    "modules_per_row": uv_modules,
+                    "row": "",
+                    "slot": "",
+                    "device_type": "",
+                    "label": "",
+                    "assignment": "",
+                    "note": "",
+                })
+                continue
+            for slot in normalized_slots:
+                rows.append({
+                    "ap": ap_name,
+                    "room": room_name,
+                    "rows": uv_rows,
+                    "modules_per_row": uv_modules,
+                    "row": slot["row"],
+                    "slot": slot["slot"],
+                    "device_type": slot["device_type"],
+                    "label": slot["label"],
+                    "assignment": slot["assignment"],
+                    "note": slot["note"],
+                })
+        return rows
+
     def _collect_ap_type_counts(self) -> dict[str, int]:
         counts: dict[str, int] = defaultdict(int)
         for panel in self.param_panel.elec_point_panels.values():
             params = panel.get_parameters()
-            symbol = (params.get("builtin_symbol") or "").strip()
-            icon_path = (params.get("icon_path") or "").strip()
-
-            if symbol and symbol != "(kein Symbol)":
-                type_name = symbol
-            elif icon_path:
-                type_name = Path(icon_path).stem.replace("_", " ").replace("-", " ").strip() or "Eigenes Symbol"
-            else:
-                type_name = "(kein Symbol)"
-
+            type_name = self._describe_ap_type(params)
             counts[type_name] += 1
         return dict(sorted(counts.items(), key=lambda kv: kv[0].lower()))
 
@@ -4484,40 +4584,14 @@ class MainWindow(QMainWindow):
         ap_cables = self._build_ap_cable_map(kv_rows)
         room_ap_connections = self._build_room_ap_connection_map(kv_rows)
         ap_type_counts = self._collect_ap_type_counts()
-
-        point_id_to_room_name: dict[str, str] = {}
-        for pid, panel in self.param_panel.elec_point_panels.items():
-            room_name = "(ohne Raum)"
-            point = self.canvas._elec_points.get(pid)
-            point_fp_id = self.param_panel._element_floorplan.get(pid, "")
-            if point is not None:
-                for rid, poly in self.canvas._elec_room_polygons.items():
-                    if len(poly) < 3:
-                        continue
-                    room_fp_id = self.param_panel._element_floorplan.get(rid, "")
-                    if point_fp_id != room_fp_id:
-                        continue
-                    if self.canvas._point_in_polygon(point, poly):
-                        room_panel = self.param_panel.elec_room_panels.get(rid)
-                        room_name = room_panel.get_parameters().get("name", rid) if room_panel else rid
-                        break
-            point_id_to_room_name[pid] = room_name
+        point_id_to_room_name = self._collect_point_id_to_room_name()
 
         ap_info_rows: list[dict] = []
         for pid, panel in self.param_panel.elec_point_panels.items():
             params = panel.get_parameters()
-            symbol = (params.get("builtin_symbol") or "").strip()
-            icon_path = (params.get("icon_path") or "").strip()
-            if symbol and symbol != "(kein Symbol)":
-                type_name = symbol
-            elif icon_path:
-                type_name = Path(icon_path).stem.replace("_", " ").replace("-", " ").strip() or "Eigenes Symbol"
-            else:
-                type_name = "(kein Symbol)"
-
             ap_info_rows.append({
                 "name": (params.get("name") or pid).strip() or pid,
-                "type": type_name,
+                "type": self._describe_ap_type(params),
                 "room": point_id_to_room_name.get(pid, "(ohne Raum)"),
                 "position": str(self.canvas._elec_point_position.get(pid, "") or "").strip(),
                 "height_cm": float(self.canvas._elec_point_height.get(pid, 0.0) or 0.0),
@@ -4535,18 +4609,9 @@ class MainWindow(QMainWindow):
         ap_rows: list[dict] = []
         for pid, panel in self.param_panel.elec_point_panels.items():
             params = panel.get_parameters()
-            symbol = (params.get("builtin_symbol") or "").strip()
-            icon_path = (params.get("icon_path") or "").strip()
-            if symbol and symbol != "(kein Symbol)":
-                type_name = symbol
-            elif icon_path:
-                type_name = Path(icon_path).stem.replace("_", " ").replace("-", " ").strip() or "Eigenes Symbol"
-            else:
-                type_name = "(kein Symbol)"
-
             ap_rows.append({
                 "name": (params.get("name") or pid).strip() or pid,
-                "type": type_name,
+                "type": self._describe_ap_type(params),
                 "room": point_id_to_room_name.get(pid, "(ohne Raum)"),
                 "position": str(self.canvas._elec_point_position.get(pid, "") or "").strip(),
                 "height_cm": float(self.canvas._elec_point_height.get(pid, 0.0) or 0.0),
@@ -4562,6 +4627,7 @@ class MainWindow(QMainWindow):
                 (r.get("name") or "").lower(),
             ),
         )
+        uv_rows = self._collect_uv_rows(point_id_to_room_name)
 
         # ── HKV-Leitungen sammeln ──
         hl_rows: list[dict] = []
@@ -4836,6 +4902,29 @@ class MainWindow(QMainWindow):
 
         tabs.addTab(apl_widget, "🔎 AP-Infos")
 
+        if uv_rows:
+            uv_widget = QWidget()
+            uv_layout = QVBoxLayout(uv_widget)
+            uv_layout.addWidget(QLabel("<b>Unterverteilungen – Belegung</b>"))
+            tbl_uv = QTableWidget(len(uv_rows), 9)
+            tbl_uv.setHorizontalHeaderLabels(
+                ["UV", "Raum", "Raster", "Reihe", "TE", "Belegung", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
+            )
+            tbl_uv.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            tbl_uv.setEditTriggers(QTableWidget.NoEditTriggers)
+            for i, r in enumerate(uv_rows):
+                tbl_uv.setItem(i, 0, QTableWidgetItem(r.get("ap", "")))
+                tbl_uv.setItem(i, 1, QTableWidgetItem(r.get("room", "")))
+                tbl_uv.setItem(i, 2, QTableWidgetItem(f"{r.get('rows', 0)}×{r.get('modules_per_row', 0)}"))
+                tbl_uv.setItem(i, 3, QTableWidgetItem(str(r.get("row", ""))))
+                tbl_uv.setItem(i, 4, QTableWidgetItem(str(r.get("slot", ""))))
+                tbl_uv.setItem(i, 5, QTableWidgetItem(r.get("device_type", "")))
+                tbl_uv.setItem(i, 6, QTableWidgetItem(r.get("label", "")))
+                tbl_uv.setItem(i, 7, QTableWidgetItem(r.get("assignment", "")))
+                tbl_uv.setItem(i, 8, QTableWidgetItem(r.get("note", "")))
+            uv_layout.addWidget(tbl_uv)
+            tabs.addTab(uv_widget, "🧰 UV")
+
         # -- Tab: Anschlusspunkte Verkabelung --
         ap_widget = QWidget()
         ap_layout = QVBoxLayout(ap_widget)
@@ -4929,7 +5018,7 @@ class MainWindow(QMainWindow):
         btn_csv.clicked.connect(
             lambda: self._save_lengths_csv(hk_rows, hk_sum, kv_rows, kv_sum,
                                            hkv_sum, ap_cables, hl_rows, hl_sum,
-                                           ap_type_counts, room_ap_connections)
+                                           ap_type_counts, room_ap_connections, uv_rows)
         )
         btn_box.addButton(btn_csv, QDialogButtonBox.ActionRole)
         btn_box.addButton(QDialogButtonBox.Close)
@@ -4940,7 +5029,8 @@ class MainWindow(QMainWindow):
 
     def _save_lengths_csv(self, hk_rows, hk_sum, kv_rows, kv_sum, hkv_sum,
                            ap_cables=None, hl_rows=None, hl_sum=None,
-                           ap_type_counts=None, room_ap_connections=None):
+                           ap_type_counts=None, room_ap_connections=None,
+                           uv_rows=None):
         path, _ = QFileDialog.getSaveFileName(
             self, "Längen als CSV speichern", "laengen.csv",
             "CSV (*.csv)")
@@ -5083,6 +5173,26 @@ class MainWindow(QMainWindow):
             lines.append(sep.join(["Typ", "Anzahl"]))
             for type_name in sorted(ap_type_counts.keys()):
                 lines.append(sep.join([type_name, str(ap_type_counts[type_name])]))
+            lines.append("")
+
+        if uv_rows:
+            lines.append("Elektro - Unterverteilungen")
+            lines.append(sep.join([
+                "UV", "Raum", "Raster", "Reihe", "TE", "Belegung",
+                "Bezeichnung", "Kabel/Stromkreis", "Notiz",
+            ]))
+            for row in uv_rows:
+                lines.append(sep.join([
+                    row.get("ap", ""),
+                    row.get("room", ""),
+                    f"{row.get('rows', 0)}x{row.get('modules_per_row', 0)}",
+                    str(row.get("row", "")),
+                    str(row.get("slot", "")),
+                    row.get("device_type", ""),
+                    row.get("label", ""),
+                    row.get("assignment", ""),
+                    row.get("note", ""),
+                ]))
             lines.append("")
 
         # HKV-Leitungen
@@ -5345,40 +5455,14 @@ class MainWindow(QMainWindow):
         ap_cables = self._build_ap_cable_map(kv_rows)
         room_ap_connections = self._build_room_ap_connection_map(kv_rows)
         ap_type_counts = self._collect_ap_type_counts()
-
-        point_id_to_room_name: dict[str, str] = {}
-        for pid, _panel in self.param_panel.elec_point_panels.items():
-            room_name = "(ohne Raum)"
-            point = self.canvas._elec_points.get(pid)
-            point_fp_id = self.param_panel._element_floorplan.get(pid, "")
-            if point is not None:
-                for rid, poly in self.canvas._elec_room_polygons.items():
-                    if len(poly) < 3:
-                        continue
-                    room_fp_id = self.param_panel._element_floorplan.get(rid, "")
-                    if point_fp_id != room_fp_id:
-                        continue
-                    if self.canvas._point_in_polygon(point, poly):
-                        room_panel = self.param_panel.elec_room_panels.get(rid)
-                        room_name = room_panel.get_parameters().get("name", rid) if room_panel else rid
-                        break
-            point_id_to_room_name[pid] = room_name
+        point_id_to_room_name = self._collect_point_id_to_room_name()
 
         ap_info_rows: list[dict] = []
         for pid, panel in self.param_panel.elec_point_panels.items():
             params = panel.get_parameters()
-            symbol = (params.get("builtin_symbol") or "").strip()
-            icon_path = (params.get("icon_path") or "").strip()
-            if symbol and symbol != "(kein Symbol)":
-                type_name = symbol
-            elif icon_path:
-                type_name = Path(icon_path).stem.replace("_", " ").replace("-", " ").strip() or "Eigenes Symbol"
-            else:
-                type_name = "(kein Symbol)"
-
             ap_info_rows.append({
                 "name": (params.get("name") or pid).strip() or pid,
-                "type": type_name,
+                "type": self._describe_ap_type(params),
                 "room": point_id_to_room_name.get(pid, "(ohne Raum)"),
                 "position": str(self.canvas._elec_point_position.get(pid, "") or "").strip(),
                 "height_cm": float(self.canvas._elec_point_height.get(pid, 0.0) or 0.0),
@@ -5391,6 +5475,7 @@ class MainWindow(QMainWindow):
             ap_info_rows,
             key=lambda r: ((r.get("room") or "").lower(), (r.get("name") or "").lower()),
         )
+        uv_rows = self._collect_uv_rows(point_id_to_room_name)
 
         # ── HKV-Leitungen sammeln ──
         hl_rows: list[dict] = []
@@ -5424,6 +5509,7 @@ class MainWindow(QMainWindow):
             "room_ap_connections": room_ap_connections,
             "ap_type_counts": ap_type_counts,
             "ap_info_rows": ap_info_rows,
+            "uv_rows": uv_rows,
             "hl_rows": hl_rows, "hl_sum": hl_sum,
         }
 
@@ -5952,7 +6038,7 @@ class MainWindow(QMainWindow):
         page = ctx.page_rect()
         ctx.stamp(page)
 
-        sections = set(table_sections or ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos"])
+        sections = set(table_sections or ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv"])
 
         title_h = ctx.mm(8)
         ctx.painter.save()
@@ -5987,6 +6073,7 @@ class MainWindow(QMainWindow):
             or ("el_ap_connections" in sections and data.get("ap_cables"))
             or ("el_rooms" in sections and data.get("room_ap_connections"))
             or ("el_ap_infos" in sections and data.get("ap_info_rows"))
+            or ("el_uv" in sections and data.get("uv_rows"))
         )
         if not table_available:
             return
@@ -6077,6 +6164,26 @@ class MainWindow(QMainWindow):
                     r.get("note", ""),
                 ]
                 for r in ap_info_rows
+            ]
+            y_after = ctx.draw_table(page, y_after, headers, rows)
+
+        uv_rows = data.get("uv_rows", [])
+        if "el_uv" in sections and uv_rows:
+            y_after += ctx.mm(4)
+            headers = ["UV", "Raum", "Raster", "Reihe", "TE", "Belegung", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
+            rows = [
+                [
+                    r.get("ap", ""),
+                    r.get("room", ""),
+                    f"{r.get('rows', 0)}×{r.get('modules_per_row', 0)}",
+                    str(r.get("row", "")),
+                    str(r.get("slot", "")),
+                    r.get("device_type", ""),
+                    r.get("label", ""),
+                    r.get("assignment", ""),
+                    r.get("note", ""),
+                ]
+                for r in uv_rows
             ]
             ctx.draw_table(page, y_after, headers, rows)
 

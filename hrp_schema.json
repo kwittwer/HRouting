@@ -105,6 +105,41 @@
       "description": "Bodenbelag mit zugehörigem Wärmeleitwiderstand R_λ,B."
     },
 
+    "ApType": {
+      "type": "string",
+      "enum": ["standard", "uv"],
+      "default": "standard",
+      "description": "Semantischer AP-Typ: Standard-Anschlusspunkt oder Unterverteilung."
+    },
+
+    "UvSlotAssignment": {
+      "type": "object",
+      "required": ["row", "slot"],
+      "properties": {
+        "row": { "type": "integer", "minimum": 1, "description": "Reihe innerhalb der UV." },
+        "slot": { "type": "integer", "minimum": 1, "description": "TE-Position innerhalb der Reihe." },
+        "device_type": { "type": "string", "default": "", "description": "Art der Belegung (z.B. FI, LS, Reserve)." },
+        "label": { "type": "string", "default": "", "description": "Freie Bezeichnung des Platzes." },
+        "assignment": { "type": "string", "default": "", "description": "Optionales Kabel-/Stromkreis-Mapping als Freitext." },
+        "note": { "type": "string", "default": "", "description": "Optionale Notiz zum Platz." }
+      }
+    },
+
+    "UvConfig": {
+      "type": "object",
+      "properties": {
+        "preset": { "type": "string", "default": "Benutzerdefiniert" },
+        "rows": { "type": "integer", "minimum": 1, "default": 2 },
+        "modules_per_row": { "type": "integer", "minimum": 1, "default": 12 },
+        "slots": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/UvSlotAssignment" },
+          "default": []
+        }
+      },
+      "default": {}
+    },
+
     "Canvas": {
       "type": "object",
       "description": "Zustand des Canvas-Widgets: Ansicht, Geometrie, alle gezeichneten Objekte.",
@@ -634,6 +669,7 @@
           "default": "",
           "description": "Name eines Builtin-Symbols (z.B. 'Steckdose', 'Licht'). Leer = kein Symbol."
         },
+        "ap_type": { "$ref": "#/$defs/ApType" },
         "visible": { "type": "boolean", "default": true },
         "label_visible": { "type": "boolean", "default": true },
         "label_size": { "type": "number", "minimum": 1, "default": 12.0 },
@@ -645,7 +681,8 @@
         "height_from_floor": { "type": "number", "minimum": 0, "default": 0.0, "description": "Einbauhöhe vom Boden in cm." },
         "smarthome_device": { "type": "string", "default": "" },
         "smarthome_device_color": { "type": "string", "default": "" },
-        "note": { "type": "string", "default": "" }
+        "note": { "type": "string", "default": "" },
+        "uv_config": { "$ref": "#/$defs/UvConfig" }
       }
     },
 

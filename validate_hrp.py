@@ -93,6 +93,12 @@ def _validate_schema_basic(data: dict) -> list[str]:
             v = params.get(field)
             if v is not None and not isinstance(v, dict):
                 errors.append(f"[Schema] params.{field} muss ein Objekt sein.")
+        elec_points = params.get("elec_points", {})
+        if isinstance(elec_points, dict):
+            for pid, pdata in elec_points.items():
+                uv_config = pdata.get("uv_config")
+                if uv_config is not None and not isinstance(uv_config, dict):
+                    errors.append(f"[Schema] params.elec_points.{pid}.uv_config muss ein Objekt sein.")
 
     return errors
 
@@ -126,6 +132,7 @@ VALID_FLOOR_COVERINGS = {
     "Teppich dünn",
     "Teppich dick",
 }
+VALID_AP_TYPES = {"standard", "uv"}
 
 
 def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
@@ -305,6 +312,92 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
                 f"[Value] circuits.{cid}.floor_covering = '{fc}' "
                 f"ist kein gültiger Bodenbelag."
             )
+
+    for pid, pdata in params.get("elec_points", {}).items():
+        ap_type = str(pdata.get("ap_type", "standard") or "standard").strip().lower()
+        if ap_type not in VALID_AP_TYPES:
+            errors.append(
+                f"[Value] elec_points.{pid}.ap_type = '{pdata.get('ap_type', '')}' "
+                f"ist kein gültiger AP-Typ."
+            )
+
+        uv_config = pdata.get("uv_config")
+        if uv_config is None:
+            continue
+        if not isinstance(uv_config, dict):
+            errors.append(f"[Value] elec_points.{pid}.uv_config muss ein Objekt sein.")
+            continue
+
+        try:
+            rows = int(uv_config.get("rows", 0) or 0)
+            modules_per_row = int(uv_config.get("modules_per_row", 0) or 0)
+        except (TypeError, ValueError):
+            errors.append(
+                f"[Value] elec_points.{pid}.uv_config.rows/modules_per_row müssen Ganzzahlen sein."
+            )
+            continue
+
+        slots = uv_config.get("slots", [])
+        if slots is None:
+            slots = []
+        if not isinstance(slots, list):
+            errors.append(f"[Value] elec_points.{pid}.uv_config.slots muss ein Array sein.")
+            continue
+
+        has_uv_data = rows > 0 or modules_per_row > 0 or len(slots) > 0
+        if has_uv_data and ap_type != "uv":
+            warnings.append(
+                f"[Value] elec_points.{pid}.uv_config ist gesetzt, aber ap_type ist nicht 'uv'."
+            )
+
+        if rows < 0 or modules_per_row < 0:
+            errors.append(
+                f"[Value] elec_points.{pid}.uv_config.rows/modules_per_row dürfen nicht negativ sein."
+            )
+            continue
+        if (rows == 0) ^ (modules_per_row == 0):
+            errors.append(
+                f"[Value] elec_points.{pid}.uv_config benötigt rows und modules_per_row gemeinsam."
+            )
+            continue
+
+        seen_slots: set[tuple[int, int]] = set()
+        for index, slot in enumerate(slots):
+            if not isinstance(slot, dict):
+                errors.append(
+                    f"[Value] elec_points.{pid}.uv_config.slots[{index}] muss ein Objekt sein."
+                )
+                continue
+            try:
+                row_no = int(slot.get("row", 0) or 0)
+                slot_no = int(slot.get("slot", 0) or 0)
+            except (TypeError, ValueError):
+                errors.append(
+                    f"[Value] elec_points.{pid}.uv_config.slots[{index}] benötigt gültige row/slot-Werte."
+                )
+                continue
+            if row_no < 1 or slot_no < 1:
+                errors.append(
+                    f"[Value] elec_points.{pid}.uv_config.slots[{index}] muss row/slot >= 1 haben."
+                )
+                continue
+            if rows and row_no > rows:
+                errors.append(
+                    f"[Value] elec_points.{pid}.uv_config.slots[{index}].row = {row_no} "
+                    f"liegt außerhalb der UV-Reihen ({rows})."
+                )
+            if modules_per_row and slot_no > modules_per_row:
+                errors.append(
+                    f"[Value] elec_points.{pid}.uv_config.slots[{index}].slot = {slot_no} "
+                    f"liegt außerhalb der TE-Anzahl ({modules_per_row})."
+                )
+            key = (row_no, slot_no)
+            if key in seen_slots:
+                errors.append(
+                    f"[Value] elec_points.{pid}.uv_config enthält eine doppelte Belegung für Reihe {row_no}, TE {slot_no}."
+                )
+            else:
+                seen_slots.add(key)
 
     # ── Farbformat prüfen ──
     def _check_color(path: str, value: str):
