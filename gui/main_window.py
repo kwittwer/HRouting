@@ -4307,8 +4307,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     @staticmethod
+    def _is_uv_type(params: dict) -> bool:
+        return str(params.get("ap_type", "standard")).strip().lower() == "uv"
+
+    @staticmethod
     def _describe_ap_type(params: dict) -> str:
-        if str(params.get("ap_type", "standard") or "").strip().lower() == "uv":
+        if MainWindow._is_uv_type(params):
             return "Unterverteilung (UV)"
         symbol = (params.get("builtin_symbol") or "").strip()
         icon_path = (params.get("icon_path") or "").strip()
@@ -4344,7 +4348,7 @@ class MainWindow(QMainWindow):
         rows: list[dict] = []
         for pid, panel in self.param_panel.elec_point_panels.items():
             params = panel.get_parameters()
-            if str(params.get("ap_type", "standard") or "").strip().lower() != "uv":
+            if not self._is_uv_type(params):
                 continue
             uv_config = params.get("uv_config") or {}
             try:

@@ -314,7 +314,7 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
             )
 
     for pid, pdata in params.get("elec_points", {}).items():
-        ap_type = str(pdata.get("ap_type", "standard") or "standard").strip().lower()
+        ap_type = str(pdata.get("ap_type", "standard")).strip().lower()
         if ap_type not in VALID_AP_TYPES:
             errors.append(
                 f"[Value] elec_points.{pid}.ap_type = '{pdata.get('ap_type', '')}' "
@@ -355,7 +355,7 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
                 f"[Value] elec_points.{pid}.uv_config.rows/modules_per_row dürfen nicht negativ sein."
             )
             continue
-        if (rows == 0) ^ (modules_per_row == 0):
+        if (rows == 0) != (modules_per_row == 0):
             errors.append(
                 f"[Value] elec_points.{pid}.uv_config benötigt rows und modules_per_row gemeinsam."
             )

@@ -480,8 +480,8 @@ class UvConfigDialog(QDialog):
             })
         return slots
 
-    def _indexed_slots(self, slots: list[dict], rows: int, modules_per_row: int) -> list[dict]:
-        indexed = [{} for _ in range(rows * modules_per_row)]
+    def _indexed_slots(self, slots: list[dict], rows: int, modules_per_row: int) -> dict[tuple[int, int], dict]:
+        indexed: dict[tuple[int, int], dict] = {}
         for slot in slots:
             try:
                 row_no = int(slot.get("row", 0))
@@ -489,7 +489,7 @@ class UvConfigDialog(QDialog):
             except (TypeError, ValueError):
                 continue
             if 1 <= row_no <= rows and 1 <= slot_no <= modules_per_row:
-                indexed[(row_no - 1) * modules_per_row + (slot_no - 1)] = {
+                indexed[(row_no, slot_no)] = {
                     "row": row_no,
                     "slot": slot_no,
                     "device_type": str(slot.get("device_type", "") or "").strip(),
@@ -507,7 +507,7 @@ class UvConfigDialog(QDialog):
         for row_no in range(1, rows + 1):
             for slot_no in range(1, modules_per_row + 1):
                 idx = (row_no - 1) * modules_per_row + (slot_no - 1)
-                slot = slot_map[idx] if idx < len(slot_map) else {}
+                slot = slot_map.get((row_no, slot_no), {})
 
                 row_item = QTableWidgetItem(str(row_no))
                 row_item.setFlags(row_item.flags() & ~Qt.ItemIsEditable)
@@ -854,7 +854,7 @@ class ElektroPointPanel(QWidget):
         return self._ap_type or "standard"
 
     def set_ap_type(self, ap_type: str):
-        value = "uv" if str(ap_type or "").strip().lower() == "uv" else "standard"
+        value = "uv" if str(ap_type).strip().lower() == "uv" else "standard"
         self._ap_type = value
         idx = self.cmb_ap_type.findData(value)
         if idx < 0:
