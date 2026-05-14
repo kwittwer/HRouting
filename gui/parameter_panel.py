@@ -383,7 +383,7 @@ class HeatingCircuitPanel(QWidget):
 # ================================================================== #
 
 class UvConfigDialog(QDialog):
-    PRESETS: list[tuple[str, tuple[int, int]]] = [
+    UV_PRESETS: list[tuple[str, tuple[int, int]]] = [
         ("1-reihig / 12 TE", (1, 12)),
         ("2-reihig / 12 TE", (2, 12)),
         ("3-reihig / 12 TE", (3, 12)),
@@ -392,7 +392,7 @@ class UvConfigDialog(QDialog):
         ("3-reihig / 18 TE", (3, 18)),
         ("Benutzerdefiniert", (0, 0)),
     ]
-    DEVICE_TYPES: list[str] = [
+    UV_DEVICE_TYPES: list[str] = [
         "",
         "Reserve",
         "FI",
@@ -419,7 +419,7 @@ class UvConfigDialog(QDialog):
 
         form = QFormLayout()
         self.cmb_preset = SafeComboBox()
-        for label, dims in self.PRESETS:
+        for label, dims in self.UV_PRESETS:
             self.cmb_preset.addItem(label, dims)
         self.cmb_preset.currentIndexChanged.connect(self._on_preset_changed)
         form.addRow("Preset:", self.cmb_preset)
@@ -518,7 +518,7 @@ class UvConfigDialog(QDialog):
                 self.tbl_slots.setItem(idx, 1, slot_item)
 
                 cmb_device = SafeComboBox()
-                cmb_device.addItems(self.DEVICE_TYPES)
+                cmb_device.addItems(self.UV_DEVICE_TYPES)
                 cmb_device.setCurrentText(str(slot.get("device_type", "") or "").strip())
                 self.tbl_slots.setCellWidget(idx, 2, cmb_device)
 
@@ -542,10 +542,10 @@ class UvConfigDialog(QDialog):
         self.lbl_summary.setText(f"{rows} Reihen mit je {modules_per_row} TE")
 
     def _preset_index_for_dims(self, rows: int, modules_per_row: int) -> int:
-        for idx, (_label, dims) in enumerate(self.PRESETS):
+        for idx, (_label, dims) in enumerate(self.UV_PRESETS):
             if dims == (rows, modules_per_row):
                 return idx
-        return len(self.PRESETS) - 1
+        return len(self.UV_PRESETS) - 1
 
     def _load_config(self, config: dict):
         rows = int(config.get("rows", 2) or 2)
