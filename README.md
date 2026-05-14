@@ -1,6 +1,6 @@
 # HRouting – Fußbodenheizung und Kabel Planer
 
-Desktop-Anwendung zur Planung von Fußbodenheizungskreisen und elektrischen Kabelverlegungen auf importierten Grundrissen (SVG, PNG, JPG, BMP).
+Desktop-Anwendung zur Planung von Fußbodenheizungskreisen und elektrischen Installationen mit Kabelverlegung und Unterverteilungen auf importierten Grundrissen (SVG, PNG, JPG, BMP).
 
 Entwickelt mit **Python 3** und **PySide6** (Qt for Python).
 
@@ -17,8 +17,8 @@ Entwickelt mit **Python 3** und **PySide6** (Qt for Python).
 ### Elektroplanung
 - **Elektro-Räume** – Raum-Polygone für automatische AP-Zuordnung
 - **Anschlusspunkte (AP)** – 35+ DIN-Symbole, Smarthome-Geräteverwaltung, Einbauhöhe, Notizen und UV-Untertyp
-- **Kabelverbindungen** – Polylinie mit Auto-Snap an APs, Kabeltyp-Verwaltung
-- **Unterverteilungen (UV)** – Rasterbasierte Platzplanung mit Belegung und optionaler Kabel-/Stromkreis-Zuordnung
+- **Kabelverbindungen** – Polylinie für Kabelwege/Verlegung mit Auto-Snap an APs und Kabeltyp-Verwaltung
+- **Unterverteilungen (UV)** – Rasterbasierte Platzplanung für das Unterverteilen mit Belegung und optionaler Kabel-/Stromkreis-Zuordnung
 - **Automatische Durchnummerierung** – Gleichnamige APs nummerieren
 
 ### Grundrisse & Ansicht
@@ -321,7 +321,7 @@ Die vollständige Benutzerdokumentation befindet sich im [Wiki/](Wiki/README.md)
 1. [Erste Schritte](Wiki/01-Erste-Schritte.md) — Installation, Programmstart, Kommandozeile
 2. [Grundriss & Maßstab](Wiki/02-Grundriss-und-Massstab.md) — Multi-Layer-Grundrisse, Einrichtungen, Referenzlinie
 3. [Heizkreise](Wiki/03-Heizkreise.md) — Raumpolygon, Rohrverlauf, Parameter
-4. [Elektroplanung](Wiki/04-Elektroplanung.md) — Räume, APs, Kabel, 35+ Symbole, Smarthome
+4. [Elektroplanung](Wiki/04-Elektroplanung.md) — Räume, APs, Kabelverlegung, Unterverteilungen, 35+ Symbole, Smarthome
 5. [Heizkreisverteiler](Wiki/05-Heizkreisverteiler.md) — HKV, Leitungen
 6. [Ansicht & Raster](Wiki/06-Ansicht-und-Raster.md) — Messen, Export-Rahmen, Text-Annotationen
 7. [Projekt & Export](Wiki/07-Projekt-und-Export.md) — Speichern, PDF/SVG/CSV-Export

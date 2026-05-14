@@ -56,7 +56,7 @@ Die Registrierung verwendet die ProgID `HRouting.Project` und aktualisiert sich 
 1. **Grundriss laden** – Klicken Sie auf **📂 Grundriss laden** und wählen Sie eine SVG-, PNG- oder JPG-Datei.
 2. **Maßstab setzen** – Zeichnen Sie eine Referenzlinie und geben Sie die reale Länge ein.
 3. **Heizkreis anlegen** – Klicken Sie auf **➕ Heizkreis**, zeichnen Sie das Raumpolygon und den Rohrverlauf.
-4. **Elektroplan** (optional) – Platzieren Sie Anschlusspunkte und zeichnen Sie Kabelverbindungen.
+4. **Elektroplan** (optional) – Platzieren Sie Anschlusspunkte, dokumentieren Sie Kabelwege und planen Sie bei Bedarf Unterverteilungen.
 5. **Speichern & Exportieren** – Projekt speichern und als PDF oder SVG exportieren.
 
 ## Letztes Projekt automatisch laden

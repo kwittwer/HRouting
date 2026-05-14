@@ -2,11 +2,12 @@
 
 ## Übersicht
 
-HRouting unterstützt die Planung elektrischer Installationen auf dem Grundriss:
+HRouting unterstützt die Planung elektrischer Installationen auf dem Grundriss – einschließlich Kabelverlegung und Unterverteilungen:
 
 - **Elektro-Räume (Polygon)** – Räume zur Zuordnung und Auswertung von Anschlusspunkten
 - **Anschlusspunkte (AP)** – Steckdosen, Leuchten, Schalter etc.
-- **Kabelverbindungen (KV)** – Leitungen zwischen Anschlusspunkten
+- **Kabelverbindungen (KV)** – Leitungen und Kabelwege zwischen Anschlusspunkten
+- **Unterverteilungen (UV)** – Dokumentation und Platzplanung von Unterverteilungen
 
 ## Elektro-Räume definieren
 
@@ -112,7 +113,7 @@ Folgende Standardsymbole stehen zur Verfügung:
 
 ## Unterverteilung (UV) planen
 
-Ein Anschlusspunkt kann zusätzlich als **Unterverteilung (UV)** markiert werden.
+Ein Anschlusspunkt kann zusätzlich als **Unterverteilung (UV)** markiert werden, um das Unterverteilen direkt im Projekt zu dokumentieren und zu planen.
 
 1. Öffnen Sie den gewünschten AP.
 2. Stellen Sie **AP-Typ** auf **Unterverteilung (UV)**.
@@ -120,7 +121,7 @@ Ein Anschlusspunkt kann zusätzlich als **Unterverteilung (UV)** markiert werden
 4. Wählen Sie ein Preset oder definieren Sie Reihen und TE manuell.
 5. Hinterlegen Sie pro Platz die **Belegung**, eine **Bezeichnung** sowie optional **Kabel/Stromkreis** und **Notiz**.
 
-Die UV-Belegung wird im Projekt gespeichert und in **Projektübersicht**, **CSV** und **PDF-Export** ausgegeben.
+Die UV-Belegung wird im Projekt gespeichert und in **Projektübersicht**, **CSV** und **PDF-Export** ausgegeben. So lassen sich Unterverteilungen mit Belegung, Zuordnungen und Notizen gemeinsam mit den geplanten Kabelwegen dokumentieren.
 
 ## Kabelverbindung zeichnen
 
@@ -130,6 +131,8 @@ Die UV-Belegung wird im Projekt gespeichert und in **Projektübersicht**, **CSV*
 4. Beenden Sie per **Rechtsklick**.
 
 > **Auto-Snap**: Start- und Endpunkt der Kabel werden automatisch am nächstgelegenen Anschlusspunkt eingerastet. Die zugehörigen APs werden in den berechneten Werten angezeigt.
+
+Damit können geplante Verlegewege der Installation direkt im Grundriss nachvollziehbar dokumentiert werden.
 
 ### Kabel bearbeiten
 
