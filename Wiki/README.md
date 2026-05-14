@@ -13,4 +13,4 @@ Willkommen zur Benutzerdokumentation von **HRouting – Fußbodenheizung und Kab
 7. [Projekt & Export](07-Projekt-und-Export.md) — Speichern, Laden, Letzte Projekte, SVG-/PDF-/CSV-Export, Projektübersicht
 8. [Tastatur & Maus](08-Tastatur-und-Maus.md) — Alle Shortcuts, Mausinteraktionen, Kontextmenü, Kopieren/Einfügen, Undo/Redo
 9. [Berechnungen & Formeln](09-Berechnungen.md) — Heizleistung, Volumenstrom, Druckverlust, hydraulischer Abgleich
-10. [MCP-Server (KI-Integration)](10-MCP-Server.md) — KI-Agenten-Anbindung, 42 Tools, Log-Fenster
+10. [MCP-Server (KI-Integration)](10-MCP-Server.md) — KI-Agenten-Anbindung, 44 Tools, Log-Fenster

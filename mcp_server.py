@@ -134,7 +134,8 @@ def _create_mcp(window: MainWindow, bridge):
             "Dateiformat. Verfügbare Tools: Heizkreise (add/modify/delete/"
             "list_circuits, set_circuit_polygon, set_circuit_route, "
             "set_supply_line), Elektropunkte (add/modify/delete/"
-            "list_elec_points), Elektro-Räume (add/modify/delete/"
+            "list_elec_points, configure_uv_distribution, "
+            "clear_uv_distribution), Elektro-Räume (add/modify/delete/"
             "list_elec_rooms), Elektro-Kabel (add/modify/delete/"
             "list_elec_cables), HKV (add/modify/delete/list_hkvs), "
             "HKV-Leitungen (add/modify/delete/list_hkv_lines), "
@@ -255,6 +256,111 @@ def _create_mcp(window: MainWindow, bridge):
         if doc_path.exists():
             return doc_path.read_text(encoding="utf-8")
         return "# Anleitung nicht gefunden"
+
+    def _normalize_ap_type(ap_type: str | None) -> str:
+        value = str(ap_type or "standard").strip().lower()
+        return "uv" if value == "uv" else "standard"
+
+    def _normalize_uv_config(
+        uv_config: dict | None,
+        *,
+        require_layout: bool = False,
+    ) -> dict:
+        if uv_config is None:
+            return {}
+        if not isinstance(uv_config, dict):
+            raise ValueError("uv_config muss ein Objekt sein.")
+        if not uv_config:
+            return {}
+
+        preset = str(
+            uv_config.get("preset", "Benutzerdefiniert")
+            or "Benutzerdefiniert"
+        ).strip() or "Benutzerdefiniert"
+
+        try:
+            rows = int(uv_config.get("rows", 0) or 0)
+            modules_per_row = int(uv_config.get("modules_per_row", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "uv_config.rows und uv_config.modules_per_row "
+                "müssen Ganzzahlen sein."
+            ) from exc
+
+        if rows < 0 or modules_per_row < 0:
+            raise ValueError(
+                "uv_config.rows und uv_config.modules_per_row "
+                "dürfen nicht negativ sein."
+            )
+        if bool(rows) != bool(modules_per_row):
+            raise ValueError(
+                "uv_config.rows und uv_config.modules_per_row "
+                "müssen gemeinsam gesetzt werden."
+            )
+        if require_layout and (rows < 1 or modules_per_row < 1):
+            raise ValueError(
+                "Für eine UV-Konfiguration müssen rows und "
+                "modules_per_row >= 1 sein."
+            )
+
+        slots_raw = uv_config.get("slots", [])
+        if slots_raw is None:
+            slots_raw = []
+        if not isinstance(slots_raw, list):
+            raise ValueError("uv_config.slots muss ein Array sein.")
+
+        seen_slots: set[tuple[int, int]] = set()
+        slots: list[dict] = []
+        for index, slot in enumerate(slots_raw):
+            if not isinstance(slot, dict):
+                raise ValueError(
+                    f"uv_config.slots[{index}] muss ein Objekt sein."
+                )
+            try:
+                row_no = int(slot.get("row", 0) or 0)
+                slot_no = int(slot.get("slot", 0) or 0)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"uv_config.slots[{index}] benötigt gültige "
+                    "row/slot-Werte."
+                ) from exc
+            if row_no < 1 or slot_no < 1:
+                raise ValueError(
+                    f"uv_config.slots[{index}] muss row/slot >= 1 haben."
+                )
+            if rows and row_no > rows:
+                raise ValueError(
+                    f"uv_config.slots[{index}].row = {row_no} liegt "
+                    f"außerhalb der UV-Reihen ({rows})."
+                )
+            if modules_per_row and slot_no > modules_per_row:
+                raise ValueError(
+                    f"uv_config.slots[{index}].slot = {slot_no} liegt "
+                    f"außerhalb der TE-Anzahl ({modules_per_row})."
+                )
+            key = (row_no, slot_no)
+            if key in seen_slots:
+                raise ValueError(
+                    f"uv_config enthält eine doppelte Belegung für "
+                    f"Reihe {row_no}, TE {slot_no}."
+                )
+            seen_slots.add(key)
+            slots.append({
+                "row": row_no,
+                "slot": slot_no,
+                "device_type": str(slot.get("device_type", "") or "").strip(),
+                "label": str(slot.get("label", "") or "").strip(),
+                "assignment": str(slot.get("assignment", "") or "").strip(),
+                "note": str(slot.get("note", "") or "").strip(),
+            })
+
+        slots.sort(key=lambda entry: (entry["row"], entry["slot"]))
+        return {
+            "preset": preset,
+            "rows": rows,
+            "modules_per_row": modules_per_row,
+            "slots": slots,
+        }
 
     # ── Lese-Tools ─────────────────────────────────────────────────
 
@@ -536,6 +642,8 @@ def _create_mcp(window: MainWindow, bridge):
         smarthome_device: str = "",
         smarthome_device_color: str = "",
         note: str = "",
+        ap_type: str = "standard",
+        uv_config: dict | None = None,
     ) -> dict:
         """Elektro-Anschlusspunkt platzieren.
 
@@ -564,6 +672,9 @@ def _create_mcp(window: MainWindow, bridge):
             smarthome_device: z.B. 'Shelly'
             smarthome_device_color: z.B. 'weiß'
             note: Freitext-Notiz
+            ap_type: AP-Typ – 'standard' oder 'uv'
+            uv_config: Optionale UV-Belegung als Objekt mit preset, rows,
+                modules_per_row und slots[]
         """
         def _add():
             from PySide6.QtCore import QPointF
@@ -572,6 +683,10 @@ def _create_mcp(window: MainWindow, bridge):
             w = window
             w._elec_point_counter += 1
             pid = f"AP-{w._elec_point_counter}"
+            effective_ap_type = _normalize_ap_type(ap_type)
+            normalized_uv_config = _normalize_uv_config(uv_config)
+            if normalized_uv_config:
+                effective_ap_type = "uv"
 
             panel = w._create_elec_point_panel(
                 pid, fp_id=floor_plan_id or None, name=name)
@@ -609,6 +724,8 @@ def _create_mcp(window: MainWindow, bridge):
                 "smarthome_device": smarthome_device,
                 "smarthome_device_color": smarthome_device_color,
                 "note": note,
+                "ap_type": effective_ap_type,
+                "uv_config": normalized_uv_config,
             })
 
             # Builtin-Symbol laden
@@ -642,7 +759,10 @@ def _create_mcp(window: MainWindow, bridge):
         position: str | None = None,
         height_from_floor: float | None = None,
         smarthome_device: str | None = None,
+        smarthome_device_color: str | None = None,
         note: str | None = None,
+        ap_type: str | None = None,
+        uv_config: dict | None = None,
         visible: bool | None = None,
     ) -> dict:
         """Parameter eines Elektro-Anschlusspunkts ändern.
@@ -658,7 +778,11 @@ def _create_mcp(window: MainWindow, bridge):
             position: Neuer Einbauort
             height_from_floor: Neue Einbauhöhe in cm
             smarthome_device: Neues Smarthome-Gerät
+            smarthome_device_color: Neue Gerätefarbe
             note: Neue Notiz
+            ap_type: Neuer AP-Typ – 'standard' oder 'uv'
+            uv_config: Neue UV-Belegung als vollständiges Objekt;
+                übergib {} zum Leeren
             visible: Sichtbarkeit
         """
         def _modify():
@@ -702,9 +826,20 @@ def _create_mcp(window: MainWindow, bridge):
                 panel.set_smarthome_device_text(smarthome_device)
                 window.canvas._elec_point_smarthome_device[point_id] = (
                     smarthome_device)
+            if smarthome_device_color is not None:
+                panel.set_smarthome_device_color_text(smarthome_device_color)
+                window.canvas._elec_point_smarthome_device_color[point_id] = (
+                    smarthome_device_color)
             if note is not None:
                 panel.te_note.setPlainText(note)
                 window.canvas._elec_point_notes[point_id] = note
+            if ap_type is not None:
+                panel.set_ap_type(ap_type)
+            if uv_config is not None:
+                normalized_uv_config = _normalize_uv_config(uv_config)
+                panel.set_uv_config(normalized_uv_config)
+                if normalized_uv_config and ap_type is None:
+                    panel.set_ap_type("uv")
             if visible is not None:
                 panel.chk_visible.setChecked(visible)
                 window.canvas._elec_visible[point_id] = visible
@@ -739,6 +874,85 @@ def _create_mcp(window: MainWindow, bridge):
             return {"point_id": point_id, "status": "deleted"}
 
         return invoke(_delete)
+
+    @mcp.tool()
+    def configure_uv_distribution(
+        point_id: str,
+        rows: int,
+        modules_per_row: int,
+        slots: list[dict] | None = None,
+        preset: str = "Benutzerdefiniert",
+    ) -> dict:
+        """UV-/Verteilungsbelegung eines Anschlusspunkts setzen.
+
+        Args:
+            point_id: ID des Anschlusspunkts (z.B. 'AP-1')
+            rows: Anzahl Reihen in der UV
+            modules_per_row: Teilungseinheiten pro Reihe
+            slots: Liste der Belegungen mit row, slot, device_type,
+                label, assignment und note
+            preset: Preset-Name (z.B. '2-reihig / 12 TE')
+        """
+        def _configure():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {
+                    "error": f"Anschlusspunkt '{point_id}' "
+                             f"nicht gefunden."}
+
+            normalized_uv_config = _normalize_uv_config({
+                "preset": preset,
+                "rows": rows,
+                "modules_per_row": modules_per_row,
+                "slots": slots or [],
+            }, require_layout=True)
+            panel.set_ap_type("uv")
+            panel.set_uv_config(normalized_uv_config)
+
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            return {
+                "point_id": point_id,
+                "status": "configured",
+                "uv_config": normalized_uv_config,
+            }
+
+        return invoke(_configure)
+
+    @mcp.tool()
+    def clear_uv_distribution(
+        point_id: str,
+        reset_ap_type: bool = False,
+    ) -> dict:
+        """UV-/Verteilungsbelegung eines Anschlusspunkts leeren.
+
+        Args:
+            point_id: ID des Anschlusspunkts (z.B. 'AP-1')
+            reset_ap_type: Setzt den AP-Typ zusätzlich auf 'standard'
+        """
+        def _clear():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {
+                    "error": f"Anschlusspunkt '{point_id}' "
+                             f"nicht gefunden."}
+
+            panel.set_uv_config({})
+            if reset_ap_type:
+                panel.set_ap_type("standard")
+
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            return {
+                "point_id": point_id,
+                "status": "cleared",
+                "ap_type": panel.get_ap_type(),
+                "uv_config": {},
+            }
+
+        return invoke(_clear)
 
     # ── HKV-Tools ──────────────────────────────────────────────────
 
