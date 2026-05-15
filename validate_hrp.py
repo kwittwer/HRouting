@@ -99,6 +99,11 @@ def _validate_schema_basic(data: dict) -> list[str]:
                 uv_config = pdata.get("uv_config")
                 if uv_config is not None and not isinstance(uv_config, dict):
                     errors.append(f"[Schema] params.elec_points.{pid}.uv_config muss ein Objekt sein.")
+                up_config = pdata.get("up_distribution_config")
+                if up_config is not None and not isinstance(up_config, dict):
+                    errors.append(
+                        f"[Schema] params.elec_points.{pid}.up_distribution_config muss ein Objekt sein."
+                    )
 
     return errors
 
@@ -132,7 +137,7 @@ VALID_FLOOR_COVERINGS = {
     "Teppich dünn",
     "Teppich dick",
 }
-VALID_AP_TYPES = {"standard", "uv"}
+VALID_AP_TYPES = {"standard", "uv", "up_distribution"}
 
 
 def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
@@ -323,11 +328,21 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
 
         uv_config = pdata.get("uv_config")
         if uv_config is None:
-            continue
+            uv_config = {}
         if not isinstance(uv_config, dict):
             errors.append(f"[Value] elec_points.{pid}.uv_config muss ein Objekt sein.")
-            continue
+            uv_config = {}
 
+        up_config = pdata.get("up_distribution_config")
+        if up_config is None:
+            up_config = {}
+        if not isinstance(up_config, dict):
+            errors.append(
+                f"[Value] elec_points.{pid}.up_distribution_config muss ein Objekt sein."
+            )
+            up_config = {}
+
+        # UV-Konfiguration prüfen
         try:
             rows = int(uv_config.get("rows", 0) or 0)
             modules_per_row = int(uv_config.get("modules_per_row", 0) or 0)
@@ -335,14 +350,15 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
             errors.append(
                 f"[Value] elec_points.{pid}.uv_config.rows/modules_per_row müssen Ganzzahlen sein."
             )
-            continue
+            rows = 0
+            modules_per_row = 0
 
         slots = uv_config.get("slots", [])
         if slots is None:
             slots = []
         if not isinstance(slots, list):
             errors.append(f"[Value] elec_points.{pid}.uv_config.slots muss ein Array sein.")
-            continue
+            slots = []
 
         has_uv_data = rows > 0 or modules_per_row > 0 or len(slots) > 0
         if has_uv_data and ap_type != "uv":
@@ -354,12 +370,10 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
             errors.append(
                 f"[Value] elec_points.{pid}.uv_config.rows/modules_per_row dürfen nicht negativ sein."
             )
-            continue
-        if bool(rows) != bool(modules_per_row):
+        elif bool(rows) != bool(modules_per_row):
             errors.append(
                 f"[Value] elec_points.{pid}.uv_config benötigt rows und modules_per_row gemeinsam."
             )
-            continue
 
         seen_slots: set[tuple[int, int]] = set()
         for index, slot in enumerate(slots):
@@ -398,6 +412,91 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
                 )
             else:
                 seen_slots.add(key)
+
+        # Unterputzdosen-Verteilung prüfen
+        incoming_cable_id = str(up_config.get("incoming_cable_id", "") or "").strip()
+        outgoing_raw = up_config.get("outgoing_cable_ids", [])
+        mappings_raw = up_config.get("mappings", [])
+        note = str(up_config.get("note", "") or "").strip()
+
+        if outgoing_raw is None:
+            outgoing_raw = []
+        if not isinstance(outgoing_raw, list):
+            errors.append(
+                f"[Value] elec_points.{pid}.up_distribution_config.outgoing_cable_ids muss ein Array sein."
+            )
+            outgoing_raw = []
+        outgoing: list[str] = []
+        for index, cable_id in enumerate(outgoing_raw):
+            text = str(cable_id or "").strip()
+            if not text:
+                warnings.append(
+                    f"[Value] elec_points.{pid}.up_distribution_config.outgoing_cable_ids[{index}] ist leer."
+                )
+                continue
+            if text in outgoing:
+                warnings.append(
+                    f"[Value] elec_points.{pid}.up_distribution_config.outgoing_cable_ids enthält '{text}' mehrfach."
+                )
+                continue
+            outgoing.append(text)
+
+        if mappings_raw is None:
+            mappings_raw = []
+        if not isinstance(mappings_raw, list):
+            errors.append(
+                f"[Value] elec_points.{pid}.up_distribution_config.mappings muss ein Array sein."
+            )
+            mappings_raw = []
+
+        has_up_data = bool(incoming_cable_id) or bool(outgoing) or bool(mappings_raw) or bool(note)
+        if has_up_data and ap_type != "up_distribution":
+            warnings.append(
+                f"[Value] elec_points.{pid}.up_distribution_config ist gesetzt, aber ap_type ist nicht 'up_distribution'."
+            )
+        if has_up_data and has_uv_data:
+            errors.append(
+                f"[Value] elec_points.{pid} hat gleichzeitig uv_config und up_distribution_config gesetzt."
+            )
+        if has_up_data and not incoming_cable_id:
+            errors.append(
+                f"[Value] elec_points.{pid}.up_distribution_config benötigt incoming_cable_id."
+            )
+        if incoming_cable_id and incoming_cable_id in outgoing:
+            errors.append(
+                f"[Value] elec_points.{pid}.up_distribution_config.outgoing_cable_ids enthält die Zuleitung '{incoming_cable_id}'."
+            )
+
+        seen_mapping_keys: set[tuple[str, str, str]] = set()
+        for index, mapping in enumerate(mappings_raw):
+            if not isinstance(mapping, dict):
+                errors.append(
+                    f"[Value] elec_points.{pid}.up_distribution_config.mappings[{index}] muss ein Objekt sein."
+                )
+                continue
+            from_conductor = str(mapping.get("from_conductor", "") or "").strip()
+            to_cable_id = str(mapping.get("to_cable_id", "") or "").strip()
+            to_conductor = str(mapping.get("to_conductor", "") or "").strip()
+            if not from_conductor or not to_cable_id or not to_conductor:
+                errors.append(
+                    f"[Value] elec_points.{pid}.up_distribution_config.mappings[{index}] benötigt from_conductor, to_cable_id und to_conductor."
+                )
+                continue
+            if incoming_cable_id and to_cable_id == incoming_cable_id:
+                errors.append(
+                    f"[Value] elec_points.{pid}.up_distribution_config.mappings[{index}] verwendet die Zuleitung auch als Abgang."
+                )
+            if outgoing and to_cable_id not in outgoing:
+                warnings.append(
+                    f"[Value] elec_points.{pid}.up_distribution_config.mappings[{index}].to_cable_id = '{to_cable_id}' ist nicht in outgoing_cable_ids enthalten."
+                )
+            map_key = (from_conductor, to_cable_id, to_conductor)
+            if map_key in seen_mapping_keys:
+                warnings.append(
+                    f"[Value] elec_points.{pid}.up_distribution_config enthält die Zuordnung {from_conductor}->{to_cable_id}:{to_conductor} mehrfach."
+                )
+            else:
+                seen_mapping_keys.add(map_key)
 
     # ── Farbformat prüfen ──
     def _check_color(path: str, value: str):

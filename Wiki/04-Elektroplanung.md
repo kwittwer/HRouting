@@ -122,6 +122,19 @@ Ein Anschlusspunkt kann zusätzlich als **Unterverteilung (UV)** markiert werden
 
 Die UV-Belegung wird im Projekt gespeichert und in **Projektübersicht**, **CSV** und **PDF-Export** ausgegeben.
 
+## Verteilung in Unterputzdose planen
+
+Ein Anschlusspunkt kann als **Verteilung in Unterputzdose** geführt werden.
+
+1. Öffnen Sie den gewünschten AP.
+2. Stellen Sie **AP-Typ** auf **Verteilung in Unterputzdose**.
+3. Klicken Sie auf **Verteilung in Unterputzdose…**.
+4. Wählen Sie die **Zuleitung**.
+5. Legen Sie in der Zuordnungstabelle fest, welche **Ader der Zuleitung** auf welches **abgehende Kabel** und welche **Ader im Abgang** geführt wird.
+6. Optional können Sie je Zuordnung eine Notiz ergänzen.
+
+Die Zuordnung wird als strukturierte Daten im Projekt gespeichert und kann über den MCP-Server automatisiert gesetzt oder ausgelesen werden. Außerdem wird sie in **Projektübersicht**, **CSV** und **PDF-Export** ausgegeben.
+
 ## Kabelverbindung zeichnen
 
 1. Klicken Sie auf **➕ Kabel** in der Seitenleiste.

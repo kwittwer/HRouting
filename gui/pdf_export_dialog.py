@@ -45,6 +45,7 @@ class PdfExportConfigDialog(QDialog):
         "el_rooms": "Räume – AP und Kabelziele",
         "el_ap_infos": "AP-Infos",
         "el_uv": "Unterverteilungen",
+        "el_up_distribution": "Verteilung in Unterputzdose",
     }
 
     def __init__(
@@ -255,7 +256,7 @@ class PdfExportConfigDialog(QDialog):
         if ptype == "heating":
             return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
         if ptype == "elektro":
-            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv"]
+            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv", "el_up_distribution"]
         return []
 
     @staticmethod
@@ -263,7 +264,7 @@ class PdfExportConfigDialog(QDialog):
         if ptype == "heating":
             return {"hk_lengths", "hk_hydraulics", "hk_hkv_lines"}
         if ptype == "elektro":
-            return {"el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv"}
+            return {"el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv", "el_up_distribution"}
         return set()
 
     def _load_pages_into_tree(self):

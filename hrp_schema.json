@@ -107,9 +107,9 @@
 
     "ApType": {
       "type": "string",
-      "enum": ["standard", "uv"],
+      "enum": ["standard", "uv", "up_distribution"],
       "default": "standard",
-      "description": "Semantischer AP-Typ: Standard-Anschlusspunkt oder Unterverteilung."
+      "description": "Semantischer AP-Typ: Standard-Anschlusspunkt, Unterverteilung oder Verteilung in Unterputzdose."
     },
 
     "UvSlotAssignment": {
@@ -136,6 +136,37 @@
           "items": { "$ref": "#/$defs/UvSlotAssignment" },
           "default": []
         }
+      },
+      "default": {}
+    },
+
+    "UpConductorMapping": {
+      "type": "object",
+      "required": ["from_conductor", "to_cable_id", "to_conductor"],
+      "properties": {
+        "from_conductor": { "type": "string", "description": "Ader auf der Zuleitung (z.B. L1, N, PE)." },
+        "to_cable_id": { "type": "string", "description": "ID des abgehenden Kabels (z.B. 'KV-2')." },
+        "to_conductor": { "type": "string", "description": "Ader auf dem abgehenden Kabel." },
+        "note": { "type": "string", "default": "", "description": "Optionale Notiz zur Zuordnung." }
+      }
+    },
+
+    "UpDistributionConfig": {
+      "type": "object",
+      "properties": {
+        "incoming_cable_id": { "type": "string", "default": "", "description": "ID des einspeisenden Kabels an der Unterputzdose." },
+        "outgoing_cable_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Liste der abgehenden Kabel-IDs."
+        },
+        "mappings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/UpConductorMapping" },
+          "default": []
+        },
+        "note": { "type": "string", "default": "", "description": "Optionale Notiz zur Verteilung." }
       },
       "default": {}
     },
@@ -682,7 +713,8 @@
         "smarthome_device": { "type": "string", "default": "" },
         "smarthome_device_color": { "type": "string", "default": "" },
         "note": { "type": "string", "default": "" },
-        "uv_config": { "$ref": "#/$defs/UvConfig" }
+        "uv_config": { "$ref": "#/$defs/UvConfig" },
+        "up_distribution_config": { "$ref": "#/$defs/UpDistributionConfig" }
       }
     },
 

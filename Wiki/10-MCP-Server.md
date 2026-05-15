@@ -96,7 +96,7 @@ Das Log-Fenster schließt sich automatisch, wenn das Hauptprogramm beendet wird.
 | `set_circuit_route` | Manuellen Rohrverlauf setzen/aktualisieren |
 | `set_supply_line` | Zuleitung setzen/aktualisieren (inkl. HKV-Zuordnung) |
 
-### Elektro-Punkt-Tools (5)
+### Elektro-Punkt-Tools (7)
 
 | Tool | Beschreibung |
 |------|-------------|
@@ -105,6 +105,8 @@ Das Log-Fenster schließt sich automatisch, wenn das Hauptprogramm beendet wird.
 | `delete_elec_point` | Anschlusspunkt löschen |
 | `configure_uv_distribution` | UV-/Verteilungsraster und Belegung für einen AP setzen |
 | `clear_uv_distribution` | UV-/Verteilungsbelegung eines AP leeren |
+| `configure_up_distribution` | Aderzuordnung für Verteilung in Unterputzdose eines AP setzen |
+| `clear_up_distribution` | Aderzuordnung für Verteilung in Unterputzdose eines AP leeren |
 
 ### Elektro-Raum-Tools (3)
 

@@ -31,6 +31,7 @@ Verfügbare Tools:
 - `list_circuits` / `add_circuit` / `modify_circuit` / `delete_circuit`
 - `list_elec_points` / `add_elec_point` / `modify_elec_point` / `delete_elec_point`
 - `configure_uv_distribution` / `clear_uv_distribution`
+- `configure_up_distribution` / `clear_up_distribution`
 - `list_hkvs` / `add_hkv` / `delete_hkv`
 - `calculate_heating` / `calculate_all_circuits`
 - `set_heating_params`

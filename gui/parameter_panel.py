@@ -605,6 +605,151 @@ class UvConfigDialog(QDialog):
         )
 
 
+class UpDistributionDialog(QDialog):
+    DEFAULT_CONDUCTORS: list[str] = [
+        "L1", "L2", "L3", "N", "PE", "L", "S1", "S2",
+    ]
+
+    def __init__(
+        self,
+        config: dict | None = None,
+        cable_choices: list[tuple[str, str]] | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Verteilung in Unterputzdose")
+        self.resize(900, 560)
+        self._cable_choices = list(cable_choices or [])
+        self._build_ui()
+        self._load_config(config or {})
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+
+        form = QFormLayout()
+        self.cmb_incoming = SafeComboBox()
+        self.cmb_incoming.setEditable(False)
+        self.cmb_incoming.addItem("", "")
+        for cable_id, cable_name in self._cable_choices:
+            text = cable_name if cable_name else cable_id
+            self.cmb_incoming.addItem(f"{text} ({cable_id})", cable_id)
+        form.addRow("Zuleitung:", self.cmb_incoming)
+
+        self.le_note = QLineEdit()
+        self.le_note.setPlaceholderText("Optionale Notiz zur Verteilung")
+        form.addRow("Notiz:", self.le_note)
+        root.addLayout(form)
+
+        self.tbl_map = QTableWidget(0, 4)
+        self.tbl_map.setHorizontalHeaderLabels(
+            ["Ader (Zuleitung)", "Abgehendes Kabel", "Ader (Abgang)", "Notiz"]
+        )
+        self.tbl_map.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_map.verticalHeader().setVisible(False)
+        root.addWidget(self.tbl_map, stretch=1)
+
+        row_buttons = QHBoxLayout()
+        self.btn_add_row = QPushButton("Zeile hinzufügen")
+        self.btn_add_row.clicked.connect(self._add_mapping_row)
+        row_buttons.addWidget(self.btn_add_row)
+        self.btn_remove_row = QPushButton("Gewählte Zeile entfernen")
+        self.btn_remove_row.clicked.connect(self._remove_selected_rows)
+        row_buttons.addWidget(self.btn_remove_row)
+        row_buttons.addStretch(1)
+        root.addLayout(row_buttons)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _add_mapping_row(self, mapping: dict | None = None):
+        mapping = mapping or {}
+        row_idx = self.tbl_map.rowCount()
+        self.tbl_map.insertRow(row_idx)
+
+        cmb_from = SafeComboBox()
+        cmb_from.setEditable(True)
+        cmb_from.addItems(self.DEFAULT_CONDUCTORS)
+        cmb_from.setCurrentText(str(mapping.get("from_conductor", "") or "").strip())
+        self.tbl_map.setCellWidget(row_idx, 0, cmb_from)
+
+        cmb_cable = SafeComboBox()
+        cmb_cable.setEditable(False)
+        cmb_cable.addItem("", "")
+        for cable_id, cable_name in self._cable_choices:
+            text = cable_name if cable_name else cable_id
+            cmb_cable.addItem(f"{text} ({cable_id})", cable_id)
+        to_cable_id = str(mapping.get("to_cable_id", "") or "").strip()
+        if to_cable_id:
+            idx = cmb_cable.findData(to_cable_id)
+            if idx >= 0:
+                cmb_cable.setCurrentIndex(idx)
+        self.tbl_map.setCellWidget(row_idx, 1, cmb_cable)
+
+        cmb_to = SafeComboBox()
+        cmb_to.setEditable(True)
+        cmb_to.addItems(self.DEFAULT_CONDUCTORS)
+        cmb_to.setCurrentText(str(mapping.get("to_conductor", "") or "").strip())
+        self.tbl_map.setCellWidget(row_idx, 2, cmb_to)
+
+        note_item = QTableWidgetItem(str(mapping.get("note", "") or "").strip())
+        self.tbl_map.setItem(row_idx, 3, note_item)
+
+    def _remove_selected_rows(self):
+        rows = sorted({i.row() for i in self.tbl_map.selectedIndexes()}, reverse=True)
+        for row_idx in rows:
+            self.tbl_map.removeRow(row_idx)
+
+    def _capture_mappings(self) -> list[dict]:
+        rows: list[dict] = []
+        for row_idx in range(self.tbl_map.rowCount()):
+            cmb_from = self.tbl_map.cellWidget(row_idx, 0)
+            cmb_cable = self.tbl_map.cellWidget(row_idx, 1)
+            cmb_to = self.tbl_map.cellWidget(row_idx, 2)
+            note_item = self.tbl_map.item(row_idx, 3)
+            entry = {
+                "from_conductor": cmb_from.currentText().strip() if isinstance(cmb_from, QComboBox) else "",
+                "to_cable_id": str(cmb_cable.currentData() or "").strip() if isinstance(cmb_cable, QComboBox) else "",
+                "to_conductor": cmb_to.currentText().strip() if isinstance(cmb_to, QComboBox) else "",
+                "note": note_item.text().strip() if note_item else "",
+            }
+            if entry["from_conductor"] or entry["to_cable_id"] or entry["to_conductor"] or entry["note"]:
+                rows.append(entry)
+        return rows
+
+    def _load_config(self, config: dict):
+        incoming = str(config.get("incoming_cable_id", "") or "").strip()
+        if incoming:
+            idx = self.cmb_incoming.findData(incoming)
+            if idx >= 0:
+                self.cmb_incoming.setCurrentIndex(idx)
+        self.le_note.setText(str(config.get("note", "") or "").strip())
+
+        mappings = config.get("mappings", [])
+        if isinstance(mappings, list):
+            for mapping in mappings:
+                if isinstance(mapping, dict):
+                    self._add_mapping_row(mapping)
+        if self.tbl_map.rowCount() == 0:
+            self._add_mapping_row()
+
+    def get_config(self) -> dict:
+        incoming_cable_id = str(self.cmb_incoming.currentData() or "").strip()
+        mappings = self._capture_mappings()
+        outgoing: list[str] = []
+        for mapping in mappings:
+            cable_id = str(mapping.get("to_cable_id", "") or "").strip()
+            if cable_id and cable_id not in outgoing:
+                outgoing.append(cable_id)
+        return {
+            "incoming_cable_id": incoming_cable_id,
+            "outgoing_cable_ids": outgoing,
+            "mappings": mappings,
+            "note": self.le_note.text().strip(),
+        }
+
+
 # ================================================================== #
 #  Elektro: Anschlusspunkt Panel                                       #
 # ================================================================== #
@@ -627,6 +772,7 @@ class ElektroPointPanel(QWidget):
     smarthome_device_color_changed = Signal(str, str)
     ap_type_changed    = Signal(str, str)
     uv_config_changed  = Signal(str)
+    up_distribution_changed = Signal(str)
 
     def __init__(self, point_id: str, name: str | None = None,
                  color: str | None = None, parent=None):
@@ -638,6 +784,8 @@ class ElektroPointPanel(QWidget):
         self._ap_type = "standard"
         self._uv_config: dict = {}
         self._uv_cable_choices: list[str] = []
+        self._up_distribution_config: dict = {}
+        self._up_cable_choices: list[tuple[str, str]] = []
         self._build_ui()
 
     def _build_ui(self):
@@ -702,12 +850,17 @@ class ElektroPointPanel(QWidget):
         self.cmb_ap_type = SafeComboBox()
         self.cmb_ap_type.addItem("Standard", "standard")
         self.cmb_ap_type.addItem("Unterverteilung (UV)", "uv")
+        self.cmb_ap_type.addItem("Verteilung in Unterputzdose", "up_distribution")
         self.cmb_ap_type.currentIndexChanged.connect(self._on_ap_type_changed)
         form.addRow("AP-Typ:", self.cmb_ap_type)
 
         self.btn_uv_plan = QPushButton("🗂️ UV planen…")
         self.btn_uv_plan.clicked.connect(self._open_uv_dialog)
         form.addRow(self.btn_uv_plan)
+
+        self.btn_up_distribution = QPushButton("Verteilung in Unterputzdose…")
+        self.btn_up_distribution.clicked.connect(self._open_up_distribution_dialog)
+        form.addRow(self.btn_up_distribution)
 
         self.sb_label_size = SafeDoubleSpinBox()
         self.sb_label_size.setRange(0.1, 999999.0)
@@ -845,19 +998,40 @@ class ElektroPointPanel(QWidget):
     def _on_ap_type_changed(self):
         data = self.cmb_ap_type.currentData()
         self._ap_type = str(data or "standard")
+        if self._ap_type == "uv":
+            self._up_distribution_config = {}
+        elif self._ap_type == "up_distribution":
+            self._uv_config = {}
+        else:
+            self._uv_config = {}
+            self._up_distribution_config = {}
         self._update_uv_controls()
         self.ap_type_changed.emit(self.point_id, self._ap_type)
 
     def _update_uv_controls(self):
-        is_uv = self.get_ap_type() == "uv"
-        self.btn_uv_plan.setVisible(is_uv)
+        ap_type = self.get_ap_type()
+        self.btn_uv_plan.setVisible(ap_type == "uv")
+        self.btn_up_distribution.setVisible(ap_type == "up_distribution")
 
     def get_ap_type(self) -> str:
         return self._ap_type or "standard"
 
     def set_ap_type(self, ap_type: str):
-        value = "uv" if str(ap_type).strip().lower() == "uv" else "standard"
+        raw = str(ap_type).strip().lower()
+        if raw == "uv":
+            value = "uv"
+        elif raw in {"up_distribution", "up", "unterputzdose", "verteilung_in_unterputzdose"}:
+            value = "up_distribution"
+        else:
+            value = "standard"
         self._ap_type = value
+        if value == "uv":
+            self._up_distribution_config = {}
+        elif value == "up_distribution":
+            self._uv_config = {}
+        else:
+            self._uv_config = {}
+            self._up_distribution_config = {}
         idx = self.cmb_ap_type.findData(value)
         if idx < 0:
             idx = 0
@@ -877,6 +1051,23 @@ class ElektroPointPanel(QWidget):
                 merged.append(text)
         self._uv_cable_choices = merged
 
+    def set_up_distribution_config(self, config: dict | None):
+        self._up_distribution_config = copy.deepcopy(config or {})
+
+    def set_up_distribution_cable_choices(self, choices: list[dict]):
+        merged: list[tuple[str, str]] = []
+        seen_ids: set[str] = set()
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            cable_id = str(choice.get("cable_id", "") or "").strip()
+            cable_name = str(choice.get("name", "") or "").strip()
+            if not cable_id or cable_id in seen_ids:
+                continue
+            seen_ids.add(cable_id)
+            merged.append((cable_id, cable_name))
+        self._up_cable_choices = merged
+
     def _open_uv_dialog(self):
         dlg = UvConfigDialog(
             config=self._uv_config,
@@ -886,6 +1077,16 @@ class ElektroPointPanel(QWidget):
         if dlg.exec() == QDialog.Accepted:
             self._uv_config = dlg.get_config()
             self.uv_config_changed.emit(self.point_id)
+
+    def _open_up_distribution_dialog(self):
+        dlg = UpDistributionDialog(
+            config=self._up_distribution_config,
+            cable_choices=self._up_cable_choices,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.Accepted:
+            self._up_distribution_config = dlg.get_config()
+            self.up_distribution_changed.emit(self.point_id)
 
     def get_parameters(self) -> dict:
         # Wenn Freitext ausgewählt ist, speichere den benutzerdefinierten Text
@@ -910,6 +1111,7 @@ class ElektroPointPanel(QWidget):
             "smarthome_device_color": self.get_smarthome_device_color_text().strip(),
             "note": self.te_note.toPlainText(),
             "uv_config": copy.deepcopy(self._uv_config),
+            "up_distribution_config": copy.deepcopy(self._up_distribution_config),
         }
 
     def get_smarthome_device_text(self) -> str:
@@ -976,6 +1178,7 @@ class ElektroPointPanel(QWidget):
         self.sb_label_size.setValue(d.get("label_size", 12.0))
         self.set_ap_type(d.get("ap_type", "standard"))
         self.set_uv_config(d.get("uv_config"))
+        self.set_up_distribution_config(d.get("up_distribution_config"))
         
         # Position und Höhe vom Boden
         position = d.get("position", "Wand")
@@ -3083,6 +3286,7 @@ class ParameterPanel(QWidget):
         panel.set_smarthome_device_text(self._last_elec_point_device)
         panel.set_smarthome_device_color_text(self._last_elec_point_device_color)
         panel.set_uv_cable_choices(self._collect_elec_cable_names())
+        panel.set_up_distribution_cable_choices(self._collect_elec_cable_refs())
         resolved = self._resolve_fp_id(fp_id)
         self._element_floorplan[point_id] = resolved or ""
         parent_item = self._fp_sub_items.get(resolved or "", {}).get("ap") if resolved else None
@@ -3154,10 +3358,22 @@ class ParameterPanel(QWidget):
                 values.append(text)
         return values
 
+    def _collect_elec_cable_refs(self) -> list[dict]:
+        values: list[dict] = []
+        for cable_id, panel in self.elec_cable_panels.items():
+            name = str(panel.get_parameters().get("name", cable_id) or "").strip() or cable_id
+            values.append({
+                "cable_id": cable_id,
+                "name": name,
+            })
+        return values
+
     def update_all_elec_point_uv_cable_choices(self):
         choices = self._collect_elec_cable_names()
+        refs = self._collect_elec_cable_refs()
         for panel in self.elec_point_panels.values():
             panel.set_uv_cable_choices(choices)
+            panel.set_up_distribution_cable_choices(refs)
 
     # ──────────────────────────────────────────────────────────────── #
     #  Elektro: Räume                                                  #

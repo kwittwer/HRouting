@@ -135,7 +135,8 @@ def _create_mcp(window: MainWindow, bridge):
             "list_circuits, set_circuit_polygon, set_circuit_route, "
             "set_supply_line), Elektropunkte (add/modify/delete/"
             "list_elec_points, configure_uv_distribution, "
-            "clear_uv_distribution), Elektro-Räume (add/modify/delete/"
+            "clear_uv_distribution, configure_up_distribution, "
+            "clear_up_distribution), Elektro-Räume (add/modify/delete/"
             "list_elec_rooms), Elektro-Kabel (add/modify/delete/"
             "list_elec_cables), HKV (add/modify/delete/list_hkvs), "
             "HKV-Leitungen (add/modify/delete/list_hkv_lines), "
@@ -259,11 +260,16 @@ def _create_mcp(window: MainWindow, bridge):
 
     def _normalize_ap_type(ap_type: str | None) -> str:
         value = str(ap_type or "standard").strip().lower()
-        return "uv" if value == "uv" else "standard"
+        if value == "uv":
+            return "uv"
+        if value in {"up_distribution", "up", "unterputzdose", "verteilung_in_unterputzdose"}:
+            return "up_distribution"
+        return "standard"
 
-    def _resolve_ap_type_for_uv(
+    def _resolve_ap_type_for_configs(
         ap_type: str | None,
         uv_config: dict,
+        up_distribution_config: dict,
         *,
         current_ap_type: str = "standard",
     ) -> tuple[str, str | None]:
@@ -271,11 +277,22 @@ def _create_mcp(window: MainWindow, bridge):
             _normalize_ap_type(ap_type)
             if ap_type is not None else _normalize_ap_type(current_ap_type)
         )
+        if uv_config and up_distribution_config:
+            return effective_ap_type, (
+                "uv_config und up_distribution_config können nicht gleichzeitig gesetzt sein."
+            )
         if uv_config and ap_type is None:
             return "uv", None
         if uv_config and effective_ap_type != "uv":
             return effective_ap_type, (
                 "uv_config erfordert ap_type='uv' "
+                "oder keinen expliziten ap_type-Wert."
+            )
+        if up_distribution_config and ap_type is None:
+            return "up_distribution", None
+        if up_distribution_config and effective_ap_type != "up_distribution":
+            return effective_ap_type, (
+                "up_distribution_config erfordert ap_type='up_distribution' "
                 "oder keinen expliziten ap_type-Wert."
             )
         return effective_ap_type, None
@@ -379,6 +396,92 @@ def _create_mcp(window: MainWindow, bridge):
             "rows": rows,
             "modules_per_row": modules_per_row,
             "slots": slots,
+        }
+
+    def _normalize_up_distribution_config(
+        up_distribution_config: dict | None,
+        *,
+        require_incoming: bool = False,
+    ) -> dict:
+        if up_distribution_config is None:
+            return {}
+        if not isinstance(up_distribution_config, dict):
+            raise ValueError("up_distribution_config muss ein Objekt sein.")
+        if not up_distribution_config:
+            return {}
+
+        incoming_cable_id = str(
+            up_distribution_config.get("incoming_cable_id", "") or ""
+        ).strip()
+        note = str(up_distribution_config.get("note", "") or "").strip()
+
+        outgoing_raw = up_distribution_config.get("outgoing_cable_ids", [])
+        if outgoing_raw is None:
+            outgoing_raw = []
+        if not isinstance(outgoing_raw, list):
+            raise ValueError("up_distribution_config.outgoing_cable_ids muss ein Array sein.")
+        outgoing_cable_ids: list[str] = []
+        for index, cable_id in enumerate(outgoing_raw):
+            text = str(cable_id or "").strip()
+            if not text:
+                raise ValueError(
+                    f"up_distribution_config.outgoing_cable_ids[{index}] darf nicht leer sein."
+                )
+            if text not in outgoing_cable_ids:
+                outgoing_cable_ids.append(text)
+
+        mappings_raw = up_distribution_config.get("mappings", [])
+        if mappings_raw is None:
+            mappings_raw = []
+        if not isinstance(mappings_raw, list):
+            raise ValueError("up_distribution_config.mappings muss ein Array sein.")
+
+        mappings: list[dict] = []
+        seen_mappings: set[tuple[str, str, str]] = set()
+        for index, mapping in enumerate(mappings_raw):
+            if not isinstance(mapping, dict):
+                raise ValueError(
+                    f"up_distribution_config.mappings[{index}] muss ein Objekt sein."
+                )
+            from_conductor = str(mapping.get("from_conductor", "") or "").strip()
+            to_cable_id = str(mapping.get("to_cable_id", "") or "").strip()
+            to_conductor = str(mapping.get("to_conductor", "") or "").strip()
+            note_text = str(mapping.get("note", "") or "").strip()
+            if not from_conductor or not to_cable_id or not to_conductor:
+                raise ValueError(
+                    "up_distribution_config.mappings benötigt from_conductor, "
+                    "to_cable_id und to_conductor."
+                )
+            if to_cable_id not in outgoing_cable_ids:
+                outgoing_cable_ids.append(to_cable_id)
+            key = (from_conductor, to_cable_id, to_conductor)
+            if key in seen_mappings:
+                raise ValueError(
+                    f"up_distribution_config enthält eine doppelte Zuordnung: "
+                    f"{from_conductor} -> {to_cable_id}:{to_conductor}."
+                )
+            seen_mappings.add(key)
+            mappings.append({
+                "from_conductor": from_conductor,
+                "to_cable_id": to_cable_id,
+                "to_conductor": to_conductor,
+                "note": note_text,
+            })
+
+        if require_incoming and not incoming_cable_id:
+            raise ValueError(
+                "Für eine UP-Verteilung muss incoming_cable_id gesetzt sein."
+            )
+        if incoming_cable_id and incoming_cable_id in outgoing_cable_ids:
+            raise ValueError(
+                "incoming_cable_id darf nicht in outgoing_cable_ids enthalten sein."
+            )
+
+        return {
+            "incoming_cable_id": incoming_cable_id,
+            "outgoing_cable_ids": outgoing_cable_ids,
+            "mappings": mappings,
+            "note": note,
         }
 
     # ── Lese-Tools ─────────────────────────────────────────────────
@@ -663,6 +766,7 @@ def _create_mcp(window: MainWindow, bridge):
         note: str = "",
         ap_type: str | None = None,
         uv_config: dict | None = None,
+        up_distribution_config: dict | None = None,
     ) -> dict:
         """Elektro-Anschlusspunkt platzieren.
 
@@ -691,9 +795,12 @@ def _create_mcp(window: MainWindow, bridge):
             smarthome_device: z.B. 'Shelly'
             smarthome_device_color: z.B. 'weiß'
             note: Freitext-Notiz
-            ap_type: AP-Typ – 'standard' oder 'uv'
+            ap_type: AP-Typ – 'standard', 'uv' oder 'up_distribution'
             uv_config: Optionale UV-Belegung als Objekt mit preset, rows,
                 modules_per_row und slots[]
+            up_distribution_config: Optionale Zuordnung für Verteilung in
+                Unterputzdose mit incoming_cable_id, outgoing_cable_ids,
+                mappings[] und note
         """
         def _add():
             from PySide6.QtCore import QPointF
@@ -703,9 +810,13 @@ def _create_mcp(window: MainWindow, bridge):
             w._elec_point_counter += 1
             pid = f"AP-{w._elec_point_counter}"
             normalized_uv_config = _normalize_uv_config(uv_config)
-            effective_ap_type, ap_type_error = _resolve_ap_type_for_uv(
+            normalized_up_distribution_config = _normalize_up_distribution_config(
+                up_distribution_config
+            )
+            effective_ap_type, ap_type_error = _resolve_ap_type_for_configs(
                 ap_type,
                 normalized_uv_config,
+                normalized_up_distribution_config,
             )
             if ap_type_error:
                 return {
@@ -750,6 +861,7 @@ def _create_mcp(window: MainWindow, bridge):
                 "note": note,
                 "ap_type": effective_ap_type,
                 "uv_config": normalized_uv_config,
+                "up_distribution_config": normalized_up_distribution_config,
             })
 
             # Builtin-Symbol laden
@@ -787,6 +899,7 @@ def _create_mcp(window: MainWindow, bridge):
         note: str | None = None,
         ap_type: str | None = None,
         uv_config: dict | None = None,
+        up_distribution_config: dict | None = None,
         visible: bool | None = None,
     ) -> dict:
         """Parameter eines Elektro-Anschlusspunkts ändern.
@@ -804,10 +917,14 @@ def _create_mcp(window: MainWindow, bridge):
             smarthome_device: Neues Smarthome-Gerät
             smarthome_device_color: Neue Gerätefarbe
             note: Neue Notiz
-            ap_type: Neuer AP-Typ – 'standard' oder 'uv'
+            ap_type: Neuer AP-Typ – 'standard', 'uv' oder 'up_distribution'
             uv_config: Neue UV-Belegung als vollständiges Objekt;
                 übergib {} zum Leeren; bei gesetzter UV-Belegung muss
                 ap_type 'uv' sein oder leer bleiben
+            up_distribution_config: Neue Verteilung in Unterputzdose als
+                vollständiges Objekt; übergib {} zum Leeren; bei gesetzter
+                Konfiguration muss ap_type 'up_distribution' sein oder leer
+                bleiben
             visible: Sichtbarkeit
         """
         def _modify():
@@ -859,11 +976,18 @@ def _create_mcp(window: MainWindow, bridge):
                 panel.te_note.setPlainText(note)
                 window.canvas._elec_point_notes[point_id] = note
             normalized_uv_config = None
+            normalized_up_distribution_config = None
             if uv_config is not None:
                 normalized_uv_config = _normalize_uv_config(uv_config)
-                _, ap_type_error = _resolve_ap_type_for_uv(
+            if up_distribution_config is not None:
+                normalized_up_distribution_config = _normalize_up_distribution_config(
+                    up_distribution_config
+                )
+            if normalized_uv_config is not None or normalized_up_distribution_config is not None:
+                _, ap_type_error = _resolve_ap_type_for_configs(
                     ap_type,
-                    normalized_uv_config,
+                    normalized_uv_config or {},
+                    normalized_up_distribution_config or {},
                     current_ap_type=panel.get_ap_type(),
                 )
                 if ap_type_error:
@@ -876,6 +1000,10 @@ def _create_mcp(window: MainWindow, bridge):
                 panel.set_uv_config(normalized_uv_config)
                 if normalized_uv_config and ap_type is None:
                     panel.set_ap_type("uv")
+            if normalized_up_distribution_config is not None:
+                panel.set_up_distribution_config(normalized_up_distribution_config)
+                if normalized_up_distribution_config and ap_type is None:
+                    panel.set_ap_type("up_distribution")
             if visible is not None:
                 panel.chk_visible.setChecked(visible)
                 window.canvas._elec_visible[point_id] = visible
@@ -986,6 +1114,86 @@ def _create_mcp(window: MainWindow, bridge):
                 "status": "cleared",
                 "ap_type": panel.get_ap_type(),
                 "uv_config": {},
+            }
+
+        return invoke(_clear)
+
+    @mcp.tool()
+    def configure_up_distribution(
+        point_id: str,
+        incoming_cable_id: str,
+        mappings: list[dict],
+        outgoing_cable_ids: list[str] | None = None,
+        note: str = "",
+    ) -> dict:
+        """Aderzuordnung für Verteilung in Unterputzdose setzen.
+
+        Args:
+            point_id: ID des Anschlusspunkts (z.B. 'AP-1')
+            incoming_cable_id: ID der Zuleitung (z.B. 'KV-1')
+            mappings: Zuordnungen als Array mit from_conductor,
+                to_cable_id, to_conductor und optional note
+            outgoing_cable_ids: Optionale Liste abgehender Kabel-IDs;
+                wird bei Bedarf aus mappings ergänzt
+            note: Optionale Notiz
+        """
+        def _configure():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {
+                    "error": f"Anschlusspunkt '{point_id}' "
+                             f"nicht gefunden."}
+
+            normalized_up_distribution_config = _normalize_up_distribution_config({
+                "incoming_cable_id": incoming_cable_id,
+                "outgoing_cable_ids": outgoing_cable_ids or [],
+                "mappings": mappings or [],
+                "note": note,
+            }, require_incoming=True)
+            panel.set_ap_type("up_distribution")
+            panel.set_up_distribution_config(normalized_up_distribution_config)
+
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            return {
+                "point_id": point_id,
+                "status": "configured",
+                "up_distribution_config": normalized_up_distribution_config,
+            }
+
+        return invoke(_configure)
+
+    @mcp.tool()
+    def clear_up_distribution(
+        point_id: str,
+        reset_ap_type: bool = False,
+    ) -> dict:
+        """Aderzuordnung für Verteilung in Unterputzdose leeren.
+
+        Args:
+            point_id: ID des Anschlusspunkts (z.B. 'AP-1')
+            reset_ap_type: Setzt den AP-Typ zusätzlich auf 'standard'
+        """
+        def _clear():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {
+                    "error": f"Anschlusspunkt '{point_id}' "
+                             f"nicht gefunden."}
+
+            panel.set_up_distribution_config({})
+            if reset_ap_type:
+                panel.set_ap_type("standard")
+
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            return {
+                "point_id": point_id,
+                "status": "cleared",
+                "ap_type": panel.get_ap_type(),
+                "up_distribution_config": {},
             }
 
         return invoke(_clear)

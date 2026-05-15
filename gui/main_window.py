@@ -1813,6 +1813,7 @@ class MainWindow(QMainWindow):
         panel.smarthome_device_color_changed.connect(self._on_elec_point_smarthome_color_changed)
         panel.ap_type_changed.connect(self._on_elec_point_ap_type_changed)
         panel.uv_config_changed.connect(self._on_elec_point_uv_config_changed)
+        panel.up_distribution_changed.connect(self._on_elec_point_up_distribution_changed)
         return panel
 
     def _on_place_elec_point(self, point_id: str):
@@ -1875,6 +1876,9 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
 
     def _on_elec_point_uv_config_changed(self, point_id: str):
+        self._mark_dirty()
+
+    def _on_elec_point_up_distribution_changed(self, point_id: str):
         self._mark_dirty()
 
     def _on_elec_visibility_changed(self, item_id: str, visible: bool):
@@ -2405,6 +2409,7 @@ class MainWindow(QMainWindow):
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
         panel.set_ap_type(src.get("ap_type", "standard"))
         panel.set_uv_config(copy.deepcopy(src.get("uv_config") or {}))
+        panel.set_up_distribution_config(copy.deepcopy(src.get("up_distribution_config") or {}))
         # Position und Höhe kopieren
         pos_idx = panel.cmb_position.findText(src.get("position", "Wand"))
         if pos_idx >= 0:
@@ -3192,6 +3197,7 @@ class MainWindow(QMainWindow):
                 panel.height_changed.connect(self._on_elec_point_height_changed)
                 panel.ap_type_changed.connect(self._on_elec_point_ap_type_changed)
                 panel.uv_config_changed.connect(self._on_elec_point_uv_config_changed)
+                panel.up_distribution_changed.connect(self._on_elec_point_up_distribution_changed)
                 values = panel.get_parameters()
                 self.canvas._label_map[pid] = values.get("name", pid)
                 self.canvas._elec_visible[pid] = values.get("visible", True)
@@ -3374,7 +3380,7 @@ class MainWindow(QMainWindow):
         if ptype == "heating":
             return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
         if ptype == "elektro":
-            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv"]
+            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv", "el_up_distribution"]
         return []
 
     def _default_pdf_export_pages(self) -> list[dict]:
@@ -4311,9 +4317,15 @@ class MainWindow(QMainWindow):
         return str(params.get("ap_type", "standard")).strip().lower() == "uv"
 
     @staticmethod
+    def _is_up_distribution_type(params: dict) -> bool:
+        return str(params.get("ap_type", "standard")).strip().lower() == "up_distribution"
+
+    @staticmethod
     def _describe_ap_type(params: dict) -> str:
         if MainWindow._is_uv_type(params):
             return "Unterverteilung (UV)"
+        if MainWindow._is_up_distribution_type(params):
+            return "Verteilung in Unterputzdose"
         symbol = (params.get("builtin_symbol") or "").strip()
         icon_path = (params.get("icon_path") or "").strip()
 
@@ -4404,6 +4416,86 @@ class MainWindow(QMainWindow):
                     "label": slot["label"],
                     "assignment": slot["assignment"],
                     "note": slot["note"],
+                })
+        return rows
+
+    def _collect_up_distribution_rows(self, point_id_to_room_name: dict[str, str] | None = None) -> list[dict]:
+        point_id_to_room_name = point_id_to_room_name or self._collect_point_id_to_room_name()
+        cable_id_to_name: dict[str, str] = {}
+        for cable_id, cable_panel in self.param_panel.elec_cable_panels.items():
+            cable_params = cable_panel.get_parameters()
+            cable_name = str(cable_params.get("name", cable_id) or "").strip() or cable_id
+            cable_id_to_name[cable_id] = cable_name
+
+        rows: list[dict] = []
+        for pid, panel in self.param_panel.elec_point_panels.items():
+            params = panel.get_parameters()
+            if not self._is_up_distribution_type(params):
+                continue
+            config = params.get("up_distribution_config") or {}
+            if not isinstance(config, dict):
+                continue
+
+            ap_name = (params.get("name") or pid).strip() or pid
+            room_name = point_id_to_room_name.get(pid, "(ohne Raum)")
+            incoming_id = str(config.get("incoming_cable_id", "") or "").strip()
+            incoming_name = cable_id_to_name.get(incoming_id, incoming_id)
+            outgoing_raw = config.get("outgoing_cable_ids", [])
+            if not isinstance(outgoing_raw, list):
+                outgoing_raw = []
+            outgoing_ids: list[str] = []
+            for cable_id in outgoing_raw:
+                text = str(cable_id or "").strip()
+                if text and text not in outgoing_ids:
+                    outgoing_ids.append(text)
+            outgoing_names = [cable_id_to_name.get(cable_id, cable_id) for cable_id in outgoing_ids]
+
+            mappings_raw = config.get("mappings", [])
+            if not isinstance(mappings_raw, list):
+                mappings_raw = []
+            mappings: list[dict] = []
+            for mapping in mappings_raw:
+                if not isinstance(mapping, dict):
+                    continue
+                to_cable_id = str(mapping.get("to_cable_id", "") or "").strip()
+                mappings.append({
+                    "from_conductor": str(mapping.get("from_conductor", "") or "").strip(),
+                    "to_cable_id": to_cable_id,
+                    "to_cable_name": cable_id_to_name.get(to_cable_id, to_cable_id),
+                    "to_conductor": str(mapping.get("to_conductor", "") or "").strip(),
+                    "note": str(mapping.get("note", "") or "").strip(),
+                })
+
+            distribution_note = str(config.get("note", "") or "").strip()
+            if not mappings:
+                rows.append({
+                    "ap": ap_name,
+                    "room": room_name,
+                    "incoming_cable": incoming_name,
+                    "incoming_cable_id": incoming_id,
+                    "outgoing_cables": ", ".join(outgoing_names),
+                    "from_conductor": "",
+                    "to_cable": "",
+                    "to_cable_id": "",
+                    "to_conductor": "",
+                    "mapping_note": "",
+                    "distribution_note": distribution_note,
+                })
+                continue
+
+            for mapping in mappings:
+                rows.append({
+                    "ap": ap_name,
+                    "room": room_name,
+                    "incoming_cable": incoming_name,
+                    "incoming_cable_id": incoming_id,
+                    "outgoing_cables": ", ".join(outgoing_names),
+                    "from_conductor": mapping["from_conductor"],
+                    "to_cable": mapping["to_cable_name"],
+                    "to_cable_id": mapping["to_cable_id"],
+                    "to_conductor": mapping["to_conductor"],
+                    "mapping_note": mapping["note"],
+                    "distribution_note": distribution_note,
                 })
         return rows
 
@@ -4632,6 +4724,7 @@ class MainWindow(QMainWindow):
             ),
         )
         uv_rows = self._collect_uv_rows(point_id_to_room_name)
+        up_distribution_rows = self._collect_up_distribution_rows(point_id_to_room_name)
 
         # ── HKV-Leitungen sammeln ──
         hl_rows: list[dict] = []
@@ -4929,6 +5022,34 @@ class MainWindow(QMainWindow):
             uv_layout.addWidget(tbl_uv)
             tabs.addTab(uv_widget, "🧰 UV")
 
+        if up_distribution_rows:
+            up_widget = QWidget()
+            up_layout = QVBoxLayout(up_widget)
+            up_layout.addWidget(QLabel("<b>Verteilung in Unterputzdose – Aderzuordnung</b>"))
+            tbl_up = QTableWidget(len(up_distribution_rows), 10)
+            tbl_up.setHorizontalHeaderLabels(
+                [
+                    "AP", "Raum", "Zuleitung", "Abgänge",
+                    "Ader (Zuleitung)", "Abgehendes Kabel", "Ader (Abgang)",
+                    "Zuordnung-Notiz", "Verteilungs-Notiz", "Abgangs-ID",
+                ]
+            )
+            tbl_up.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            tbl_up.setEditTriggers(QTableWidget.NoEditTriggers)
+            for i, r in enumerate(up_distribution_rows):
+                tbl_up.setItem(i, 0, QTableWidgetItem(r.get("ap", "")))
+                tbl_up.setItem(i, 1, QTableWidgetItem(r.get("room", "")))
+                tbl_up.setItem(i, 2, QTableWidgetItem(r.get("incoming_cable", "")))
+                tbl_up.setItem(i, 3, QTableWidgetItem(r.get("outgoing_cables", "")))
+                tbl_up.setItem(i, 4, QTableWidgetItem(r.get("from_conductor", "")))
+                tbl_up.setItem(i, 5, QTableWidgetItem(r.get("to_cable", "")))
+                tbl_up.setItem(i, 6, QTableWidgetItem(r.get("to_conductor", "")))
+                tbl_up.setItem(i, 7, QTableWidgetItem(r.get("mapping_note", "")))
+                tbl_up.setItem(i, 8, QTableWidgetItem(r.get("distribution_note", "")))
+                tbl_up.setItem(i, 9, QTableWidgetItem(r.get("to_cable_id", "")))
+            up_layout.addWidget(tbl_up)
+            tabs.addTab(up_widget, "🔀 Unterputzdose")
+
         # -- Tab: Anschlusspunkte Verkabelung --
         ap_widget = QWidget()
         ap_layout = QVBoxLayout(ap_widget)
@@ -5022,7 +5143,8 @@ class MainWindow(QMainWindow):
         btn_csv.clicked.connect(
             lambda: self._save_lengths_csv(hk_rows, hk_sum, kv_rows, kv_sum,
                                            hkv_sum, ap_cables, hl_rows, hl_sum,
-                                           ap_type_counts, room_ap_connections, uv_rows)
+                                           ap_type_counts, room_ap_connections, uv_rows,
+                                           up_distribution_rows)
         )
         btn_box.addButton(btn_csv, QDialogButtonBox.ActionRole)
         btn_box.addButton(QDialogButtonBox.Close)
@@ -5034,7 +5156,7 @@ class MainWindow(QMainWindow):
     def _save_lengths_csv(self, hk_rows, hk_sum, kv_rows, kv_sum, hkv_sum,
                            ap_cables=None, hl_rows=None, hl_sum=None,
                            ap_type_counts=None, room_ap_connections=None,
-                           uv_rows=None):
+                           uv_rows=None, up_distribution_rows=None):
         path, _ = QFileDialog.getSaveFileName(
             self, "Längen als CSV speichern", "laengen.csv",
             "CSV (*.csv)")
@@ -5196,6 +5318,28 @@ class MainWindow(QMainWindow):
                     row.get("label", ""),
                     row.get("assignment", ""),
                     row.get("note", ""),
+                ]))
+            lines.append("")
+
+        if up_distribution_rows:
+            lines.append("Elektro - Verteilung in Unterputzdose")
+            lines.append(sep.join([
+                "AP", "Raum", "Zuleitung", "Abgänge",
+                "Ader (Zuleitung)", "Abgehendes Kabel", "Abgehendes Kabel (ID)", "Ader (Abgang)",
+                "Zuordnung-Notiz", "Verteilungs-Notiz",
+            ]))
+            for row in up_distribution_rows:
+                lines.append(sep.join([
+                    row.get("ap", ""),
+                    row.get("room", ""),
+                    row.get("incoming_cable", ""),
+                    row.get("outgoing_cables", ""),
+                    row.get("from_conductor", ""),
+                    row.get("to_cable", ""),
+                    row.get("to_cable_id", ""),
+                    row.get("to_conductor", ""),
+                    row.get("mapping_note", ""),
+                    row.get("distribution_note", ""),
                 ]))
             lines.append("")
 
@@ -5480,6 +5624,7 @@ class MainWindow(QMainWindow):
             key=lambda r: ((r.get("room") or "").lower(), (r.get("name") or "").lower()),
         )
         uv_rows = self._collect_uv_rows(point_id_to_room_name)
+        up_distribution_rows = self._collect_up_distribution_rows(point_id_to_room_name)
 
         # ── HKV-Leitungen sammeln ──
         hl_rows: list[dict] = []
@@ -5514,6 +5659,7 @@ class MainWindow(QMainWindow):
             "ap_type_counts": ap_type_counts,
             "ap_info_rows": ap_info_rows,
             "uv_rows": uv_rows,
+            "up_distribution_rows": up_distribution_rows,
             "hl_rows": hl_rows, "hl_sum": hl_sum,
         }
 
@@ -6042,7 +6188,7 @@ class MainWindow(QMainWindow):
         page = ctx.page_rect()
         ctx.stamp(page)
 
-        sections = set(table_sections or ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv"])
+        sections = set(table_sections or ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv", "el_up_distribution"])
 
         title_h = ctx.mm(8)
         ctx.painter.save()
@@ -6078,6 +6224,7 @@ class MainWindow(QMainWindow):
             or ("el_rooms" in sections and data.get("room_ap_connections"))
             or ("el_ap_infos" in sections and data.get("ap_info_rows"))
             or ("el_uv" in sections and data.get("uv_rows"))
+            or ("el_up_distribution" in sections and data.get("up_distribution_rows"))
         )
         if not table_available:
             return
@@ -6188,6 +6335,30 @@ class MainWindow(QMainWindow):
                     r.get("note", ""),
                 ]
                 for r in uv_rows
+            ]
+            y_after = ctx.draw_table(page, y_after, headers, rows)
+
+        up_distribution_rows = data.get("up_distribution_rows", [])
+        if "el_up_distribution" in sections and up_distribution_rows:
+            y_after += ctx.mm(4)
+            headers = [
+                "AP", "Raum", "Zuleitung", "Abgänge",
+                "Ader (Zul.)", "Abgehendes Kabel", "Ader (Abg.)",
+                "Zuordn.-Notiz", "Verteilungs-Notiz",
+            ]
+            rows = [
+                [
+                    r.get("ap", ""),
+                    r.get("room", ""),
+                    r.get("incoming_cable", ""),
+                    r.get("outgoing_cables", ""),
+                    r.get("from_conductor", ""),
+                    r.get("to_cable", ""),
+                    r.get("to_conductor", ""),
+                    r.get("mapping_note", ""),
+                    r.get("distribution_note", ""),
+                ]
+                for r in up_distribution_rows
             ]
             ctx.draw_table(page, y_after, headers, rows)
 
