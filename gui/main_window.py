@@ -1814,7 +1814,29 @@ class MainWindow(QMainWindow):
         panel.ap_type_changed.connect(self._on_elec_point_ap_type_changed)
         panel.uv_config_changed.connect(self._on_elec_point_uv_config_changed)
         panel.up_distribution_changed.connect(self._on_elec_point_up_distribution_changed)
+        self._update_up_distribution_cable_choices_for_point(point_id)
         return panel
+
+    def _update_up_distribution_cable_choices_for_point(self, point_id: str):
+        panel = self.param_panel.elec_point_panels.get(point_id)
+        if not panel:
+            return
+        connected: list[dict] = []
+        for cable_id, cable_panel in self.param_panel.elec_cable_panels.items():
+            start_ap_id, end_ap_id = self.canvas.get_cable_ap(cable_id)
+            if point_id not in (start_ap_id, end_ap_id):
+                continue
+            cable_params = cable_panel.get_parameters()
+            cable_name = str(cable_params.get("name", cable_id) or "").strip() or cable_id
+            connected.append({
+                "cable_id": cable_id,
+                "name": cable_name,
+            })
+        panel.set_up_distribution_cable_choices(connected)
+
+    def _update_up_distribution_cable_choices_all(self):
+        for point_id in self.param_panel.elec_point_panels.keys():
+            self._update_up_distribution_cable_choices_for_point(point_id)
 
     def _on_place_elec_point(self, point_id: str):
         params = self.param_panel.get_elec_point_params(point_id)
@@ -1833,6 +1855,7 @@ class MainWindow(QMainWindow):
 
     def _on_elec_point_placed(self, point_id: str):
         self._update_elec_point_room_assignments()
+        self._update_up_distribution_cable_choices_for_point(point_id)
         self.status.showMessage(
             f"✅ Anschlusspunkt {point_id} platziert.")
 
@@ -1888,6 +1911,7 @@ class MainWindow(QMainWindow):
     def _delete_elec_point(self, point_id: str):
         self.canvas.delete_elec_point(point_id)
         self.param_panel.remove_elec_point_panel(point_id)
+        self._update_up_distribution_cable_choices_all()
         self.status.showMessage(f"🗑️ Anschlusspunkt {point_id} gelöscht.")
 
     def _add_elec_room(self, fp_id: str = ""):
@@ -1999,6 +2023,7 @@ class MainWindow(QMainWindow):
         panel.visibility_changed.connect(self._on_elec_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
         panel.label_visibility_changed.connect(self._on_label_visibility_changed)
+        self._update_up_distribution_cable_choices_all()
         return panel
 
     def _on_draw_elec_cable(self, cable_id: str):
@@ -2024,6 +2049,7 @@ class MainWindow(QMainWindow):
         length_mm = length_px * self.canvas.get_mm_per_px()
         self.param_panel.set_cable_length(cable_id, length_mm)
         self._update_cable_ap_labels(cable_id)
+        self._update_up_distribution_cable_choices_all()
         self.status.showMessage(
             f"✅ {cable_id}: Kabel aktualisiert ({length_mm / 1000:.2f} m)")
 
@@ -2050,6 +2076,7 @@ class MainWindow(QMainWindow):
     def _on_elec_cable_name_changed(self, cable_id: str, name: str):
         self.canvas._label_map[cable_id] = name
         self.canvas.update()
+        self._update_up_distribution_cable_choices_all()
 
     def _on_elec_cable_color_changed(self, cable_id: str, color: str):
         self.canvas.set_color(cable_id, QColor(color))
@@ -2061,6 +2088,7 @@ class MainWindow(QMainWindow):
     def _delete_elec_cable(self, cable_id: str):
         self.canvas.delete_elec_cable(cable_id)
         self.param_panel.remove_elec_cable_panel(cable_id)
+        self._update_up_distribution_cable_choices_all()
         self.status.showMessage(f"🗑️ Kabelverbindung {cable_id} gelöscht.")
 
     def _selected_object_type(self, item_id: str) -> str | None:
@@ -3258,6 +3286,8 @@ class MainWindow(QMainWindow):
                     self._elec_cable_counter = max(self._elec_cable_counter, num)
                 except (IndexError, ValueError):
                     pass
+
+            self._update_up_distribution_cable_choices_all()
 
             # HKV panels
             for hid, panel in self.param_panel.hkv_panels.items():
