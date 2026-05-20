@@ -382,6 +382,21 @@ class HeatingCircuitPanel(QWidget):
 #  Elektro: UV-Planung                                                 #
 # ================================================================== #
 
+# Standard phase colors used consistently in rail widget, dialog and PDF
+PHASE_COLORS: dict[str, str] = {
+    "L1": "#e53935",
+    "L2": "#43a047",
+    "L3": "#1e88e5",
+    "N":  "#1565c0",
+    "PE": "#558b2f",
+    "L":  "#ff7043",
+}
+
+# Special phase name for 3-phase rotating busbar (L1→L2→L3 per TE)
+THREE_PHASE_LABEL = "L1/L2/L3"
+_THREE_PHASE_ROTATION = ["L1", "L2", "L3"]
+
+
 class UvSlotEditPopup(QDialog):
     """Small dialog to edit a single TE slot in the UV rail view."""
 
@@ -405,10 +420,12 @@ class UvSlotEditPopup(QDialog):
 
     def __init__(self, slot: dict, cable_choices: list[str],
                  max_rows: int = 12, max_modules: int = 36,
+                 phase_info: str = "",
                  parent=None):
         super().__init__(parent)
         self._max_rows = max_rows
         self._max_modules = max_modules
+        self._phase_info = phase_info
         row_no = slot.get("row", "?")
         slot_no = slot.get("slot", "?")
         self.setWindowTitle(f"Slot R{row_no} / TE {slot_no} bearbeiten")
@@ -418,6 +435,14 @@ class UvSlotEditPopup(QDialog):
     def _build_ui(self, slot: dict, cable_choices: list[str]):
         layout = QVBoxLayout(self)
         form = QFormLayout()
+
+        # Phase (read-only, from busbar config)
+        if self._phase_info:
+            lbl_phase = QLabel(self._phase_info)
+            lbl_phase.setStyleSheet(
+                f"color: {PHASE_COLORS.get(self._phase_info, '#ffffff')}; font-weight: bold;"
+            )
+            form.addRow("Phase:", lbl_phase)
 
         # Position
         pos_row = QHBoxLayout()
@@ -448,6 +473,11 @@ class UvSlotEditPopup(QDialog):
         self.sb_te_size.setToolTip("Anzahl der belegten TE (z.B. FI = 2 TE)")
         form.addRow("TE-Breite:", self.sb_te_size)
 
+        self.le_spec = QLineEdit(str(slot.get("spec", "") or ""))
+        self.le_spec.setPlaceholderText("z.B. B16, Typ A 30mA, 63A …")
+        self.le_spec.setToolTip("Typ-Kennzeichnung des Geräts (wird im Schaltplan angezeigt)")
+        form.addRow("Typ/Kennz.:", self.le_spec)
+
         self.le_label = QLineEdit(str(slot.get("label", "") or ""))
         form.addRow("Bezeichnung:", self.le_label)
 
@@ -476,6 +506,7 @@ class UvSlotEditPopup(QDialog):
             "slot": self.sb_slot.value(),
             "device_type": self.cmb_device.currentText().strip(),
             "te_size": self.sb_te_size.value(),
+            "spec": self.le_spec.text().strip(),
             "label": self.le_label.text().strip(),
             "assignment": self.cmb_assignment.currentText().strip(),
             "note": self.le_note.text().strip(),
@@ -540,9 +571,11 @@ class UvRailWidget(QWidget):
         self._rows = 0
         self._modules = 0
         self._slots: list[dict] = []
+        self._busbars: list[dict] = []
         self._cable_choices: list[str] = []
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(120)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
         # drag state
         self._drag_source: tuple[int, int] | None = None   # (row_no, slot_no)
@@ -558,17 +591,39 @@ class UvRailWidget(QWidget):
 
     def set_data(self, rows: int, modules_per_row: int,
                  slots_list: list[dict],
-                 cable_choices: list[str] | None = None):
+                 cable_choices: list[str] | None = None,
+                 busbars: list[dict] | None = None):
         self._rows = rows
         self._modules = modules_per_row
         self._slots = list(slots_list)
+        self._busbars = list(busbars or [])
         self._cable_choices = list(cable_choices or [])
-        total_h = (self.TOP_MARGIN
-                   + rows * (self.ROW_H + self.ROW_GAP)
-                   + self.BOTTOM_MARGIN)
-        total_w = self.LEFT_MARGIN + modules_per_row * self.SLOT_W + 10
-        self.setMinimumSize(total_w, total_h)
+        # Minimum size based on compact slot width; actual rendering scales to widget size
+        min_w = self.LEFT_MARGIN + min(modules_per_row, 12) * (self.SLOT_W // 2) + 10
+        min_h = self.TOP_MARGIN + rows * (50 + self.ROW_GAP) + self.BOTTOM_MARGIN
+        self.setMinimumSize(min_w, min_h)
+        self.updateGeometry()
         self.update()
+
+    def _slot_w(self) -> float:
+        """Compute the actual TE slot width in pixels to fill the widget."""
+        if self._modules == 0:
+            return float(self.SLOT_W)
+        avail = self.width() - self.LEFT_MARGIN - 10
+        return max(14.0, avail / self._modules)
+
+    def _row_h(self) -> float:
+        """Compute the actual row height in pixels to fill the widget."""
+        if self._rows == 0:
+            return float(self.ROW_H)
+        avail = self.height() - self.TOP_MARGIN - self.BOTTOM_MARGIN
+        return max(50.0, (avail - (self._rows - 1) * self.ROW_GAP) / self._rows)
+
+    def sizeHint(self):
+        from PySide6.QtCore import QSize
+        total_h = self.TOP_MARGIN + self._rows * (self.ROW_H + self.ROW_GAP) + self.BOTTOM_MARGIN
+        total_w = self.LEFT_MARGIN + self._modules * self.SLOT_W + 10
+        return QSize(total_w, total_h)
 
     # ── layout helper ───────────────────────────────────────── #
 
@@ -600,6 +655,12 @@ class UvRailWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        # Dynamic layout values – scale to actual widget size
+        slot_w = self._slot_w()
+        row_h  = self._row_h()
+        te_num_h = max(12, int(row_h * 0.17))
+        rail_zone = max(14, int(row_h * 0.22))
+
         # Background
         painter.fillRect(self.rect(), QColor("#2b2b2b"))
 
@@ -611,23 +672,26 @@ class UvRailWidget(QWidget):
         font_te_num.setPointSize(6)
 
         font_type = QFont()
-        font_type.setPointSize(8)
+        font_type.setPointSize(max(5, int(row_h * 0.11)))
         font_type.setBold(True)
 
+        font_spec = QFont()
+        font_spec.setPointSize(max(5, int(row_h * 0.09)))
+
         font_lbl = QFont()
-        font_lbl.setPointSize(6)
+        font_lbl.setPointSize(max(5, int(row_h * 0.08)))
 
         font_note = QFont()
-        font_note.setPointSize(5)
+        font_note.setPointSize(max(4, int(row_h * 0.07)))
 
         for row_idx in range(self._rows):
             row_no = row_idx + 1
-            row_y = self.TOP_MARGIN + row_idx * (self.ROW_H + self.ROW_GAP)
+            row_y = self.TOP_MARGIN + row_idx * (row_h + self.ROW_GAP)
 
             # ─ Row label ─
             painter.setFont(font_row_lbl)
             painter.setPen(QColor("#aaaaaa"))
-            painter.drawText(2, row_y, self.LEFT_MARGIN - 4, self.ROW_H,
+            painter.drawText(2, int(row_y), self.LEFT_MARGIN - 4, int(row_h),
                              Qt.AlignVCenter | Qt.AlignRight, f"R{row_no}")
 
             # ─ TE numbers (continuous across rows) ─
@@ -635,33 +699,33 @@ class UvRailWidget(QWidget):
             painter.setFont(font_te_num)
             painter.setPen(QColor("#777777"))
             for te in range(1, self._modules + 1):
-                te_x = self.LEFT_MARGIN + (te - 1) * self.SLOT_W
-                painter.drawText(te_x, row_y, self.SLOT_W, 14,
+                te_x = self.LEFT_MARGIN + (te - 1) * slot_w
+                painter.drawText(int(te_x), int(row_y), int(slot_w), te_num_h,
                                  Qt.AlignHCenter | Qt.AlignTop, str(te_offset + te))
 
             # ─ DIN rail bar ─
-            rail_y = row_y + self.ROW_H - 18
-            rail_w = self._modules * self.SLOT_W
+            rail_y = row_y + row_h - rail_zone
+            rail_w = self._modules * slot_w
             painter.setPen(QPen(QColor("#888888"), 1))
             painter.setBrush(QBrush(QColor("#606060")))
-            painter.drawRect(self.LEFT_MARGIN, rail_y, rail_w, 7)
+            painter.drawRect(int(self.LEFT_MARGIN), int(rail_y), int(rail_w), 7)
             # rail notch lines
             painter.setPen(QPen(QColor("#999999"), 1))
             for te in range(0, self._modules + 1, 2):
-                nx = self.LEFT_MARGIN + te * self.SLOT_W
-                painter.drawLine(nx, rail_y + 2, nx, rail_y + 5)
+                nx = self.LEFT_MARGIN + te * slot_w
+                painter.drawLine(int(nx), int(rail_y + 2), int(nx), int(rail_y + 5))
 
             # ─ Slots ─
             layout = self._build_row_layout(row_no)
             for start_te, ts, slot in layout:
-                x = self.LEFT_MARGIN + (start_te - 1) * self.SLOT_W
-                w = ts * self.SLOT_W - 2
+                x = self.LEFT_MARGIN + (start_te - 1) * slot_w
+                w = ts * slot_w - 2
                 device_type = slot.get("device_type", "") if slot else ""
                 color_hex = self.DEVICE_COLORS.get(
                     device_type, self.DEVICE_COLORS[""]
                 )
 
-                slot_top = row_y + 16
+                slot_top = row_y + te_num_h
                 slot_bottom = rail_y - 1
                 slot_h = slot_bottom - slot_top
 
@@ -669,22 +733,34 @@ class UvRailWidget(QWidget):
                     # Filled device block
                     painter.setBrush(QBrush(QColor(color_hex)))
                     painter.setPen(QPen(QColor("#111111"), 1))
-                    painter.drawRoundedRect(x + 1, slot_top, w, slot_h, 3, 3)
+                    painter.drawRoundedRect(int(x + 1), int(slot_top), int(w), int(slot_h), 3, 3)
 
                     # Type short label (top area)
                     short = self.DEVICE_SHORT.get(device_type, device_type[:5])
+                    type_h = max(12, int(slot_h * 0.32))
                     painter.setFont(font_type)
                     painter.setPen(QColor("#ffffff"))
-                    painter.drawText(x + 1, slot_top + 2, w, 20,
+                    painter.drawText(int(x + 1), int(slot_top + 2), int(w), type_h,
                                      Qt.AlignHCenter | Qt.AlignVCenter, short)
 
+                    # Spec / Typ-Kennzeichnung (e.g. "B16", "Typ A 30mA")
+                    spec = str(slot.get("spec", "") or "").strip()
+                    spec_h = max(10, int(slot_h * 0.24))
+                    spec_y = slot_top + 2 + type_h
+                    if spec:
+                        painter.setFont(font_spec)
+                        painter.setPen(QColor("#ffe08a"))
+                        painter.drawText(int(x + 1), int(spec_y), int(w), spec_h,
+                                         Qt.AlignHCenter | Qt.AlignVCenter, spec)
+
                     # Designation
+                    label_y = spec_y + (spec_h if spec else 0)
                     label = str(slot.get("label", "") or "").strip()
                     if label:
+                        label_h = max(8, int(slot_bottom - 14 - label_y))
                         painter.setFont(font_lbl)
                         painter.setPen(QColor("#dddddd"))
-                        painter.drawText(x + 2, slot_top + 22, w - 4,
-                                         slot_h - 32,
+                        painter.drawText(int(x + 2), int(label_y), int(w - 4), label_h,
                                          Qt.AlignHCenter | Qt.AlignTop
                                          | Qt.TextWordWrap, label)
 
@@ -693,21 +769,65 @@ class UvRailWidget(QWidget):
                     if note:
                         painter.setFont(font_note)
                         painter.setPen(QColor("#aaaaaa"))
-                        painter.drawText(x + 2, slot_bottom - 14, w - 4, 12,
+                        painter.drawText(int(x + 2), int(slot_bottom - 14), int(w - 4), 12,
                                          Qt.AlignHCenter | Qt.AlignVCenter, note)
                 else:
                     # Empty slot placeholder
                     painter.setBrush(QBrush(QColor("#383838")))
                     painter.setPen(QPen(QColor("#4a4a4a"), 1))
-                    painter.drawRect(x + 1, slot_top, w, slot_h)
+                    painter.drawRect(int(x + 1), int(slot_top), int(w), int(slot_h))
+
+            # ─ Busbar phase bands (drawn on top of slot area, just above DIN rail) ─
+            if self._busbars:
+                busbar_strip_h = max(5, int(row_h * 0.09))
+                by = int(rail_y - busbar_strip_h)
+                te_row_start = row_idx * self._modules + 1  # global TE of first slot in this row
+                font_busbar = QFont()
+                font_busbar.setPointSize(max(4, int(row_h * 0.07)))
+                font_busbar.setBold(True)
+                for bb in self._busbars:
+                    bb_te_start = int(bb.get("te_start", 1) or 1)
+                    bb_te_end = int(bb.get("te_end", 1) or 1)
+                    row_te_end = te_row_start + self._modules - 1
+                    vis_start = max(bb_te_start, te_row_start)
+                    vis_end = min(bb_te_end, row_te_end)
+                    if vis_start > vis_end:
+                        continue
+                    bb_phase = str(bb.get("phase", "") or "")
+                    if bb_phase == THREE_PHASE_LABEL:
+                        # Dreiphasige Sammelschiene: jede TE einzeln einfärben
+                        for te_g in range(vis_start, vis_end + 1):
+                            local_te = te_g - te_row_start  # 0-based within row
+                            te_bx = int(self.LEFT_MARGIN + local_te * slot_w)
+                            te_bw = int(slot_w)
+                            phase_idx = (te_g - bb_te_start) % 3
+                            te_phase = _THREE_PHASE_ROTATION[phase_idx]
+                            te_color = PHASE_COLORS.get(te_phase, "#888888")
+                            painter.fillRect(te_bx, by, te_bw, busbar_strip_h, QColor(te_color))
+                            painter.setFont(font_busbar)
+                            painter.setPen(QColor("#ffffff"))
+                            painter.drawText(te_bx + 1, by, te_bw - 2, busbar_strip_h,
+                                             Qt.AlignHCenter | Qt.AlignVCenter, te_phase)
+                    else:
+                        local_start = vis_start - te_row_start  # 0-based within row
+                        local_end = vis_end - te_row_start      # 0-based within row
+                        bx = int(self.LEFT_MARGIN + local_start * slot_w)
+                        bw_bb = int((local_end - local_start + 1) * slot_w)
+                        bb_color = str(bb.get("color", "#888888") or "#888888")
+                        painter.fillRect(bx, by, bw_bb, busbar_strip_h, QColor(bb_color))
+                        if bb_phase:
+                            painter.setFont(font_busbar)
+                            painter.setPen(QColor("#ffffff"))
+                            painter.drawText(bx + 2, by, bw_bb - 4, busbar_strip_h,
+                                             Qt.AlignVCenter | Qt.AlignLeft, bb_phase)
 
         # ── Drag overlay ─
         if self._is_dragging and self._drag_slot_data is not None:
             sd = self._drag_slot_data
             device_type = str(sd.get("device_type", "") or "")
             drag_ts = max(1, int(sd.get("te_size", 1) or 1))
-            ow = drag_ts * self.SLOT_W - 2
-            oh = self.ROW_H - 35
+            ow = int(drag_ts * slot_w - 2)
+            oh = int(row_h - rail_zone - te_num_h)
             ox = self._drag_x - ow // 2
             oy = self._drag_y - oh // 2
             color_hex = self.DEVICE_COLORS.get(device_type, self.DEVICE_COLORS[""])
@@ -726,13 +846,13 @@ class UvRailWidget(QWidget):
                 tr, tslot = self._drop_target
                 for row_idx2 in range(self._rows):
                     if row_idx2 + 1 == tr:
-                        ty = self.TOP_MARGIN + row_idx2 * (self.ROW_H + self.ROW_GAP)
-                        tx = self.LEFT_MARGIN + (tslot - 1) * self.SLOT_W
-                        tw = drag_ts * self.SLOT_W - 2
-                        th = self.ROW_H - 35
+                        ty = self.TOP_MARGIN + row_idx2 * (row_h + self.ROW_GAP)
+                        tx = self.LEFT_MARGIN + (tslot - 1) * slot_w
+                        tw = int(drag_ts * slot_w - 2)
+                        th = int(row_h - rail_zone - te_num_h)
                         painter.setBrush(Qt.NoBrush)
                         painter.setPen(QPen(QColor("#00e5ff"), 2, Qt.DashLine))
-                        painter.drawRoundedRect(tx + 1, ty + 16, tw, th, 4, 4)
+                        painter.drawRoundedRect(int(tx + 1), int(ty + te_num_h), tw, th, 4, 4)
 
         painter.end()
 
@@ -742,11 +862,13 @@ class UvRailWidget(QWidget):
         """Return (row_no, slot_no) for the logical slot at pixel (x, y), or None."""
         if x < self.LEFT_MARGIN:
             return None
+        slot_w = self._slot_w()
+        row_h  = self._row_h()
         for row_idx in range(self._rows):
             row_no = row_idx + 1
-            row_y = self.TOP_MARGIN + row_idx * (self.ROW_H + self.ROW_GAP)
-            if row_y <= y <= row_y + self.ROW_H:
-                col = int((x - self.LEFT_MARGIN) / self.SLOT_W)
+            row_y = self.TOP_MARGIN + row_idx * (row_h + self.ROW_GAP)
+            if row_y <= y <= row_y + row_h:
+                col = int((x - self.LEFT_MARGIN) / slot_w)
                 te_clicked = col + 1
                 if 1 <= te_clicked <= self._modules:
                     layout = self._build_row_layout(row_no)
@@ -860,7 +982,8 @@ class UvConfigDialog(QDialog):
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle("UV planen")
-        self.resize(860, 620)
+        self.resize(1100, 740)
+        self.setSizeGripEnabled(True)
         self._cable_choices = list(cable_choices or [])
         self._building = False
         self._build_ui()
@@ -908,21 +1031,54 @@ class UvConfigDialog(QDialog):
         self.rail_widget.slot_moved.connect(self._on_slot_moved)
 
         # Tab 1 – editable table
-        # Columns: Reihe | TE | Belegung | TE-Breite | Bezeichnung | Kabel/Stromkreis | Notiz
-        self.tbl_slots = QTableWidget(0, 7)
+        # Columns: Reihe | TE | Belegung | TE-Br. | Typ/Kennz. | Bezeichnung | Kabel/Stromkreis | Notiz
+        self.tbl_slots = QTableWidget(0, 8)
         self.tbl_slots.setHorizontalHeaderLabels(
-            ["Reihe", "TE", "Belegung", "TE-Br.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
+            ["Reihe", "TE", "Belegung", "TE-Br.", "Typ/Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
         )
         hdr = self.tbl_slots.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(4, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(5, QHeaderView.Stretch)
         hdr.setSectionResizeMode(6, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(7, QHeaderView.Stretch)
         self.tbl_slots.verticalHeader().setVisible(False)
         self.tabs.addTab(self.tbl_slots, "Tabelle")
+
+        # Tab 2 – Phasenschienen (busbars)
+        busbar_tab = QWidget()
+        busbar_layout = QVBoxLayout(busbar_tab)
+        busbar_btn_row = QHBoxLayout()
+        btn_add_bb = QPushButton("+ Phasenschiene")
+        btn_add_bb.clicked.connect(lambda: self._add_busbar_row())
+        btn_del_bb = QPushButton("− Entfernen")
+        btn_del_bb.clicked.connect(self._remove_busbar_row)
+        busbar_btn_row.addWidget(btn_add_bb)
+        busbar_btn_row.addWidget(btn_del_bb)
+        busbar_btn_row.addStretch()
+        busbar_layout.addLayout(busbar_btn_row)
+
+        self.tbl_busbars = QTableWidget(0, 4)
+        self.tbl_busbars.setHorizontalHeaderLabels(["Phase", "Farbe", "TE-Start", "TE-Ende"])
+        bb_hdr = self.tbl_busbars.horizontalHeader()
+        bb_hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        bb_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        bb_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        bb_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.tbl_busbars.verticalHeader().setVisible(False)
+        busbar_layout.addWidget(self.tbl_busbars)
+
+        lbl_hint = QLabel(
+            "Globale TE-Nummern (durchgehend über alle Reihen).\n"
+            "Standardfarben: L1=rot, L2=grün, L3=blau, N=dunkelblau, PE=dunkelgrün"
+        )
+        lbl_hint.setWordWrap(True)
+        lbl_hint.setStyleSheet("color: #888888; font-size: 10px;")
+        busbar_layout.addWidget(lbl_hint)
+        self.tabs.addTab(busbar_tab, "Phasenschienen")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -932,7 +1088,7 @@ class UvConfigDialog(QDialog):
     def _capture_current_slots(self) -> list[dict]:
         """Read all rows from the table widget into a list of slot dicts.
         Columns: 0=Reihe, 1=TE, 2=Belegung(cmb), 3=TE-Breite(spinbox),
-                 4=Bezeichnung, 5=Kabel/Stromkreis(cmb), 6=Notiz"""
+                 4=Typ/Kennz., 5=Bezeichnung, 6=Kabel/Stromkreis(cmb), 7=Notiz"""
         slots: list[dict] = []
         for row_idx in range(self.tbl_slots.rowCount()):
             row_item = self.tbl_slots.item(row_idx, 0)
@@ -946,14 +1102,16 @@ class UvConfigDialog(QDialog):
                 continue
             device_combo = self.tbl_slots.cellWidget(row_idx, 2)
             te_sb = self.tbl_slots.cellWidget(row_idx, 3)
-            assignment_combo = self.tbl_slots.cellWidget(row_idx, 5)
-            label_item = self.tbl_slots.item(row_idx, 4)
-            note_item = self.tbl_slots.item(row_idx, 6)
+            spec_item = self.tbl_slots.item(row_idx, 4)
+            label_item = self.tbl_slots.item(row_idx, 5)
+            assignment_combo = self.tbl_slots.cellWidget(row_idx, 6)
+            note_item = self.tbl_slots.item(row_idx, 7)
             slots.append({
                 "row": row_no,
                 "slot": slot_no,
                 "device_type": device_combo.currentText().strip() if isinstance(device_combo, QComboBox) else "",
                 "te_size": te_sb.value() if isinstance(te_sb, QSpinBox) else 1,
+                "spec": spec_item.text().strip() if spec_item else "",
                 "label": label_item.text().strip() if label_item else "",
                 "assignment": assignment_combo.currentText().strip() if isinstance(assignment_combo, QComboBox) else "",
                 "note": note_item.text().strip() if note_item else "",
@@ -974,6 +1132,7 @@ class UvConfigDialog(QDialog):
                     "slot": slot_no,
                     "device_type": str(slot.get("device_type", "") or "").strip(),
                     "te_size": int(slot.get("te_size", 1) or 1),
+                    "spec": str(slot.get("spec", "") or "").strip(),
                     "label": str(slot.get("label", "") or "").strip(),
                     "assignment": str(slot.get("assignment", "") or "").strip(),
                     "note": str(slot.get("note", "") or "").strip(),
@@ -1016,12 +1175,17 @@ class UvConfigDialog(QDialog):
                 sb_te.valueChanged.connect(self._refresh_visual)
                 self.tbl_slots.setCellWidget(idx, 3, sb_te)
 
-                # col 4 – Bezeichnung
+                # col 4 – Typ/Kennz.
                 self.tbl_slots.setItem(
-                    idx, 4, QTableWidgetItem(str(slot.get("label", "") or "").strip())
+                    idx, 4, QTableWidgetItem(str(slot.get("spec", "") or "").strip())
                 )
 
-                # col 5 – Kabel/Stromkreis
+                # col 5 – Bezeichnung
+                self.tbl_slots.setItem(
+                    idx, 5, QTableWidgetItem(str(slot.get("label", "") or "").strip())
+                )
+
+                # col 6 – Kabel/Stromkreis
                 cmb_assignment = SafeComboBox()
                 cmb_assignment.setEditable(True)
                 cmb_assignment.addItem("")
@@ -1029,11 +1193,11 @@ class UvConfigDialog(QDialog):
                     if choice and cmb_assignment.findText(choice) < 0:
                         cmb_assignment.addItem(choice)
                 cmb_assignment.setCurrentText(str(slot.get("assignment", "") or "").strip())
-                self.tbl_slots.setCellWidget(idx, 5, cmb_assignment)
+                self.tbl_slots.setCellWidget(idx, 6, cmb_assignment)
 
-                # col 6 – Notiz
+                # col 7 – Notiz
                 self.tbl_slots.setItem(
-                    idx, 6, QTableWidgetItem(str(slot.get("note", "") or "").strip())
+                    idx, 7, QTableWidgetItem(str(slot.get("note", "") or "").strip())
                 )
 
         self.lbl_summary.setText(f"{rows} Reihen mit je {modules_per_row} TE")
@@ -1046,6 +1210,7 @@ class UvConfigDialog(QDialog):
             self.sb_modules.value(),
             self._capture_current_slots(),
             self._cable_choices,
+            busbars=self._capture_current_busbars(),
         )
 
     def _write_slot_to_table(self, row_no: int, slot_no: int, data: dict):
@@ -1061,13 +1226,16 @@ class UvConfigDialog(QDialog):
         te_sb = self.tbl_slots.cellWidget(tbl_idx, 3)
         if isinstance(te_sb, QSpinBox):
             te_sb.setValue(int(data.get("te_size", 1) or 1))
-        lbl_item = self.tbl_slots.item(tbl_idx, 4)
+        spec_item = self.tbl_slots.item(tbl_idx, 4)
+        if spec_item:
+            spec_item.setText(data.get("spec", ""))
+        lbl_item = self.tbl_slots.item(tbl_idx, 5)
         if lbl_item:
             lbl_item.setText(data.get("label", ""))
-        cmb_a = self.tbl_slots.cellWidget(tbl_idx, 5)
+        cmb_a = self.tbl_slots.cellWidget(tbl_idx, 6)
         if isinstance(cmb_a, QComboBox):
             cmb_a.setCurrentText(data.get("assignment", ""))
-        note_item = self.tbl_slots.item(tbl_idx, 6)
+        note_item = self.tbl_slots.item(tbl_idx, 7)
         if note_item:
             note_item.setText(data.get("note", ""))
 
@@ -1075,7 +1243,7 @@ class UvConfigDialog(QDialog):
         """Reset a table row to empty values."""
         self._write_slot_to_table(row_no, slot_no, {
             "device_type": "", "te_size": 1,
-            "label": "", "assignment": "", "note": "",
+            "spec": "", "label": "", "assignment": "", "note": "",
         })
 
     def _on_rail_slot_clicked(self, row_no: int, slot_no: int):
@@ -1087,10 +1255,28 @@ class UvConfigDialog(QDialog):
                 slot_data = dict(s)
                 break
 
+        # Compute phase info for this slot (global TE number)
+        mpr = self.sb_modules.value()
+        te_global = (row_no - 1) * mpr + slot_no
+        phase_info = ""
+        for bb in self._capture_current_busbars():
+            bb_te_s = int(bb.get("te_start", 0))
+            bb_te_e = int(bb.get("te_end", 0))
+            if bb_te_s <= te_global <= bb_te_e:
+                bb_phase = str(bb.get("phase", "") or "")
+                if bb_phase == THREE_PHASE_LABEL:
+                    # Resolve the actual phase for this specific TE
+                    phase_idx = (te_global - bb_te_s) % 3
+                    phase_info = _THREE_PHASE_ROTATION[phase_idx]
+                else:
+                    phase_info = bb_phase
+                break
+
         dlg = UvSlotEditPopup(
             slot_data, self._cable_choices,
             max_rows=self.sb_rows.value(),
             max_modules=self.sb_modules.value(),
+            phase_info=phase_info,
             parent=self,
         )
         if dlg.exec() != QDialog.Accepted:
@@ -1146,12 +1332,17 @@ class UvConfigDialog(QDialog):
         rows = int(config.get("rows", 2) or 2)
         modules_per_row = int(config.get("modules_per_row", 12) or 12)
         slots = config.get("slots", [])
+        busbars = config.get("busbars", [])
         self._building = True
         self.sb_rows.setValue(rows)
         self.sb_modules.setValue(modules_per_row)
         self.cmb_preset.setCurrentIndex(self._preset_index_for_dims(rows, modules_per_row))
         self._building = False
         self._rebuild_table(slots if isinstance(slots, list) else [])
+        # Load busbars
+        self.tbl_busbars.setRowCount(0)
+        for bb in (busbars if isinstance(busbars, list) else []):
+            self._add_busbar_row(bb)
 
     def _on_preset_changed(self):
         if self._building:
@@ -1188,6 +1379,7 @@ class UvConfigDialog(QDialog):
             "modules_per_row": modules_per_row,
             "preset": self.cmb_preset.currentText(),
             "slots": slots,
+            "busbars": self._capture_current_busbars(),
         }
 
     @staticmethod
@@ -1196,8 +1388,139 @@ class UvConfigDialog(QDialog):
             return True
         return any(
             str(slot.get(key, "") or "").strip()
-            for key in ("device_type", "label", "assignment", "note")
+            for key in ("device_type", "spec", "label", "assignment", "note")
         )
+
+    # ── Busbar (Phasenschienen) helpers ──────────────────────── #
+
+    def _capture_current_busbars(self) -> list[dict]:
+        """Read all rows from tbl_busbars into a list of busbar dicts."""
+        busbars: list[dict] = []
+        for row_idx in range(self.tbl_busbars.rowCount()):
+            cmb_phase = self.tbl_busbars.cellWidget(row_idx, 0)
+            btn_color = self.tbl_busbars.cellWidget(row_idx, 1)
+            sb_start = self.tbl_busbars.cellWidget(row_idx, 2)
+            sb_end = self.tbl_busbars.cellWidget(row_idx, 3)
+            if not all([cmb_phase, btn_color, sb_start, sb_end]):
+                continue
+            phase = cmb_phase.currentText().strip() if isinstance(cmb_phase, QComboBox) else ""
+            color = btn_color.property("busbar_color") or "#888888"
+            te_start = sb_start.value() if isinstance(sb_start, QSpinBox) else 1
+            te_end = sb_end.value() if isinstance(sb_end, QSpinBox) else 1
+            if phase:
+                busbars.append({
+                    "phase": phase,
+                    "color": color,
+                    "te_start": te_start,
+                    "te_end": te_end,
+                })
+        return busbars
+
+    def _add_busbar_row(self, busbar: dict | None = None):
+        """Append a row to tbl_busbars, optionally pre-filled from busbar dict."""
+        total_te = self.sb_rows.value() * self.sb_modules.value()
+        row_idx = self.tbl_busbars.rowCount()
+        self.tbl_busbars.insertRow(row_idx)
+
+        # Phase combo
+        cmb = SafeComboBox()
+        cmb.setEditable(True)
+        for p in (THREE_PHASE_LABEL, "L1", "L2", "L3", "N", "PE", "L"):
+            cmb.addItem(p)
+        phase = str((busbar or {}).get("phase", "L1") or "L1")
+        cmb.setCurrentText(phase)
+        cmb.currentTextChanged.connect(lambda p, ri=row_idx: self._on_busbar_phase_changed(ri, p))
+        cmb.currentTextChanged.connect(lambda _: self._refresh_visual())
+        self.tbl_busbars.setCellWidget(row_idx, 0, cmb)
+
+        # Color button
+        is_3p = (phase == THREE_PHASE_LABEL)
+        default_color = PHASE_COLORS.get(phase, "#888888")
+        color = str((busbar or {}).get("color", default_color) or default_color)
+        btn = QPushButton()
+        btn.setFixedHeight(22)
+        btn.setProperty("busbar_color", color)
+        if is_3p:
+            self._apply_three_phase_btn_style(btn)
+        else:
+            self._update_busbar_color_btn(btn, color)
+            btn.clicked.connect(lambda checked=False, ri=row_idx: self._pick_busbar_color(ri))
+        self.tbl_busbars.setCellWidget(row_idx, 1, btn)
+
+        # TE-Start spinbox
+        sb_start = QSpinBox()
+        sb_start.setRange(1, max(1, total_te))
+        sb_start.setValue(int((busbar or {}).get("te_start", 1) or 1))
+        sb_start.valueChanged.connect(lambda _: self._refresh_visual())
+        self.tbl_busbars.setCellWidget(row_idx, 2, sb_start)
+
+        # TE-Ende spinbox
+        sb_end = QSpinBox()
+        sb_end.setRange(1, max(1, total_te))
+        sb_end.setValue(int((busbar or {}).get("te_end", sb_start.value()) or sb_start.value()))
+        sb_end.valueChanged.connect(lambda _: self._refresh_visual())
+        self.tbl_busbars.setCellWidget(row_idx, 3, sb_end)
+
+        self._refresh_visual()
+
+    def _remove_busbar_row(self):
+        """Remove the currently selected busbar row."""
+        selected = self.tbl_busbars.currentRow()
+        if selected >= 0:
+            self.tbl_busbars.removeRow(selected)
+        elif self.tbl_busbars.rowCount() > 0:
+            self.tbl_busbars.removeRow(self.tbl_busbars.rowCount() - 1)
+        self._refresh_visual()
+
+    def _on_busbar_phase_changed(self, row_idx: int, phase: str):
+        """When a phase is selected, update the color button accordingly."""
+        btn = self.tbl_busbars.cellWidget(row_idx, 1)
+        if not isinstance(btn, QPushButton):
+            return
+        if phase == THREE_PHASE_LABEL:
+            self._apply_three_phase_btn_style(btn)
+        else:
+            btn.setEnabled(True)
+            # Re-connect click if it was previously a 3-phase button (no click handler)
+            try:
+                btn.clicked.disconnect()
+            except RuntimeError:
+                pass
+            btn.clicked.connect(lambda checked=False, ri=row_idx: self._pick_busbar_color(ri))
+            if phase in PHASE_COLORS:
+                self._update_busbar_color_btn(btn, PHASE_COLORS[phase])
+
+    @staticmethod
+    def _apply_three_phase_btn_style(btn: QPushButton):
+        """Style a color button as the 3-phase gradient and disable it."""
+        btn.setText("L1 / L2 / L3")
+        btn.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #e53935, stop:0.32 #e53935, "
+            "stop:0.34 #43a047, stop:0.65 #43a047, "
+            "stop:0.67 #1e88e5, stop:1 #1e88e5);"
+            "color: #ffffff; border: 1px solid #555; border-radius: 2px;"
+        )
+        btn.setEnabled(False)
+
+    def _pick_busbar_color(self, row_idx: int):
+        """Open color picker for the busbar color button at row_idx."""
+        btn = self.tbl_busbars.cellWidget(row_idx, 1)
+        if not isinstance(btn, QPushButton):
+            return
+        current = btn.property("busbar_color") or "#888888"
+        color = QColorDialog.getColor(QColor(current), self, "Farbe wählen")
+        if color.isValid():
+            self._update_busbar_color_btn(btn, color.name())
+            self._refresh_visual()
+
+    @staticmethod
+    def _update_busbar_color_btn(btn: QPushButton, color: str):
+        btn.setProperty("busbar_color", color)
+        btn.setStyleSheet(
+            f"background-color: {color}; color: #ffffff; border: 1px solid #555; border-radius: 2px;"
+        )
+        btn.setText(color)
 
 
 class UpDistributionDialog(QDialog):

@@ -44,7 +44,7 @@ class PdfExportConfigDialog(QDialog):
         "el_ap_connections": "AP – Kabelverbindungen",
         "el_rooms": "Räume – AP und Kabelziele",
         "el_ap_infos": "AP-Infos",
-        "el_uv": "Unterverteilungen",
+        "el_uv": "UV-Schaltschrank-Layout",
         "el_up_distribution": "Verteilung in Unterputzdose",
     }
 

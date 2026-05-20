@@ -286,6 +286,38 @@ def _create_mcp(window: MainWindow, bridge):
             "Freitext",
         ], ensure_ascii=False)
 
+    @mcp.resource("hrp://builtin_symbols")
+    def get_builtin_symbols_resource() -> str:
+        """Verfügbare Builtin-Symbole für Elektro-Anschlusspunkte.
+
+        Gibt alle gültigen Werte für den builtin_symbol-Parameter in
+        add_elec_point / modify_elec_point zurück.  Die tatsächlich
+        verfügbaren Symbole hängen von den installierten Icon-Dateien ab.
+        Typische Werte: 'Steckdose', 'Steckdose 2fach', 'Licht',
+        'Lichtquelle', 'Taster', 'Rauchmelder', 'Thermostat', 'LAN', 'TV',
+        'Heizkreisverteiler', 'Bewegungsmelder', 'Gong', ...
+        """
+        import json
+        from gui.parameter_panel import BUILTIN_SYMBOLS
+        labels = [lbl for lbl in BUILTIN_SYMBOLS.keys() if lbl != "(kein Symbol)"]
+        return json.dumps(sorted(labels), ensure_ascii=False)
+
+    @mcp.resource("hrp://ap_types")
+    def get_ap_types_resource() -> str:
+        """Gültige Werte für ap_type in add_elec_point / modify_elec_point.
+
+        standard       – normaler Anschlusspunkt (Steckdose, Licht, etc.)
+        uv             – Unterverteilung (aktiviert uv_config / UV-Planung)
+        up_distribution – Verteilung in Unterputzdose (aktiviert
+                          up_distribution_config / Aderzuordnung)
+        """
+        import json
+        return json.dumps([
+            {"value": "standard",         "label": "Normaler Anschlusspunkt"},
+            {"value": "uv",               "label": "Unterverteilung (UV)"},
+            {"value": "up_distribution",   "label": "Verteilung in Unterputzdose"},
+        ], ensure_ascii=False)
+
     def _normalize_ap_type(ap_type: str | None) -> str:
         value = str(ap_type or "standard").strip().lower()
         if value == "uv":
@@ -418,17 +450,54 @@ def _create_mcp(window: MainWindow, bridge):
                 "slot": slot_no,
                 "device_type": str(slot.get("device_type", "") or "").strip(),
                 "te_size": te_size,
+                "spec": str(slot.get("spec", "") or "").strip(),
                 "label": str(slot.get("label", "") or "").strip(),
                 "assignment": str(slot.get("assignment", "") or "").strip(),
                 "note": str(slot.get("note", "") or "").strip(),
             })
 
         slots.sort(key=lambda entry: (entry["row"], entry["slot"]))
+
+        # Normalize busbars
+        busbars_raw = uv_config.get("busbars", [])
+        if busbars_raw is None:
+            busbars_raw = []
+        if not isinstance(busbars_raw, list):
+            raise ValueError("uv_config.busbars muss ein Array sein.")
+        busbars: list[dict] = []
+        for bidx, bb in enumerate(busbars_raw):
+            if not isinstance(bb, dict):
+                raise ValueError(f"uv_config.busbars[{bidx}] muss ein Objekt sein.")
+            phase = str(bb.get("phase", "") or "").strip()
+            if not phase:
+                raise ValueError(f"uv_config.busbars[{bidx}].phase darf nicht leer sein.")
+            try:
+                te_start = int(bb.get("te_start", 1) or 1)
+                te_end = int(bb.get("te_end", 1) or 1)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"uv_config.busbars[{bidx}] benötigt gültige te_start/te_end-Werte."
+                ) from exc
+            if te_start < 1 or te_end < 1:
+                raise ValueError(f"uv_config.busbars[{bidx}]: te_start und te_end müssen >= 1 sein.")
+            if te_start > te_end:
+                raise ValueError(
+                    f"uv_config.busbars[{bidx}]: te_start ({te_start}) muss <= te_end ({te_end}) sein."
+                )
+            color = str(bb.get("color", "#888888") or "#888888").strip()
+            busbars.append({
+                "phase": phase,
+                "color": color,
+                "te_start": te_start,
+                "te_end": te_end,
+            })
+
         return {
             "preset": preset,
             "rows": rows,
             "modules_per_row": modules_per_row,
             "slots": slots,
+            "busbars": busbars,
         }
 
     def _normalize_up_distribution_config(
@@ -1079,6 +1148,7 @@ def _create_mcp(window: MainWindow, bridge):
         modules_per_row: int,
         slots: list[dict] | None = None,
         preset: str = "Benutzerdefiniert",
+        busbars: list[dict] | None = None,
     ) -> dict:
         """UV-/Verteilungsbelegung eines Anschlusspunkts setzen.
 
@@ -1089,6 +1159,8 @@ def _create_mcp(window: MainWindow, bridge):
             slots: Liste der Belegungen mit row, slot, device_type,
                 label, assignment und note
             preset: Preset-Name (z.B. '2-reihig / 12 TE')
+            busbars: Phasenschienen-Konfiguration, z.B.
+                [{"phase": "L1", "color": "#e53935", "te_start": 1, "te_end": 6}]
         """
         def _configure():
             panel = window.param_panel.elec_point_panels.get(point_id)
@@ -1102,6 +1174,7 @@ def _create_mcp(window: MainWindow, bridge):
                 "rows": rows,
                 "modules_per_row": modules_per_row,
                 "slots": slots or [],
+                "busbars": busbars or [],
             }, require_layout=True)
             panel.set_ap_type("uv")
             panel.set_uv_config(normalized_uv_config)
@@ -1188,6 +1261,7 @@ def _create_mcp(window: MainWindow, bridge):
                 "total_te": rows * mpr,
                 "occupied_count": len(uv.get("slots", [])),
                 "slots": uv.get("slots", []),
+                "busbars": uv.get("busbars", []),
             }
         return invoke(_get)
 
@@ -1201,6 +1275,7 @@ def _create_mcp(window: MainWindow, bridge):
         assignment: str = "",
         note: str = "",
         te_size: int = 1,
+        spec: str = "",
     ) -> dict:
         """Einzelnen TE-Slot in einer UV setzen oder überschreiben.
 
@@ -1215,8 +1290,9 @@ def _create_mcp(window: MainWindow, bridge):
                 Leer = Slot löschen.
             label: Bezeichnung (z.B. 'Küche', 'Licht OG')
             assignment: Kabel-/Stromkreis-Zuordnung (z.B. 'KV-1')
-            note: Freitext-Notiz (z.B. '16A', 'B16')
+            note: Freitext-Notiz
             te_size: Anzahl belegter TE (Standard 1; FI=2, HS=3)
+            spec: Typ-Kennzeichnung des Geräts, z.B. 'B16', 'Typ A 30mA', '63A'
         """
         def _set():
             panel = window.param_panel.elec_point_panels.get(point_id)
@@ -1264,6 +1340,7 @@ def _create_mcp(window: MainWindow, bridge):
                     "slot": slot,
                     "device_type": str(device_type).strip(),
                     "te_size": max(1, int(te_size)),
+                    "spec": str(spec or "").strip(),
                     "label": str(label or "").strip(),
                     "assignment": str(assignment or "").strip(),
                     "note": str(note or "").strip(),
@@ -2797,6 +2874,838 @@ def _create_mcp(window: MainWindow, bridge):
             "valid": len(errors) == 0,
             "errors": errors,
             "warnings": warnings,
+        }
+
+    # ── Erweiterte Abfrage-Tools ───────────────────────────────────
+
+    @mcp.tool()
+    def bulk_set_uv_slots(
+        point_id: str,
+        slots: list[dict],
+        replace_all: bool = False,
+    ) -> dict:
+        """Mehrere TE-Slots einer UV auf einmal setzen.
+
+        Effizienter als wiederholte set_uv_slot-Aufrufe.
+
+        Args:
+            point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
+            slots: Liste von Slot-Dicts. Jedes Dict muss enthalten:
+                row (int), slot (int), device_type (str).
+                Optional: te_size (int, Standard 1), spec (str),
+                label (str), assignment (str), note (str).
+            replace_all: True = gesamte Belegung ersetzen (alle
+                bisherigen Slots werden gelöscht). False = nur die
+                angegebenen Positionen werden überschrieben.
+        """
+        def _bulk():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
+
+            p = window.param_panel.to_dict()
+            ep = p.get("elec_points", {}).get(point_id, {})
+            if ep.get("ap_type") != "uv":
+                return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
+
+            current_uv = dict(ep.get("uv_config") or {})
+            rows = current_uv.get("rows", 0)
+            mpr = current_uv.get("modules_per_row", 0)
+            if rows < 1 or mpr < 1:
+                return {"error": "UV hat kein gültiges Layout."}
+
+            # Validate incoming slots
+            errors = []
+            for i, s in enumerate(slots):
+                r = s.get("row", 0)
+                sl = s.get("slot", 0)
+                if not (1 <= r <= rows):
+                    errors.append(f"slots[{i}]: row={r} außerhalb 1..{rows}")
+                if not (1 <= sl <= mpr):
+                    errors.append(f"slots[{i}]: slot={sl} außerhalb 1..{mpr}")
+            if errors:
+                return {"error": "; ".join(errors)}
+
+            # Build new slot list
+            if replace_all:
+                base_slots: list[dict] = []
+            else:
+                incoming_keys = {(s["row"], s["slot"]) for s in slots}
+                base_slots = [
+                    s for s in (current_uv.get("slots") or [])
+                    if (s["row"], s["slot"]) not in incoming_keys
+                ]
+
+            for s in slots:
+                dt = str(s.get("device_type", "") or "").strip()
+                if not dt:
+                    continue  # skip empty = delete
+                base_slots.append({
+                    "row": int(s["row"]),
+                    "slot": int(s["slot"]),
+                    "device_type": dt,
+                    "te_size": max(1, int(s.get("te_size", 1) or 1)),
+                    "spec": str(s.get("spec", "") or "").strip(),
+                    "label": str(s.get("label", "") or "").strip(),
+                    "assignment": str(s.get("assignment", "") or "").strip(),
+                    "note": str(s.get("note", "") or "").strip(),
+                })
+
+            base_slots.sort(key=lambda x: (x["row"], x["slot"]))
+            new_uv = dict(current_uv)
+            new_uv["slots"] = base_slots
+            panel.set_uv_config(new_uv)
+
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            return {
+                "point_id": point_id,
+                "occupied_count": len(base_slots),
+                "total_te": rows * mpr,
+                "status": "updated",
+            }
+
+        return invoke(_bulk)
+
+    @mcp.tool()
+    def find_free_uv_slots(
+        point_id: str,
+        min_te_size: int = 1,
+    ) -> dict:
+        """Freie TE-Positionen in einer UV finden.
+
+        Args:
+            point_id: ID des UV-Anschlusspunkts
+            min_te_size: Nur Lücken zurückgeben die mindestens
+                diese Anzahl zusammenhängender freier TEs haben.
+                Standard 1 = alle freien Positionen.
+
+        Returns:
+            Dict mit free_slots (Liste freier Positionen) und
+            free_runs (zusammenhängende freie Blöcke je Reihe).
+        """
+        def _find():
+            p = window.param_panel.to_dict()
+            ep = p.get("elec_points", {}).get(point_id)
+            if ep is None:
+                return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
+            if ep.get("ap_type") != "uv":
+                return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
+
+            uv = ep.get("uv_config") or {}
+            rows = uv.get("rows", 0)
+            mpr = uv.get("modules_per_row", 0)
+            if rows < 1 or mpr < 1:
+                return {"error": "UV hat kein gültiges Layout."}
+
+            # Build occupied map (row, slot) → te_size
+            occupied: dict[tuple[int, int], int] = {}
+            for s in (uv.get("slots") or []):
+                ts = max(1, int(s.get("te_size", 1) or 1))
+                row_no = int(s["row"])
+                slot_no = int(s["slot"])
+                for t in range(ts):
+                    occupied[(row_no, slot_no + t)] = ts
+
+            free_slots: list[dict] = []
+            free_runs: list[dict] = []
+
+            for row_no in range(1, rows + 1):
+                te_offset = (row_no - 1) * mpr
+                run_start: int | None = None
+                run_len = 0
+                for te in range(1, mpr + 1):
+                    if (row_no, te) not in occupied:
+                        global_te = te_offset + te
+                        free_slots.append({"row": row_no, "slot": te,
+                                           "global_te": global_te})
+                        if run_start is None:
+                            run_start = te
+                        run_len += 1
+                    else:
+                        if run_start is not None and run_len >= min_te_size:
+                            free_runs.append({
+                                "row": row_no,
+                                "start_slot": run_start,
+                                "length_te": run_len,
+                                "global_te_start": (row_no - 1) * mpr + run_start,
+                            })
+                        run_start = None
+                        run_len = 0
+                    # advance past multi-TE block
+                    ts = occupied.get((row_no, te), 1)
+                if run_start is not None and run_len >= min_te_size:
+                    free_runs.append({
+                        "row": row_no,
+                        "start_slot": run_start,
+                        "length_te": run_len,
+                        "global_te_start": (row_no - 1) * mpr + run_start,
+                    })
+
+            total_te = rows * mpr
+            used_te = sum(
+                max(1, int(s.get("te_size", 1) or 1))
+                for s in (uv.get("slots") or [])
+            )
+            return {
+                "point_id": point_id,
+                "rows": rows,
+                "modules_per_row": mpr,
+                "total_te": total_te,
+                "used_te": used_te,
+                "free_te": total_te - used_te,
+                "free_slots": free_slots,
+                "free_runs": free_runs,
+            }
+
+        return invoke(_find)
+
+    @mcp.tool()
+    def get_uv_busbars(point_id: str) -> dict:
+        """Phasenschienen (Busbars) einer UV-Unterverteilung lesen.
+
+        Args:
+            point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
+
+        Returns:
+            Dict mit point_id und busbars-Liste. Jeder Eintrag hat:
+            phase (str), color (#rrggbb), te_start (int), te_end (int).
+        """
+        def _get():
+            p = window.param_panel.to_dict()
+            ep = p.get("elec_points", {}).get(point_id)
+            if ep is None:
+                return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
+            if ep.get("ap_type") != "uv":
+                return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
+            uv = ep.get("uv_config") or {}
+            return {
+                "point_id": point_id,
+                "busbars": uv.get("busbars", []),
+            }
+        return invoke(_get)
+
+    @mcp.tool()
+    def set_uv_busbar(
+        point_id: str,
+        phase: str,
+        te_start: int,
+        te_end: int,
+        color: str = "",
+    ) -> dict:
+        """Phasenschiene in einer UV-Unterverteilung hinzufügen oder ersetzen.
+
+        Wenn bereits eine Phasenschiene mit derselben Phase vorhanden ist,
+        wird sie ersetzt.
+
+        Args:
+            point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
+            phase: Phasenbezeichnung (z.B. 'L1', 'L2', 'L3', 'N', 'PE').
+                Für dreiphasige Sammelschiene 'L1/L2/L3' verwenden – dann rotiert
+                die Phase L1→L2→L3 automatisch pro TE.
+            te_start: Erste globale TE-Nummer (inklusiv, >= 1)
+            te_end: Letzte globale TE-Nummer (inklusiv, >= te_start)
+            color: Hex-Farbe (#rrggbb). Leer = Standardfarbe für die Phase.
+                Für phase='L1/L2/L3' (dreiphasige Sammelschiene) wird color ignoriert –
+                jede TE erhält automatisch die Farbe der zugehörigen Phase (rot/grün/blau).
+        """
+        _PHASE_COLORS = {
+            "L1": "#e53935",
+            "L2": "#43a047",
+            "L3": "#1e88e5",
+            "N": "#1565c0",
+            "PE": "#558b2f",
+            "L": "#ff7043",
+        }
+
+        def _set():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
+            if panel.get_ap_type() != "uv":
+                return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
+
+            phase_s = str(phase or "").strip()
+            if not phase_s:
+                return {"error": "phase darf nicht leer sein."}
+            if te_start < 1 or te_end < 1 or te_start > te_end:
+                return {"error": f"Ungültige TE-Range: te_start={te_start}, te_end={te_end}."}
+
+            resolved_color = str(color or "").strip() or _PHASE_COLORS.get(phase_s, "#888888")
+
+            p = window.param_panel.to_dict()
+            ep = p.get("elec_points", {}).get(point_id, {})
+            uv = dict(ep.get("uv_config") or {})
+            existing_busbars = list(uv.get("busbars", []) or [])
+            # Replace or append
+            new_busbars = [bb for bb in existing_busbars if str(bb.get("phase", "")) != phase_s]
+            new_busbars.append({
+                "phase": phase_s,
+                "color": resolved_color,
+                "te_start": te_start,
+                "te_end": te_end,
+            })
+            new_busbars.sort(key=lambda b: b["te_start"])
+            uv["busbars"] = new_busbars
+            panel.set_uv_config(_normalize_uv_config(uv))
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            return {
+                "point_id": point_id,
+                "status": "set",
+                "busbar": {"phase": phase_s, "color": resolved_color,
+                           "te_start": te_start, "te_end": te_end},
+                "busbars_total": len(new_busbars),
+            }
+        return invoke(_set)
+
+    @mcp.tool()
+    def delete_uv_busbar(point_id: str, phase: str) -> dict:
+        """Phasenschiene aus einer UV-Unterverteilung entfernen.
+
+        Args:
+            point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
+            phase: Phasenbezeichnung der zu löschenden Schiene (z.B. 'L1')
+        """
+        def _del():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
+            if panel.get_ap_type() != "uv":
+                return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
+
+            phase_s = str(phase or "").strip()
+            p = window.param_panel.to_dict()
+            ep = p.get("elec_points", {}).get(point_id, {})
+            uv = dict(ep.get("uv_config") or {})
+            existing = list(uv.get("busbars", []) or [])
+            new_busbars = [bb for bb in existing if str(bb.get("phase", "")) != phase_s]
+            removed = len(existing) - len(new_busbars)
+            uv["busbars"] = new_busbars
+            panel.set_uv_config(_normalize_uv_config(uv))
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            return {
+                "point_id": point_id,
+                "status": "deleted" if removed > 0 else "not_found",
+                "phase": phase_s,
+                "removed_count": removed,
+            }
+        return invoke(_del)
+
+    @mcp.tool()
+    def bulk_set_uv_busbars(
+        point_id: str,
+        busbars: list[dict],
+        replace_all: bool = True,
+    ) -> dict:
+        """Mehrere Phasenschienen einer UV auf einmal setzen.
+
+        Args:
+            point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
+            busbars: Liste von Phasenschienen, jede mit:
+                phase (Pflicht), te_start (Pflicht), te_end (Pflicht),
+                color (optional, Standard = Phasenfarbe).
+            replace_all: True (Standard) = alle bisherigen Phasenschienen
+                ersetzen. False = vorhandene behalten, neue ergänzen/ersetzen.
+
+        Beispiel:
+            bulk_set_uv_busbars('AP-1', [
+                {'phase': 'L1', 'te_start': 1, 'te_end': 6},
+                {'phase': 'L2', 'te_start': 7, 'te_end': 12},
+                {'phase': 'L3', 'te_start': 13, 'te_end': 18},
+            ])
+        """
+        _PHASE_COLORS = {
+            "L1": "#e53935", "L2": "#43a047", "L3": "#1e88e5",
+            "N": "#1565c0", "PE": "#558b2f", "L": "#ff7043",
+        }
+
+        def _bulk():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
+            if panel.get_ap_type() != "uv":
+                return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
+
+            if not isinstance(busbars, list):
+                return {"error": "busbars muss eine Liste sein."}
+
+            p = window.param_panel.to_dict()
+            ep = p.get("elec_points", {}).get(point_id, {})
+            uv = dict(ep.get("uv_config") or {})
+            base_busbars = [] if replace_all else list(uv.get("busbars", []) or [])
+
+            errors: list[str] = []
+            for idx, bb in enumerate(busbars):
+                if not isinstance(bb, dict):
+                    errors.append(f"busbars[{idx}] muss ein Objekt sein.")
+                    continue
+                phase_s = str(bb.get("phase", "") or "").strip()
+                if not phase_s:
+                    errors.append(f"busbars[{idx}].phase darf nicht leer sein.")
+                    continue
+                try:
+                    te_s = int(bb.get("te_start", 0) or 0)
+                    te_e = int(bb.get("te_end", 0) or 0)
+                except (TypeError, ValueError):
+                    errors.append(f"busbars[{idx}]: te_start/te_end ungültig.")
+                    continue
+                if te_s < 1 or te_e < te_s:
+                    errors.append(f"busbars[{idx}]: te_start={te_s} te_end={te_e} ungültig.")
+                    continue
+                col = str(bb.get("color", "") or "").strip() or _PHASE_COLORS.get(phase_s, "#888888")
+                # Replace existing same phase
+                base_busbars = [b for b in base_busbars if str(b.get("phase", "")) != phase_s]
+                base_busbars.append({
+                    "phase": phase_s,
+                    "color": col,
+                    "te_start": te_s,
+                    "te_end": te_e,
+                })
+
+            if errors:
+                return {"error": "; ".join(errors)}
+
+            base_busbars.sort(key=lambda b: b["te_start"])
+            uv["busbars"] = base_busbars
+            panel.set_uv_config(_normalize_uv_config(uv))
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            return {
+                "point_id": point_id,
+                "status": "configured",
+                "busbars_count": len(base_busbars),
+                "busbars": base_busbars,
+            }
+        return invoke(_bulk)
+
+    @mcp.tool()
+    def get_rooms_with_aps() -> list[dict]:
+        """Räume mit ihren zugeordneten Anschlusspunkten.
+
+        Gibt für jeden Elektro-Raum eine Liste der darin
+        enthaltenen APs zurück — nützlich um zu verstehen welche
+        Geräte in welchem Raum geplant werden sollen.
+
+        Returns:
+            Liste von Dicts: room_id, room_name, floor_plan_id,
+            aps (Liste mit point_id, name, ap_type, builtin_symbol,
+            position, height_from_floor).
+            Zusätzlich: unassigned_aps (APs ohne Raum).
+        """
+        def _read():
+            p = window.param_panel.to_dict()
+            c = window.canvas.to_dict()
+
+            # room_id → set of point_ids (from canvas room assignment)
+            room_to_aps: dict[str, list[str]] = {}
+            for rid in p.get("elec_rooms", {}):
+                room_to_aps[rid] = []
+
+            # Use the window's room-assignment helper if available
+            assigned: set[str] = set()
+            try:
+                mapping = window._elec_point_room_map  # {ap_id: room_id}
+                for ap_id, rid in mapping.items():
+                    if rid in room_to_aps:
+                        room_to_aps[rid].append(ap_id)
+                        assigned.add(ap_id)
+            except AttributeError:
+                pass
+
+            def _ap_summary(pid: str) -> dict:
+                ep = p.get("elec_points", {}).get(pid, {})
+                return {
+                    "point_id": pid,
+                    "name": ep.get("name", pid),
+                    "ap_type": ep.get("ap_type", "standard"),
+                    "builtin_symbol": ep.get("builtin_symbol", ""),
+                    "position": ep.get("position", ""),
+                    "height_from_floor": ep.get("height_from_floor", 0),
+                }
+
+            result = []
+            for rid, rdata in p.get("elec_rooms", {}).items():
+                result.append({
+                    "room_id": rid,
+                    "room_name": rdata.get("name", rid),
+                    "floor_plan_id": rdata.get("floor_plan_id", ""),
+                    "ap_count": len(room_to_aps[rid]),
+                    "aps": [_ap_summary(pid) for pid in room_to_aps[rid]],
+                })
+
+            all_ap_ids = set(p.get("elec_points", {}).keys())
+            unassigned = [_ap_summary(pid)
+                          for pid in sorted(all_ap_ids - assigned)]
+            return {
+                "rooms": result,
+                "unassigned_aps": unassigned,
+                "unassigned_count": len(unassigned),
+            }
+
+        return invoke(_read)
+
+    @mcp.tool()
+    def get_floor_plan_info(
+        floor_plan_id: str = "",
+    ) -> dict:
+        """Grundriss-Informationen: Maßstab, Abmessungen, Koordinatenhilfe.
+
+        Gibt mm_per_px, reale Abmessungen und Umrechnungsformeln
+        zurück — nötig um Pixelkoordinaten für add_circuit /
+        add_elec_point korrekt zu berechnen.
+
+        Args:
+            floor_plan_id: Grundriss-ID (z.B. 'grundriss-1').
+                Leer = erster/einziger Grundriss.
+        """
+        def _read():
+            p = window.param_panel.to_dict()
+            fps = p.get("floorplans", {})
+            if not fps:
+                return {"error": "Keine Grundrisse im Projekt."}
+
+            if floor_plan_id:
+                fid = floor_plan_id
+                if fid not in fps:
+                    return {"error": f"Grundriss '{fid}' nicht gefunden."}
+            else:
+                order = p.get("floorplans_order") or list(fps.keys())
+                fid = order[0] if order else list(fps.keys())[0]
+
+            fdata = fps[fid]
+            layer = window.canvas._floor_plans.get(fid)
+            mpp = layer.mm_per_px if layer else fdata.get("mm_per_px", 1.0)
+
+            # Get canvas image dimensions
+            img_w_px = img_h_px = 0
+            if layer and getattr(layer, "image", None) is not None:
+                img_w_px = layer.image.width()
+                img_h_px = layer.image.height()
+
+            real_w_mm = img_w_px * mpp if img_w_px else 0
+            real_h_mm = img_h_px * mpp if img_h_px else 0
+
+            return {
+                "floor_plan_id": fid,
+                "name": fdata.get("name", fid),
+                "mm_per_px": mpp,
+                "image_width_px": img_w_px,
+                "image_height_px": img_h_px,
+                "real_width_mm": round(real_w_mm, 1),
+                "real_height_mm": round(real_h_mm, 1),
+                "real_width_m": round(real_w_mm / 1000, 2),
+                "real_height_m": round(real_h_mm / 1000, 2),
+                "offset_x": layer.offset_x if layer else 0,
+                "offset_y": layer.offset_y if layer else 0,
+                "ref_length_mm": fdata.get("ref_length_mm", 0),
+                "hint_px_to_mm": f"real_mm = pixel * {mpp:.4f}",
+                "hint_mm_to_px": f"pixel = real_mm / {mpp:.4f}",
+                "hint_example": (
+                    f"5000 mm = {5000 / mpp:.0f} px"
+                    if mpp > 0 else "mm_per_px not calibrated"
+                ),
+            }
+
+        return invoke(_read)
+
+    @mcp.tool()
+    def get_heating_load_summary() -> dict:
+        """Heizlast-Zusammenfassung für alle Heizkreise.
+
+        Berechnet alle Heizkreise neu und gibt aggregierte Werte
+        zurück: Gesamtleistung, Gesamtvolumenstrom, Gesamtrohrlänge
+        sowie eine Übersicht je Heizkreis.
+
+        Nützlich um die normgerechte Auslegung zu prüfen.
+        """
+        def _calc():
+            from logic.heating_calc import HeatingCalc
+            p = window.param_panel.to_dict()
+            c = window.canvas.to_dict()
+            t_supply = p.get("t_supply", 35.0)
+            t_return = p.get("t_return", 30.0)
+            t_norm = p.get("t_norm_outdoor", -12.0)
+
+            total_power_w = 0.0
+            total_flow_lmin = 0.0
+            total_pipe_m = 0.0
+            circuits_summary = []
+
+            for cid, cdata in p.get("circuits", {}).items():
+                polygon = c.get("polygons", {}).get(cid, [])
+                if not polygon:
+                    continue
+                try:
+                    calc = HeatingCalc(
+                        polygon=polygon,
+                        t_supply=t_supply,
+                        t_return=t_return,
+                        t_room=cdata.get("room_temp", 20.0),
+                        spacing_mm=cdata.get("spacing", 150.0),
+                        diameter_mm=cdata.get("diameter", 16.0),
+                        wall_dist_mm=cdata.get("wall_dist", 200.0),
+                        floor_covering=cdata.get("floor_covering", "Fliesen / Keramik"),
+                        mm_per_px=window.canvas._mm_per_px,
+                    )
+                    res = calc.calculate()
+                    power = res.get("power_w", 0.0)
+                    flow = res.get("volume_flow_lmin", 0.0)
+                    pipe = res.get("pipe_length_m", 0.0)
+                    total_power_w += power
+                    total_flow_lmin += flow
+                    total_pipe_m += pipe
+                    circuits_summary.append({
+                        "circuit_id": cid,
+                        "name": cdata.get("name", cid),
+                        "power_w": round(power, 1),
+                        "q_wm2": round(res.get("q_wm2", 0.0), 1),
+                        "area_m2": round(res.get("area_m2", 0.0), 2),
+                        "volume_flow_lmin": round(flow, 3),
+                        "pressure_drop_mbar": round(res.get("pressure_drop_mbar", 0.0), 1),
+                        "pipe_length_m": round(pipe, 1),
+                        "room_temp": cdata.get("room_temp", 20.0),
+                        "floor_covering": cdata.get("floor_covering", ""),
+                    })
+                except Exception as e:
+                    circuits_summary.append({
+                        "circuit_id": cid,
+                        "name": cdata.get("name", cid),
+                        "error": str(e),
+                    })
+
+            return {
+                "t_supply": t_supply,
+                "t_return": t_return,
+                "t_norm_outdoor": t_norm,
+                "circuit_count": len(circuits_summary),
+                "total_power_w": round(total_power_w, 1),
+                "total_power_kw": round(total_power_w / 1000, 3),
+                "total_volume_flow_lmin": round(total_flow_lmin, 3),
+                "total_pipe_length_m": round(total_pipe_m, 1),
+                "circuits": circuits_summary,
+            }
+
+        return invoke(_calc)
+
+    @mcp.tool()
+    def get_cable_length_summary() -> dict:
+        """Kabellängen-Zusammenfassung nach Typ und gesamt.
+
+        Gibt Gesamtlängen gruppiert nach Leitungstyp zurück —
+        nützlich für Materiallisten und Kostenschätzungen.
+        """
+        def _calc():
+            from math import hypot
+            p = window.param_panel.to_dict()
+            c = window.canvas.to_dict()
+            mpp = window.canvas._mm_per_px
+
+            cables = p.get("elec_cables", {})
+            canvas_cables = c.get("elec_cables", {})
+
+            total_m = 0.0
+            by_type: dict[str, float] = {}
+            details: list[dict] = []
+
+            for cid, cdata in cables.items():
+                points = canvas_cables.get(cid, [])
+                length_m = 0.0
+                for i in range(1, len(points)):
+                    dx = points[i][0] - points[i - 1][0]
+                    dy = points[i][1] - points[i - 1][1]
+                    length_m += hypot(dx, dy) * mpp / 1000.0
+
+                ctype = cdata.get("cable_type", cdata.get("name", cid))
+                total_m += length_m
+                by_type[ctype] = by_type.get(ctype, 0.0) + length_m
+                details.append({
+                    "cable_id": cid,
+                    "name": cdata.get("name", cid),
+                    "type": ctype,
+                    "length_m": round(length_m, 2),
+                    "start_ap": cdata.get("start_ap_id", ""),
+                    "end_ap": cdata.get("end_ap_id", ""),
+                })
+
+            return {
+                "total_length_m": round(total_m, 2),
+                "cable_count": len(cables),
+                "by_type": {k: round(v, 2)
+                            for k, v in sorted(by_type.items())},
+                "cables": sorted(details, key=lambda x: x["type"]),
+            }
+
+        return invoke(_calc)
+
+    @mcp.tool()
+    def coordinate_convert(
+        floor_plan_id: str,
+        points_mm: list[list[float]],
+    ) -> dict:
+        """Reale Koordinaten (mm) in Canvas-Pixel umrechnen.
+
+        Unverzichtbar um Polygone, Punkte und Routen für add_circuit,
+        set_circuit_polygon, add_elec_point etc. korrekt zu berechnen.
+        Gibt für jeden Eingabepunkt [x_px, y_px] zurück.
+
+        Voraussetzung: Der Grundriss muss kalibriert sein (ref_line gesetzt).
+        Die Formel lautet: px = mm / mm_per_px.
+
+        Args:
+            floor_plan_id: Grundriss-ID (z.B. 'grundriss-1').
+                           Leer = erster verfügbarer Grundriss.
+            points_mm: Liste von [x_mm, y_mm]-Koordinaten relativ zur
+                       oberen linken Ecke des Grundrissbildes.
+                       Beispiel: [[500, 1000], [3200, 1000]]
+        Returns:
+            Dict mit mm_per_px, scale_info und
+            points_px (Liste von [x_px, y_px]).
+        """
+        def _conv():
+            p = window.param_panel.to_dict()
+            fps = p.get("floorplans", {})
+
+            fp_id = floor_plan_id
+            if not fp_id:
+                order = p.get("floorplans_order", [])
+                fp_id = order[0] if order else (next(iter(fps), ""))
+
+            fp = fps.get(fp_id)
+            if fp is None:
+                return {"error": f"Grundriss '{fp_id}' nicht gefunden. "
+                                 f"Verfügbar: {list(fps.keys())}"}
+
+            mpp = float(fp.get("mm_per_px", 0) or 0)
+            if mpp <= 0:
+                return {
+                    "error": "Grundriss nicht kalibriert (mm_per_px = 0). "
+                             "Bitte zuerst eine Referenzlinie setzen."
+                }
+
+            offset_x = float(fp.get("offset_x", 0) or 0)
+            offset_y = float(fp.get("offset_y", 0) or 0)
+
+            result_px: list[list[float]] = []
+            for pt in points_mm:
+                if len(pt) < 2:
+                    return {"error": f"Ungültiger Punkt: {pt}. Erwartet [x_mm, y_mm]."}
+                x_px = pt[0] / mpp + offset_x
+                y_px = pt[1] / mpp + offset_y
+                result_px.append([round(x_px, 1), round(y_px, 1)])
+
+            return {
+                "floor_plan_id": fp_id,
+                "mm_per_px": mpp,
+                "offset_x_px": offset_x,
+                "offset_y_px": offset_y,
+                "points_px": result_px,
+            }
+
+        return invoke(_conv)
+
+    @mcp.tool()
+    def get_tool_overview() -> dict:
+        """Alle verfügbaren MCP-Tools gruppiert nach Kategorie.
+
+        Gibt eine Übersicht zurück, ohne dass der Agent alle Tool-
+        Definitionen einzeln lesen muss. Als Einstieg empfohlen.
+        """
+        return {
+            "resources": [
+                "hrp://schema            – Vollständiges JSON-Schema der HRP-Datei",
+                "hrp://instructions      – Agenten-Anleitung (Koordinatensystem, Formeln, …)",
+                "hrp://uv_device_types   – Gültige Gerätetypen für UV-Slots",
+                "hrp://builtin_symbols   – Verfügbare Icon-Symbole für Anschlusspunkte",
+                "hrp://ap_types          – Gültige ap_type-Werte (standard/uv/up_distribution)",
+            ],
+            "read": [
+                "get_project_summary     – Einstieg: Zähler + globale Parameter",
+                "get_project_json        – Vollständige Projektdaten als JSON",
+                "list_circuits           – Alle Heizkreise mit Parametern",
+                "list_elec_points        – Alle Elektro-Anschlusspunkte",
+                "list_elec_cables        – Alle Leitungen/Kabel",
+                "list_elec_rooms         – Alle Elektro-Räume",
+                "list_hkvs               – Alle Heizkreisverteiler",
+                "list_hkv_lines          – Alle HKV-Verbindungsleitungen",
+                "list_floor_plans        – Alle Grundriss-Layer",
+                "list_texts              – Alle Text-Annotationen",
+                "get_uv_config           – UV-Belegung eines Anschlusspunkts",
+                "get_rooms_with_aps      – Räume mit zugehörigen APs",
+                "get_floor_plan_info     – Massstab + reale Abmessungen eines Grundrisses",
+                "get_heating_load_summary– Heizlast-Übersicht aller Heizkreise",
+                "get_cable_length_summary– Kabellängen-Zusammenfassung nach Typ",
+            ],
+            "heizkreise": [
+                "add_circuit             – Neuen Heizkreis mit Polygon anlegen",
+                "modify_circuit          – Parameter eines Heizkreises ändern",
+                "delete_circuit          – Heizkreis löschen",
+                "set_circuit_polygon     – Raumpolygon setzen (Canvas-Pixel)",
+                "set_circuit_route       – Manuellen Rohrverlauf setzen",
+                "set_supply_line         – Zuleitung zum HKV setzen",
+                "calculate_heating       – Heizlast für einen Heizkreis berechnen",
+                "calculate_all_circuits  – Heizlast aller Heizkreise berechnen",
+                "set_heating_params      – Vorlauf-/Rücklauftemperatur setzen",
+            ],
+            "elektro": [
+                "add_elec_point          – Anschlusspunkt platzieren",
+                "modify_elec_point       – AP-Parameter ändern",
+                "delete_elec_point       – AP löschen",
+                "add_elec_cable          – Leitung zwischen zwei APs anlegen",
+                "modify_elec_cable       – Leitungsparameter ändern",
+                "delete_elec_cable       – Leitung löschen",
+                "add_elec_room           – Elektro-Raum-Polygon anlegen",
+                "modify_elec_room        – Raum-Parameter ändern",
+                "delete_elec_room        – Raum löschen",
+            ],
+            "uv_unterverteilung": [
+                "configure_uv_distribution  – UV-Layout (Raster + alle Slots) setzen",
+                "clear_uv_distribution      – UV-Belegung leeren",
+                "get_uv_config              – Aktuellen UV-Zustand lesen",
+                "set_uv_slot                – Einzelnen TE-Slot setzen/überschreiben",
+                "delete_uv_slot             – Einzelnen TE-Slot löschen",
+                "bulk_set_uv_slots          – Mehrere Slots auf einmal setzen (effizient)",
+                "find_free_uv_slots         – Freie TE-Plätze in einer UV auflisten",
+                "get_uv_busbars             – Phasenschienen einer UV lesen",
+                "set_uv_busbar              – Phasenschiene hinzufügen/ersetzen",
+                "delete_uv_busbar           – Phasenschiene entfernen",
+                "bulk_set_uv_busbars        – Mehrere Phasenschienen auf einmal setzen",
+            ],
+            "hkv": [
+                "add_hkv                 – Heizkreisverteiler platzieren",
+                "modify_hkv              – HKV-Parameter ändern",
+                "delete_hkv              – HKV löschen",
+                "add_hkv_line            – Verbindungsleitung zwischen HKVs",
+                "modify_hkv_line         – Leitungsparameter ändern",
+                "delete_hkv_line         – Verbindungsleitung löschen",
+            ],
+            "grundriss": [
+                "add_floor_plan          – Neuen Grundriss-Layer hinzufügen",
+                "modify_floor_plan       – Grundriss-Parameter ändern (Massstab etc.)",
+                "delete_floor_plan       – Grundriss-Layer entfernen",
+                "coordinate_convert      – mm → Canvas-Pixel umrechnen (WICHTIG)",
+                "get_floor_plan_info     – Massstab + Abmessungen lesen",
+            ],
+            "projekt": [
+                "save_project            – Projekt speichern",
+                "validate_project        – Schema + Konsistenz prüfen",
+                "add_text                – Text-Annotation hinzufügen",
+                "modify_text             – Text-Annotation ändern",
+                "delete_text             – Text-Annotation löschen",
+            ],
+            "workflow_empfehlung": [
+                "1. get_tool_overview() oder get_project_summary() als Einstieg",
+                "2. list_floor_plans() + get_floor_plan_info() für Massstab",
+                "3. coordinate_convert() um mm → px zu wandeln",
+                "4. add_circuit() / add_elec_point() mit berechneten Pixelkoordinaten",
+                "5. calculate_all_circuits() für Heizlast-Prüfung",
+                "6. validate_project() + save_project()",
+            ],
         }
 
     return mcp
