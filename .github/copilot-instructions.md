@@ -196,6 +196,24 @@ Der `params`-Abschnitt speichert alle **Einstellungen und Eigenschaften** der El
 }
 ```
 
+#### UV-Phasenschienen (Busbars)
+
+Innerhalb einer `UvConfig` können Phasenschienen definiert werden, die anzeigen welche Phase auf welchen TE-Positionen anliegt. **Mehrere Einträge mit derselben Phase sind erlaubt** (für nicht-zusammenhängende Bereiche).
+
+**Format 1 – Einzelner Bereich (klassisch):**
+```json
+{"phase": "L1", "color": "#e53935", "te_start": 15, "te_end": 16}
+```
+
+**Format 2 – Nicht-zusammenhängende Bereiche (te_ranges):**
+```json
+{"phase": "L1", "te_ranges": [[15, 16], [28, 28], [39, 39]]}
+```
+
+`te_ranges` wird bei der Normalisierung in separate Busbar-Einträge aufgelöst. Im gespeicherten Format gibt es immer nur `te_start`/`te_end`-Paare – `te_ranges` ist eine Eingabe-Konvenienz für die MCP-Tools.
+
+**Dreiphasige Sammelschiene:** `"phase": "L1/L2/L3"` rotiert automatisch die Farben L1→L2→L3 pro TE (z.B. für Kochfeld-Anschluss oder Hauptschalter).
+
 ---
 
 ## 5. Beziehungen zwischen Elementen

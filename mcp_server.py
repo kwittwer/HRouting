@@ -471,26 +471,62 @@ def _create_mcp(window: MainWindow, bridge):
             phase = str(bb.get("phase", "") or "").strip()
             if not phase:
                 raise ValueError(f"uv_config.busbars[{bidx}].phase darf nicht leer sein.")
-            try:
-                te_start = int(bb.get("te_start", 1) or 1)
-                te_end = int(bb.get("te_end", 1) or 1)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"uv_config.busbars[{bidx}] benötigt gültige te_start/te_end-Werte."
-                ) from exc
-            if te_start < 1 or te_end < 1:
-                raise ValueError(f"uv_config.busbars[{bidx}]: te_start und te_end müssen >= 1 sein.")
-            if te_start > te_end:
-                raise ValueError(
-                    f"uv_config.busbars[{bidx}]: te_start ({te_start}) muss <= te_end ({te_end}) sein."
-                )
             color = str(bb.get("color", "#888888") or "#888888").strip()
-            busbars.append({
-                "phase": phase,
-                "color": color,
-                "te_start": te_start,
-                "te_end": te_end,
-            })
+
+            # Support te_ranges: [[start, end], ...] for non-contiguous ranges
+            te_ranges = bb.get("te_ranges")
+            if te_ranges is not None:
+                if not isinstance(te_ranges, list) or not te_ranges:
+                    raise ValueError(
+                        f"uv_config.busbars[{bidx}].te_ranges muss ein nicht-leeres Array von [start, end]-Paaren sein."
+                    )
+                for ridx, rng in enumerate(te_ranges):
+                    if (not isinstance(rng, (list, tuple)) or len(rng) != 2):
+                        raise ValueError(
+                            f"uv_config.busbars[{bidx}].te_ranges[{ridx}] muss ein [start, end]-Paar sein."
+                        )
+                    try:
+                        r_start = int(rng[0])
+                        r_end = int(rng[1])
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"uv_config.busbars[{bidx}].te_ranges[{ridx}] enthält ungültige Werte."
+                        ) from exc
+                    if r_start < 1 or r_end < 1:
+                        raise ValueError(
+                            f"uv_config.busbars[{bidx}].te_ranges[{ridx}]: Werte müssen >= 1 sein."
+                        )
+                    if r_start > r_end:
+                        raise ValueError(
+                            f"uv_config.busbars[{bidx}].te_ranges[{ridx}]: start ({r_start}) muss <= end ({r_end}) sein."
+                        )
+                    busbars.append({
+                        "phase": phase,
+                        "color": color,
+                        "te_start": r_start,
+                        "te_end": r_end,
+                    })
+            else:
+                # Classic single-range format
+                try:
+                    te_start = int(bb.get("te_start", 1) or 1)
+                    te_end = int(bb.get("te_end", 1) or 1)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"uv_config.busbars[{bidx}] benötigt gültige te_start/te_end-Werte oder te_ranges."
+                    ) from exc
+                if te_start < 1 or te_end < 1:
+                    raise ValueError(f"uv_config.busbars[{bidx}]: te_start und te_end müssen >= 1 sein.")
+                if te_start > te_end:
+                    raise ValueError(
+                        f"uv_config.busbars[{bidx}]: te_start ({te_start}) muss <= te_end ({te_end}) sein."
+                    )
+                busbars.append({
+                    "phase": phase,
+                    "color": color,
+                    "te_start": te_start,
+                    "te_end": te_end,
+                })
 
         return {
             "preset": preset,
@@ -1161,6 +1197,9 @@ def _create_mcp(window: MainWindow, bridge):
             preset: Preset-Name (z.B. '2-reihig / 12 TE')
             busbars: Phasenschienen-Konfiguration, z.B.
                 [{"phase": "L1", "color": "#e53935", "te_start": 1, "te_end": 6}]
+                Für nicht-zusammenhängende Bereiche te_ranges verwenden:
+                [{"phase": "L1", "te_ranges": [[15,16],[28,28]]}]
+                Mehrere Einträge mit derselben Phase sind erlaubt.
         """
         def _configure():
             panel = window.param_panel.elec_point_panels.get(point_id)
@@ -3069,8 +3108,8 @@ def _create_mcp(window: MainWindow, bridge):
             point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
 
         Returns:
-            Dict mit point_id und busbars-Liste. Jeder Eintrag hat:
-            phase (str), color (#rrggbb), te_start (int), te_end (int).
+            Dict mit point_id, busbars (flache Liste aller Einträge) und
+            phases (nach Phase gruppierte Übersicht mit te_ranges).
         """
         def _get():
             p = window.param_panel.to_dict()
@@ -3080,9 +3119,26 @@ def _create_mcp(window: MainWindow, bridge):
             if ep.get("ap_type") != "uv":
                 return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
             uv = ep.get("uv_config") or {}
+            raw_busbars = uv.get("busbars", [])
+            # Build grouped view
+            from collections import OrderedDict
+            grouped: dict[str, dict] = OrderedDict()
+            for bb in raw_busbars:
+                ph = str(bb.get("phase", "") or "")
+                if ph not in grouped:
+                    grouped[ph] = {
+                        "phase": ph,
+                        "color": str(bb.get("color", "#888888") or "#888888"),
+                        "te_ranges": [],
+                    }
+                grouped[ph]["te_ranges"].append([
+                    int(bb.get("te_start", 1) or 1),
+                    int(bb.get("te_end", 1) or 1),
+                ])
             return {
                 "point_id": point_id,
-                "busbars": uv.get("busbars", []),
+                "busbars": raw_busbars,
+                "phases": list(grouped.values()),
             }
         return invoke(_get)
 
@@ -3090,25 +3146,33 @@ def _create_mcp(window: MainWindow, bridge):
     def set_uv_busbar(
         point_id: str,
         phase: str,
-        te_start: int,
-        te_end: int,
+        te_start: int = 0,
+        te_end: int = 0,
         color: str = "",
+        te_ranges: list[list[int]] | None = None,
+        replace_existing: bool = True,
     ) -> dict:
         """Phasenschiene in einer UV-Unterverteilung hinzufügen oder ersetzen.
 
-        Wenn bereits eine Phasenschiene mit derselben Phase vorhanden ist,
-        wird sie ersetzt.
+        Unterstützt nicht-zusammenhängende Bereiche über te_ranges.
 
         Args:
             point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
             phase: Phasenbezeichnung (z.B. 'L1', 'L2', 'L3', 'N', 'PE').
                 Für dreiphasige Sammelschiene 'L1/L2/L3' verwenden – dann rotiert
                 die Phase L1→L2→L3 automatisch pro TE.
-            te_start: Erste globale TE-Nummer (inklusiv, >= 1)
-            te_end: Letzte globale TE-Nummer (inklusiv, >= te_start)
+            te_start: Erste globale TE-Nummer (inklusiv, >= 1).
+                Wird ignoriert wenn te_ranges gesetzt ist.
+            te_end: Letzte globale TE-Nummer (inklusiv, >= te_start).
+                Wird ignoriert wenn te_ranges gesetzt ist.
             color: Hex-Farbe (#rrggbb). Leer = Standardfarbe für die Phase.
-                Für phase='L1/L2/L3' (dreiphasige Sammelschiene) wird color ignoriert –
-                jede TE erhält automatisch die Farbe der zugehörigen Phase (rot/grün/blau).
+            te_ranges: Nicht-zusammenhängende TE-Bereiche als Liste von
+                [start, end]-Paaren, z.B. [[15,16],[28,28],[39,39]].
+                Ersetzt te_start/te_end. Erzeugt einen Busbar-Eintrag
+                pro Bereich — alle mit derselben Phase und Farbe.
+            replace_existing: True (Standard) = vorhandene Einträge mit
+                derselben Phase werden ersetzt. False = neue Bereiche
+                werden zu vorhandenen hinzugefügt.
         """
         _PHASE_COLORS = {
             "L1": "#e53935",
@@ -3129,25 +3193,47 @@ def _create_mcp(window: MainWindow, bridge):
             phase_s = str(phase or "").strip()
             if not phase_s:
                 return {"error": "phase darf nicht leer sein."}
-            if te_start < 1 or te_end < 1 or te_start > te_end:
-                return {"error": f"Ungültige TE-Range: te_start={te_start}, te_end={te_end}."}
 
             resolved_color = str(color or "").strip() or _PHASE_COLORS.get(phase_s, "#888888")
+
+            # Build list of new busbar entries from te_ranges or te_start/te_end
+            new_entries: list[dict] = []
+            if te_ranges is not None:
+                if not isinstance(te_ranges, list) or not te_ranges:
+                    return {"error": "te_ranges muss eine nicht-leere Liste von [start, end]-Paaren sein."}
+                for ridx, rng in enumerate(te_ranges):
+                    if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+                        return {"error": f"te_ranges[{ridx}] muss ein [start, end]-Paar sein."}
+                    try:
+                        r_s, r_e = int(rng[0]), int(rng[1])
+                    except (TypeError, ValueError):
+                        return {"error": f"te_ranges[{ridx}] enthält ungültige Werte."}
+                    if r_s < 1 or r_e < r_s:
+                        return {"error": f"te_ranges[{ridx}]: ungültig ({r_s}, {r_e})."}
+                    new_entries.append({
+                        "phase": phase_s, "color": resolved_color,
+                        "te_start": r_s, "te_end": r_e,
+                    })
+            else:
+                if te_start < 1 or te_end < 1 or te_start > te_end:
+                    return {"error": f"Ungültige TE-Range: te_start={te_start}, te_end={te_end}."}
+                new_entries.append({
+                    "phase": phase_s, "color": resolved_color,
+                    "te_start": te_start, "te_end": te_end,
+                })
 
             p = window.param_panel.to_dict()
             ep = p.get("elec_points", {}).get(point_id, {})
             uv = dict(ep.get("uv_config") or {})
             existing_busbars = list(uv.get("busbars", []) or [])
-            # Replace or append
-            new_busbars = [bb for bb in existing_busbars if str(bb.get("phase", "")) != phase_s]
-            new_busbars.append({
-                "phase": phase_s,
-                "color": resolved_color,
-                "te_start": te_start,
-                "te_end": te_end,
-            })
-            new_busbars.sort(key=lambda b: b["te_start"])
-            uv["busbars"] = new_busbars
+            if replace_existing:
+                # Remove all existing entries with the same phase
+                base = [bb for bb in existing_busbars if str(bb.get("phase", "")) != phase_s]
+            else:
+                base = list(existing_busbars)
+            base.extend(new_entries)
+            base.sort(key=lambda b: b["te_start"])
+            uv["busbars"] = base
             panel.set_uv_config(_normalize_uv_config(uv))
             window.canvas.update()
             window._dirty = True
@@ -3155,9 +3241,9 @@ def _create_mcp(window: MainWindow, bridge):
             return {
                 "point_id": point_id,
                 "status": "set",
-                "busbar": {"phase": phase_s, "color": resolved_color,
-                           "te_start": te_start, "te_end": te_end},
-                "busbars_total": len(new_busbars),
+                "entries_added": len(new_entries),
+                "busbars_total": len(base),
+                "busbars": base,
             }
         return invoke(_set)
 
@@ -3204,19 +3290,30 @@ def _create_mcp(window: MainWindow, bridge):
     ) -> dict:
         """Mehrere Phasenschienen einer UV auf einmal setzen.
 
+        Unterstützt mehrere Einträge pro Phase (nicht-zusammenhängende
+        Bereiche) und te_ranges als Alternative zu te_start/te_end.
+
         Args:
             point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
             busbars: Liste von Phasenschienen, jede mit:
-                phase (Pflicht), te_start (Pflicht), te_end (Pflicht),
+                phase (Pflicht),
+                te_start + te_end ODER te_ranges (Pflicht),
                 color (optional, Standard = Phasenfarbe).
+                te_ranges: [[start, end], ...] für nicht-zusammenhängende
+                Bereiche derselben Phase.
             replace_all: True (Standard) = alle bisherigen Phasenschienen
-                ersetzen. False = vorhandene behalten, neue ergänzen/ersetzen.
+                ersetzen. False = vorhandene behalten, neue ergänzen.
 
-        Beispiel:
+        Beispiel (klassisch):
             bulk_set_uv_busbars('AP-1', [
                 {'phase': 'L1', 'te_start': 1, 'te_end': 6},
                 {'phase': 'L2', 'te_start': 7, 'te_end': 12},
-                {'phase': 'L3', 'te_start': 13, 'te_end': 18},
+            ])
+
+        Beispiel (te_ranges für nicht-zusammenhängende Bereiche):
+            bulk_set_uv_busbars('AP-1', [
+                {'phase': 'L1', 'te_ranges': [[15,16],[28,28],[39,39]]},
+                {'phase': 'L2', 'te_ranges': [[17,18],[40,40]]},
             ])
         """
         _PHASE_COLORS = {
@@ -3248,24 +3345,53 @@ def _create_mcp(window: MainWindow, bridge):
                 if not phase_s:
                     errors.append(f"busbars[{idx}].phase darf nicht leer sein.")
                     continue
-                try:
-                    te_s = int(bb.get("te_start", 0) or 0)
-                    te_e = int(bb.get("te_end", 0) or 0)
-                except (TypeError, ValueError):
-                    errors.append(f"busbars[{idx}]: te_start/te_end ungültig.")
-                    continue
-                if te_s < 1 or te_e < te_s:
-                    errors.append(f"busbars[{idx}]: te_start={te_s} te_end={te_e} ungültig.")
-                    continue
                 col = str(bb.get("color", "") or "").strip() or _PHASE_COLORS.get(phase_s, "#888888")
-                # Replace existing same phase
-                base_busbars = [b for b in base_busbars if str(b.get("phase", "")) != phase_s]
-                base_busbars.append({
-                    "phase": phase_s,
-                    "color": col,
-                    "te_start": te_s,
-                    "te_end": te_e,
-                })
+
+                # Support te_ranges
+                bb_te_ranges = bb.get("te_ranges")
+                if bb_te_ranges is not None:
+                    if not isinstance(bb_te_ranges, list) or not bb_te_ranges:
+                        errors.append(f"busbars[{idx}].te_ranges muss nicht-leer sein.")
+                        continue
+                    valid = True
+                    for ridx, rng in enumerate(bb_te_ranges):
+                        if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+                            errors.append(f"busbars[{idx}].te_ranges[{ridx}] muss [start, end] sein.")
+                            valid = False
+                            break
+                        try:
+                            r_s, r_e = int(rng[0]), int(rng[1])
+                        except (TypeError, ValueError):
+                            errors.append(f"busbars[{idx}].te_ranges[{ridx}] ungültig.")
+                            valid = False
+                            break
+                        if r_s < 1 or r_e < r_s:
+                            errors.append(f"busbars[{idx}].te_ranges[{ridx}]: ({r_s},{r_e}) ungültig.")
+                            valid = False
+                            break
+                        base_busbars.append({
+                            "phase": phase_s, "color": col,
+                            "te_start": r_s, "te_end": r_e,
+                        })
+                    if not valid:
+                        continue
+                else:
+                    # Classic te_start/te_end
+                    try:
+                        te_s = int(bb.get("te_start", 0) or 0)
+                        te_e = int(bb.get("te_end", 0) or 0)
+                    except (TypeError, ValueError):
+                        errors.append(f"busbars[{idx}]: te_start/te_end ungültig.")
+                        continue
+                    if te_s < 1 or te_e < te_s:
+                        errors.append(f"busbars[{idx}]: te_start={te_s} te_end={te_e} ungültig.")
+                        continue
+                    base_busbars.append({
+                        "phase": phase_s,
+                        "color": col,
+                        "te_start": te_s,
+                        "te_end": te_e,
+                    })
 
             if errors:
                 return {"error": "; ".join(errors)}
@@ -3671,10 +3797,10 @@ def _create_mcp(window: MainWindow, bridge):
                 "delete_uv_slot             – Einzelnen TE-Slot löschen",
                 "bulk_set_uv_slots          – Mehrere Slots auf einmal setzen (effizient)",
                 "find_free_uv_slots         – Freie TE-Plätze in einer UV auflisten",
-                "get_uv_busbars             – Phasenschienen einer UV lesen",
-                "set_uv_busbar              – Phasenschiene hinzufügen/ersetzen",
+                "get_uv_busbars             – Phasenschienen einer UV lesen (mit te_ranges-Gruppierung)",
+                "set_uv_busbar              – Phasenschiene hinzufügen/ersetzen (unterstützt te_ranges)",
                 "delete_uv_busbar           – Phasenschiene entfernen",
-                "bulk_set_uv_busbars        – Mehrere Phasenschienen auf einmal setzen",
+                "bulk_set_uv_busbars        – Mehrere Phasenschienen auf einmal setzen (unterstützt te_ranges)",
             ],
             "hkv": [
                 "add_hkv                 – Heizkreisverteiler platzieren",

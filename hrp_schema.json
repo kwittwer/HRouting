@@ -129,13 +129,28 @@
 
     "UvBusbar": {
       "type": "object",
-      "required": ["phase", "te_start", "te_end"],
+      "required": ["phase"],
       "properties": {
-        "phase": { "type": "string", "description": "Phasenbezeichnung, z.B. L1, L2, L3, N, PE oder 'L1/L2/L3' für dreiphasige Sammelschiene (L1→L2→L3 je TE)." },
+        "phase": { "type": "string", "description": "Phasenbezeichnung, z.B. L1, L2, L3, N, PE oder 'L1/L2/L3' für dreiphasige Sammelschiene (L1→L2→L3 je TE). Mehrere Einträge mit derselben Phase sind erlaubt (nicht-zusammenhängende Bereiche)." },
         "color": { "type": "string", "default": "#e53935", "description": "Farbe der Phasenschiene als Hex-Code (#rrggbb)." },
-        "te_start": { "type": "integer", "minimum": 1, "description": "Erste globale TE-Nummer der Phasenschiene (inklusiv)." },
-        "te_end": { "type": "integer", "minimum": 1, "description": "Letzte globale TE-Nummer der Phasenschiene (inklusiv)." }
-      }
+        "te_start": { "type": "integer", "minimum": 1, "description": "Erste globale TE-Nummer der Phasenschiene (inklusiv). Pflicht wenn te_ranges nicht gesetzt." },
+        "te_end": { "type": "integer", "minimum": 1, "description": "Letzte globale TE-Nummer der Phasenschiene (inklusiv). Pflicht wenn te_ranges nicht gesetzt." },
+        "te_ranges": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 1 },
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "Paar [te_start, te_end] (inklusiv)."
+          },
+          "description": "Alternative zu te_start/te_end: Liste von [start, end]-Paaren für nicht-zusammenhängende Bereiche derselben Phase. Wird bei Normalisierung in separate Busbar-Einträge aufgelöst."
+        }
+      },
+      "oneOf": [
+        { "required": ["te_start", "te_end"] },
+        { "required": ["te_ranges"] }
+      ]
     },
 
     "UvConfig": {
