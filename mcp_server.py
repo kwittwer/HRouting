@@ -135,6 +135,7 @@ def _create_mcp(window: MainWindow, bridge):
             "list_circuits, set_circuit_polygon, set_circuit_route, "
             "set_supply_line), Elektropunkte (add/modify/delete/"
             "list_elec_points, configure_uv_distribution, "
+            "get_uv_config, set_uv_slot, delete_uv_slot, "
             "clear_uv_distribution, configure_up_distribution, "
             "clear_up_distribution), Elektro-Räume (add/modify/delete/"
             "list_elec_rooms), Elektro-Kabel (add/modify/delete/"
@@ -257,6 +258,33 @@ def _create_mcp(window: MainWindow, bridge):
         if doc_path.exists():
             return doc_path.read_text(encoding="utf-8")
         return "# Anleitung nicht gefunden"
+
+    @mcp.resource("hrp://uv_device_types")
+    def get_uv_device_types_resource() -> str:
+        """Gültige Gerätetypen für UV-Slots (device_type-Werte).
+
+        Verwende diese Werte in configure_uv_distribution und set_uv_slot.
+        Typische TE-Breiten: LS=1, FI=2, FI/LS=1-2, Hauptschalter=3,
+        Überspannungsschutz=2, Schütz=2-3, Zeitschalter=2.
+        """
+        import json
+        return json.dumps([
+            "",
+            "Reserve",
+            "Hauptschalter",
+            "LS",
+            "LS 3-polig",
+            "FI",
+            "FI 4-polig",
+            "FI/LS",
+            "Überspannungsschutz",
+            "Motorschutz",
+            "Schütz",
+            "Zeitschalter",
+            "Klemme",
+            "Steckdose UV",
+            "Freitext",
+        ], ensure_ascii=False)
 
     def _normalize_ap_type(ap_type: str | None) -> str:
         value = str(ap_type or "standard").strip().lower()
@@ -381,10 +409,15 @@ def _create_mcp(window: MainWindow, bridge):
                     f"Reihe {row_no}, TE {slot_no}."
                 )
             seen_slots.add(key)
+            try:
+                te_size = max(1, int(slot.get("te_size", 1) or 1))
+            except (TypeError, ValueError):
+                te_size = 1
             slots.append({
                 "row": row_no,
                 "slot": slot_no,
                 "device_type": str(slot.get("device_type", "") or "").strip(),
+                "te_size": te_size,
                 "label": str(slot.get("label", "") or "").strip(),
                 "assignment": str(slot.get("assignment", "") or "").strip(),
                 "note": str(slot.get("note", "") or "").strip(),
@@ -1117,6 +1150,193 @@ def _create_mcp(window: MainWindow, bridge):
             }
 
         return invoke(_clear)
+
+    @mcp.tool()
+    def get_uv_config(
+        point_id: str,
+    ) -> dict:
+        """Aktuelle UV-Belegung eines Anschlusspunkts lesen.
+
+        Gibt rows, modules_per_row, preset und die vollständige
+        Slots-Liste (row, slot, device_type, te_size, label,
+        assignment, note) zurück. Nutze dies vor set_uv_slot um
+        den aktuellen Stand zu prüfen.
+
+        Args:
+            point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
+        """
+        def _get():
+            p = window.param_panel.to_dict()
+            ep = p.get("elec_points", {}).get(point_id)
+            if ep is None:
+                return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
+            if ep.get("ap_type") != "uv":
+                return {
+                    "error": (
+                        f"AP '{point_id}' ist kein UV-Punkt "
+                        f"(ap_type='{ep.get('ap_type', 'standard')}')."
+                    )
+                }
+            uv = ep.get("uv_config") or {}
+            rows = uv.get("rows", 0)
+            mpr = uv.get("modules_per_row", 0)
+            return {
+                "point_id": point_id,
+                "rows": rows,
+                "modules_per_row": mpr,
+                "preset": uv.get("preset", ""),
+                "total_te": rows * mpr,
+                "occupied_count": len(uv.get("slots", [])),
+                "slots": uv.get("slots", []),
+            }
+        return invoke(_get)
+
+    @mcp.tool()
+    def set_uv_slot(
+        point_id: str,
+        row: int,
+        slot: int,
+        device_type: str,
+        label: str = "",
+        assignment: str = "",
+        note: str = "",
+        te_size: int = 1,
+    ) -> dict:
+        """Einzelnen TE-Slot in einer UV setzen oder überschreiben.
+
+        Ändert genau einen Slot ohne die restlichen Belegungen zu berühren.
+        Wird device_type leer übergeben, wird der Slot gelöscht (= Reserve).
+
+        Args:
+            point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
+            row: Reihe (1-basiert)
+            slot: TE-Position innerhalb der Reihe (1-basiert)
+            device_type: Gerätetyp aus hrp://uv_device_types.
+                Leer = Slot löschen.
+            label: Bezeichnung (z.B. 'Küche', 'Licht OG')
+            assignment: Kabel-/Stromkreis-Zuordnung (z.B. 'KV-1')
+            note: Freitext-Notiz (z.B. '16A', 'B16')
+            te_size: Anzahl belegter TE (Standard 1; FI=2, HS=3)
+        """
+        def _set():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
+
+            p = window.param_panel.to_dict()
+            ep = p.get("elec_points", {}).get(point_id, {})
+            if ep.get("ap_type") != "uv":
+                return {
+                    "error": (
+                        f"AP '{point_id}' ist kein UV-Punkt "
+                        f"(ap_type='{ep.get('ap_type', 'standard')}')."
+                        " Setze ap_type='uv' via add_elec_point / modify_elec_point"
+                        " und lege das Layout mit configure_uv_distribution fest."
+                    )
+                }
+
+            current_uv = dict(ep.get("uv_config") or {})
+            rows = current_uv.get("rows", 0)
+            mpr = current_uv.get("modules_per_row", 0)
+
+            if rows < 1 or mpr < 1:
+                return {
+                    "error": (
+                        "UV hat kein gültiges Layout (rows/modules_per_row fehlt). "
+                        "Lege zuerst das Layout mit configure_uv_distribution fest."
+                    )
+                }
+            if not (1 <= row <= rows):
+                return {"error": f"row={row} liegt außerhalb 1..{rows}."}
+            if not (1 <= slot <= mpr):
+                return {"error": f"slot={slot} liegt außerhalb 1..{mpr}."}
+            if int(te_size) < 1:
+                return {"error": "te_size muss >= 1 sein."}
+
+            # Remove existing entry for this position, then optionally re-add
+            new_slots = [
+                s for s in (current_uv.get("slots") or [])
+                if not (s["row"] == row and s["slot"] == slot)
+            ]
+            if str(device_type or "").strip():
+                new_slots.append({
+                    "row": row,
+                    "slot": slot,
+                    "device_type": str(device_type).strip(),
+                    "te_size": max(1, int(te_size)),
+                    "label": str(label or "").strip(),
+                    "assignment": str(assignment or "").strip(),
+                    "note": str(note or "").strip(),
+                })
+            new_slots.sort(key=lambda s: (s["row"], s["slot"]))
+
+            new_uv = dict(current_uv)
+            new_uv["slots"] = new_slots
+            panel.set_uv_config(new_uv)
+
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            action = "deleted" if not str(device_type or "").strip() else "set"
+            return {
+                "point_id": point_id,
+                "row": row,
+                "slot": slot,
+                "action": action,
+                "occupied_count": len(new_slots),
+            }
+        return invoke(_set)
+
+    @mcp.tool()
+    def delete_uv_slot(
+        point_id: str,
+        row: int,
+        slot: int,
+    ) -> dict:
+        """Einzelnen TE-Slot in einer UV löschen (auf leer zurücksetzen).
+
+        Args:
+            point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
+            row: Reihe (1-basiert)
+            slot: TE-Position (1-basiert)
+        """
+        def _del():
+            panel = window.param_panel.elec_point_panels.get(point_id)
+            if not panel:
+                return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
+
+            p = window.param_panel.to_dict()
+            ep = p.get("elec_points", {}).get(point_id, {})
+            if ep.get("ap_type") != "uv":
+                return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
+
+            current_uv = dict(ep.get("uv_config") or {})
+            old_slots = current_uv.get("slots") or []
+            new_slots = [
+                s for s in old_slots
+                if not (s["row"] == row and s["slot"] == slot)
+            ]
+            if len(new_slots) == len(old_slots):
+                return {
+                    "point_id": point_id,
+                    "action": "not_found",
+                    "row": row, "slot": slot,
+                }
+
+            new_uv = dict(current_uv)
+            new_uv["slots"] = new_slots
+            panel.set_uv_config(new_uv)
+
+            window.canvas.update()
+            window._dirty = True
+            window._update_title()
+            return {
+                "point_id": point_id,
+                "action": "deleted",
+                "row": row, "slot": slot,
+                "occupied_count": len(new_slots),
+            }
+        return invoke(_del)
 
     @mcp.tool()
     def configure_up_distribution(

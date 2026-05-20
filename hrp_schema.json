@@ -121,7 +121,8 @@
         "device_type": { "type": "string", "default": "", "description": "Art der Belegung (z.B. FI, LS, Reserve)." },
         "label": { "type": "string", "default": "", "description": "Freie Bezeichnung des Platzes." },
         "assignment": { "type": "string", "default": "", "description": "Optionales Kabel-/Stromkreis-Mapping als Freitext." },
-        "note": { "type": "string", "default": "", "description": "Optionale Notiz zum Platz." }
+        "note": { "type": "string", "default": "", "description": "Optionale Notiz zum Platz." },
+        "te_size": { "type": "integer", "minimum": 1, "maximum": 8, "default": 1, "description": "Anzahl der belegten TE-Einheiten (z.B. FI = 2 TE)." }
       }
     },
 

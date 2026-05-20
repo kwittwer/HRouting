@@ -23,10 +23,10 @@ from PySide6.QtWidgets import (
     QCheckBox, QFileDialog, QTextEdit, QComboBox,
     QTreeWidget, QTreeWidgetItem, QSplitter, QAbstractItemView,
     QDialog, QDialogButtonBox, QSpinBox, QTableWidget,
-    QTableWidgetItem, QHeaderView,
+    QTableWidgetItem, QHeaderView, QTabWidget, QSizePolicy,
 )
 from pathlib import Path
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QColor, QPixmap, QPainter, QFont, QPen, QBrush, QFontMetrics
 from PySide6.QtCore import Signal, Qt
 
 # ── Custom Spinbox: Completely disable mouse wheel ────────────── #
@@ -382,6 +382,449 @@ class HeatingCircuitPanel(QWidget):
 #  Elektro: UV-Planung                                                 #
 # ================================================================== #
 
+class UvSlotEditPopup(QDialog):
+    """Small dialog to edit a single TE slot in the UV rail view."""
+
+    UV_DEVICE_TYPES: list[str] = [
+        "",
+        "Reserve",
+        "Hauptschalter",
+        "LS",
+        "LS 3-polig",
+        "FI",
+        "FI 4-polig",
+        "FI/LS",
+        "Überspannungsschutz",
+        "Motorschutz",
+        "Schütz",
+        "Zeitschalter",
+        "Klemme",
+        "Steckdose UV",
+        "Freitext",
+    ]
+
+    def __init__(self, slot: dict, cable_choices: list[str],
+                 max_rows: int = 12, max_modules: int = 36,
+                 parent=None):
+        super().__init__(parent)
+        self._max_rows = max_rows
+        self._max_modules = max_modules
+        row_no = slot.get("row", "?")
+        slot_no = slot.get("slot", "?")
+        self.setWindowTitle(f"Slot R{row_no} / TE {slot_no} bearbeiten")
+        self.setMinimumWidth(380)
+        self._build_ui(slot, cable_choices)
+
+    def _build_ui(self, slot: dict, cable_choices: list[str]):
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        # Position
+        pos_row = QHBoxLayout()
+        self.sb_row = QSpinBox()
+        self.sb_row.setRange(1, self._max_rows)
+        self.sb_row.setValue(int(slot.get("row", 1) or 1))
+        self.sb_row.setToolTip("Reihe in der Unterverteilung")
+        pos_row.addWidget(QLabel("Reihe:"))
+        pos_row.addWidget(self.sb_row)
+        pos_row.addSpacing(12)
+        self.sb_slot = QSpinBox()
+        self.sb_slot.setRange(1, self._max_modules)
+        self.sb_slot.setValue(int(slot.get("slot", 1) or 1))
+        self.sb_slot.setToolTip("TE-Position innerhalb der Reihe")
+        pos_row.addWidget(QLabel("TE-Position:"))
+        pos_row.addWidget(self.sb_slot)
+        pos_row.addStretch()
+        form.addRow("Position:", pos_row)
+
+        self.cmb_device = SafeComboBox()
+        self.cmb_device.addItems(self.UV_DEVICE_TYPES)
+        self.cmb_device.setCurrentText(str(slot.get("device_type", "") or ""))
+        form.addRow("Belegung:", self.cmb_device)
+
+        self.sb_te_size = QSpinBox()
+        self.sb_te_size.setRange(1, 8)
+        self.sb_te_size.setValue(int(slot.get("te_size", 1) or 1))
+        self.sb_te_size.setToolTip("Anzahl der belegten TE (z.B. FI = 2 TE)")
+        form.addRow("TE-Breite:", self.sb_te_size)
+
+        self.le_label = QLineEdit(str(slot.get("label", "") or ""))
+        form.addRow("Bezeichnung:", self.le_label)
+
+        self.cmb_assignment = SafeComboBox()
+        self.cmb_assignment.setEditable(True)
+        self.cmb_assignment.addItem("")
+        for c in cable_choices:
+            if c and self.cmb_assignment.findText(c) < 0:
+                self.cmb_assignment.addItem(c)
+        self.cmb_assignment.setCurrentText(str(slot.get("assignment", "") or ""))
+        form.addRow("Kabel/Stromkreis:", self.cmb_assignment)
+
+        self.le_note = QLineEdit(str(slot.get("note", "") or ""))
+        form.addRow("Notiz:", self.le_note)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_slot_data(self) -> dict:
+        return {
+            "row": self.sb_row.value(),
+            "slot": self.sb_slot.value(),
+            "device_type": self.cmb_device.currentText().strip(),
+            "te_size": self.sb_te_size.value(),
+            "label": self.le_label.text().strip(),
+            "assignment": self.cmb_assignment.currentText().strip(),
+            "note": self.le_note.text().strip(),
+        }
+
+
+# ------------------------------------------------------------------ #
+
+class UvRailWidget(QWidget):
+    """Widget that paints a visual DIN-rail (Hutschiene) layout of a UV."""
+
+    slot_clicked = Signal(int, int)  # row_no, slot_no
+
+    SLOT_W = 28        # px per TE unit
+    ROW_H = 82         # full height of one row band
+    ROW_GAP = 14       # gap between rows
+    LEFT_MARGIN = 44   # space for row labels
+    TOP_MARGIN = 20    # space for TE numbers above first row
+    BOTTOM_MARGIN = 12
+
+    DEVICE_COLORS: dict[str, str] = {
+        "":                    "#383838",
+        "Reserve":             "#606060",
+        "Hauptschalter":       "#c0392b",
+        "LS":                  "#1553b5",
+        "LS 3-polig":          "#0d3d8a",
+        "FI":                  "#b85d10",
+        "FI 4-polig":          "#8a3a00",
+        "FI/LS":               "#6b22bf",
+        "Überspannungsschutz": "#9b0000",
+        "Motorschutz":         "#1a7a3a",
+        "Schütz":              "#007070",
+        "Zeitschalter":        "#5a5a00",
+        "Klemme":              "#9a7000",
+        "Steckdose UV":        "#2c6e49",
+        "Freitext":            "#444444",
+    }
+    DEVICE_SHORT: dict[str, str] = {
+        "":                    "",
+        "Reserve":             "Res",
+        "Hauptschalter":       "HS",
+        "LS":                  "LS",
+        "LS 3-polig":          "LS3",
+        "FI":                  "FI",
+        "FI 4-polig":          "FI4",
+        "FI/LS":               "FI/LS",
+        "Überspannungsschutz": "ÜSS",
+        "Motorschutz":         "MOT",
+        "Schütz":              "SCH",
+        "Zeitschalter":        "Zeit",
+        "Klemme":              "KL",
+        "Steckdose UV":        "SD",
+        "Freitext":            "...",
+    }
+
+    slot_moved = Signal(int, int, int, int)  # from_row, from_slot, to_row, to_slot
+
+    _DRAG_THRESHOLD = 6  # px before drag starts
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows = 0
+        self._modules = 0
+        self._slots: list[dict] = []
+        self._cable_choices: list[str] = []
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(120)
+        self.setMouseTracking(True)
+        # drag state
+        self._drag_source: tuple[int, int] | None = None   # (row_no, slot_no)
+        self._drag_slot_data: dict | None = None
+        self._drag_press_x = 0
+        self._drag_press_y = 0
+        self._drag_x = 0
+        self._drag_y = 0
+        self._is_dragging = False
+        self._drop_target: tuple[int, int] | None = None   # (row_no, slot_no)
+
+    # ── public ──────────────────────────────────────────────── #
+
+    def set_data(self, rows: int, modules_per_row: int,
+                 slots_list: list[dict],
+                 cable_choices: list[str] | None = None):
+        self._rows = rows
+        self._modules = modules_per_row
+        self._slots = list(slots_list)
+        self._cable_choices = list(cable_choices or [])
+        total_h = (self.TOP_MARGIN
+                   + rows * (self.ROW_H + self.ROW_GAP)
+                   + self.BOTTOM_MARGIN)
+        total_w = self.LEFT_MARGIN + modules_per_row * self.SLOT_W + 10
+        self.setMinimumSize(total_w, total_h)
+        self.update()
+
+    # ── layout helper ───────────────────────────────────────── #
+
+    def _build_row_layout(self, row_no: int) -> list[tuple[int, int, dict | None]]:
+        """Returns [(start_te, te_size, slot_dict_or_None), ...] for every
+        device/gap in the row in order, filling empty TE as single gaps."""
+        slots_in_row = {
+            s["slot"]: s
+            for s in self._slots
+            if s.get("row") == row_no
+        }
+        result: list[tuple[int, int, dict | None]] = []
+        te = 1
+        while te <= self._modules:
+            if te in slots_in_row:
+                slot = slots_in_row[te]
+                ts = max(1, int(slot.get("te_size", 1) or 1))
+                ts = min(ts, self._modules - te + 1)  # clamp to row end
+                result.append((te, ts, slot))
+                te += ts
+            else:
+                result.append((te, 1, None))
+                te += 1
+        return result
+
+    # ── painting ─────────────────────────────────────────────── #
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Background
+        painter.fillRect(self.rect(), QColor("#2b2b2b"))
+
+        font_row_lbl = QFont()
+        font_row_lbl.setPointSize(8)
+        font_row_lbl.setBold(True)
+
+        font_te_num = QFont()
+        font_te_num.setPointSize(6)
+
+        font_type = QFont()
+        font_type.setPointSize(8)
+        font_type.setBold(True)
+
+        font_lbl = QFont()
+        font_lbl.setPointSize(6)
+
+        font_note = QFont()
+        font_note.setPointSize(5)
+
+        for row_idx in range(self._rows):
+            row_no = row_idx + 1
+            row_y = self.TOP_MARGIN + row_idx * (self.ROW_H + self.ROW_GAP)
+
+            # ─ Row label ─
+            painter.setFont(font_row_lbl)
+            painter.setPen(QColor("#aaaaaa"))
+            painter.drawText(2, row_y, self.LEFT_MARGIN - 4, self.ROW_H,
+                             Qt.AlignVCenter | Qt.AlignRight, f"R{row_no}")
+
+            # ─ TE numbers (continuous across rows) ─
+            te_offset = row_idx * self._modules
+            painter.setFont(font_te_num)
+            painter.setPen(QColor("#777777"))
+            for te in range(1, self._modules + 1):
+                te_x = self.LEFT_MARGIN + (te - 1) * self.SLOT_W
+                painter.drawText(te_x, row_y, self.SLOT_W, 14,
+                                 Qt.AlignHCenter | Qt.AlignTop, str(te_offset + te))
+
+            # ─ DIN rail bar ─
+            rail_y = row_y + self.ROW_H - 18
+            rail_w = self._modules * self.SLOT_W
+            painter.setPen(QPen(QColor("#888888"), 1))
+            painter.setBrush(QBrush(QColor("#606060")))
+            painter.drawRect(self.LEFT_MARGIN, rail_y, rail_w, 7)
+            # rail notch lines
+            painter.setPen(QPen(QColor("#999999"), 1))
+            for te in range(0, self._modules + 1, 2):
+                nx = self.LEFT_MARGIN + te * self.SLOT_W
+                painter.drawLine(nx, rail_y + 2, nx, rail_y + 5)
+
+            # ─ Slots ─
+            layout = self._build_row_layout(row_no)
+            for start_te, ts, slot in layout:
+                x = self.LEFT_MARGIN + (start_te - 1) * self.SLOT_W
+                w = ts * self.SLOT_W - 2
+                device_type = slot.get("device_type", "") if slot else ""
+                color_hex = self.DEVICE_COLORS.get(
+                    device_type, self.DEVICE_COLORS[""]
+                )
+
+                slot_top = row_y + 16
+                slot_bottom = rail_y - 1
+                slot_h = slot_bottom - slot_top
+
+                if slot and device_type:
+                    # Filled device block
+                    painter.setBrush(QBrush(QColor(color_hex)))
+                    painter.setPen(QPen(QColor("#111111"), 1))
+                    painter.drawRoundedRect(x + 1, slot_top, w, slot_h, 3, 3)
+
+                    # Type short label (top area)
+                    short = self.DEVICE_SHORT.get(device_type, device_type[:5])
+                    painter.setFont(font_type)
+                    painter.setPen(QColor("#ffffff"))
+                    painter.drawText(x + 1, slot_top + 2, w, 20,
+                                     Qt.AlignHCenter | Qt.AlignVCenter, short)
+
+                    # Designation
+                    label = str(slot.get("label", "") or "").strip()
+                    if label:
+                        painter.setFont(font_lbl)
+                        painter.setPen(QColor("#dddddd"))
+                        painter.drawText(x + 2, slot_top + 22, w - 4,
+                                         slot_h - 32,
+                                         Qt.AlignHCenter | Qt.AlignTop
+                                         | Qt.TextWordWrap, label)
+
+                    # Note (bottom)
+                    note = str(slot.get("note", "") or "").strip()
+                    if note:
+                        painter.setFont(font_note)
+                        painter.setPen(QColor("#aaaaaa"))
+                        painter.drawText(x + 2, slot_bottom - 14, w - 4, 12,
+                                         Qt.AlignHCenter | Qt.AlignVCenter, note)
+                else:
+                    # Empty slot placeholder
+                    painter.setBrush(QBrush(QColor("#383838")))
+                    painter.setPen(QPen(QColor("#4a4a4a"), 1))
+                    painter.drawRect(x + 1, slot_top, w, slot_h)
+
+        # ── Drag overlay ─
+        if self._is_dragging and self._drag_slot_data is not None:
+            sd = self._drag_slot_data
+            device_type = str(sd.get("device_type", "") or "")
+            drag_ts = max(1, int(sd.get("te_size", 1) or 1))
+            ow = drag_ts * self.SLOT_W - 2
+            oh = self.ROW_H - 35
+            ox = self._drag_x - ow // 2
+            oy = self._drag_y - oh // 2
+            color_hex = self.DEVICE_COLORS.get(device_type, self.DEVICE_COLORS[""])
+            dc = QColor(color_hex)
+            dc.setAlpha(200)
+            painter.setBrush(QBrush(dc))
+            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.drawRoundedRect(ox, oy, ow, oh, 4, 4)
+            short = self.DEVICE_SHORT.get(device_type, device_type[:5])
+            painter.setFont(font_type)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(ox, oy, ow, oh, Qt.AlignCenter, short)
+
+            # Drop target highlight
+            if self._drop_target is not None:
+                tr, tslot = self._drop_target
+                for row_idx2 in range(self._rows):
+                    if row_idx2 + 1 == tr:
+                        ty = self.TOP_MARGIN + row_idx2 * (self.ROW_H + self.ROW_GAP)
+                        tx = self.LEFT_MARGIN + (tslot - 1) * self.SLOT_W
+                        tw = drag_ts * self.SLOT_W - 2
+                        th = self.ROW_H - 35
+                        painter.setBrush(Qt.NoBrush)
+                        painter.setPen(QPen(QColor("#00e5ff"), 2, Qt.DashLine))
+                        painter.drawRoundedRect(tx + 1, ty + 16, tw, th, 4, 4)
+
+        painter.end()
+
+    # ── hit-test helper ──────────────────────────────────────── #
+
+    def _hit_slot(self, x: int, y: int) -> tuple[int, int] | None:
+        """Return (row_no, slot_no) for the logical slot at pixel (x, y), or None."""
+        if x < self.LEFT_MARGIN:
+            return None
+        for row_idx in range(self._rows):
+            row_no = row_idx + 1
+            row_y = self.TOP_MARGIN + row_idx * (self.ROW_H + self.ROW_GAP)
+            if row_y <= y <= row_y + self.ROW_H:
+                col = int((x - self.LEFT_MARGIN) / self.SLOT_W)
+                te_clicked = col + 1
+                if 1 <= te_clicked <= self._modules:
+                    layout = self._build_row_layout(row_no)
+                    for start_te, ts, _ in layout:
+                        if start_te <= te_clicked < start_te + ts:
+                            return (row_no, start_te)
+                return None
+        return None
+
+    # ── mouse ────────────────────────────────────────────────── #
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        x, y = event.x(), event.y()
+        hit = self._hit_slot(x, y)
+        if hit is not None:
+            row_no, slot_no = hit
+            # Only draggable if slot has content
+            slot_data = next(
+                (s for s in self._slots if s.get("row") == row_no and s.get("slot") == slot_no),
+                None,
+            )
+            self._drag_source = hit
+            self._drag_slot_data = dict(slot_data) if slot_data else None
+            self._drag_press_x = x
+            self._drag_press_y = y
+            self._drag_x = x
+            self._drag_y = y
+            self._is_dragging = False
+            self._drop_target = None
+
+    def mouseMoveEvent(self, event):
+        if self._drag_source is None:
+            return
+        x, y = event.x(), event.y()
+        if not self._is_dragging:
+            if (abs(x - self._drag_press_x) > self._DRAG_THRESHOLD
+                    or abs(y - self._drag_press_y) > self._DRAG_THRESHOLD):
+                if self._drag_slot_data is not None:
+                    self._is_dragging = True
+                    self.setCursor(Qt.ClosedHandCursor)
+                else:
+                    # empty slot – cancel drag attempt
+                    self._drag_source = None
+                    return
+        if self._is_dragging:
+            self._drag_x = x
+            self._drag_y = y
+            self._drop_target = self._hit_slot(x, y)
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        was_dragging = self._is_dragging
+        source = self._drag_source
+        drop = self._drop_target
+        # Reset drag state first
+        self._drag_source = None
+        self._drag_slot_data = None
+        self._is_dragging = False
+        self._drop_target = None
+        self.setCursor(Qt.PointingHandCursor)
+        self.update()
+
+        if was_dragging:
+            if (source is not None and drop is not None
+                    and source != drop):
+                self.slot_moved.emit(source[0], source[1], drop[0], drop[1])
+        else:
+            # Plain click
+            if source is not None:
+                self.slot_clicked.emit(source[0], source[1])
+
+
+# ------------------------------------------------------------------ #
+
 class UvConfigDialog(QDialog):
     MAX_UV_ROWS = 12
     MAX_UV_MODULES = 36
@@ -397,11 +840,18 @@ class UvConfigDialog(QDialog):
     UV_DEVICE_TYPES: list[str] = [
         "",
         "Reserve",
-        "FI",
+        "Hauptschalter",
         "LS",
+        "LS 3-polig",
+        "FI",
+        "FI 4-polig",
         "FI/LS",
         "Überspannungsschutz",
+        "Motorschutz",
+        "Schütz",
+        "Zeitschalter",
         "Klemme",
+        "Steckdose UV",
         "Freitext",
     ]
 
@@ -419,6 +869,7 @@ class UvConfigDialog(QDialog):
     def _build_ui(self):
         root = QVBoxLayout(self)
 
+        # ─ Top form (preset / dimensions) ─
         form = QFormLayout()
         self.cmb_preset = SafeComboBox()
         for label, dims in self.UV_PRESETS:
@@ -443,13 +894,35 @@ class UvConfigDialog(QDialog):
         form.addRow("Zusammenfassung:", self.lbl_summary)
         root.addLayout(form)
 
-        self.tbl_slots = QTableWidget(0, 6)
+        # ─ Tabs: Visuell | Tabelle ─
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, stretch=1)
+
+        # Tab 0 – visual rail view
+        self.rail_widget = UvRailWidget()
+        rail_scroll = QScrollArea()
+        rail_scroll.setWidgetResizable(True)
+        rail_scroll.setWidget(self.rail_widget)
+        self.tabs.addTab(rail_scroll, "Visuell")
+        self.rail_widget.slot_clicked.connect(self._on_rail_slot_clicked)
+        self.rail_widget.slot_moved.connect(self._on_slot_moved)
+
+        # Tab 1 – editable table
+        # Columns: Reihe | TE | Belegung | TE-Breite | Bezeichnung | Kabel/Stromkreis | Notiz
+        self.tbl_slots = QTableWidget(0, 7)
         self.tbl_slots.setHorizontalHeaderLabels(
-            ["Reihe", "TE", "Belegung", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
+            ["Reihe", "TE", "Belegung", "TE-Br.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
         )
-        self.tbl_slots.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        hdr = self.tbl_slots.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(5, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(6, QHeaderView.Stretch)
         self.tbl_slots.verticalHeader().setVisible(False)
-        root.addWidget(self.tbl_slots, stretch=1)
+        self.tabs.addTab(self.tbl_slots, "Tabelle")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -457,6 +930,9 @@ class UvConfigDialog(QDialog):
         root.addWidget(buttons)
 
     def _capture_current_slots(self) -> list[dict]:
+        """Read all rows from the table widget into a list of slot dicts.
+        Columns: 0=Reihe, 1=TE, 2=Belegung(cmb), 3=TE-Breite(spinbox),
+                 4=Bezeichnung, 5=Kabel/Stromkreis(cmb), 6=Notiz"""
         slots: list[dict] = []
         for row_idx in range(self.tbl_slots.rowCount()):
             row_item = self.tbl_slots.item(row_idx, 0)
@@ -469,13 +945,15 @@ class UvConfigDialog(QDialog):
             except (TypeError, ValueError):
                 continue
             device_combo = self.tbl_slots.cellWidget(row_idx, 2)
-            assignment_combo = self.tbl_slots.cellWidget(row_idx, 4)
-            label_item = self.tbl_slots.item(row_idx, 3)
-            note_item = self.tbl_slots.item(row_idx, 5)
+            te_sb = self.tbl_slots.cellWidget(row_idx, 3)
+            assignment_combo = self.tbl_slots.cellWidget(row_idx, 5)
+            label_item = self.tbl_slots.item(row_idx, 4)
+            note_item = self.tbl_slots.item(row_idx, 6)
             slots.append({
                 "row": row_no,
                 "slot": slot_no,
                 "device_type": device_combo.currentText().strip() if isinstance(device_combo, QComboBox) else "",
+                "te_size": te_sb.value() if isinstance(te_sb, QSpinBox) else 1,
                 "label": label_item.text().strip() if label_item else "",
                 "assignment": assignment_combo.currentText().strip() if isinstance(assignment_combo, QComboBox) else "",
                 "note": note_item.text().strip() if note_item else "",
@@ -495,6 +973,7 @@ class UvConfigDialog(QDialog):
                     "row": row_no,
                     "slot": slot_no,
                     "device_type": str(slot.get("device_type", "") or "").strip(),
+                    "te_size": int(slot.get("te_size", 1) or 1),
                     "label": str(slot.get("label", "") or "").strip(),
                     "assignment": str(slot.get("assignment", "") or "").strip(),
                     "note": str(slot.get("note", "") or "").strip(),
@@ -502,6 +981,9 @@ class UvConfigDialog(QDialog):
         return indexed
 
     def _rebuild_table(self, slots: list[dict] | None = None):
+        """(Re-)populate the table and refresh the visual rail.
+        Columns: 0=Reihe, 1=TE, 2=Belegung(cmb), 3=TE-Breite(spinbox),
+                 4=Bezeichnung, 5=Kabel/Stromkreis(cmb), 6=Notiz"""
         rows = self.sb_rows.value()
         modules_per_row = self.sb_modules.value()
         slot_map = self._indexed_slots(slots or [], rows, modules_per_row)
@@ -519,15 +1001,27 @@ class UvConfigDialog(QDialog):
                 slot_item.setFlags(slot_item.flags() & ~Qt.ItemIsEditable)
                 self.tbl_slots.setItem(idx, 1, slot_item)
 
+                # col 2 – device type
                 cmb_device = SafeComboBox()
                 cmb_device.addItems(self.UV_DEVICE_TYPES)
                 cmb_device.setCurrentText(str(slot.get("device_type", "") or "").strip())
+                cmb_device.currentTextChanged.connect(self._refresh_visual)
                 self.tbl_slots.setCellWidget(idx, 2, cmb_device)
 
+                # col 3 – TE-Breite
+                sb_te = QSpinBox()
+                sb_te.setRange(1, 8)
+                sb_te.setValue(int(slot.get("te_size", 1) or 1))
+                sb_te.setToolTip("Anzahl belegter TE")
+                sb_te.valueChanged.connect(self._refresh_visual)
+                self.tbl_slots.setCellWidget(idx, 3, sb_te)
+
+                # col 4 – Bezeichnung
                 self.tbl_slots.setItem(
-                    idx, 3, QTableWidgetItem(str(slot.get("label", "") or "").strip())
+                    idx, 4, QTableWidgetItem(str(slot.get("label", "") or "").strip())
                 )
 
+                # col 5 – Kabel/Stromkreis
                 cmb_assignment = SafeComboBox()
                 cmb_assignment.setEditable(True)
                 cmb_assignment.addItem("")
@@ -535,13 +1029,112 @@ class UvConfigDialog(QDialog):
                     if choice and cmb_assignment.findText(choice) < 0:
                         cmb_assignment.addItem(choice)
                 cmb_assignment.setCurrentText(str(slot.get("assignment", "") or "").strip())
-                self.tbl_slots.setCellWidget(idx, 4, cmb_assignment)
+                self.tbl_slots.setCellWidget(idx, 5, cmb_assignment)
 
+                # col 6 – Notiz
                 self.tbl_slots.setItem(
-                    idx, 5, QTableWidgetItem(str(slot.get("note", "") or "").strip())
+                    idx, 6, QTableWidgetItem(str(slot.get("note", "") or "").strip())
                 )
 
         self.lbl_summary.setText(f"{rows} Reihen mit je {modules_per_row} TE")
+        self._refresh_visual()
+
+    def _refresh_visual(self):
+        """Update the rail widget from current table state (no full rebuild)."""
+        self.rail_widget.set_data(
+            self.sb_rows.value(),
+            self.sb_modules.value(),
+            self._capture_current_slots(),
+            self._cable_choices,
+        )
+
+    def _write_slot_to_table(self, row_no: int, slot_no: int, data: dict):
+        """Write slot data dict into the table at (row_no, slot_no)."""
+        mpr = self.sb_modules.value()
+        tbl_idx = (row_no - 1) * mpr + (slot_no - 1)
+        row_count = self.tbl_slots.rowCount()
+        if not (0 <= tbl_idx < row_count):
+            return
+        cmb_d = self.tbl_slots.cellWidget(tbl_idx, 2)
+        if isinstance(cmb_d, QComboBox):
+            cmb_d.setCurrentText(data.get("device_type", ""))
+        te_sb = self.tbl_slots.cellWidget(tbl_idx, 3)
+        if isinstance(te_sb, QSpinBox):
+            te_sb.setValue(int(data.get("te_size", 1) or 1))
+        lbl_item = self.tbl_slots.item(tbl_idx, 4)
+        if lbl_item:
+            lbl_item.setText(data.get("label", ""))
+        cmb_a = self.tbl_slots.cellWidget(tbl_idx, 5)
+        if isinstance(cmb_a, QComboBox):
+            cmb_a.setCurrentText(data.get("assignment", ""))
+        note_item = self.tbl_slots.item(tbl_idx, 6)
+        if note_item:
+            note_item.setText(data.get("note", ""))
+
+    def _clear_slot_in_table(self, row_no: int, slot_no: int):
+        """Reset a table row to empty values."""
+        self._write_slot_to_table(row_no, slot_no, {
+            "device_type": "", "te_size": 1,
+            "label": "", "assignment": "", "note": "",
+        })
+
+    def _on_rail_slot_clicked(self, row_no: int, slot_no: int):
+        """Slot in rail was clicked: open edit popup, write result back."""
+        current_slots = self._capture_current_slots()
+        slot_data: dict = {"row": row_no, "slot": slot_no}
+        for s in current_slots:
+            if s["row"] == row_no and s["slot"] == slot_no:
+                slot_data = dict(s)
+                break
+
+        dlg = UvSlotEditPopup(
+            slot_data, self._cable_choices,
+            max_rows=self.sb_rows.value(),
+            max_modules=self.sb_modules.value(),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        updated = dlg.get_slot_data()
+        new_row = updated["row"]
+        new_slot = updated["slot"]
+
+        # If position changed, move slot
+        if new_row != row_no or new_slot != slot_no:
+            self._on_slot_moved(row_no, slot_no, new_row, new_slot)
+            # Update data at new position
+            self._write_slot_to_table(new_row, new_slot, updated)
+        else:
+            self._write_slot_to_table(row_no, slot_no, updated)
+
+        self.tabs.setCurrentIndex(0)
+        self._refresh_visual()
+
+    def _on_slot_moved(self, from_row: int, from_slot: int,
+                       to_row: int, to_slot: int):
+        """Move slot data from one position to another (swap if target occupied)."""
+        current_slots = self._capture_current_slots()
+        src_data: dict | None = None
+        dst_data: dict | None = None
+        for s in current_slots:
+            if s["row"] == from_row and s["slot"] == from_slot:
+                src_data = dict(s)
+            if s["row"] == to_row and s["slot"] == to_slot:
+                dst_data = dict(s)
+
+        if src_data is None:
+            return  # nothing to move
+
+        # Write source data to target
+        self._write_slot_to_table(to_row, to_slot, src_data)
+        # Write target data (or blanks) to source
+        if dst_data is not None:
+            self._write_slot_to_table(from_row, from_slot, dst_data)
+        else:
+            self._clear_slot_in_table(from_row, from_slot)
+
+        self._refresh_visual()
 
     def _preset_index_for_dims(self, rows: int, modules_per_row: int) -> int:
         for idx, (_label, dims) in enumerate(self.UV_PRESETS):
@@ -599,6 +1192,8 @@ class UvConfigDialog(QDialog):
 
     @staticmethod
     def _slot_has_content(slot: dict) -> bool:
+        if int(slot.get("te_size", 1) or 1) > 1:
+            return True
         return any(
             str(slot.get(key, "") or "").strip()
             for key in ("device_type", "label", "assignment", "note")
