@@ -2258,6 +2258,7 @@ class ElektroCablePanel(QWidget):
     label_size_changed   = Signal(str, float)
     label_visibility_changed = Signal(str, bool)
     duplicate_requested  = Signal(str)
+    stroke_width_changed = Signal(str, float)
 
     def __init__(self, cable_id: str, name: str | None = None,
                  color: str | None = None,
@@ -2332,6 +2333,17 @@ class ElektroCablePanel(QWidget):
         )
         form.addRow("Schriftgr\u00f6\u00dfe:", self.sb_label_size)
 
+        self.sb_stroke_width = SafeDoubleSpinBox()
+        self.sb_stroke_width.setRange(0.5, 10.0)
+        self.sb_stroke_width.setSingleStep(0.5)
+        self.sb_stroke_width.setDecimals(1)
+        self.sb_stroke_width.setValue(float(self._defaults.get("stroke_width", 2.0)))
+        self.sb_stroke_width.setSuffix(" px")
+        self.sb_stroke_width.valueChanged.connect(
+            lambda v: self.stroke_width_changed.emit(self.cable_id, v)
+        )
+        form.addRow("Strichst\u00e4rke:", self.sb_stroke_width)
+
         self.btn_draw = QPushButton("\u270f\ufe0f Kabel zeichnen")
         self.btn_draw.clicked.connect(
             lambda: self.draw_cable_requested.emit(self.cable_id)
@@ -2403,6 +2415,7 @@ class ElektroCablePanel(QWidget):
             "visible": self.chk_visible.isChecked(),
             "label_visible": self.chk_label_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
+            "stroke_width": self.sb_stroke_width.value(),
             "start_ap": self._start_ap,
             "end_ap":   self._end_ap,
         }
@@ -2449,6 +2462,7 @@ class ElektroCablePanel(QWidget):
         self.chk_visible.setChecked(d.get("visible", True))
         self.chk_label_visible.setChecked(d.get("label_visible", True))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
+        self.sb_stroke_width.setValue(d.get("stroke_width", 2.0))
         self.set_start_ap(d.get("start_ap", ""))
         self.set_end_ap(d.get("end_ap", ""))
 

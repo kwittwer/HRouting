@@ -1857,6 +1857,7 @@ def _create_mcp(window: MainWindow, bridge):
         comment: str = "",
         start_ap_id: str = "",
         end_ap_id: str = "",
+        stroke_width: float = 2.0,
     ) -> dict:
         """Elektro-Kabel als Polylinie hinzufügen.
 
@@ -1872,6 +1873,8 @@ def _create_mcp(window: MainWindow, bridge):
                 leer = kein Start-AP
             end_ap_id: End-Anschlusspunkt-ID (z.B. 'AP-2'),
                 leer = kein End-AP
+            stroke_width: Strichstärke der Kabellinie in px (0.5–10.0,
+                Standard: 2.0)
         """
         if len(polyline) < 2:
             return {"error": "Polylinie muss mindestens 2 Punkte haben."}
@@ -1895,6 +1898,10 @@ def _create_mcp(window: MainWindow, bridge):
             w.canvas.set_color(kid, QC(color))
             w.canvas._label_map[kid] = name
             w.canvas._ensure_color(kid)
+
+            # Strichstärke setzen
+            w.canvas.set_elec_cable_stroke_width(kid, stroke_width)
+            panel.sb_stroke_width.setValue(max(0.5, min(10.0, stroke_width)))
 
             # AP-Verbindungen setzen
             if start_ap_id:
@@ -1940,6 +1947,7 @@ def _create_mcp(window: MainWindow, bridge):
         start_ap_id: str | None = None,
         end_ap_id: str | None = None,
         visible: bool | None = None,
+        stroke_width: float | None = None,
     ) -> dict:
         """Parameter eines Elektro-Kabels ändern.
         Nur angegebene Parameter werden geändert.
@@ -1954,6 +1962,7 @@ def _create_mcp(window: MainWindow, bridge):
             start_ap_id: Neue Start-AP-ID (leer = entfernen)
             end_ap_id: Neue End-AP-ID (leer = entfernen)
             visible: Sichtbarkeit
+            stroke_width: Neue Strichstärke in px (0.5–10.0)
         """
         def _modify():
             from PySide6.QtCore import QPointF
@@ -1998,6 +2007,9 @@ def _create_mcp(window: MainWindow, bridge):
             if visible is not None:
                 panel.chk_visible.setChecked(visible)
                 window.canvas._elec_visible[cable_id] = visible
+            if stroke_width is not None:
+                window.canvas.set_elec_cable_stroke_width(cable_id, stroke_width)
+                panel.sb_stroke_width.setValue(max(0.5, min(10.0, stroke_width)))
 
             window.canvas.update()
             window._dirty = True

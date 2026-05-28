@@ -189,6 +189,7 @@ class CanvasWidget(QWidget):
         self._elec_point_smarthome_device_color: Dict[str, str]   = {}
         self._elec_cables:        Dict[str, List[QPointF]]        = {}
         self._elec_cable_notes:   Dict[str, str]                  = {}
+        self._elec_cable_stroke_width: Dict[str, float]            = {}
         self._elec_visible:       Dict[str, bool]                 = {}
 
         # Cable ↔ AP connections  (cable_id → point_id or "")
@@ -1341,9 +1342,13 @@ class CanvasWidget(QWidget):
         self._color_map.pop(point_id, None)
         self.update()
 
+    def set_elec_cable_stroke_width(self, cable_id: str, width: float):
+        self._elec_cable_stroke_width[cable_id] = max(0.5, min(10.0, width))
+        self.update()
+
     def delete_elec_cable(self, cable_id: str):
         for d in (self._elec_cables, self._elec_visible,
-                  self._elec_cable_notes,
+                  self._elec_cable_notes, self._elec_cable_stroke_width,
                   self._cable_start_ap, self._cable_end_ap,
                   self._label_positions, self._label_font_sizes, self._label_visible,
                   self._label_rects, self._label_draw_pos):
@@ -1389,7 +1394,8 @@ class CanvasWidget(QWidget):
         pts = self._elec_cables.get(cable_id, [])
         if len(pts) < 2:
             return None
-        threshold = 8.0 / self._scale
+        sw = self._elec_cable_stroke_width.get(cable_id, 2.0)
+        threshold = max(8.0, sw * 2) / self._scale
         for i in range(len(pts) - 1):
             proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
             if _qdist(canvas_pt, proj) < threshold:
@@ -2072,6 +2078,7 @@ class CanvasWidget(QWidget):
                 for cid, pts in self._elec_cables.items()
             },
             "elec_cable_notes": dict(self._elec_cable_notes),
+            "elec_cable_stroke_width": dict(self._elec_cable_stroke_width),
             "cable_start_ap": dict(self._cable_start_ap),
             "cable_end_ap": dict(self._cable_end_ap),
             "elec_visible": dict(self._elec_visible),
@@ -2239,6 +2246,9 @@ class CanvasWidget(QWidget):
             self._ensure_color(cid)
         self._elec_cable_notes = {
             cid: str(v) for cid, v in d.get("elec_cable_notes", {}).items()
+        }
+        self._elec_cable_stroke_width = {
+            cid: float(v) for cid, v in d.get("elec_cable_stroke_width", {}).items()
         }
         self._cable_start_ap = dict(d.get("cable_start_ap", {}))
         self._cable_end_ap = dict(d.get("cable_end_ap", {}))
@@ -5482,7 +5492,8 @@ class CanvasWidget(QWidget):
         if len(points) < 2:
             return
         color = self._color_map.get(cable_id, QColor("#ff9800"))
-        pen = QPen(color, 2.0 / self._scale)
+        sw = self._elec_cable_stroke_width.get(cable_id, 2.0)
+        pen = QPen(color, sw / self._scale)
         pen.setJoinStyle(Qt.RoundJoin)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
@@ -5517,7 +5528,9 @@ class CanvasWidget(QWidget):
             r = 3.0 / self._scale
             painter.drawEllipse(pts[0], r, r)
             return
-        pen = QPen(color, 2.0 / self._scale, Qt.DashLine)
+        sw = self._elec_cable_stroke_width.get(
+            self._current_elec_cable_id, 2.0)
+        pen = QPen(color, sw / self._scale, Qt.DashLine)
         pen.setJoinStyle(Qt.RoundJoin)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)

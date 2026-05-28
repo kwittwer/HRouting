@@ -2023,6 +2023,7 @@ class MainWindow(QMainWindow):
         panel.visibility_changed.connect(self._on_elec_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
         panel.label_visibility_changed.connect(self._on_label_visibility_changed)
+        panel.stroke_width_changed.connect(self._on_elec_cable_stroke_width_changed)
         self._update_up_distribution_cable_choices_all()
         return panel
 
@@ -2031,6 +2032,8 @@ class MainWindow(QMainWindow):
         if panel:
             self.canvas.set_color(cable_id, QColor(panel._color.name()))
             self.canvas._elec_cable_notes[cable_id] = panel.get_parameters().get("comment", "")
+            self.canvas.set_elec_cable_stroke_width(
+                cable_id, panel.get_parameters().get("stroke_width", 2.0))
         self.canvas.start_draw_elec_cable(cable_id)
         self.status.showMessage(
             f"{cable_id}: Kabel zeichnen  |  "
@@ -2083,6 +2086,10 @@ class MainWindow(QMainWindow):
 
     def _on_elec_cable_comment_changed(self, cable_id: str, comment: str):
         self.canvas._elec_cable_notes[cable_id] = comment
+        self._mark_dirty_debounced()
+
+    def _on_elec_cable_stroke_width_changed(self, cable_id: str, width: float):
+        self.canvas.set_elec_cable_stroke_width(cable_id, width)
         self._mark_dirty_debounced()
 
     def _delete_elec_cable(self, cable_id: str):
@@ -3270,12 +3277,14 @@ class MainWindow(QMainWindow):
                 panel.visibility_changed.connect(self._on_elec_visibility_changed)
                 panel.label_size_changed.connect(self._on_label_size_changed)
                 panel.label_visibility_changed.connect(self._on_label_visibility_changed)
+                panel.stroke_width_changed.connect(self._on_elec_cable_stroke_width_changed)
                 values = panel.get_parameters()
                 self.canvas._label_map[kid] = values.get("name", kid)
                 self.canvas._elec_visible[kid] = values.get("visible", True)
                 self.canvas.set_label_font_size(kid, values.get("label_size", 12.0))
                 self.canvas.set_label_visible(kid, values.get("label_visible", True))
                 self.canvas.set_color(kid, QColor(values.get("color", "#ff9800")))
+                self.canvas.set_elec_cable_stroke_width(kid, values.get("stroke_width", 2.0))
                 # Update cable length + AP labels
                 length_px = self.canvas.get_elec_cable_length_px(kid)
                 length_mm = length_px * self.canvas.get_mm_per_px()
@@ -3990,7 +3999,8 @@ class MainWindow(QMainWindow):
                     color = self.canvas._color_map.get(kid, QColor("#ff9800"))
                     rounding = 8.0
                     qpath = self.canvas._smooth_polyline_path(pts, rounding)
-                    painter.setPen(QPen(color, 2.0, Qt.SolidLine,
+                    sw = self.canvas._elec_cable_stroke_width.get(kid, 2.0)
+                    painter.setPen(QPen(color, sw, Qt.SolidLine,
                                         Qt.RoundCap, Qt.RoundJoin))
                     painter.setBrush(Qt.NoBrush)
                     painter.drawPath(qpath)
@@ -4149,10 +4159,11 @@ class MainWindow(QMainWindow):
             rounding = 8.0
             qpath = self.canvas._smooth_polyline_path(pts, rounding)
             svg_d = self._qpainterpath_to_svg_d(qpath)
+            sw = self.canvas._elec_cable_stroke_width.get(kid, 2.0)
             if svg_d:
                 lines.append(
                     f'  <path d="{svg_d}" fill="none" '
-                    f'stroke="{color_str}" stroke-width="2" '
+                    f'stroke="{color_str}" stroke-width="{sw}" '
                     f'stroke-linejoin="round" stroke-linecap="round"/>'
                 )
 

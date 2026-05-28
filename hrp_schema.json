@@ -411,6 +411,12 @@
           "default": {},
           "description": "Kabelnotizen pro Kabel-ID."
         },
+        "elec_cable_stroke_width": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0.5, "maximum": 10.0 },
+          "default": {},
+          "description": "Strichstärke pro Kabel-ID (px). Default 2.0."
+        },
         "cable_start_ap": {
           "type": "object",
           "additionalProperties": { "type": "string" },
@@ -780,7 +786,8 @@
         "label_visible": { "type": "boolean", "default": true },
         "label_size": { "type": "number", "minimum": 1, "default": 12.0 },
         "start_ap": { "type": "string", "default": "", "description": "Start-Anschlusspunkt-ID (z.B. 'AP-1')." },
-        "end_ap": { "type": "string", "default": "", "description": "End-Anschlusspunkt-ID (z.B. 'AP-2')." }
+        "end_ap": { "type": "string", "default": "", "description": "End-Anschlusspunkt-ID (z.B. 'AP-2')." },
+        "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 10.0, "default": 2.0, "description": "Strichstärke der Kabellinie in px." }
       }
     },
 
