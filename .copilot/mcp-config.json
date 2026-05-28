@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "hrouting": {
+      "command": "python",
+      "args": ["mcp_server_stdio.py"],
+      "cwd": "C:\\Users\\z004s49s\\Documents\\GitHub\\HRouting"
+    }
+  }
+}

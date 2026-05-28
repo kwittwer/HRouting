@@ -257,6 +257,9 @@ class MainWindow(QMainWindow):
         edit_menu.addAction("🏷️ Anschlusspunkte durchnummerieren", 
                            self._numbering_elec_points)
 
+        # ── Extras ──
+        extras_menu = mb.addMenu("&Extras")
+
         # ── Hilfe ──
         help_menu = mb.addMenu("&Hilfe")
         help_menu.addAction("ℹ️ Über HRouting…", self._show_about)

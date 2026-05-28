@@ -140,11 +140,15 @@ def _refresh_hrp_association_if_outdated():
 def main():
     _refresh_hrp_association_if_outdated()
 
-    # --mcp Flag vor QApplication herausfiltern (QApplication würde unbekannte
-    # Argumente ignorieren, aber wir wollen es sauber aus sys.argv entfernen)
-    _enable_mcp = "--mcp" in sys.argv
-    if _enable_mcp:
+    # Parameter-Parsing: --mcp (HTTP) und --mcpstdio (Stdio)
+    _enable_mcp_http = "--mcp" in sys.argv
+    _enable_mcp_stdio = "--mcpstdio" in sys.argv
+    
+    # Argumente vor QApplication herausfiltern
+    if _enable_mcp_http:
         sys.argv.remove("--mcp")
+    if _enable_mcp_stdio:
+        sys.argv.remove("--mcpstdio")
 
     # --- Schnellstart: nur minimale Qt-Imports für Splash ---
     from PySide6.QtWidgets import QApplication, QSplashScreen
@@ -268,9 +272,11 @@ def main():
     elif svg_path.exists():
         window.setWindowIcon(QIcon(str(svg_path)))
 
-    # --- MCP-Server starten (nur mit --mcp) ---
+    # --- MCP-Server starten (nur mit --mcp oder --mcpstdio) ---
     _mcp_log_window = None
-    if _enable_mcp:
+    _mcp_stdio_process = None
+    
+    if _enable_mcp_http:
         _mcp_log_window = McpLogWindow()
         _mcp_log_window.show()
         try:
@@ -283,12 +289,40 @@ def main():
                 + traceback.format_exc(),
                 "ERROR",
             )
+    
+    if _enable_mcp_stdio:
+        _mcp_log_window = McpLogWindow()
+        _mcp_log_window._append("Starten des MCP Stdio-Servers...", "INFO")
+        _mcp_log_window.show()
+        try:
+            import subprocess
+            from pathlib import Path
+            server_path = BASE_DIR / "mcp_server_stdio.py"
+            _mcp_stdio_process = subprocess.Popen(
+                [str(Path(sys.executable)), str(server_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            _mcp_log_window._append(
+                f"MCP Stdio-Server läuft (PID: {_mcp_stdio_process.pid})",
+                "INFO",
+            )
+        except Exception as e:
+            import traceback
+            _mcp_log_window._append(
+                f"FEHLER beim Starten des MCP Stdio-Servers: {e}\n"
+                + traceback.format_exc(),
+                "ERROR",
+            )
 
     # Log-Fenster schließen wenn Hauptfenster geschlossen wird
     if _mcp_log_window:
         _orig_close = window.closeEvent
 
         def _close_with_log(event):
+            if _mcp_stdio_process:
+                _mcp_stdio_process.terminate()
             _mcp_log_window.close()
             _orig_close(event)
 
