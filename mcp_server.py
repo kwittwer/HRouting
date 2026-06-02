@@ -3747,6 +3747,1072 @@ def _create_mcp(window: MainWindow, bridge):
 
         return invoke(_conv)
 
+    # ── Planungs-Analyse Tools ─────────────────────────────────────
+
+    @mcp.tool()
+    def get_spatial_overview() -> dict:
+        """Räumlicher Überblick: alle Räume, Flächen, Schwerpunkte und zugeordnete Elemente.
+
+        Nützlich als erster Schritt vor der Planung – gibt dem Agenten
+        ein vollständiges Bild der Raumstruktur ohne viele Einzelabfragen.
+
+        Returns:
+            rooms: Liste aller Elektro-Räume mit Fläche_m2, Schwerpunkt_px,
+                   Schwerpunkt_mm, zugeordneten AP-IDs und ob ein Heizkreis existiert.
+            heating_only: Heizkreise ohne zugehörigen Elektro-Raum.
+            unassigned_aps: APs die keinem Raum zugeordnet sind.
+            stats: Zusammenfassung (Raumanzahl, Gesamtfläche, etc.)
+        """
+        import math
+
+        def _read():
+            p = window.param_panel.to_dict()
+            c = window.canvas.to_dict()
+            mpp = window.canvas._mm_per_px or 1.0
+
+            def _poly_area_px(pts):
+                n = len(pts)
+                if n < 3:
+                    return 0.0
+                area = 0.0
+                for i in range(n):
+                    j = (i + 1) % n
+                    area += pts[i][0] * pts[j][1]
+                    area -= pts[j][0] * pts[i][1]
+                return abs(area) / 2.0
+
+            def _poly_centroid_px(pts):
+                if not pts:
+                    return [0.0, 0.0]
+                cx = sum(p[0] for p in pts) / len(pts)
+                cy = sum(p[1] for p in pts) / len(pts)
+                return [round(cx, 1), round(cy, 1)]
+
+            # AP room assignments
+            ap_room: dict[str, str] = {}
+            try:
+                ap_room = dict(window._elec_point_room_map)
+            except AttributeError:
+                pass
+
+            room_to_aps: dict[str, list[str]] = {rid: [] for rid in p.get("elec_rooms", {})}
+            for ap_id, rid in ap_room.items():
+                if rid in room_to_aps:
+                    room_to_aps[rid].append(ap_id)
+
+            # Which rooms have a heating circuit?
+            circuit_fp_ids: set[str] = set()
+            rooms_with_hk: set[str] = set()
+            # Match by floor_plan_id overlap (simple heuristic)
+            for cid, cdata in p.get("circuits", {}).items():
+                circuit_fp_ids.add(cdata.get("floor_plan_id", ""))
+
+            rooms = []
+            for rid, rdata in p.get("elec_rooms", {}).items():
+                poly = c.get("elec_rooms", {}).get(rid, [])
+                area_px = _poly_area_px(poly)
+                area_mm2 = area_px * (mpp ** 2)
+                centroid_px = _poly_centroid_px(poly)
+                centroid_mm = [round(centroid_px[0] * mpp, 1), round(centroid_px[1] * mpp, 1)]
+                fp_id = rdata.get("floor_plan_id", "")
+                has_hk = fp_id in circuit_fp_ids
+                rooms.append({
+                    "room_id": rid,
+                    "name": rdata.get("name", rid),
+                    "floor_plan_id": fp_id,
+                    "area_m2": round(area_mm2 / 1_000_000, 3),
+                    "area_mm2": round(area_mm2, 0),
+                    "centroid_px": centroid_px,
+                    "centroid_mm": centroid_mm,
+                    "ap_ids": room_to_aps.get(rid, []),
+                    "ap_count": len(room_to_aps.get(rid, [])),
+                    "has_heating_circuit": has_hk,
+                })
+
+            # Heizkreise ohne Elektro-Raum
+            heating_only = []
+            for cid, cdata in p.get("circuits", {}).items():
+                poly = c.get("polygons", {}).get(cid, [])
+                area_px = _poly_area_px(poly)
+                area_mm2 = area_px * (mpp ** 2)
+                centroid_px = _poly_centroid_px(poly)
+                centroid_mm = [round(centroid_px[0] * mpp, 1), round(centroid_px[1] * mpp, 1)]
+                heating_only.append({
+                    "circuit_id": cid,
+                    "name": cdata.get("name", cid),
+                    "floor_plan_id": cdata.get("floor_plan_id", ""),
+                    "area_m2": round(area_mm2 / 1_000_000, 3),
+                    "centroid_px": centroid_px,
+                    "centroid_mm": centroid_mm,
+                    "room_temp": cdata.get("room_temp", 20.0),
+                    "floor_covering": cdata.get("floor_covering", ""),
+                })
+
+            all_ap_ids = set(p.get("elec_points", {}).keys())
+            unassigned = sorted(all_ap_ids - set(ap_room.keys()))
+
+            total_area = sum(r["area_m2"] for r in rooms)
+            return {
+                "rooms": rooms,
+                "heating_circuits": heating_only,
+                "unassigned_aps": unassigned,
+                "stats": {
+                    "room_count": len(rooms),
+                    "circuit_count": len(heating_only),
+                    "total_room_area_m2": round(total_area, 3),
+                    "total_ap_count": len(all_ap_ids),
+                    "unassigned_ap_count": len(unassigned),
+                    "mm_per_px": mpp,
+                },
+            }
+
+        return invoke(_read)
+
+    @mcp.tool()
+    def get_topology_graph() -> dict:
+        """Kabelverbindungsgraph aller Anschlusspunkte.
+
+        Gibt die Verbindungsstruktur als Adjazenzliste zurück — ideal
+        um Leitungswege und Unterverteilungshierarchien zu verstehen
+        und optimale Kabelverlegung zu planen.
+
+        Returns:
+            nodes: AP-IDs mit Name, Typ, Raum.
+            edges: Alle Kabelverbindungen mit Länge und Typ.
+            adjacency: {ap_id: [{cable_id, other_ap_id, length_m, cable_type}]}
+            isolated_aps: APs ohne jede Verbindung.
+            stats: Kennzahlen (Knoten, Kanten, Gesamtlänge, etc.)
+        """
+        def _read():
+            p = window.param_panel.to_dict()
+            c = window.canvas.to_dict()
+            mpp = window.canvas._mm_per_px or 1.0
+
+            import math
+
+            def _cable_length_m(pts):
+                if len(pts) < 2:
+                    return 0.0
+                total = sum(
+                    math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+                    for i in range(len(pts) - 1)
+                )
+                return round(total * mpp / 1000, 3)
+
+            # AP room lookup
+            ap_room: dict[str, str] = {}
+            try:
+                ap_room = dict(window._elec_point_room_map)
+            except AttributeError:
+                pass
+            room_name: dict[str, str] = {
+                rid: rd.get("name", rid)
+                for rid, rd in p.get("elec_rooms", {}).items()
+            }
+
+            nodes = {}
+            for pid, pd in p.get("elec_points", {}).items():
+                rid = ap_room.get(pid, "")
+                nodes[pid] = {
+                    "point_id": pid,
+                    "name": pd.get("name", pid),
+                    "ap_type": pd.get("ap_type", "standard"),
+                    "builtin_symbol": pd.get("builtin_symbol", ""),
+                    "room_id": rid,
+                    "room_name": room_name.get(rid, "(ohne Raum)") if rid else "(ohne Raum)",
+                }
+
+            edges = []
+            adjacency: dict[str, list] = {pid: [] for pid in nodes}
+            for cid, cd in p.get("elec_cables", {}).items():
+                pts = c.get("elec_cables", {}).get(cid, [])
+                start_ap = c.get("cable_start_ap", {}).get(cid, "")
+                end_ap = c.get("cable_end_ap", {}).get(cid, "")
+                length = _cable_length_m(pts)
+                edge = {
+                    "cable_id": cid,
+                    "name": cd.get("name", cid),
+                    "cable_type": cd.get("type", ""),
+                    "start_ap_id": start_ap,
+                    "end_ap_id": end_ap,
+                    "length_m": length,
+                    "length_mm": round(length * 1000, 0),
+                }
+                edges.append(edge)
+                if start_ap in adjacency:
+                    adjacency[start_ap].append({
+                        "cable_id": cid, "other_ap_id": end_ap,
+                        "length_m": length, "cable_type": cd.get("type", ""),
+                    })
+                if end_ap in adjacency:
+                    adjacency[end_ap].append({
+                        "cable_id": cid, "other_ap_id": start_ap,
+                        "length_m": length, "cable_type": cd.get("type", ""),
+                    })
+
+            connected = {pid for pid, nbrs in adjacency.items() if nbrs}
+            isolated = sorted(set(nodes.keys()) - connected)
+            total_length = round(sum(e["length_m"] for e in edges), 3)
+
+            return {
+                "nodes": list(nodes.values()),
+                "edges": edges,
+                "adjacency": adjacency,
+                "isolated_aps": isolated,
+                "stats": {
+                    "node_count": len(nodes),
+                    "edge_count": len(edges),
+                    "connected_ap_count": len(connected),
+                    "isolated_ap_count": len(isolated),
+                    "total_cable_length_m": total_length,
+                },
+            }
+
+        return invoke(_read)
+
+    @mcp.tool()
+    def find_aps_in_room(room_id: str) -> dict:
+        """Findet alle APs die geometrisch in einem Elektro-Raum liegen.
+
+        Prüft für jeden AP ob seine Canvas-Position innerhalb des
+        Raum-Polygons liegt — auch wenn keine explizite Zuordnung
+        vorhanden ist.
+
+        Args:
+            room_id: ID des Elektro-Raums (z.B. 'ER-1').
+
+        Returns:
+            room_id, room_name, assigned_aps (explizit zugeordnet),
+            geometric_aps (geometrisch im Polygon), all_aps (Vereinigung).
+        """
+        def _read():
+            p = window.param_panel.to_dict()
+            c = window.canvas.to_dict()
+
+            rdata = p.get("elec_rooms", {}).get(room_id)
+            if not rdata:
+                return {"error": f"Raum '{room_id}' nicht gefunden."}
+
+            poly = c.get("elec_rooms", {}).get(room_id, [])
+            if not poly:
+                return {
+                    "room_id": room_id,
+                    "room_name": rdata.get("name", room_id),
+                    "assigned_aps": [],
+                    "geometric_aps": [],
+                    "all_aps": [],
+                    "note": "Raum hat kein Polygon.",
+                }
+
+            def _point_in_poly(px, py, poly):
+                n = len(poly)
+                inside = False
+                j = n - 1
+                for i in range(n):
+                    xi, yi = poly[i][0], poly[i][1]
+                    xj, yj = poly[j][0], poly[j][1]
+                    if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+                        inside = not inside
+                    j = i
+                return inside
+
+            # Explicit assignments
+            assigned: set[str] = set()
+            try:
+                for ap_id, rid in window._elec_point_room_map.items():
+                    if rid == room_id:
+                        assigned.add(ap_id)
+            except AttributeError:
+                pass
+
+            # Geometric check
+            geometric: set[str] = set()
+            for pid, pos in c.get("elec_points", {}).items():
+                px, py = pos[0], pos[1]
+                if _point_in_poly(px, py, poly):
+                    geometric.add(pid)
+
+            def _ap_info(pid):
+                ep = p.get("elec_points", {}).get(pid, {})
+                return {
+                    "point_id": pid,
+                    "name": ep.get("name", pid),
+                    "ap_type": ep.get("ap_type", "standard"),
+                    "builtin_symbol": ep.get("builtin_symbol", ""),
+                }
+
+            all_ids = sorted(assigned | geometric)
+            return {
+                "room_id": room_id,
+                "room_name": rdata.get("name", room_id),
+                "assigned_aps": [_ap_info(p) for p in sorted(assigned)],
+                "geometric_aps": [_ap_info(p) for p in sorted(geometric)],
+                "all_aps": [_ap_info(p) for p in all_ids],
+                "total_count": len(all_ids),
+            }
+
+        return invoke(_read)
+
+    # ── Planungskontext ────────────────────────────────────────────
+
+    @mcp.tool()
+    def set_planning_context(
+        rooms: list[dict],
+        global_notes: str = "",
+    ) -> dict:
+        """Planungsanforderungen je Raum speichern.
+
+        Speichert Anforderungen (Steckdosen, Licht, Heizkreise etc.)
+        pro Raum im Projekt — der Agent liest diese bei der nächsten
+        Planung per get_planning_context() ab.
+
+        Args:
+            rooms: Liste von Raum-Anforderungen. Jeder Eintrag:
+                   {room_id, required_sockets?, required_lights?,
+                    required_circuits?, notes?, priority?}
+            global_notes: Globale Planungshinweise (Freitext).
+
+        Returns:
+            status, room_count, saved context.
+        """
+        def _write():
+            import json
+            ctx_rooms = []
+            for entry in rooms:
+                if not isinstance(entry, dict):
+                    continue
+                ctx_rooms.append({
+                    "room_id": str(entry.get("room_id", "") or "").strip(),
+                    "required_sockets": int(entry.get("required_sockets", 0) or 0),
+                    "required_lights": int(entry.get("required_lights", 0) or 0),
+                    "required_circuits": int(entry.get("required_circuits", 0) or 0),
+                    "notes": str(entry.get("notes", "") or "").strip(),
+                    "priority": str(entry.get("priority", "normal") or "normal").strip(),
+                })
+
+            ctx = {
+                "rooms": ctx_rooms,
+                "global_notes": str(global_notes or "").strip(),
+            }
+            # Store in canvas extra data (survives save/load)
+            window.canvas._planning_context = ctx
+            window._mark_dirty()
+            return {
+                "status": "ok",
+                "room_count": len(ctx_rooms),
+                "context": ctx,
+            }
+
+        return invoke(_write)
+
+    @mcp.tool()
+    def get_planning_context() -> dict:
+        """Gespeicherte Planungsanforderungen lesen.
+
+        Gibt den per set_planning_context() gespeicherten Kontext
+        zurück und ergänzt ihn um den aktuellen Erfüllungsgrad
+        (vorhandene APs / Heizkreise vs. Anforderung).
+
+        Returns:
+            context: die gespeicherten Anforderungen,
+            fulfillment: je Raum: ist_sockets, ist_lights, ist_circuits
+                         vs. required.
+        """
+        def _read():
+            p = window.param_panel.to_dict()
+            c = window.canvas.to_dict()
+
+            ctx = getattr(window.canvas, "_planning_context", {}) or {}
+            if not ctx:
+                return {"context": {}, "fulfillment": [], "note": "Noch kein Planungskontext gesetzt."}
+
+            # Build AP counts per room
+            room_ap_count: dict[str, int] = {}
+            try:
+                for ap_id, rid in window._elec_point_room_map.items():
+                    room_ap_count[rid] = room_ap_count.get(rid, 0) + 1
+            except AttributeError:
+                pass
+
+            # Count light/socket symbols roughly
+            def _count_symbols(room_id, symbol_keywords):
+                try:
+                    count = 0
+                    for ap_id, rid in window._elec_point_room_map.items():
+                        if rid != room_id:
+                            continue
+                        sym = p.get("elec_points", {}).get(ap_id, {}).get("builtin_symbol", "").lower()
+                        if any(kw in sym for kw in symbol_keywords):
+                            count += 1
+                    return count
+                except Exception:
+                    return 0
+
+            # Count circuits per floor plan
+            fp_circuit_count: dict[str, int] = {}
+            for cid, cd in p.get("circuits", {}).items():
+                fp = cd.get("floor_plan_id", "")
+                fp_circuit_count[fp] = fp_circuit_count.get(fp, 0) + 1
+
+            fulfillment = []
+            for req in ctx.get("rooms", []):
+                rid = req.get("room_id", "")
+                rdata = p.get("elec_rooms", {}).get(rid, {})
+                fp_id = rdata.get("floor_plan_id", "")
+                ist_sockets = _count_symbols(rid, ["steckdose", "socket"])
+                ist_lights = _count_symbols(rid, ["licht", "light", "lichtquelle", "leuchte"])
+                ist_circuits = fp_circuit_count.get(fp_id, 0)
+                fulfillment.append({
+                    "room_id": rid,
+                    "room_name": rdata.get("name", rid) if rdata else rid,
+                    "required_sockets": req.get("required_sockets", 0),
+                    "ist_sockets": ist_sockets,
+                    "sockets_ok": ist_sockets >= req.get("required_sockets", 0),
+                    "required_lights": req.get("required_lights", 0),
+                    "ist_lights": ist_lights,
+                    "lights_ok": ist_lights >= req.get("required_lights", 0),
+                    "required_circuits": req.get("required_circuits", 0),
+                    "ist_circuits": ist_circuits,
+                    "circuits_ok": ist_circuits >= req.get("required_circuits", 0),
+                    "notes": req.get("notes", ""),
+                })
+
+            return {"context": ctx, "fulfillment": fulfillment}
+
+        return invoke(_read)
+
+    # ── Batch-Erstellungs-Tools ────────────────────────────────────
+
+    @mcp.tool()
+    def bulk_add_elec_points(
+        points: list[dict],
+    ) -> dict:
+        """Mehrere Anschlusspunkte auf einmal anlegen.
+
+        Effizienter als wiederholte add_elec_point()-Aufrufe.
+        Alle Punkte werden in einer einzigen Qt-Transaktion angelegt.
+
+        Args:
+            points: Liste von AP-Definitionen. Jeder Eintrag hat die
+                    gleichen Felder wie add_elec_point():
+                    name (Pflicht), x (Pflicht), y (Pflicht),
+                    floor_plan_id?, color?, builtin_symbol?,
+                    width?, height?, position?, height_from_floor?,
+                    smarthome_device?, smarthome_device_color?,
+                    note?, ap_type?
+
+        Returns:
+            created_ids, error_count, errors (falls vorhanden).
+        """
+        def _write():
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QColor
+            from gui.parameter_panel import BUILTIN_SYMBOLS
+
+            created_ids = []
+            errors = []
+
+            for idx, entry in enumerate(points):
+                if not isinstance(entry, dict):
+                    errors.append({"index": idx, "error": "Eintrag ist kein Objekt."})
+                    continue
+                name = str(entry.get("name", "") or "").strip()
+                if not name:
+                    errors.append({"index": idx, "error": "name ist Pflicht."})
+                    continue
+                try:
+                    x = float(entry["x"])
+                    y = float(entry["y"])
+                except (KeyError, TypeError, ValueError):
+                    errors.append({"index": idx, "error": "x und y sind Pflicht (Zahlen)."})
+                    continue
+
+                fp_id = str(entry.get("floor_plan_id", "") or "").strip()
+                window._elec_point_counter += 1
+                point_id = f"AP-{window._elec_point_counter}"
+
+                window._add_elec_point(fp_id=fp_id)
+                panel = window.param_panel.elec_point_panels.get(point_id)
+                if not panel:
+                    errors.append({"index": idx, "error": f"Panel für {point_id} nicht erstellt."})
+                    window._elec_point_counter -= 1
+                    continue
+
+                # Apply fields
+                panel.le_name.setText(name)
+                color = str(entry.get("color", "#4fc3f7") or "#4fc3f7").strip()
+                panel._color = QColor(color)
+                panel._update_color_button()
+
+                symbol = str(entry.get("builtin_symbol", "") or "").strip()
+                if symbol and panel.cmb_symbol.findText(symbol) >= 0:
+                    panel.cmb_symbol.setCurrentText(symbol)
+                    icon_path = BUILTIN_SYMBOLS.get(symbol, "")
+                    panel._icon_path = icon_path
+                    window.canvas.set_elec_point_icon(point_id, icon_path)
+
+                ap_type = str(entry.get("ap_type", "standard") or "standard").strip()
+                panel.set_ap_type(ap_type)
+
+                for fld, setter in [
+                    ("position", lambda v: panel.cmb_position.setCurrentText(v)
+                     if panel.cmb_position.findText(v) >= 0
+                     else panel.le_position_custom.setText(v)),
+                    ("height_from_floor", lambda v: panel.sb_height_from_floor.setValue(float(v))),
+                    ("note", lambda v: panel.te_note.setPlainText(str(v))),
+                    ("smarthome_device", lambda v: panel.set_smarthome_device_text(str(v))),
+                    ("smarthome_device_color", lambda v: panel.set_smarthome_device_color_text(str(v))),
+                ]:
+                    val = entry.get(fld)
+                    if val is not None:
+                        try:
+                            setter(val)
+                        except Exception:
+                            pass
+
+                try:
+                    w = float(entry.get("width", 30.0) or 30.0)
+                    h = float(entry.get("height", 30.0) or 30.0)
+                    panel.sb_width.setValue(w / 10.0)
+                    panel.sb_height.setValue(h / 10.0)
+                except (TypeError, ValueError):
+                    pass
+
+                # Place on canvas
+                window.canvas._elec_points[point_id] = QPointF(x, y)
+                window.canvas.elec_point_placed.emit(point_id)
+                window._on_elec_point_color_changed(point_id, color)
+                created_ids.append(point_id)
+
+            window._mark_dirty()
+            return {
+                "status": "ok",
+                "created_ids": created_ids,
+                "created_count": len(created_ids),
+                "error_count": len(errors),
+                "errors": errors,
+            }
+
+        return invoke(_write)
+
+    @mcp.tool()
+    def bulk_add_elec_cables(
+        cables: list[dict],
+    ) -> dict:
+        """Mehrere Kabelverbindungen auf einmal anlegen.
+
+        Effizienter als wiederholte add_elec_cable()-Aufrufe.
+
+        Args:
+            cables: Liste von Kabel-Definitionen. Jeder Eintrag:
+                    name (Pflicht), polyline (Pflicht, ≥2 Punkte [[x,y],...]),
+                    floor_plan_id?, color?, cable_type?,
+                    start_ap_id?, end_ap_id?, stroke_width?, comment?
+
+        Returns:
+            created_ids, error_count, errors (falls vorhanden).
+        """
+        def _write():
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QColor
+
+            created_ids = []
+            errors = []
+
+            for idx, entry in enumerate(cables):
+                if not isinstance(entry, dict):
+                    errors.append({"index": idx, "error": "Eintrag ist kein Objekt."})
+                    continue
+                name = str(entry.get("name", "") or "").strip()
+                polyline = entry.get("polyline", [])
+                if not polyline or len(polyline) < 2:
+                    errors.append({"index": idx, "error": "polyline mit ≥2 Punkten ist Pflicht."})
+                    continue
+                try:
+                    pts = [QPointF(float(pt[0]), float(pt[1])) for pt in polyline]
+                except (TypeError, ValueError, IndexError):
+                    errors.append({"index": idx, "error": "polyline enthält ungültige Punkte."})
+                    continue
+
+                fp_id = str(entry.get("floor_plan_id", "") or "").strip()
+                window._add_elec_cable(fp_id=fp_id)
+                cable_id = f"KV-{window._elec_cable_counter}"
+                panel = window.param_panel.elec_cable_panels.get(cable_id)
+                if not panel:
+                    errors.append({"index": idx, "error": f"Panel für {cable_id} nicht erstellt."})
+                    continue
+
+                if name:
+                    panel.le_name.setText(name)
+                color = str(entry.get("color", "#ff9800") or "#ff9800").strip()
+                panel._color = QColor(color)
+                panel._update_color_button()
+                window._on_elec_cable_color_changed(cable_id, color)
+
+                cable_type = str(entry.get("cable_type", "") or "").strip()
+                if cable_type:
+                    panel.set_type_text(cable_type)
+                    window._on_elec_cable_type_changed(cable_id, cable_type)
+
+                comment = str(entry.get("comment", "") or "").strip()
+                if comment:
+                    panel.te_comment.setPlainText(comment)
+
+                try:
+                    sw = float(entry.get("stroke_width", 2.0) or 2.0)
+                    panel.sb_stroke_width.setValue(sw)
+                    window.canvas.set_elec_cable_stroke_width(cable_id, sw)
+                except (TypeError, ValueError):
+                    pass
+
+                start_ap = str(entry.get("start_ap_id", "") or "").strip()
+                end_ap = str(entry.get("end_ap_id", "") or "").strip()
+                if start_ap:
+                    window.canvas._cable_start_ap[cable_id] = start_ap
+                if end_ap:
+                    window.canvas._cable_end_ap[cable_id] = end_ap
+
+                window.canvas._elec_cables[cable_id] = pts
+                window.canvas._elec_visible[cable_id] = True
+                window.canvas.elec_cable_changed.emit(cable_id)
+                created_ids.append(cable_id)
+
+            window._mark_dirty()
+            return {
+                "status": "ok",
+                "created_ids": created_ids,
+                "created_count": len(created_ids),
+                "error_count": len(errors),
+                "errors": errors,
+            }
+
+        return invoke(_write)
+
+    # ── Planungs-Validierung ───────────────────────────────────────
+
+    @mcp.tool()
+    def validate_planning() -> dict:
+        """Planungs-Vollständigkeitsprüfung (über Schema-Validierung hinaus).
+
+        Prüft planungsspezifische Probleme:
+        - Räume ohne Heizkreis
+        - APs ohne Kabelverbindung
+        - UV-Verteiler ohne Zuleitung
+        - Heizkreise ohne Zuleitung zum HKV
+        - Phasenlast-Abschätzung je Phase in UVs
+        - Räume ohne APs
+
+        Returns:
+            valid (bool), warnings[], issues[], stats.
+        """
+        def _check():
+            p = window.param_panel.to_dict()
+            c = window.canvas.to_dict()
+
+            issues = []
+            warnings = []
+
+            # APs verbunden?
+            connected_aps: set[str] = set()
+            for cid in p.get("elec_cables", {}):
+                s = c.get("cable_start_ap", {}).get(cid, "")
+                e = c.get("cable_end_ap", {}).get(cid, "")
+                if s:
+                    connected_aps.add(s)
+                if e:
+                    connected_aps.add(e)
+
+            all_aps = set(p.get("elec_points", {}).keys())
+            isolated = all_aps - connected_aps
+            for pid in sorted(isolated):
+                ap_name = p.get("elec_points", {}).get(pid, {}).get("name", pid)
+                warnings.append({
+                    "type": "ap_no_cable",
+                    "severity": "warning",
+                    "message": f"AP '{ap_name}' ({pid}) hat keine Kabelverbindung.",
+                    "element_id": pid,
+                })
+
+            # UV-Verteiler: Zuleitung vorhanden?
+            for pid, pdata in p.get("elec_points", {}).items():
+                if pdata.get("ap_type") == "uv":
+                    if pid not in connected_aps:
+                        issues.append({
+                            "type": "uv_no_supply",
+                            "severity": "error",
+                            "message": f"UV-Verteiler '{pdata.get('name', pid)}' ({pid}) hat keine Zuleitung.",
+                            "element_id": pid,
+                        })
+
+            # Heizkreise ohne HKV-Zuleitung
+            supply_hkv = c.get("supply_hkv", {})
+            for cid, cdata in p.get("circuits", {}).items():
+                supply_pts = c.get("supply_lines", {}).get(cid, [])
+                hkv_assigned = supply_hkv.get(cid, "")
+                if not supply_pts and not hkv_assigned:
+                    warnings.append({
+                        "type": "circuit_no_supply",
+                        "severity": "warning",
+                        "message": f"Heizkreis '{cdata.get('name', cid)}' ({cid}) hat keine Zuleitung zum HKV.",
+                        "element_id": cid,
+                    })
+
+            # Räume ohne APs
+            try:
+                room_aps = dict(window._elec_point_room_map)
+            except AttributeError:
+                room_aps = {}
+            rooms_with_aps: set[str] = set(room_aps.values())
+            for rid, rdata in p.get("elec_rooms", {}).items():
+                if rid not in rooms_with_aps:
+                    warnings.append({
+                        "type": "room_no_aps",
+                        "severity": "warning",
+                        "message": f"Raum '{rdata.get('name', rid)}' ({rid}) hat keine zugeordneten APs.",
+                        "element_id": rid,
+                    })
+
+            # Phasenlast-Abschätzung je UV
+            for pid, pdata in p.get("elec_points", {}).items():
+                uv = pdata.get("uv_config") or {}
+                if not uv:
+                    continue
+                slots = uv.get("slots", [])
+                phase_te: dict[str, int] = {}
+                busbars = uv.get("busbars", [])
+                bb_map: dict[int, str] = {}
+                for bb in busbars:
+                    for te in range(bb.get("te_start", 1), bb.get("te_end", 1) + 1):
+                        bb_map[te] = bb.get("phase", "?")
+                for slot in slots:
+                    te = slot.get("slot", 0)
+                    phase = bb_map.get(te, "unbekannt")
+                    ts = slot.get("te_size", 1)
+                    phase_te[phase] = phase_te.get(phase, 0) + ts
+                if phase_te:
+                    max_te = max(phase_te.values())
+                    min_te = min(phase_te.values())
+                    if max_te > 0 and (max_te - min_te) / max_te > 0.5:
+                        warnings.append({
+                            "type": "uv_phase_imbalance",
+                            "severity": "warning",
+                            "message": (
+                                f"UV '{pdata.get('name', pid)}' ({pid}): "
+                                f"Phasenlast stark ungleich: {phase_te}"
+                            ),
+                            "element_id": pid,
+                        })
+
+            all_issues = issues + warnings
+            return {
+                "valid": len(issues) == 0,
+                "issue_count": len(issues),
+                "warning_count": len(warnings),
+                "issues": [i for i in all_issues if i["severity"] == "error"],
+                "warnings": [i for i in all_issues if i["severity"] == "warning"],
+                "stats": {
+                    "total_aps": len(all_aps),
+                    "connected_aps": len(connected_aps),
+                    "isolated_aps": len(isolated),
+                    "total_circuits": len(p.get("circuits", {})),
+                    "total_rooms": len(p.get("elec_rooms", {})),
+                },
+            }
+
+        return invoke(_check)
+
+    # ── Heizungs-Optimierungstools ─────────────────────────────────
+
+    @mcp.tool()
+    def suggest_circuit_parameters(
+        area_m2: float,
+        room_temp: float = 20.0,
+        floor_covering: str = "Fliesen / Keramik",
+        t_supply: float = 0.0,
+        t_return: float = 0.0,
+    ) -> dict:
+        """Empfohlene Heizkreis-Parameter für eine gegebene Fläche.
+
+        Berechnet ohne etwas zu schreiben den empfohlenen Verlegeabstand
+        und Rohrdurchmesser basierend auf Normheizlast und DIN EN 1264.
+
+        Args:
+            area_m2:       Raumfläche in m².
+            room_temp:     Soll-Raumtemperatur in °C (Standard: 20).
+            floor_covering: Bodenbelag (Standard: 'Fliesen / Keramik').
+            t_supply:      Vorlauftemperatur °C (0 = Projektwert verwenden).
+            t_return:      Rücklauftemperatur °C (0 = Projektwert verwenden).
+
+        Returns:
+            recommended_spacing_mm, recommended_diameter_mm,
+            estimated_power_w, estimated_q_wm2 für verschiedene
+            Verlegeabstände (75/100/150/200 mm).
+        """
+        def _calc():
+            from logic.heating_calc import calc_circuit, FLOOR_COVERINGS
+            p = window.param_panel.to_dict()
+            ts = t_supply if t_supply > 0 else p.get("t_supply", 35.0)
+            tr = t_return if t_return > 0 else p.get("t_return", 30.0)
+
+            if area_m2 <= 0:
+                return {"error": "area_m2 muss größer 0 sein."}
+            if floor_covering not in FLOOR_COVERINGS:
+                return {
+                    "error": f"Ungültiger Bodenbelag '{floor_covering}'.",
+                    "valid_values": list(FLOOR_COVERINGS.keys()),
+                }
+            r_lambda_b = FLOOR_COVERINGS[floor_covering]
+
+            results = []
+            for spacing_mm in [75, 100, 150, 200]:
+                for diameter_mm in [16, 20]:
+                    spacing_cm = spacing_mm / 10.0
+                    # Estimate pipe length from area and spacing
+                    pipe_length_m = area_m2 / (spacing_mm / 1000.0)
+                    try:
+                        res = calc_circuit(
+                            t_supply=ts,
+                            t_return=tr,
+                            t_room=room_temp,
+                            spacing_cm=spacing_cm,
+                            r_lambda_b=r_lambda_b,
+                            area_m2=area_m2,
+                            pipe_length_m=pipe_length_m,
+                            outer_diameter_mm=float(diameter_mm),
+                        )
+                        results.append({
+                            "spacing_mm": spacing_mm,
+                            "diameter_mm": diameter_mm,
+                            "power_w": round(res.get("power_w", 0), 1),
+                            "q_wm2": round(res.get("q_wm2", 0), 1),
+                            "volume_flow_lmin": round(res.get("volume_flow_lmin", 0), 3),
+                            "pressure_drop_mbar": round(res.get("pressure_drop_mbar", 0), 1),
+                            "pipe_length_m": round(pipe_length_m, 1),
+                        })
+                    except Exception as e:
+                        results.append({"spacing_mm": spacing_mm, "diameter_mm": diameter_mm, "error": str(e)})
+
+            # Recommendation: choose combination closest to 50 W/m² norm load
+            norm_load_wm2 = 50.0
+            best = None
+            for r in results:
+                if "q_wm2" in r:
+                    if best is None or abs(r["q_wm2"] - norm_load_wm2) < abs(best["q_wm2"] - norm_load_wm2):
+                        best = r
+
+            return {
+                "input": {
+                    "area_m2": area_m2,
+                    "room_temp": room_temp,
+                    "floor_covering": floor_covering,
+                    "t_supply": ts,
+                    "t_return": tr,
+                },
+                "scenarios": results,
+                "recommendation": best,
+                "note": (
+                    "Empfehlung basiert auf Normheizlast ~50 W/m². "
+                    "Für genaue Auslegung: Wärmebedarf nach DIN EN 12831 berechnen."
+                ),
+            }
+
+        return invoke(_calc)
+
+    @mcp.tool()
+    def balance_hkv_circuits(hkv_id: str) -> dict:
+        """Hydraulischen Abgleich für alle Kreise an einem HKV berechnen.
+
+        Liest alle am HKV angeschlossenen Heizkreise, berechnet die
+        Hydraulik und gibt empfohlene Durchfluss-Einstellungen zurück.
+
+        Args:
+            hkv_id: ID des Heizkreisverteilers (z.B. 'HKV-1').
+
+        Returns:
+            hkv_name, circuits mit Volumenstrom und Druckverlust,
+            recommended_settings für Strangregulierventile.
+        """
+        def _calc():
+            from logic.heating_calc import calc_circuit, FLOOR_COVERINGS
+            p = window.param_panel.to_dict()
+            c = window.canvas.to_dict()
+            mpp = window.canvas._mm_per_px or 1.0
+
+            hkv_data = p.get("hkv_points", {}).get(hkv_id)
+            if not hkv_data:
+                return {"error": f"HKV '{hkv_id}' nicht gefunden."}
+
+            ts = p.get("t_supply", 35.0)
+            tr = p.get("t_return", 30.0)
+
+            # Find circuits connected to this HKV
+            supply_hkv = c.get("supply_hkv", {})
+            connected_circuits = [cid for cid, vid in supply_hkv.items() if vid == hkv_id]
+            if not connected_circuits:
+                hkv_name_str = hkv_data.get("name", hkv_id)
+                connected_circuits = [
+                    cid for cid, cdata in p.get("circuits", {}).items()
+                    if cdata.get("distributor", "") == hkv_name_str
+                ]
+
+            if not connected_circuits:
+                return {
+                    "hkv_id": hkv_id,
+                    "hkv_name": hkv_data.get("name", hkv_id),
+                    "connected_circuit_count": 0,
+                    "circuits": [],
+                    "note": "Keine Heizkreise an diesem HKV gefunden.",
+                }
+
+            results = []
+            max_pressure = 0.0
+            for cid in connected_circuits:
+                cdata = p.get("circuits", {}).get(cid, {})
+                area_mm2 = window._compute_polygon_area_mm2(cid)
+                area_m2 = (area_mm2 or 0.0) / 1_000_000.0
+                route_m = (
+                    window.canvas.get_manual_route_length_px(cid) * mpp / 1000.0
+                )
+                supply_m = (
+                    window.canvas.get_supply_line_length_px(cid) * mpp / 1000.0
+                )
+                if area_m2 <= 0:
+                    results.append({"circuit_id": cid, "name": cdata.get("name", cid), "error": "Kein Polygon."})
+                    continue
+                try:
+                    spacing_cm = cdata.get("spacing", 150.0) / 10.0
+                    floor_name = cdata.get("floor_covering", "Fliesen / Keramik")
+                    r_lambda_b = FLOOR_COVERINGS.get(floor_name, 0.01)
+                    res = calc_circuit(
+                        t_supply=ts,
+                        t_return=tr,
+                        t_room=cdata.get("room_temp", 20.0),
+                        spacing_cm=spacing_cm,
+                        r_lambda_b=r_lambda_b,
+                        area_m2=area_m2,
+                        pipe_length_m=route_m,
+                        outer_diameter_mm=cdata.get("diameter", 16.0),
+                        total_pipe_length_m=route_m + supply_m,
+                    )
+                    pd_mbar = res.get("pressure_drop_mbar", 0.0)
+                    max_pressure = max(max_pressure, pd_mbar)
+                    results.append({
+                        "circuit_id": cid,
+                        "name": cdata.get("name", cid),
+                        "power_w": round(res.get("power_w", 0), 1),
+                        "volume_flow_lmin": round(res.get("volume_flow_lmin", 0), 3),
+                        "pressure_drop_mbar": round(pd_mbar, 1),
+                        "pipe_length_m": round(route_m, 1),
+                        "area_m2": round(area_m2, 2),
+                    })
+                except Exception as e:
+                    results.append({"circuit_id": cid, "name": cdata.get("name", cid), "error": str(e)})
+
+            for r in results:
+                if "pressure_drop_mbar" in r and max_pressure > 0:
+                    excess = max_pressure - r["pressure_drop_mbar"]
+                    r["throttle_mbar"] = round(excess, 1)
+                    r["throttle_note"] = (
+                        "kein Drosselventil nötig" if excess <= 5
+                        else f"Strangregulierventil um {excess:.0f} mbar drosseln"
+                    )
+
+            total_flow = sum(r.get("volume_flow_lmin", 0) for r in results if "volume_flow_lmin" in r)
+            return {
+                "hkv_id": hkv_id,
+                "hkv_name": hkv_data.get("name", hkv_id),
+                "t_supply": ts,
+                "t_return": tr,
+                "connected_circuit_count": len(connected_circuits),
+                "max_pressure_drop_mbar": round(max_pressure, 1),
+                "total_volume_flow_lmin": round(total_flow, 3),
+                "circuits": results,
+            }
+
+        return invoke(_calc)
+
+    # ── Planungsprotokoll ──────────────────────────────────────────
+
+    @mcp.tool()
+    def append_planning_log(
+        entry: str,
+        category: str = "info",
+    ) -> dict:
+        """Planungsentscheidung ins Protokoll schreiben.
+
+        Der Agent dokumentiert jeden Planungsschritt — der Nutzer
+        kann so den Gedankengang nachvollziehen und korrigieren.
+
+        Args:
+            entry:    Beschreibung der Entscheidung (Freitext).
+            category: 'info', 'decision', 'warning', 'todo'.
+
+        Returns:
+            status, entry_count, last_entry.
+        """
+        import datetime
+
+        def _write():
+            log = getattr(window.canvas, "_planning_log", None)
+            if not isinstance(log, list):
+                log = []
+                window.canvas._planning_log = log
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log.append({
+                "timestamp": ts,
+                "category": str(category or "info").strip(),
+                "entry": str(entry or "").strip(),
+            })
+            window._mark_dirty()
+            return {
+                "status": "ok",
+                "entry_count": len(log),
+                "last_entry": log[-1],
+            }
+
+        return invoke(_write)
+
+    @mcp.tool()
+    def get_planning_log() -> dict:
+        """Planungsprotokoll lesen.
+
+        Gibt alle per append_planning_log() geschriebenen Einträge
+        zurück, gruppiert nach Kategorie.
+
+        Returns:
+            entries[], grouped_by_category{}, entry_count.
+        """
+        def _read():
+            log = getattr(window.canvas, "_planning_log", None) or []
+            grouped: dict[str, list] = {}
+            for e in log:
+                cat = e.get("category", "info")
+                grouped.setdefault(cat, []).append(e)
+            return {
+                "entries": log,
+                "grouped_by_category": grouped,
+                "entry_count": len(log),
+            }
+
+        return invoke(_read)
+
+    @mcp.tool()
+    def clear_planning_log() -> dict:
+        """Planungsprotokoll leeren.
+
+        Returns:
+            status, deleted_count.
+        """
+        def _write():
+            count = len(getattr(window.canvas, "_planning_log", None) or [])
+            window.canvas._planning_log = []
+            window._mark_dirty()
+            return {"status": "ok", "deleted_count": count}
+
+        return invoke(_write)
+
+    # ── Tool-Übersicht ─────────────────────────────────────────────
+
     @mcp.tool()
     def get_tool_overview() -> dict:
         """Alle verfügbaren MCP-Tools gruppiert nach Kategorie.
@@ -3843,6 +4909,42 @@ def _create_mcp(window: MainWindow, bridge):
                 "4. add_circuit() / add_elec_point() mit berechneten Pixelkoordinaten",
                 "5. calculate_all_circuits() für Heizlast-Prüfung",
                 "6. validate_project() + save_project()",
+            ],
+            "planung_workflow": [
+                "1. get_spatial_overview()          – Räumliche Struktur verstehen",
+                "2. set_planning_context(rooms=[…]) – Anforderungen je Raum setzen",
+                "3. suggest_circuit_parameters()    – Heizkreis-Parameter empfehlen lassen",
+                "4. bulk_add_elec_points([…])        – Viele APs auf einmal anlegen",
+                "5. bulk_add_elec_cables([…])        – Kabel auf einmal anlegen",
+                "6. get_topology_graph()            – Verbindungsstruktur prüfen",
+                "7. validate_planning()             – Vollständigkeit prüfen",
+                "8. balance_hkv_circuits(hkv_id)   – Hydraulischen Abgleich berechnen",
+                "9. append_planning_log(entry)      – Entscheidungen dokumentieren",
+            ],
+            "planungs_analyse": [
+                "get_spatial_overview    – Räume mit Fläche, Schwerpunkt, APs, Heizkreisen",
+                "get_topology_graph      – Kabelverbindungsgraph als Adjazenzliste",
+                "find_aps_in_room        – APs geometrisch in einem Raum finden",
+            ],
+            "planungskontext": [
+                "set_planning_context    – Anforderungen je Raum speichern (Steckdosen, Licht, …)",
+                "get_planning_context    – Anforderungen + Erfüllungsgrad lesen",
+            ],
+            "batch_erstellen": [
+                "bulk_add_elec_points    – Viele APs auf einmal anlegen (effizienter als Einzelaufrufe)",
+                "bulk_add_elec_cables    – Viele Kabel auf einmal anlegen",
+            ],
+            "planung_validierung": [
+                "validate_planning       – APs ohne Kabel, Räume ohne APs, UV ohne Zuleitung, Phasenlast",
+            ],
+            "heizung_optimierung": [
+                "suggest_circuit_parameters – Verlegeabstand + Rohrdurchmesser für Fläche empfehlen",
+                "balance_hkv_circuits       – Hydraulischen Abgleich für alle Kreise an einem HKV",
+            ],
+            "planungsprotokoll": [
+                "append_planning_log     – Planungsentscheidung dokumentieren",
+                "get_planning_log        – Protokoll lesen (nach Kategorie gruppiert)",
+                "clear_planning_log      – Protokoll leeren",
             ],
         }
 
