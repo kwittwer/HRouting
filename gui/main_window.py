@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         self._pdf_export_dialog = None
         self._elec_schema_window: ElecSchemaWindow | None = None
         self._elec_schema_ap_positions: dict[str, list[float]] = {}
+        self._elec_point_room_map: dict[str, str] = {}
         self._suspend_schema_refresh = False
         self._dirty = False
         self._copy_buffer: dict | None = None
@@ -339,18 +340,27 @@ class MainWindow(QMainWindow):
 
     # -- Unsaved-changes guard ----------------------------------------- #
 
-    def _mark_dirty(self, *_args):
+    def _record_mutation(self, *, debounced: bool = False):
+        """Central mutation hook for dirty/undo/title updates.
+
+        This keeps mutation bookkeeping in one place so GUI and non-GUI
+        mutation paths can be aligned incrementally.
+        """
         self._dirty = True
-        self._push_undo()
         self._update_title()
+        if debounced:
+            self._dirty_debounce_timer.start()
+        else:
+            self._push_undo()
+
+    def _mark_dirty(self, *_args):
+        self._record_mutation(debounced=False)
 
     def _mark_dirty_debounced(self, *_args):
-        self._dirty = True
-        self._update_title()
-        self._dirty_debounce_timer.start()
+        self._record_mutation(debounced=True)
 
     def _apply_debounced_dirty(self):
-        self._push_undo()
+        self._record_mutation(debounced=False)
 
     def _flush_pending_dirty(self):
         if self._dirty_debounce_timer.isActive():
@@ -718,6 +728,13 @@ class MainWindow(QMainWindow):
         self._update_elec_point_room_assignments()
 
     def _connect_signals(self):
+        if (
+            getattr(self, "_signals_connected", False)
+            and getattr(self, "_signals_canvas", None) is self.canvas
+            and getattr(self, "_signals_panel", None) is self.param_panel
+        ):
+            return
+
         self.canvas.polygon_finished.connect(self._on_polygon_finished)
         self.canvas.elec_room_polygon_finished.connect(self._on_elec_room_polygon_finished)
         self.canvas.polygon_changed.connect(self._update_circuit_area)
@@ -741,7 +758,7 @@ class MainWindow(QMainWindow):
         self.canvas.floor_plan_transform_updated.connect(
             self._on_floor_plan_transform_from_canvas)
         self.canvas.floor_plan_polygon_changed.connect(
-            lambda _: self._mark_dirty())
+            self._on_floor_plan_polygon_changed)
 
         # Treeview selection sync
         self.param_panel.item_selected.connect(self.canvas.set_selected_item)
@@ -788,6 +805,10 @@ class MainWindow(QMainWindow):
 
         # Dirty-tracking: jede inhaltliche Änderung markiert als unsaved
         self.canvas.polygon_finished.connect(self._mark_dirty)
+
+        self._signals_connected = True
+        self._signals_canvas = self.canvas
+        self._signals_panel = self.param_panel
         self.canvas.polygon_changed.connect(self._mark_dirty)
         self.canvas.elec_room_polygon_finished.connect(self._mark_dirty)
         self.canvas.elec_room_polygon_changed.connect(self._mark_dirty)
@@ -1246,6 +1267,9 @@ class MainWindow(QMainWindow):
         panel = self.param_panel.floorplan_panels.get(fp_id)
         if panel:
             panel.set_transform_silent(offset_x, offset_y, rotation)
+        self._mark_dirty()
+
+    def _on_floor_plan_polygon_changed(self, _fp_id: str):
         self._mark_dirty()
 
     def _on_floorplan_order_changed(self):
@@ -2196,6 +2220,7 @@ class MainWindow(QMainWindow):
             self._elec_schema_window.delete_ap_requested.connect(self._delete_elec_point)
             self._elec_schema_window.delete_cable_requested.connect(self._delete_elec_cable)
             self._elec_schema_window.ap_position_changed.connect(self._on_schema_ap_position_changed)
+            self._elec_schema_window.ap_positions_changed.connect(self._on_schema_ap_positions_changed)
             self._elec_schema_window.edit_ap_requested.connect(self._on_schema_edit_ap)
             self._elec_schema_window.edit_cable_requested.connect(self._on_schema_edit_cable)
         self._refresh_elec_schema_window()
@@ -2380,6 +2405,25 @@ class MainWindow(QMainWindow):
     def _on_schema_ap_position_changed(self, point_id: str, x: float, y: float):
         self._elec_schema_ap_positions[point_id] = [float(x), float(y)]
         self._mark_dirty()
+
+    def _on_schema_ap_positions_changed(self, positions: dict):
+        changed = False
+        for point_id, pos in positions.items():
+            if not isinstance(pos, (list, tuple)) or len(pos) != 2:
+                continue
+            try:
+                nx = float(pos[0])
+                ny = float(pos[1])
+            except (TypeError, ValueError):
+                continue
+            current = self._elec_schema_ap_positions.get(point_id)
+            if current is not None and len(current) == 2:
+                if abs(float(current[0]) - nx) <= 0.01 and abs(float(current[1]) - ny) <= 0.01:
+                    continue
+            self._elec_schema_ap_positions[point_id] = [nx, ny]
+            changed = True
+        if changed:
+            self._record_mutation(debounced=False)
 
     def _on_schema_edit_ap(self, point_id: str, payload: dict):
         """Übernimmt bearbeitete AP-Eigenschaften aus dem Schema-Fenster."""

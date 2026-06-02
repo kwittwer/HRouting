@@ -575,6 +575,7 @@ class _ZoomGraphicsView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._zoom_callback = None
+        self._mouse_press_callback = None
         self._mouse_move_callback = None
         self._mouse_release_callback = None
         self._panning = False
@@ -585,7 +586,8 @@ class _ZoomGraphicsView(QGraphicsView):
     def set_zoom_callback(self, callback):
         self._zoom_callback = callback
 
-    def set_mouse_callbacks(self, move_callback=None, release_callback=None):
+    def set_mouse_callbacks(self, press_callback=None, move_callback=None, release_callback=None):
+        self._mouse_press_callback = press_callback
         self._mouse_move_callback = move_callback
         self._mouse_release_callback = release_callback
 
@@ -613,6 +615,11 @@ class _ZoomGraphicsView(QGraphicsView):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
+        if self._mouse_press_callback is not None:
+            handled = bool(self._mouse_press_callback(event))
+            if handled:
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -645,13 +652,31 @@ class _ZoomGraphicsView(QGraphicsView):
 
 
 class _ApNodeItem(QGraphicsRectItem):
-    def __init__(self, point_id: str, rect: QRectF, moved_callback, dblclick_callback, parent=None):
+    def __init__(
+        self,
+        point_id: str,
+        rect: QRectF,
+        moved_callback,
+        dblclick_callback,
+        press_callback,
+        position_change_callback,
+        parent=None,
+    ):
         super().__init__(rect, parent)
         self._point_id = point_id
         self._moved_callback = moved_callback
         self._dblclick_callback = dblclick_callback
+        self._press_callback = press_callback
+        self._position_change_callback = position_change_callback
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
-        self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+
+    def mousePressEvent(self, event):
+        if self._press_callback is not None:
+            allow_default = bool(self._press_callback(self._point_id, event))
+            if not allow_default:
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
@@ -664,6 +689,15 @@ class _ApNodeItem(QGraphicsRectItem):
         super().mouseDoubleClickEvent(event)
         if self._dblclick_callback is not None:
             self._dblclick_callback(self._point_id)
+
+    def itemChange(self, change, value):
+        if (
+            change == QGraphicsRectItem.GraphicsItemChange.ItemPositionChange
+            and self._position_change_callback is not None
+            and isinstance(value, QPointF)
+        ):
+            return self._position_change_callback(self._point_id, value)
+        return super().itemChange(change, value)
 
 
 class _CablePathItem(QGraphicsPathItem):
@@ -684,7 +718,6 @@ class _CablePathItem(QGraphicsPathItem):
         self._press_callback = press_callback
         self._move_callback = move_callback
         self._release_callback = release_callback
-        self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsSelectable, True)
         # breiterer unsichtbarer Bereich für einfacheres Anklicken
         self.setAcceptHoverEvents(True)
 
@@ -771,6 +804,7 @@ class ElecSchemaWindow(QMainWindow):
     delete_ap_requested = Signal(str)
     delete_cable_requested = Signal(str)
     ap_position_changed = Signal(str, float, float)
+    ap_positions_changed = Signal(dict)
     edit_ap_requested = Signal(str, dict)   # point_id, payload
     edit_cable_requested = Signal(str, dict)  # cable_id, payload
 
@@ -789,7 +823,23 @@ class ElecSchemaWindow(QMainWindow):
         self._room_choices: list[tuple[str, str]] = []
         self._ap_scene_positions: dict[str, QPointF] = {}
         self._cable_endpoints_scene: dict[str, tuple[QPointF | None, QPointF | None]] = {}
-        self._selected_cable_id: str | None = None
+        self._ap_items: dict[str, _ApNodeItem] = {}
+        self._cable_items: dict[str, _CablePathItem] = {}
+        self._cable_handle_items: dict[str, list[_CableEndpointHandle]] = {}
+        self._selected_ap_ids: set[str] = set()
+        self._selected_cable_ids: set[str] = set()
+        self._active_cable_id: str | None = None
+        self._selection_origin: QPointF | None = None
+        self._selection_rect_item: QGraphicsRectItem | None = None
+        self._selection_origin_ap_ids: set[str] = set()
+        self._selection_origin_cable_ids: set[str] = set()
+        self._selection_mode: str = "replace"
+        self._group_drag_anchor_id: str | None = None
+        self._group_drag_orig_positions: dict[str, QPointF] = {}
+        self._group_drag_active = False
+        self._applying_group_drag = False
+        self._view_group_drag_state: dict | None = None
+        self._cable_drag_state: dict | None = None
         self._cable_rewire_state: dict | None = None
         self._rewire_preview_item: QGraphicsPathItem | None = None
         self._rewire_endpoint_tolerance_px = 14.0
@@ -837,7 +887,11 @@ class ElecSchemaWindow(QMainWindow):
         self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.view.set_zoom_callback(self._apply_zoom_factor)
-        self.view.set_mouse_callbacks(self._on_view_mouse_move, self._on_view_mouse_release)
+        self.view.set_mouse_callbacks(
+            self._on_view_mouse_press,
+            self._on_view_mouse_move,
+            self._on_view_mouse_release,
+        )
         root.addWidget(self.view, 1)
 
         self.lbl_hint = QLabel("Anzeige: AP-Name, Raum, Verteilerfunktion, Anschlussstatus | Kabel: Name, Typ, Länge")
@@ -866,8 +920,10 @@ class ElecSchemaWindow(QMainWindow):
     ):
         self._ap_nodes = {n.point_id: n for n in ap_nodes}
         self._cable_edges = {e.cable_id: e for e in cable_edges}
-        if self._selected_cable_id and self._selected_cable_id not in self._cable_edges:
-            self._selected_cable_id = None
+        self._selected_ap_ids &= set(self._ap_nodes.keys())
+        self._selected_cable_ids &= set(self._cable_edges.keys())
+        if self._active_cable_id and self._active_cable_id not in self._selected_cable_ids:
+            self._active_cable_id = next(iter(self._selected_cable_ids), None)
         self._room_choices = list(room_choices or [])
         if manual_positions is not None:
             sanitized: dict[str, tuple[float, float]] = {}
@@ -943,10 +999,14 @@ class ElecSchemaWindow(QMainWindow):
 
     def _render(self):
         self._is_rendering = True
+        self._clear_selection_rect()
         self._clear_rewire_preview()
         self._cable_rewire_state = None
         self._ap_scene_positions.clear()
         self._cable_endpoints_scene.clear()
+        self._ap_items.clear()
+        self._cable_items.clear()
+        self._cable_handle_items.clear()
         self.scene.clear()
         if not self._ap_nodes and not self._cable_edges:
             self.scene.addSimpleText("Keine APs/Kabel vorhanden.")
@@ -960,6 +1020,7 @@ class ElecSchemaWindow(QMainWindow):
         bounds = self.scene.itemsBoundingRect().adjusted(-50, -50, 50, 50)
         self.scene.setSceneRect(bounds)
         self._is_rendering = False
+        self._apply_selection_visuals()
 
     def _zoom_in(self):
         self._apply_zoom_factor(self._zoom_step)
@@ -1191,7 +1252,8 @@ class ElecSchemaWindow(QMainWindow):
                 self._on_cable_mouse_move,
                 self._on_cable_mouse_release,
             )
-            is_selected = edge.cable_id == self._selected_cable_id
+            self._cable_items[edge.cable_id] = item
+            is_selected = edge.cable_id in self._selected_cable_ids
             pen_color = QColor(edge.color)
             if is_selected:
                 pen_color = pen_color.lighter(165)
@@ -1224,8 +1286,9 @@ class ElecSchemaWindow(QMainWindow):
                 open_tag.setPos(x2 + 8.0, y2 - 8.0)
                 self.scene.addItem(open_tag)
 
-            self._draw_cable_end_handle(edge.cable_id, "start", start_pos)
-            self._draw_cable_end_handle(edge.cable_id, "end", end_pos)
+            start_handle = self._draw_cable_end_handle(edge.cable_id, "start", start_pos)
+            end_handle = self._draw_cable_end_handle(edge.cable_id, "end", end_pos)
+            self._cable_handle_items[edge.cable_id] = [start_handle, end_handle]
 
     def _draw_cable_end_handle(self, cable_id: str, endpoint: str, pos: QPointF):
         radius = float(self._handle_radius)
@@ -1238,7 +1301,7 @@ class ElecSchemaWindow(QMainWindow):
             self._on_cable_mouse_release,
         )
         handle.setPos(pos)
-        is_selected = cable_id == self._selected_cable_id
+        is_selected = cable_id == self._active_cable_id
         fill = QColor("#ffd54f" if is_selected else "#b0bec5")
         fill.setAlpha(220)
         handle.setBrush(QBrush(fill))
@@ -1251,6 +1314,7 @@ class ElecSchemaWindow(QMainWindow):
             handle.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             handle.setOpacity(0.65)
         self.scene.addItem(handle)
+        return handle
 
     def _screen_px_to_scene(self, px: float) -> float:
         scale = float(self.view.transform().m11())
@@ -1279,10 +1343,18 @@ class ElecSchemaWindow(QMainWindow):
             fill = QColor(color)
             fill.setAlpha(60)
 
-            base = _ApNodeItem(node.point_id, rect, self._on_ap_node_moved, self._on_ap_node_dblclick)
+            base = _ApNodeItem(
+                node.point_id,
+                rect,
+                self._on_ap_node_moved,
+                self._on_ap_node_dblclick,
+                self._on_ap_node_mouse_press,
+                self._on_ap_node_position_change,
+            )
+            self._ap_items[node.point_id] = base
             base.setPos(x, y)
             base.setBrush(QBrush(fill))
-            base.setPen(QPen(color, 2.0))
+            base.setPen(QPen(color, 3.0 if node.point_id in self._selected_ap_ids else 2.0))
             base.setZValue(20.0)
             self.scene.addItem(base)
 
@@ -1342,9 +1414,104 @@ class ElecSchemaWindow(QMainWindow):
     def _on_ap_node_moved(self, point_id: str, x: float, y: float):
         if self._is_rendering:
             return
+
+        if self._group_drag_active and self._group_drag_anchor_id == point_id:
+            changed_positions: dict[str, list[float]] = {}
+            for selected_id in self._group_drag_orig_positions:
+                item = self._ap_items.get(selected_id)
+                if item is None:
+                    continue
+                pos = item.pos()
+                current = self._manual_positions.get(selected_id)
+                nx = float(pos.x())
+                ny = float(pos.y())
+                if current is None or abs(current[0] - nx) > 0.01 or abs(current[1] - ny) > 0.01:
+                    self._manual_positions[selected_id] = (nx, ny)
+                    changed_positions[selected_id] = [nx, ny]
+
+            self._group_drag_active = False
+            self._group_drag_anchor_id = None
+            self._group_drag_orig_positions.clear()
+
+            self._emit_position_changes(changed_positions)
+            self._render()
+            return
+
         self._manual_positions[point_id] = (float(x), float(y))
         self.ap_position_changed.emit(point_id, float(x), float(y))
         self._render()
+
+    def _emit_position_changes(self, changed_positions: dict[str, list[float]]):
+        if len(changed_positions) == 1:
+            pid, coords = next(iter(changed_positions.items()))
+            self.ap_position_changed.emit(pid, float(coords[0]), float(coords[1]))
+        elif changed_positions:
+            self.ap_positions_changed.emit(changed_positions)
+
+    def _on_ap_node_mouse_press(self, point_id: str, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return True
+
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            ap_ids = set(self._selected_ap_ids)
+            if point_id in ap_ids:
+                ap_ids.remove(point_id)
+            else:
+                ap_ids.add(point_id)
+            self._set_selection(ap_ids, set(self._selected_cable_ids), self._active_cable_id)
+            return False
+        elif mods & Qt.KeyboardModifier.ShiftModifier:
+            ap_ids = set(self._selected_ap_ids)
+            ap_ids.add(point_id)
+            self._set_selection(ap_ids, set(self._selected_cable_ids), self._active_cable_id)
+        else:
+            if point_id in self._selected_ap_ids:
+                self._set_selection(set(self._selected_ap_ids), set(self._selected_cable_ids), self._active_cable_id)
+            else:
+                self._set_selection({point_id}, set(), None)
+
+        if point_id not in self._selected_ap_ids:
+            return False
+
+        self._group_drag_anchor_id = point_id
+        self._group_drag_active = True
+        self._group_drag_orig_positions = {
+            pid: QPointF(self._ap_items[pid].pos())
+            for pid in self._selected_ap_ids
+            if pid in self._ap_items
+        }
+        return True
+
+    def _on_ap_node_position_change(self, point_id: str, target_pos: QPointF) -> QPointF:
+        if (
+            not self._group_drag_active
+            or self._group_drag_anchor_id != point_id
+            or self._applying_group_drag
+        ):
+            return target_pos
+
+        anchor_origin = self._group_drag_orig_positions.get(point_id)
+        if anchor_origin is None:
+            return target_pos
+
+        dx = float(target_pos.x() - anchor_origin.x())
+        dy = float(target_pos.y() - anchor_origin.y())
+        if abs(dx) <= 1e-9 and abs(dy) <= 1e-9:
+            return target_pos
+
+        self._applying_group_drag = True
+        try:
+            for pid, origin in self._group_drag_orig_positions.items():
+                if pid == point_id:
+                    continue
+                item = self._ap_items.get(pid)
+                if item is None:
+                    continue
+                item.setPos(origin.x() + dx, origin.y() + dy)
+        finally:
+            self._applying_group_drag = False
+        return target_pos
 
     def _clear_rewire_preview(self):
         if self._rewire_preview_item is not None:
@@ -1403,11 +1570,10 @@ class ElecSchemaWindow(QMainWindow):
     def _on_cable_endpoint_handle_press(self, cable_id: str, endpoint_kind: str, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        if self._selected_cable_id != cable_id:
-            self._selected_cable_id = cable_id
+        if self._active_cable_id != cable_id:
+            self._set_selection(set(self._selected_ap_ids), {cable_id}, cable_id)
             self._clear_rewire_preview()
             self._cable_rewire_state = None
-            self._render()
             event.accept()
             return
         if self._start_rewire_for_endpoint(cable_id, endpoint_kind, event.scenePos()):
@@ -1416,14 +1582,38 @@ class ElecSchemaWindow(QMainWindow):
     def _on_cable_mouse_press(self, cable_id: str, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        if self._selected_cable_id != cable_id:
-            self._selected_cable_id = cable_id
-            self._clear_rewire_preview()
-            self._cable_rewire_state = None
-            self._render()
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            cable_ids = set(self._selected_cable_ids)
+            if cable_id in cable_ids:
+                cable_ids.remove(cable_id)
+            else:
+                cable_ids.add(cable_id)
+            active_cable = cable_id if cable_id in cable_ids else None
+            self._set_selection(set(self._selected_ap_ids), cable_ids, active_cable)
+        elif mods & Qt.KeyboardModifier.ShiftModifier:
+            cable_ids = set(self._selected_cable_ids)
+            cable_ids.add(cable_id)
+            self._set_selection(set(self._selected_ap_ids), cable_ids, cable_id)
+        else:
+            if cable_id in self._selected_cable_ids:
+                self._set_selection(set(self._selected_ap_ids), set(self._selected_cable_ids), self._active_cable_id)
+            else:
+                self._set_selection(set(), {cable_id}, cable_id)
+
+        self._clear_rewire_preview()
+        self._cable_rewire_state = None
+        if not (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
+            self._start_cable_group_drag(event.scenePos())
         event.accept()
 
     def _on_cable_mouse_move(self, cable_id: str, event):
+        drag_state = self._cable_drag_state
+        if drag_state and drag_state.get("cable_id") == cable_id:
+            self._update_cable_group_drag(event.scenePos())
+            event.accept()
+            return
+
         state = self._cable_rewire_state
         if not state or state.get("cable_id") != cable_id:
             return
@@ -1472,13 +1662,169 @@ class ElecSchemaWindow(QMainWindow):
         return True
 
     def _on_cable_mouse_release(self, cable_id: str, event):
+        drag_state = self._cable_drag_state
+        if drag_state and drag_state.get("cable_id") == cable_id:
+            self._finalize_cable_group_drag()
+            event.accept()
+            return
+
         state = self._cable_rewire_state
         if not state or state.get("cable_id") != cable_id:
             return
         self._finalize_cable_rewire(cable_id, event.scenePos())
         event.accept()
 
+    def _start_cable_group_drag(self, scene_pos: QPointF):
+        ap_ids = self._collect_ap_ids_for_group_move()
+
+        if not ap_ids:
+            self._cable_drag_state = None
+            return
+
+        self._cable_drag_state = {
+            "cable_id": self._active_cable_id,
+            "start_scene": QPointF(scene_pos),
+            "ap_ids": ap_ids,
+            "orig_positions": {
+                point_id: QPointF(self._ap_items[point_id].pos())
+                for point_id in ap_ids
+                if point_id in self._ap_items
+            },
+        }
+
+    def _collect_ap_ids_for_group_move(self) -> set[str]:
+        ap_ids = set(self._selected_ap_ids)
+        for selected_cable_id in self._selected_cable_ids:
+            edge = self._cable_edges.get(selected_cable_id)
+            if edge is None:
+                continue
+            if edge.start_ap_id in self._ap_items:
+                ap_ids.add(edge.start_ap_id)
+            if edge.end_ap_id in self._ap_items:
+                ap_ids.add(edge.end_ap_id)
+        return ap_ids
+
+    def _current_selection_bounds(self) -> QRectF | None:
+        rect: QRectF | None = None
+        for point_id in self._selected_ap_ids:
+            item = self._ap_items.get(point_id)
+            if item is None:
+                continue
+            item_rect = item.sceneBoundingRect()
+            rect = QRectF(item_rect) if rect is None else rect.united(item_rect)
+        for cable_id in self._selected_cable_ids:
+            item = self._cable_items.get(cable_id)
+            if item is None:
+                continue
+            item_rect = item.sceneBoundingRect()
+            rect = QRectF(item_rect) if rect is None else rect.united(item_rect)
+        return rect
+
+    def _start_view_group_drag(self, scene_pos: QPointF):
+        ap_ids = self._collect_ap_ids_for_group_move()
+        if not ap_ids:
+            self._view_group_drag_state = None
+            return False
+        self._view_group_drag_state = {
+            "start_scene": QPointF(scene_pos),
+            "orig_positions": {
+                point_id: QPointF(self._ap_items[point_id].pos())
+                for point_id in ap_ids
+                if point_id in self._ap_items
+            },
+        }
+        return True
+
+    def _update_view_group_drag(self, scene_pos: QPointF):
+        state = self._view_group_drag_state
+        if not state:
+            return
+        start_scene = state.get("start_scene")
+        if not isinstance(start_scene, QPointF):
+            return
+
+        dx = float(scene_pos.x() - start_scene.x())
+        dy = float(scene_pos.y() - start_scene.y())
+        orig_positions = state.get("orig_positions", {})
+        for point_id, origin in orig_positions.items():
+            item = self._ap_items.get(point_id)
+            if item is None:
+                continue
+            item.setPos(origin.x() + dx, origin.y() + dy)
+
+    def _finalize_view_group_drag(self):
+        state = self._view_group_drag_state
+        self._view_group_drag_state = None
+        if not state:
+            return
+        changed_positions: dict[str, list[float]] = {}
+        orig_positions = state.get("orig_positions", {})
+        for point_id, origin in orig_positions.items():
+            item = self._ap_items.get(point_id)
+            if item is None:
+                continue
+            pos = item.pos()
+            nx = float(pos.x())
+            ny = float(pos.y())
+            if abs(nx - origin.x()) <= 0.01 and abs(ny - origin.y()) <= 0.01:
+                continue
+            self._manual_positions[point_id] = (nx, ny)
+            changed_positions[point_id] = [nx, ny]
+        self._emit_position_changes(changed_positions)
+        self._render()
+
+    def _update_cable_group_drag(self, scene_pos: QPointF):
+        state = self._cable_drag_state
+        if not state:
+            return
+        start_scene = state.get("start_scene")
+        if not isinstance(start_scene, QPointF):
+            return
+
+        dx = float(scene_pos.x() - start_scene.x())
+        dy = float(scene_pos.y() - start_scene.y())
+        orig_positions = state.get("orig_positions", {})
+        for point_id, origin in orig_positions.items():
+            item = self._ap_items.get(point_id)
+            if item is None:
+                continue
+            item.setPos(origin.x() + dx, origin.y() + dy)
+
+    def _finalize_cable_group_drag(self):
+        state = self._cable_drag_state
+        self._cable_drag_state = None
+        if not state:
+            return
+
+        changed_positions: dict[str, list[float]] = {}
+        orig_positions = state.get("orig_positions", {})
+        for point_id, origin in orig_positions.items():
+            item = self._ap_items.get(point_id)
+            if item is None:
+                continue
+            pos = item.pos()
+            nx = float(pos.x())
+            ny = float(pos.y())
+            if abs(nx - origin.x()) <= 0.01 and abs(ny - origin.y()) <= 0.01:
+                continue
+            self._manual_positions[point_id] = (nx, ny)
+            changed_positions[point_id] = [nx, ny]
+
+        self._emit_position_changes(changed_positions)
+        self._render()
+
     def _on_view_mouse_move(self, event) -> bool:
+        if self._view_group_drag_state is not None:
+            scene_pos = self.view.mapToScene(event.position().toPoint())
+            self._update_view_group_drag(scene_pos)
+            return True
+
+        if self._selection_origin is not None:
+            scene_pos = self.view.mapToScene(event.position().toPoint())
+            self._update_selection_rect(scene_pos)
+            self._apply_rect_selection_preview()
+            return True
+
         state = self._cable_rewire_state
         if not state:
             return False
@@ -1495,6 +1841,16 @@ class ElecSchemaWindow(QMainWindow):
         return True
 
     def _on_view_mouse_release(self, event) -> bool:
+        if self._view_group_drag_state is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._finalize_view_group_drag()
+            return True
+
+        if self._selection_origin is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._apply_rect_selection_preview()
+            self._selection_origin = None
+            self._clear_selection_rect()
+            return True
+
         state = self._cable_rewire_state
         if not state:
             return False
@@ -1505,6 +1861,155 @@ class ElecSchemaWindow(QMainWindow):
             return False
         scene_pos = self.view.mapToScene(event.position().toPoint())
         return self._finalize_cable_rewire(cable_id, scene_pos)
+
+    def _on_view_mouse_press(self, event) -> bool:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        if self._cable_rewire_state is not None:
+            return False
+
+        scene_pos = self.view.mapToScene(event.position().toPoint())
+        mods = event.modifiers()
+        selection_count = len(self._selected_ap_ids) + len(self._selected_cable_ids)
+        selection_bounds = self._current_selection_bounds()
+        if (
+            selection_count > 1
+            and not (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+            and selection_bounds is not None
+            and selection_bounds.contains(scene_pos)
+        ):
+            return self._start_view_group_drag(scene_pos)
+
+        item = self.scene.itemAt(scene_pos, self.view.transform())
+        if item is not None:
+            return False
+
+        self._selection_origin = scene_pos
+        self._selection_origin_ap_ids = set(self._selected_ap_ids)
+        self._selection_origin_cable_ids = set(self._selected_cable_ids)
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            self._selection_mode = "toggle"
+        elif mods & Qt.KeyboardModifier.ShiftModifier:
+            self._selection_mode = "add"
+        else:
+            self._selection_mode = "replace"
+        self._update_selection_rect(scene_pos)
+        return True
+
+    def _clear_selection_rect(self):
+        if self._selection_rect_item is not None:
+            try:
+                self.scene.removeItem(self._selection_rect_item)
+            except RuntimeError:
+                pass
+            self._selection_rect_item = None
+
+    def _update_selection_rect(self, scene_pos: QPointF):
+        if self._selection_origin is None:
+            return
+        rect = QRectF(self._selection_origin, scene_pos).normalized()
+        if self._selection_rect_item is None:
+            self._selection_rect_item = QGraphicsRectItem()
+            self._selection_rect_item.setPen(QPen(QColor("#80deea"), 1.2, Qt.PenStyle.DashLine))
+            fill = QColor("#80deea")
+            fill.setAlpha(40)
+            self._selection_rect_item.setBrush(QBrush(fill))
+            self._selection_rect_item.setZValue(1000.0)
+            self.scene.addItem(self._selection_rect_item)
+        self._selection_rect_item.setRect(rect)
+
+    def _collect_ids_in_rect(self, rect: QRectF) -> tuple[set[str], set[str]]:
+        if rect.width() < 1.0 and rect.height() < 1.0:
+            return set(), set()
+
+        hit_aps = {
+            point_id
+            for point_id, item in self._ap_items.items()
+            if item.sceneBoundingRect().intersects(rect)
+        }
+        hit_cables = {
+            cable_id
+            for cable_id, item in self._cable_items.items()
+            if item.sceneBoundingRect().intersects(rect)
+        }
+        return hit_aps, hit_cables
+
+    def _apply_rect_selection_preview(self):
+        if self._selection_rect_item is None:
+            return
+        rect = self._selection_rect_item.rect().normalized()
+        hit_aps, hit_cables = self._collect_ids_in_rect(rect)
+
+        if self._selection_mode == "toggle":
+            ap_ids = set(self._selection_origin_ap_ids) ^ hit_aps
+            cable_ids = set(self._selection_origin_cable_ids) ^ hit_cables
+        elif self._selection_mode == "add":
+            ap_ids = set(self._selection_origin_ap_ids) | hit_aps
+            cable_ids = set(self._selection_origin_cable_ids) | hit_cables
+        else:
+            ap_ids = hit_aps
+            cable_ids = hit_cables
+
+        active_cable = self._active_cable_id if self._active_cable_id in cable_ids else None
+        if active_cable is None and cable_ids:
+            active_cable = next(iter(cable_ids))
+        self._set_selection(ap_ids, cable_ids, active_cable)
+
+    def _set_selection(
+        self,
+        ap_ids: set[str],
+        cable_ids: set[str],
+        active_cable: str | None,
+    ):
+        self._selected_ap_ids = {pid for pid in ap_ids if pid in self._ap_nodes}
+        self._selected_cable_ids = {cid for cid in cable_ids if cid in self._cable_edges}
+        if active_cable and active_cable in self._selected_cable_ids:
+            self._active_cable_id = active_cable
+        else:
+            self._active_cable_id = next(iter(self._selected_cable_ids), None)
+        self._apply_selection_visuals()
+
+    def _apply_selection_visuals(self):
+        for point_id, item in self._ap_items.items():
+            node = self._ap_nodes.get(point_id)
+            if node is None:
+                continue
+            color = QColor(node.color)
+            fill = QColor(color)
+            is_selected = point_id in self._selected_ap_ids
+            fill.setAlpha(100 if is_selected else 60)
+            item.setBrush(QBrush(fill))
+            item.setPen(QPen(color, 3.0 if is_selected else 2.0))
+
+        for cable_id, item in self._cable_items.items():
+            edge = self._cable_edges.get(cable_id)
+            if edge is None:
+                continue
+            is_selected = cable_id in self._selected_cable_ids
+            pen_color = QColor(edge.color)
+            if is_selected:
+                pen_color = pen_color.lighter(165)
+            pen_width = max(0.5, float(edge.stroke_width_px)) + (1.8 if is_selected else 0.0)
+            pen = QPen(pen_color, pen_width)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            item.setPen(pen)
+
+            handles = self._cable_handle_items.get(cable_id, [])
+            for handle in handles:
+                is_active = cable_id == self._active_cable_id
+                fill = QColor("#ffd54f" if is_active else "#b0bec5")
+                fill.setAlpha(220)
+                handle.setBrush(QBrush(fill))
+                pen_color = QColor("#2b2b2b" if is_active else "#455a64")
+                handle.setPen(QPen(pen_color, 1.6 if is_active else 1.2))
+                handle.setZValue(45.0 if is_active else 35.0)
+                if is_active:
+                    handle.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+                    handle.setOpacity(1.0)
+                else:
+                    handle.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                    handle.setOpacity(0.65)
 
     def _on_ap_node_dblclick(self, point_id: str):
         node = self._ap_nodes.get(point_id)

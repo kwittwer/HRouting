@@ -57,6 +57,11 @@ COLORS = [
     "#457b9d", "#8338ec", "#fb5607", "#06d6a0",
 ]
 
+HIT_POINT_RADIUS_PX = 10.0
+HIT_EDGE_RADIUS_PX = 8.0
+HIT_CABLE_POINT_RADIUS_PX = 20.0
+MIN_SYMBOL_PICK_HALF_PX = 8.0
+
 class ToolMode(Enum):
     NONE       = auto()
     DRAW_REF   = auto()
@@ -225,6 +230,10 @@ class CanvasWidget(QWidget):
         self._text_comments:      Dict[str, str]                  = {}  # id → tooltip comment
         self._text_visible:       Dict[str, bool]                 = {}
         self._text_rects:         Dict[str, QRectF]               = {}  # transient hit rects
+
+        # MCP planning metadata
+        self._planning_context:   Dict[str, object]               = {}
+        self._planning_log:       List[Dict[str, object]]         = []
 
         # Labels (movable + resizable)
         self._label_positions:    Dict[str, QPointF]              = {}
@@ -845,7 +854,7 @@ class CanvasWidget(QWidget):
         pts = self._floor_polygon_points_world(fp_id)
         if not pts:
             return None
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
         for i, pt in enumerate(pts):
             if _qdist(canvas_pt, pt) < threshold:
                 return i
@@ -855,7 +864,7 @@ class CanvasWidget(QWidget):
         pts = self._floor_polygon_points_world(fp_id)
         if len(pts) < 2:
             return None
-        threshold = 8.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_EDGE_RADIUS_PX)
         for i in range(len(pts)):
             p1 = pts[i]
             p2 = pts[(i + 1) % len(pts)]
@@ -898,7 +907,7 @@ class CanvasWidget(QWidget):
         pts = self._polygons.get(cid, [])
         if not pts:
             pts = self._elec_room_polygons.get(cid, [])
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
         for i, pt in enumerate(pts):
             if _qdist(canvas_pt, pt) < threshold:
                 return i
@@ -910,7 +919,7 @@ class CanvasWidget(QWidget):
             pts = self._elec_room_polygons.get(cid, [])
         if len(pts) < 2:
             return None
-        threshold = 8.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_EDGE_RADIUS_PX)
         for i in range(len(pts)):
             p1 = pts[i]
             p2 = pts[(i + 1) % len(pts)]
@@ -921,7 +930,7 @@ class CanvasWidget(QWidget):
 
     def _hit_route_point_in_circuit(self, canvas_pt: QPointF, cid: str) -> Optional[int]:
         pts = self._manual_routes.get(cid, [])
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
         for i, pt in enumerate(pts):
             if _qdist(canvas_pt, pt) < threshold:
                 return i
@@ -931,7 +940,7 @@ class CanvasWidget(QWidget):
         pts = self._manual_routes.get(cid, [])
         if len(pts) < 2:
             return None
-        threshold = 8.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_EDGE_RADIUS_PX)
         for i in range(len(pts) - 1):
             p1 = pts[i]
             p2 = pts[i + 1]
@@ -1287,7 +1296,7 @@ class CanvasWidget(QWidget):
     def _hit_supply_line_point(self, canvas_pt: QPointF,
                                 cid: str) -> Optional[int]:
         pts = self._supply_lines.get(cid, [])
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
         for i, pt in enumerate(pts):
             if _qdist(canvas_pt, pt) < threshold:
                 return i
@@ -1298,7 +1307,7 @@ class CanvasWidget(QWidget):
         pts = self._supply_lines.get(cid, [])
         if len(pts) < 2:
             return None
-        threshold = 8.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_EDGE_RADIUS_PX)
         for i in range(len(pts) - 1):
             proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
             if _qdist(canvas_pt, proj) < threshold:
@@ -1426,7 +1435,7 @@ class CanvasWidget(QWidget):
             if not self._elec_visible.get(pid, True):
                 continue
             w, h = self._elec_point_size_px.get(pid, (30, 30))
-            min_pick_half = 8.0 / max(self._scale, 1e-9)
+            min_pick_half = self._px_to_canvas_units(MIN_SYMBOL_PICK_HALF_PX)
             half_w = max(w / 2, min_pick_half)
             half_h = max(h / 2, min_pick_half)
             rect = QRectF(pos.x() - half_w, pos.y() - half_h,
@@ -1438,7 +1447,7 @@ class CanvasWidget(QWidget):
     def _hit_elec_cable_point(self, canvas_pt: QPointF,
                                cable_id: str) -> Optional[int]:
         pts = self._elec_cables.get(cable_id, [])
-        threshold = 20.0 / self._scale  # Increased from 10.0 for more reliable hit detection
+        threshold = self._px_to_canvas_units(HIT_CABLE_POINT_RADIUS_PX)
         for i, pt in enumerate(pts):
             if _qdist(canvas_pt, pt) < threshold:
                 return i
@@ -1518,7 +1527,7 @@ class CanvasWidget(QWidget):
     def _hit_any_object(self, canvas_pt: QPointF) -> Optional[Tuple[str, str]]:
         """Try to hit any clickable object. Returns (object_type, object_id) or None.
         Checks in this order: foreground objects first, floor plans last."""
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
 
         # 1. Electrical points (highest priority)
         ap = self._hit_elec_point(canvas_pt)
@@ -1851,7 +1860,7 @@ class CanvasWidget(QWidget):
     def _hit_hkv_line_point(self, canvas_pt: QPointF,
                              line_id: str) -> Optional[int]:
         pts = self._hkv_lines.get(line_id, [])
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
         for i, pt in enumerate(pts):
             if _qdist(canvas_pt, pt) < threshold:
                 return i
@@ -1862,7 +1871,7 @@ class CanvasWidget(QWidget):
         pts = self._hkv_lines.get(line_id, [])
         if len(pts) < 2:
             return None
-        threshold = 8.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_EDGE_RADIUS_PX)
         for i in range(len(pts) - 1):
             proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
             if _qdist(canvas_pt, proj) < threshold:
@@ -2391,6 +2400,9 @@ class CanvasWidget(QWidget):
             (screen.y() - self._offset.y()) / self._scale,
         )
 
+    def _px_to_canvas_units(self, px: float) -> float:
+        return px / max(self._scale, 1e-9)
+
     def _fit_to_window(self):
         w, h = self._svg_size
         if w <= 0 or h <= 0:
@@ -2425,7 +2437,7 @@ class CanvasWidget(QWidget):
             self._color_index += 1
 
     def _hit_start_point(self, canvas_pt: QPointF) -> Optional[str]:
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
         for cid, sp in self._start_points.items():
             if not self._circuit_visible.get(cid, True):
                 continue
@@ -2434,7 +2446,7 @@ class CanvasWidget(QWidget):
         return None
 
     def _hit_route_point(self, canvas_pt: QPointF) -> Optional[Tuple[str, int]]:
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
         for cid, pts in self._manual_routes.items():
             if not self._circuit_visible.get(cid, True):
                 continue
@@ -2737,7 +2749,7 @@ class CanvasWidget(QWidget):
             return super().mouseDoubleClickEvent(event)
 
         canvas_pt = self._to_canvas(QPointF(event.position()))
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
 
         # In Draw-Supply-Line mode: double-click on last point finishes the supply line
         if self._mode == ToolMode.DRAW_SUPPLY_LINE and self._current_supply_cid and self._current_supply_points:
@@ -2854,7 +2866,7 @@ class CanvasWidget(QWidget):
             if route_hit:
                 self._snap_route_point_to_valid(route_hit[0], route_hit[1])
             return
-        threshold = 10.0 / self._scale
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
 
         # 1. Elektro AP
         ap_hit = self._hit_elec_point(canvas_pt)
@@ -3010,7 +3022,7 @@ class CanvasWidget(QWidget):
             for cid, pts in self._elec_cables.items():
                 if not self._elec_visible.get(cid, True):
                     continue
-                threshold = 20.0 / self._scale
+                threshold = self._px_to_canvas_units(HIT_CABLE_POINT_RADIUS_PX)
                 start_ap = self._cable_start_ap.get(cid, "")
                 end_ap   = self._cable_end_ap.get(cid, "")
                 last_idx = len(pts) - 1
@@ -3540,49 +3552,12 @@ class CanvasWidget(QWidget):
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_hkv_line_id = None
+                self._dragging_route_point = None
                 self.setCursor(Qt.ArrowCursor)
                 self.update()
                 return
 
         # ── Polygon bearbeiten ──
-                # ── HKV-Verbindungsleitung bearbeiten ──
-                if self._mode == ToolMode.EDIT_HKV_LINE and self._edit_hkv_line_id:
-                    lid = self._edit_hkv_line_id
-                    if event.button() == Qt.LeftButton:
-                        hit = self._hit_hkv_line_point(canvas_pt, lid)
-                        if hit is not None:
-                            self._dragging_route_point = (lid, hit)
-                            self.setCursor(Qt.ClosedHandCursor)
-                        return
-                    elif event.button() == Qt.RightButton:
-                        hit = self._hit_hkv_line_point(canvas_pt, lid)
-                        if hit is not None:
-                            pts = self._hkv_lines.get(lid, [])
-                            if len(pts) > 2:
-                                del pts[hit]
-                                self.hkv_line_changed.emit(lid)
-                                self.update()
-                            return
-                        hit = self._hit_hkv_line_edge(canvas_pt, lid)
-                        if hit is not None:
-                            idx1, idx2 = hit
-                            pts = self._hkv_lines[lid]
-                            p1, p2 = pts[idx1], pts[idx2]
-                            mid = QPointF((p1.x() + p2.x()) * 0.5,
-                                          (p1.y() + p2.y()) * 0.5)
-                            pts.insert(idx2, mid)
-                            self.hkv_line_changed.emit(lid)
-                            self.update()
-                        return
-                    elif event.button() == Qt.MiddleButton:
-                        self._mode = ToolMode.NONE
-                        self._edit_hkv_line_id = None
-                        self._dragging_route_point = None
-                        self.setCursor(Qt.ArrowCursor)
-                        self.update()
-                        return
-
-                # ── Polygon bearbeiten ──
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
             cid = self._edit_polygon_cid
             if event.button() == Qt.LeftButton:
@@ -4216,7 +4191,7 @@ class CanvasWidget(QWidget):
             hover_cursor = Qt.ArrowCursor
 
             # ── Check if hovering over elec cable point ──
-            threshold = 20.0 / self._scale
+            threshold = self._px_to_canvas_units(HIT_CABLE_POINT_RADIUS_PX)
             for cid, pts in self._elec_cables.items():
                 if not self._elec_visible.get(cid, True):
                     continue

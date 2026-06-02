@@ -154,6 +154,43 @@ def _create_mcp(window: MainWindow, bridge):
 
     invoke = bridge.invoke
 
+    def _record_mutation(w, *, debounced: bool = False):
+        """Zentraler Mutations-Hook für MCP-Write-Tools.
+
+        Nutzt – falls vorhanden – den MainWindow-Hook `_record_mutation`,
+        damit Undo/Dirty/Title konsistent zur GUI-Interaktion bleibt.
+        """
+        if hasattr(w, "_record_mutation"):
+            w._record_mutation(debounced=debounced)
+            return
+
+        w._dirty = True
+        if debounced and hasattr(w, "_dirty_debounce_timer"):
+            w._dirty_debounce_timer.start()
+        else:
+            if hasattr(w, "_push_undo"):
+                w._push_undo()
+        w._update_title()
+
+    def _get_ap_room_map(w) -> dict[str, str]:
+        mapping = getattr(w, "_elec_point_room_map", {})
+        return dict(mapping) if isinstance(mapping, dict) else {}
+
+    def _get_canvas_dict_extra(key: str, default):
+        value = getattr(window.canvas, key, default)
+        if value is None:
+            return default
+        return value if isinstance(value, dict) else default
+
+    def _get_canvas_list_extra(key: str, default):
+        value = getattr(window.canvas, key, default)
+        if value is None:
+            return default
+        return value if isinstance(value, list) else default
+
+    def _set_canvas_extra(key: str, value) -> None:
+        setattr(window.canvas, key, value)
+
     # ── Tool-Logging: Jeden Tool-Aufruf ins Log-Fenster schreiben ──
     import functools as _functools
     import inspect as _inspect
@@ -783,8 +820,7 @@ def _create_mcp(window: MainWindow, bridge):
             w.canvas.update()
             w._update_circuit_area(cid)
             w._recalc_circuit_hydraulics(cid)
-            w._dirty = True
-            w._update_title()
+            _record_mutation(w)
 
             return {
                 "circuit_id": cid,
@@ -856,8 +892,7 @@ def _create_mcp(window: MainWindow, bridge):
 
             window._recalc_circuit_hydraulics(circuit_id)
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
 
             return {
                 "circuit_id": circuit_id,
@@ -879,8 +914,7 @@ def _create_mcp(window: MainWindow, bridge):
                 return {
                     "error": f"Heizkreis '{circuit_id}' nicht gefunden."}
             window._delete_circuit(circuit_id)
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {"circuit_id": circuit_id, "status": "deleted"}
 
         return invoke(_delete)
@@ -1010,8 +1044,7 @@ def _create_mcp(window: MainWindow, bridge):
                     w.canvas.set_elec_point_icon(pid, icon_path)
 
             w.canvas.update()
-            w._dirty = True
-            w._update_title()
+            _record_mutation(w)
 
             return {
                 "point_id": pid,
@@ -1147,8 +1180,7 @@ def _create_mcp(window: MainWindow, bridge):
                 window.canvas._elec_visible[point_id] = visible
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
 
             return {
                 "point_id": point_id,
@@ -1171,8 +1203,7 @@ def _create_mcp(window: MainWindow, bridge):
                     "error": f"Anschlusspunkt '{point_id}' "
                              f"nicht gefunden."}
             window._delete_elec_point(point_id)
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {"point_id": point_id, "status": "deleted"}
 
         return invoke(_delete)
@@ -1219,8 +1250,7 @@ def _create_mcp(window: MainWindow, bridge):
             panel.set_uv_config(normalized_uv_config)
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "point_id": point_id,
                 "status": "configured",
@@ -1252,8 +1282,7 @@ def _create_mcp(window: MainWindow, bridge):
                 panel.set_ap_type("standard")
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "point_id": point_id,
                 "status": "cleared",
@@ -1391,8 +1420,7 @@ def _create_mcp(window: MainWindow, bridge):
             panel.set_uv_config(new_uv)
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             action = "deleted" if not str(device_type or "").strip() else "set"
             return {
                 "point_id": point_id,
@@ -1444,8 +1472,7 @@ def _create_mcp(window: MainWindow, bridge):
             panel.set_uv_config(new_uv)
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "point_id": point_id,
                 "action": "deleted",
@@ -1490,8 +1517,7 @@ def _create_mcp(window: MainWindow, bridge):
             panel.set_up_distribution_config(normalized_up_distribution_config)
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "point_id": point_id,
                 "status": "configured",
@@ -1523,8 +1549,7 @@ def _create_mcp(window: MainWindow, bridge):
                 panel.set_ap_type("standard")
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "point_id": point_id,
                 "status": "cleared",
@@ -1588,8 +1613,7 @@ def _create_mcp(window: MainWindow, bridge):
             })
 
             w.canvas.update()
-            w._dirty = True
-            w._update_title()
+            _record_mutation(w)
 
             return {"hkv_id": hid, "name": name, "status": "created"}
 
@@ -1606,8 +1630,7 @@ def _create_mcp(window: MainWindow, bridge):
             if hkv_id not in window.param_panel.hkv_panels:
                 return {"error": f"HKV '{hkv_id}' nicht gefunden."}
             window._delete_hkv(hkv_id)
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {"hkv_id": hkv_id, "status": "deleted"}
 
         return invoke(_delete)
@@ -1666,8 +1689,7 @@ def _create_mcp(window: MainWindow, bridge):
                 window.canvas._hkv_visible[hkv_id] = visible
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "hkv_id": hkv_id,
                 "status": "modified",
@@ -1739,8 +1761,7 @@ def _create_mcp(window: MainWindow, bridge):
 
             w._update_elec_point_room_assignments()
             w.canvas.update()
-            w._dirty = True
-            w._update_title()
+            _record_mutation(w)
 
             return {
                 "room_id": rid,
@@ -1795,8 +1816,7 @@ def _create_mcp(window: MainWindow, bridge):
 
             window._update_elec_point_room_assignments()
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "room_id": room_id,
                 "status": "modified",
@@ -1816,8 +1836,7 @@ def _create_mcp(window: MainWindow, bridge):
             if room_id not in window.param_panel.elec_room_panels:
                 return {"error": f"Raum '{room_id}' nicht gefunden."}
             window._delete_elec_room(room_id)
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {"room_id": room_id, "status": "deleted"}
 
         return invoke(_delete)
@@ -1923,8 +1942,7 @@ def _create_mcp(window: MainWindow, bridge):
             w._update_cable_ap_labels(kid)
 
             w.canvas.update()
-            w._dirty = True
-            w._update_title()
+            _record_mutation(w)
 
             return {
                 "cable_id": kid,
@@ -2012,8 +2030,7 @@ def _create_mcp(window: MainWindow, bridge):
                 panel.sb_stroke_width.setValue(max(0.5, min(10.0, stroke_width)))
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "cable_id": cable_id,
                 "status": "modified",
@@ -2033,8 +2050,7 @@ def _create_mcp(window: MainWindow, bridge):
             if cable_id not in window.param_panel.elec_cable_panels:
                 return {"error": f"Kabel '{cable_id}' nicht gefunden."}
             window._delete_elec_cable(cable_id)
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {"cable_id": cable_id, "status": "deleted"}
 
         return invoke(_delete)
@@ -2129,8 +2145,7 @@ def _create_mcp(window: MainWindow, bridge):
             w._update_hkv_line_labels(lid)
 
             w.canvas.update()
-            w._dirty = True
-            w._update_title()
+            _record_mutation(w)
 
             return {
                 "line_id": lid,
@@ -2208,8 +2223,7 @@ def _create_mcp(window: MainWindow, bridge):
                 window.canvas._hkv_line_visible[line_id] = visible
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "line_id": line_id,
                 "status": "modified",
@@ -2229,8 +2243,7 @@ def _create_mcp(window: MainWindow, bridge):
             if line_id not in window.param_panel.hkv_line_panels:
                 return {"error": f"HKV-Leitung '{line_id}' nicht gefunden."}
             window._delete_hkv_line(line_id)
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {"line_id": line_id, "status": "deleted"}
 
         return invoke(_delete)
@@ -2305,8 +2318,7 @@ def _create_mcp(window: MainWindow, bridge):
             panel.te_comment.setPlainText(comment)
 
             w.canvas.update()
-            w._dirty = True
-            w._update_title()
+            _record_mutation(w)
 
             return {
                 "text_id": tid,
@@ -2376,8 +2388,7 @@ def _create_mcp(window: MainWindow, bridge):
                 window.canvas._text_visible[text_id] = visible
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "text_id": text_id,
                 "status": "modified",
@@ -2474,8 +2485,7 @@ def _create_mcp(window: MainWindow, bridge):
             w.canvas.set_floor_plan_transform(
                 fp_id, offset_x, offset_y, 0.0)
             w.canvas.set_floor_plan_opacity(fp_id, opacity)
-            w._dirty = True
-            w._update_title()
+            _record_mutation(w)
 
             return {
                 "floor_plan_id": fp_id,
@@ -2555,8 +2565,7 @@ def _create_mcp(window: MainWindow, bridge):
                         panel.update_scale_label(mm_per_px)
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
 
             return {
                 "floor_plan_id": floor_plan_id,
@@ -2583,8 +2592,7 @@ def _create_mcp(window: MainWindow, bridge):
             if floor_plan_id not in window.param_panel.floorplan_panels:
                 return {"error": f"Grundriss '{floor_plan_id}' nicht gefunden."}
             window._delete_floorplan(floor_plan_id)
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {"floor_plan_id": floor_plan_id, "status": "deleted"}
 
         return invoke(_delete)
@@ -2621,8 +2629,7 @@ def _create_mcp(window: MainWindow, bridge):
             window._update_circuit_area(circuit_id)
             window._recalc_circuit_hydraulics(circuit_id)
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "circuit_id": circuit_id,
                 "polygon_points": len(polygon),
@@ -2664,8 +2671,7 @@ def _create_mcp(window: MainWindow, bridge):
             window._update_total_length(circuit_id)
             window._recalc_circuit_hydraulics(circuit_id)
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "circuit_id": circuit_id,
                 "route_points": len(route) if route else 0,
@@ -2717,8 +2723,7 @@ def _create_mcp(window: MainWindow, bridge):
             window._recalc_circuit_hydraulics(circuit_id)
             window._update_supply_hkv_label(circuit_id)
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "circuit_id": circuit_id,
                 "supply_points": len(supply_line) if supply_line else 0,
@@ -2847,8 +2852,7 @@ def _create_mcp(window: MainWindow, bridge):
                 window.param_panel.sb_norm_aussen.setValue(t_norm_outdoor)
 
             window._recalc_all_circuits()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
 
             return {
                 "t_supply": window.param_panel.sb_vorlauf.value(),
@@ -3008,8 +3012,7 @@ def _create_mcp(window: MainWindow, bridge):
             panel.set_uv_config(new_uv)
 
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "point_id": point_id,
                 "occupied_count": len(base_slots),
@@ -3248,8 +3251,7 @@ def _create_mcp(window: MainWindow, bridge):
             uv["busbars"] = base
             panel.set_uv_config(_normalize_uv_config(uv))
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "point_id": point_id,
                 "status": "set",
@@ -3284,8 +3286,7 @@ def _create_mcp(window: MainWindow, bridge):
             uv["busbars"] = new_busbars
             panel.set_uv_config(_normalize_uv_config(uv))
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "point_id": point_id,
                 "status": "deleted" if removed > 0 else "not_found",
@@ -3412,8 +3413,7 @@ def _create_mcp(window: MainWindow, bridge):
             uv["busbars"] = base_busbars
             panel.set_uv_config(_normalize_uv_config(uv))
             window.canvas.update()
-            window._dirty = True
-            window._update_title()
+            _record_mutation(window)
             return {
                 "point_id": point_id,
                 "status": "configured",
@@ -3447,14 +3447,11 @@ def _create_mcp(window: MainWindow, bridge):
 
             # Use the window's room-assignment helper if available
             assigned: set[str] = set()
-            try:
-                mapping = window._elec_point_room_map  # {ap_id: room_id}
-                for ap_id, rid in mapping.items():
-                    if rid in room_to_aps:
-                        room_to_aps[rid].append(ap_id)
-                        assigned.add(ap_id)
-            except AttributeError:
-                pass
+            mapping = _get_ap_room_map(window)
+            for ap_id, rid in mapping.items():
+                if rid in room_to_aps:
+                    room_to_aps[rid].append(ap_id)
+                    assigned.add(ap_id)
 
             def _ap_summary(pid: str) -> dict:
                 ep = p.get("elec_points", {}).get(pid, {})
@@ -3522,9 +3519,11 @@ def _create_mcp(window: MainWindow, bridge):
 
             # Get canvas image dimensions
             img_w_px = img_h_px = 0
-            if layer and getattr(layer, "image", None) is not None:
-                img_w_px = layer.image.width()
-                img_h_px = layer.image.height()
+            if layer:
+                pixmap = getattr(layer, "pixmap", None)
+                if pixmap is not None:
+                    img_w_px = pixmap.width()
+                    img_h_px = pixmap.height()
 
             real_w_mm = img_w_px * mpp if img_w_px else 0
             real_h_mm = img_h_px * mpp if img_h_px else 0
@@ -3563,12 +3562,12 @@ def _create_mcp(window: MainWindow, bridge):
         Nützlich um die normgerechte Auslegung zu prüfen.
         """
         def _calc():
-            from logic.heating_calc import HeatingCalc
+            from logic.heating_calc import calc_circuit, FLOOR_COVERINGS
             p = window.param_panel.to_dict()
-            c = window.canvas.to_dict()
             t_supply = p.get("t_supply", 35.0)
             t_return = p.get("t_return", 30.0)
             t_norm = p.get("t_norm_outdoor", -12.0)
+            mpp = window.canvas.get_mm_per_px() or 1.0
 
             total_power_w = 0.0
             total_flow_lmin = 0.0
@@ -3576,25 +3575,43 @@ def _create_mcp(window: MainWindow, bridge):
             circuits_summary = []
 
             for cid, cdata in p.get("circuits", {}).items():
-                polygon = c.get("polygons", {}).get(cid, [])
-                if not polygon:
-                    continue
                 try:
-                    calc = HeatingCalc(
-                        polygon=polygon,
+                    area_mm2 = window._compute_polygon_area_mm2(cid)
+                    area_m2 = (area_mm2 or 0.0) / 1_000_000.0
+                    if area_m2 <= 0:
+                        circuits_summary.append({
+                            "circuit_id": cid,
+                            "name": cdata.get("name", cid),
+                            "error": "Kein Polygon.",
+                        })
+                        continue
+
+                    route_m = (
+                        window.canvas.get_manual_route_length_px(cid)
+                        * mpp / 1000.0
+                    )
+                    supply_m = (
+                        window.canvas.get_supply_line_length_px(cid)
+                        * mpp / 1000.0
+                    )
+                    total_m = route_m + supply_m
+
+                    floor_name = cdata.get("floor_covering", "Fliesen / Keramik")
+                    r_lambda_b = FLOOR_COVERINGS.get(floor_name, 0.01)
+                    res = calc_circuit(
                         t_supply=t_supply,
                         t_return=t_return,
                         t_room=cdata.get("room_temp", 20.0),
-                        spacing_mm=cdata.get("spacing", 150.0),
-                        diameter_mm=cdata.get("diameter", 16.0),
-                        wall_dist_mm=cdata.get("wall_dist", 200.0),
-                        floor_covering=cdata.get("floor_covering", "Fliesen / Keramik"),
-                        mm_per_px=window.canvas._mm_per_px,
+                        spacing_cm=(cdata.get("spacing", 150.0) / 10.0),
+                        r_lambda_b=r_lambda_b,
+                        area_m2=area_m2,
+                        pipe_length_m=route_m,
+                        outer_diameter_mm=cdata.get("diameter", 16.0),
+                        total_pipe_length_m=total_m,
                     )
-                    res = calc.calculate()
                     power = res.get("power_w", 0.0)
                     flow = res.get("volume_flow_lmin", 0.0)
-                    pipe = res.get("pipe_length_m", 0.0)
+                    pipe = total_m
                     total_power_w += power
                     total_flow_lmin += flow
                     total_pipe_m += pipe
@@ -3603,10 +3620,12 @@ def _create_mcp(window: MainWindow, bridge):
                         "name": cdata.get("name", cid),
                         "power_w": round(power, 1),
                         "q_wm2": round(res.get("q_wm2", 0.0), 1),
-                        "area_m2": round(res.get("area_m2", 0.0), 2),
+                        "area_m2": round(area_m2, 2),
                         "volume_flow_lmin": round(flow, 3),
                         "pressure_drop_mbar": round(res.get("pressure_drop_mbar", 0.0), 1),
-                        "pipe_length_m": round(pipe, 1),
+                        "pipe_length_m": round(route_m, 1),
+                        "supply_length_m": round(supply_m, 1),
+                        "total_pipe_length_m": round(total_m, 1),
                         "room_temp": cdata.get("room_temp", 20.0),
                         "floor_covering": cdata.get("floor_covering", ""),
                     })
@@ -3642,7 +3661,7 @@ def _create_mcp(window: MainWindow, bridge):
             from math import hypot
             p = window.param_panel.to_dict()
             c = window.canvas.to_dict()
-            mpp = window.canvas._mm_per_px
+            mpp = window.canvas.get_mm_per_px() or 1.0
 
             cables = p.get("elec_cables", {})
             canvas_cables = c.get("elec_cables", {})
@@ -3768,7 +3787,7 @@ def _create_mcp(window: MainWindow, bridge):
         def _read():
             p = window.param_panel.to_dict()
             c = window.canvas.to_dict()
-            mpp = window.canvas._mm_per_px or 1.0
+            mpp = window.canvas.get_mm_per_px() or 1.0
 
             def _poly_area_px(pts):
                 n = len(pts)
@@ -3789,11 +3808,7 @@ def _create_mcp(window: MainWindow, bridge):
                 return [round(cx, 1), round(cy, 1)]
 
             # AP room assignments
-            ap_room: dict[str, str] = {}
-            try:
-                ap_room = dict(window._elec_point_room_map)
-            except AttributeError:
-                pass
+            ap_room = _get_ap_room_map(window)
 
             room_to_aps: dict[str, list[str]] = {rid: [] for rid in p.get("elec_rooms", {})}
             for ap_id, rid in ap_room.items():
@@ -3886,7 +3901,7 @@ def _create_mcp(window: MainWindow, bridge):
         def _read():
             p = window.param_panel.to_dict()
             c = window.canvas.to_dict()
-            mpp = window.canvas._mm_per_px or 1.0
+            mpp = window.canvas.get_mm_per_px() or 1.0
 
             import math
 
@@ -3900,11 +3915,7 @@ def _create_mcp(window: MainWindow, bridge):
                 return round(total * mpp / 1000, 3)
 
             # AP room lookup
-            ap_room: dict[str, str] = {}
-            try:
-                ap_room = dict(window._elec_point_room_map)
-            except AttributeError:
-                pass
+            ap_room = _get_ap_room_map(window)
             room_name: dict[str, str] = {
                 rid: rd.get("name", rid)
                 for rid, rd in p.get("elec_rooms", {}).items()
@@ -4018,12 +4029,9 @@ def _create_mcp(window: MainWindow, bridge):
 
             # Explicit assignments
             assigned: set[str] = set()
-            try:
-                for ap_id, rid in window._elec_point_room_map.items():
-                    if rid == room_id:
-                        assigned.add(ap_id)
-            except AttributeError:
-                pass
+            for ap_id, rid in _get_ap_room_map(window).items():
+                if rid == room_id:
+                    assigned.add(ap_id)
 
             # Geometric check
             geometric: set[str] = set()
@@ -4095,8 +4103,8 @@ def _create_mcp(window: MainWindow, bridge):
                 "global_notes": str(global_notes or "").strip(),
             }
             # Store in canvas extra data (survives save/load)
-            window.canvas._planning_context = ctx
-            window._mark_dirty()
+            _set_canvas_extra("_planning_context", ctx)
+            _record_mutation(window)
             return {
                 "status": "ok",
                 "room_count": len(ctx_rooms),
@@ -4120,25 +4128,22 @@ def _create_mcp(window: MainWindow, bridge):
         """
         def _read():
             p = window.param_panel.to_dict()
-            c = window.canvas.to_dict()
 
-            ctx = getattr(window.canvas, "_planning_context", {}) or {}
+            ctx = _get_canvas_dict_extra("_planning_context", {})
             if not ctx:
                 return {"context": {}, "fulfillment": [], "note": "Noch kein Planungskontext gesetzt."}
 
             # Build AP counts per room
             room_ap_count: dict[str, int] = {}
-            try:
-                for ap_id, rid in window._elec_point_room_map.items():
-                    room_ap_count[rid] = room_ap_count.get(rid, 0) + 1
-            except AttributeError:
-                pass
+            ap_room_map = _get_ap_room_map(window)
+            for _ap_id, rid in ap_room_map.items():
+                room_ap_count[rid] = room_ap_count.get(rid, 0) + 1
 
             # Count light/socket symbols roughly
             def _count_symbols(room_id, symbol_keywords):
                 try:
                     count = 0
-                    for ap_id, rid in window._elec_point_room_map.items():
+                    for ap_id, rid in ap_room_map.items():
                         if rid != room_id:
                             continue
                         sym = p.get("elec_points", {}).get(ap_id, {}).get("builtin_symbol", "").lower()
@@ -4254,21 +4259,44 @@ def _create_mcp(window: MainWindow, bridge):
                 ap_type = str(entry.get("ap_type", "standard") or "standard").strip()
                 panel.set_ap_type(ap_type)
 
-                for fld, setter in [
-                    ("position", lambda v: panel.cmb_position.setCurrentText(v)
-                     if panel.cmb_position.findText(v) >= 0
-                     else panel.le_position_custom.setText(v)),
-                    ("height_from_floor", lambda v: panel.sb_height_from_floor.setValue(float(v))),
-                    ("note", lambda v: panel.te_note.setPlainText(str(v))),
-                    ("smarthome_device", lambda v: panel.set_smarthome_device_text(str(v))),
-                    ("smarthome_device_color", lambda v: panel.set_smarthome_device_color_text(str(v))),
-                ]:
-                    val = entry.get(fld)
-                    if val is not None:
-                        try:
-                            setter(val)
-                        except Exception:
-                            pass
+                position_val = entry.get("position")
+                if position_val is not None and panel.cmb_position is not None:
+                    pos_text = str(position_val)
+                    try:
+                        if panel.cmb_position.findText(pos_text) >= 0:
+                            panel.cmb_position.setCurrentText(pos_text)
+                        elif panel.le_position_custom is not None:
+                            panel.le_position_custom.setText(pos_text)
+                    except Exception:
+                        pass
+
+                height_val = entry.get("height_from_floor")
+                if height_val is not None and panel.sb_height_from_floor is not None:
+                    try:
+                        panel.sb_height_from_floor.setValue(float(height_val))
+                    except Exception:
+                        pass
+
+                note_val = entry.get("note")
+                if note_val is not None and panel.te_note is not None:
+                    try:
+                        panel.te_note.setPlainText(str(note_val))
+                    except Exception:
+                        pass
+
+                smarthome_val = entry.get("smarthome_device")
+                if smarthome_val is not None:
+                    try:
+                        panel.set_smarthome_device_text(str(smarthome_val))
+                    except Exception:
+                        pass
+
+                smarthome_color_val = entry.get("smarthome_device_color")
+                if smarthome_color_val is not None:
+                    try:
+                        panel.set_smarthome_device_color_text(str(smarthome_color_val))
+                    except Exception:
+                        pass
 
                 try:
                     w = float(entry.get("width", 30.0) or 30.0)
@@ -4284,7 +4312,7 @@ def _create_mcp(window: MainWindow, bridge):
                 window._on_elec_point_color_changed(point_id, color)
                 created_ids.append(point_id)
 
-            window._mark_dirty()
+            _record_mutation(window)
             return {
                 "status": "ok",
                 "created_ids": created_ids,
@@ -4377,7 +4405,7 @@ def _create_mcp(window: MainWindow, bridge):
                 window.canvas.elec_cable_changed.emit(cable_id)
                 created_ids.append(cable_id)
 
-            window._mark_dirty()
+            _record_mutation(window)
             return {
                 "status": "ok",
                 "created_ids": created_ids,
@@ -4458,10 +4486,7 @@ def _create_mcp(window: MainWindow, bridge):
                     })
 
             # Räume ohne APs
-            try:
-                room_aps = dict(window._elec_point_room_map)
-            except AttributeError:
-                room_aps = {}
+            room_aps = _get_ap_room_map(window)
             rooms_with_aps: set[str] = set(room_aps.values())
             for rid, rdata in p.get("elec_rooms", {}).items():
                 if rid not in rooms_with_aps:
@@ -4753,17 +4778,15 @@ def _create_mcp(window: MainWindow, bridge):
         import datetime
 
         def _write():
-            log = getattr(window.canvas, "_planning_log", None)
-            if not isinstance(log, list):
-                log = []
-                window.canvas._planning_log = log
+            log = _get_canvas_list_extra("_planning_log", [])
+            _set_canvas_extra("_planning_log", log)
             ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             log.append({
                 "timestamp": ts,
                 "category": str(category or "info").strip(),
                 "entry": str(entry or "").strip(),
             })
-            window._mark_dirty()
+            _record_mutation(window)
             return {
                 "status": "ok",
                 "entry_count": len(log),
@@ -4783,7 +4806,7 @@ def _create_mcp(window: MainWindow, bridge):
             entries[], grouped_by_category{}, entry_count.
         """
         def _read():
-            log = getattr(window.canvas, "_planning_log", None) or []
+            log = _get_canvas_list_extra("_planning_log", [])
             grouped: dict[str, list] = {}
             for e in log:
                 cat = e.get("category", "info")
@@ -4804,9 +4827,9 @@ def _create_mcp(window: MainWindow, bridge):
             status, deleted_count.
         """
         def _write():
-            count = len(getattr(window.canvas, "_planning_log", None) or [])
-            window.canvas._planning_log = []
-            window._mark_dirty()
+            count = len(_get_canvas_list_extra("_planning_log", []))
+            _set_canvas_extra("_planning_log", [])
+            _record_mutation(window)
             return {"status": "ok", "deleted_count": count}
 
         return invoke(_write)
