@@ -39,8 +39,9 @@ from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF,
 from PySide6.QtPrintSupport import QPrinter
 
 from gui.canvas_widget import CanvasWidget, COLORS
-from gui.parameter_panel import ParameterPanel, SafeDoubleSpinBox, SafeComboBox
+from gui.parameter_panel import ParameterPanel, SafeDoubleSpinBox, SafeComboBox, BUILTIN_SYMBOLS
 from gui.pdf_export_dialog import PdfExportConfigDialog
+from gui.elec_schema_window import ElecSchemaWindow, ApNode, CableEdge
 from logic.svg_parser import parse_svg_dimensions
 from logic.heating_calc import calc_circuit, calc_balancing, FLOOR_COVERINGS
 
@@ -71,6 +72,9 @@ class MainWindow(QMainWindow):
         self._furniture_counter = 0
         self._pdf_export_pages: list[dict] = []
         self._pdf_export_dialog = None
+        self._elec_schema_window: ElecSchemaWindow | None = None
+        self._elec_schema_ap_positions: dict[str, list[float]] = {}
+        self._suspend_schema_refresh = False
         self._dirty = False
         self._copy_buffer: dict | None = None
 
@@ -245,11 +249,16 @@ class MainWindow(QMainWindow):
         edit_menu = mb.addMenu("&Bearbeiten")
         self._undo_action = edit_menu.addAction("↩ Rückgängig")
         self._undo_action.setShortcut(QKeySequence.Undo)
+        self._undo_action.setShortcutContext(Qt.ApplicationShortcut)
         self._undo_action.triggered.connect(self._undo)
         self._undo_action.setEnabled(False)
 
         self._redo_action = edit_menu.addAction("↪ Wiederherstellen")
-        self._redo_action.setShortcut(QKeySequence.Redo)
+        self._redo_action.setShortcuts([
+            QKeySequence.Redo,
+            QKeySequence("Ctrl+Shift+Z"),
+        ])
+        self._redo_action.setShortcutContext(Qt.ApplicationShortcut)
         self._redo_action.triggered.connect(self._redo)
         self._redo_action.setEnabled(False)
 
@@ -259,6 +268,7 @@ class MainWindow(QMainWindow):
 
         # ── Extras ──
         extras_menu = mb.addMenu("&Extras")
+        extras_menu.addAction("🧠 Elektro-Strangschema…", self._open_elec_schema_window)
 
         # ── Hilfe ──
         help_menu = mb.addMenu("&Hilfe")
@@ -380,6 +390,7 @@ class MainWindow(QMainWindow):
         return copy.deepcopy({
             "canvas": self.canvas.to_dict(),
             "params": self.param_panel.to_dict(),
+            "elec_schema_ap_positions": self._elec_schema_ap_positions,
             "pdf_export_pages": self._pdf_export_pages,
             "counters": {
                 "circuit": self._circuit_counter,
@@ -404,7 +415,8 @@ class MainWindow(QMainWindow):
             # Quick identity check: if counters haven't changed, compare key fields
             if (current.get("counters") == self._last_snapshot.get("counters")
                     and current.get("canvas") == self._last_snapshot.get("canvas")
-                    and current.get("params") == self._last_snapshot.get("params")):
+                    and current.get("params") == self._last_snapshot.get("params")
+                    and current.get("elec_schema_ap_positions") == self._last_snapshot.get("elec_schema_ap_positions")):
                 return  # nothing changed, skip
             self._undo_stack.append(self._last_snapshot)
             if len(self._undo_stack) > _MAX_UNDO:
@@ -458,6 +470,7 @@ class MainWindow(QMainWindow):
     def _restore_snapshot(self, snap: dict):
         """Restore canvas + param panel from a snapshot dict."""
         self._undo_blocked = True
+        self._suspend_schema_refresh = True
         # Keep current viewport during undo/redo (no jump in zoom/pan position)
         current_view_scale = self.canvas._scale
         current_view_offset = QPointF(self.canvas._offset)
@@ -486,6 +499,9 @@ class MainWindow(QMainWindow):
             self._pdf_export_pages = self._normalize_pdf_export_pages(
                 snap.get("pdf_export_pages")
             )
+            self._elec_schema_ap_positions = self._sanitize_elec_schema_ap_positions(
+                snap.get("elec_schema_ap_positions", {})
+            )
 
             # Reconnect panel signals + sync visual state
             self._reconnect_panels_after_restore()
@@ -500,6 +516,8 @@ class MainWindow(QMainWindow):
             self._update_title()
             self.canvas.update()
         finally:
+            self._suspend_schema_refresh = False
+            self._refresh_elec_schema_window()
             # _undo_blocked stays True – caller or QTimer will reset it
             pass
 
@@ -771,6 +789,10 @@ class MainWindow(QMainWindow):
         self.canvas.ref_line_set.connect(self._mark_dirty)
         self.canvas.start_point_moved.connect(self._mark_dirty)
         self.param_panel.heating_global_changed.connect(self._mark_dirty)
+
+        # Elektro-Strangschema live aktualisieren
+        self.canvas.elec_point_placed.connect(self._refresh_elec_schema_window)
+        self.canvas.elec_cable_changed.connect(self._refresh_elec_schema_window)
 
     # ------------------------------------------------------------------ #
     #  Slots                                                               #
@@ -1697,9 +1719,13 @@ class MainWindow(QMainWindow):
 
     def _on_label_size_changed(self, item_id: str, size: float):
         self.canvas.set_label_font_size(item_id, size)
+        if item_id in self.param_panel.elec_point_panels or item_id in self.param_panel.elec_cable_panels:
+            self._refresh_elec_schema_window()
 
     def _on_label_visibility_changed(self, item_id: str, visible: bool):
         self.canvas.set_label_visible(item_id, visible)
+        if item_id in self.param_panel.elec_point_panels or item_id in self.param_panel.elec_cable_panels:
+            self._refresh_elec_schema_window()
 
     def _compute_polygon_area_mm2(self, circuit_id: str) -> float | None:
         px_points = self.canvas.get_polygon_px(circuit_id)
@@ -1868,6 +1894,7 @@ class MainWindow(QMainWindow):
     def _on_elec_point_placed(self, point_id: str):
         self._update_elec_point_room_assignments()
         self._update_up_distribution_cable_choices_for_point(point_id)
+        self._refresh_elec_schema_window()
         self.status.showMessage(
             f"✅ Anschlusspunkt {point_id} platziert.")
 
@@ -1876,54 +1903,69 @@ class MainWindow(QMainWindow):
         if params:
             self.canvas.update_elec_point_size(
                 point_id, params["width"], params["height"])
+            self._refresh_elec_schema_window()
 
     def _on_elec_point_icon_changed(self, point_id: str, path: str):
         self.canvas.set_elec_point_icon(point_id, path)
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_color_changed(self, point_id: str, color: str):
         self.canvas.set_color(point_id, QColor(color))
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_name_changed(self, point_id: str, name: str):
         self.canvas._label_map[point_id] = name
         self.canvas.update()
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_position_changed(self, point_id: str, position: str):
         self.canvas._elec_point_position[point_id] = position
         self._mark_dirty()
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_height_changed(self, point_id: str, height: float):
         self.canvas._elec_point_height[point_id] = height
         self._mark_dirty()
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_note_changed(self, point_id: str, note: str):
         self.canvas._elec_point_notes[point_id] = note
         self._mark_dirty_debounced()
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_smarthome_changed(self, point_id: str, device: str):
         self.canvas._elec_point_smarthome_device[point_id] = device
         self._mark_dirty_debounced()
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_smarthome_color_changed(self, point_id: str, color: str):
         self.canvas._elec_point_smarthome_device_color[point_id] = color
         self._mark_dirty_debounced()
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_ap_type_changed(self, point_id: str, ap_type: str):
         self._mark_dirty()
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_uv_config_changed(self, point_id: str):
         self._mark_dirty()
+        self._refresh_elec_schema_window()
 
     def _on_elec_point_up_distribution_changed(self, point_id: str):
         self._mark_dirty()
+        self._refresh_elec_schema_window()
 
     def _on_elec_visibility_changed(self, item_id: str, visible: bool):
         self.canvas._elec_visible[item_id] = visible
         self.canvas.update()
+        self._refresh_elec_schema_window()
 
     def _delete_elec_point(self, point_id: str):
         self.canvas.delete_elec_point(point_id)
         self.param_panel.remove_elec_point_panel(point_id)
+        self._elec_schema_ap_positions.pop(point_id, None)
         self._update_up_distribution_cable_choices_all()
+        self._refresh_elec_schema_window()
         self.status.showMessage(f"🗑️ Anschlusspunkt {point_id} gelöscht.")
 
     def _add_elec_room(self, fp_id: str = ""):
@@ -2014,6 +2056,7 @@ class MainWindow(QMainWindow):
                     assigned_name = room_panel.get_parameters().get("name", rid) if room_panel else rid
                     break
             panel.set_room_name(assigned_name)
+        self._refresh_elec_schema_window()
 
     def _add_elec_cable(self, fp_id: str = ""):
         self._elec_cable_counter += 1
@@ -2068,7 +2111,9 @@ class MainWindow(QMainWindow):
         length_mm = length_px * self.canvas.get_mm_per_px()
         self.param_panel.set_cable_length(cable_id, length_mm)
         self._update_cable_ap_labels(cable_id)
+        self.param_panel.update_all_elec_point_uv_cable_choices()
         self._update_up_distribution_cable_choices_all()
+        self._refresh_elec_schema_window()
         self.status.showMessage(
             f"✅ {cable_id}: Kabel aktualisiert ({length_mm / 1000:.2f} m)")
 
@@ -2096,31 +2141,448 @@ class MainWindow(QMainWindow):
         self.canvas._label_map[cable_id] = name
         self.canvas.update()
         self._update_up_distribution_cable_choices_all()
+        self._refresh_elec_schema_window()
 
     def _on_elec_cable_color_changed(self, cable_id: str, color: str):
         self.canvas.set_color(cable_id, QColor(color))
+        self._refresh_elec_schema_window()
 
     def _on_elec_cable_type_changed(self, cable_id: str, cable_type: str):
         self.canvas.set_elec_cable_type_text(cable_id, cable_type)
         self._mark_dirty_debounced()
+        self._refresh_elec_schema_window()
 
     def _on_elec_cable_type_label_visibility_changed(self, cable_id: str, visible: bool):
         self.canvas.set_elec_cable_type_label_visible(cable_id, visible)
         self._mark_dirty_debounced()
+        self._refresh_elec_schema_window()
 
     def _on_elec_cable_comment_changed(self, cable_id: str, comment: str):
         self.canvas._elec_cable_notes[cable_id] = comment
         self._mark_dirty_debounced()
+        self._refresh_elec_schema_window()
 
     def _on_elec_cable_stroke_width_changed(self, cable_id: str, width: float):
         self.canvas.set_elec_cable_stroke_width(cable_id, width)
         self._mark_dirty_debounced()
+        self._refresh_elec_schema_window()
 
     def _delete_elec_cable(self, cable_id: str):
         self.canvas.delete_elec_cable(cable_id)
         self.param_panel.remove_elec_cable_panel(cable_id)
+        self.param_panel.update_all_elec_point_uv_cable_choices()
         self._update_up_distribution_cable_choices_all()
+        self._refresh_elec_schema_window()
         self.status.showMessage(f"🗑️ Kabelverbindung {cable_id} gelöscht.")
+
+    def _open_elec_schema_window(self):
+        if self._elec_schema_window is None:
+            self._elec_schema_window = ElecSchemaWindow(self)
+            self._elec_schema_window.add_ap_requested.connect(self._on_schema_add_ap)
+            self._elec_schema_window.add_cable_requested.connect(self._on_schema_add_cable)
+            self._elec_schema_window.delete_ap_requested.connect(self._delete_elec_point)
+            self._elec_schema_window.delete_cable_requested.connect(self._delete_elec_cable)
+            self._elec_schema_window.ap_position_changed.connect(self._on_schema_ap_position_changed)
+            self._elec_schema_window.edit_ap_requested.connect(self._on_schema_edit_ap)
+            self._elec_schema_window.edit_cable_requested.connect(self._on_schema_edit_cable)
+        self._refresh_elec_schema_window()
+        self._elec_schema_window.show()
+        self._elec_schema_window.raise_()
+        self._elec_schema_window.activateWindow()
+
+    def _collect_elec_room_choices(self) -> list[tuple[str, str]]:
+        choices: list[tuple[str, str]] = []
+        for room_id, panel in self.param_panel.elec_room_panels.items():
+            room_name = str(panel.get_parameters().get("name", room_id) or room_id).strip() or room_id
+            choices.append((room_id, room_name))
+        choices.sort(key=lambda value: value[1].lower())
+        return choices
+
+    def _resolve_schema_room_center(self, room_id: str) -> tuple[QPointF, str] | None:
+        polygon = self.canvas._elec_room_polygons.get(room_id, [])
+        if not polygon:
+            return None
+
+        area_twice = 0.0
+        cx = 0.0
+        cy = 0.0
+        for idx, point in enumerate(polygon):
+            nxt = polygon[(idx + 1) % len(polygon)]
+            cross = point.x() * nxt.y() - nxt.x() * point.y()
+            area_twice += cross
+            cx += (point.x() + nxt.x()) * cross
+            cy += (point.y() + nxt.y()) * cross
+
+        if abs(area_twice) > 1e-9:
+            centroid = QPointF(cx / (3.0 * area_twice), cy / (3.0 * area_twice))
+        else:
+            centroid = QPointF(
+                sum(point.x() for point in polygon) / len(polygon),
+                sum(point.y() for point in polygon) / len(polygon),
+            )
+
+        if not self.canvas._point_in_polygon(centroid, polygon):
+            centroid = QPointF(
+                sum(point.x() for point in polygon) / len(polygon),
+                sum(point.y() for point in polygon) / len(polygon),
+            )
+
+        return centroid, str(self.param_panel._element_floorplan.get(room_id, "") or "")
+
+    def _place_schema_elec_point(self, point_id: str, position: QPointF):
+        panel = self.param_panel.elec_point_panels.get(point_id)
+        if not panel:
+            return
+        params = panel.get_parameters()
+        self.canvas._elec_point_notes[point_id] = params.get("note", "")
+        self.canvas._elec_point_smarthome_device[point_id] = params.get("smarthome_device", "")
+        self.canvas._elec_point_smarthome_device_color[point_id] = params.get("smarthome_device_color", "")
+        self.canvas._elec_point_position[point_id] = params.get("position", "Wand")
+        self.canvas._elec_point_height[point_id] = params.get("height_from_floor", 0.0)
+        self.canvas._elec_visible[point_id] = bool(params.get("visible", True))
+        self.canvas.set_label_visible(point_id, bool(params.get("label_visible", True)))
+        self.canvas.set_label_font_size(point_id, float(params.get("label_size", 12.0) or 12.0))
+        self.canvas.update_elec_point_size(point_id, params.get("width", 30.0), params.get("height", 30.0))
+        self.canvas.set_elec_point_icon(point_id, str(params.get("icon_path", "") or ""))
+        self.canvas._ensure_color(point_id)
+        self.canvas.set_color(point_id, QColor(params.get("color", "#4fc3f7")))
+        self.canvas._label_map[point_id] = str(params.get("name", point_id) or point_id)
+        self.canvas._elec_points[point_id] = QPointF(position)
+        self.canvas.update()
+        self.canvas.elec_point_placed.emit(point_id)
+
+    def _resolve_schema_cable_floorplan(self, start_ap_id: str, end_ap_id: str) -> str:
+        for point_id in (start_ap_id, end_ap_id):
+            if point_id:
+                fp_id = str(self.param_panel._element_floorplan.get(point_id, "") or "")
+                if fp_id:
+                    return fp_id
+        return ""
+
+    def _rebuild_schema_cable_geometry(self, cable_id: str, start_ap_id: str, end_ap_id: str):
+        existing = [QPointF(point) for point in self.canvas._elec_cables.get(cable_id, [])]
+        start_point = QPointF(self.canvas._elec_points[start_ap_id]) if start_ap_id in self.canvas._elec_points else None
+        end_point = QPointF(self.canvas._elec_points[end_ap_id]) if end_ap_id in self.canvas._elec_points else None
+
+        if start_point and end_point:
+            self.canvas._elec_cables[cable_id] = [start_point, end_point]
+            return
+
+        if start_point:
+            fallback = existing[-1] if existing else QPointF(start_point.x() + 120.0, start_point.y() + 40.0)
+            self.canvas._elec_cables[cable_id] = [start_point, QPointF(fallback)]
+            return
+
+        if end_point:
+            fallback = existing[0] if existing else QPointF(end_point.x() - 120.0, end_point.y() - 40.0)
+            self.canvas._elec_cables[cable_id] = [QPointF(fallback), end_point]
+            return
+
+        if cable_id not in self.canvas._elec_cables:
+            self.canvas._elec_cables[cable_id] = []
+
+    def _on_schema_add_ap(self, payload: dict):
+        room_id = str(payload.get("room_id") or "").strip()
+        room_target = self._resolve_schema_room_center(room_id) if room_id else None
+        fp_id = room_target[1] if room_target else str(self.param_panel._element_floorplan.get(room_id, "") or "")
+        self._add_elec_point(fp_id=fp_id)
+        point_id = f"AP-{self._elec_point_counter}"
+        panel = self.param_panel.elec_point_panels.get(point_id)
+        if not panel:
+            return
+
+        name = (payload.get("name") or "").strip() or point_id
+        color = (payload.get("color") or "").strip() or "#4fc3f7"
+        symbol = (payload.get("symbol") or "").strip()
+        ap_type = str(payload.get("ap_type") or "standard")
+
+        panel.le_name.setText(name)
+        panel.set_ap_type(ap_type)
+        if panel.cmb_symbol.findText(symbol) >= 0:
+            panel.cmb_symbol.setCurrentText(symbol)
+        panel._icon_path = BUILTIN_SYMBOLS.get(symbol, "") if symbol else ""
+        panel._color = QColor(color)
+        panel._update_color_button()
+        self._on_elec_point_color_changed(point_id, color)
+        self.canvas.set_elec_point_icon(point_id, panel._icon_path or "")
+        if room_target is not None:
+            self._place_schema_elec_point(point_id, room_target[0])
+        else:
+            self._on_place_elec_point(point_id)
+        self._refresh_elec_schema_window()
+
+    def _on_schema_add_cable(self, payload: dict):
+        start_ap_id = str(payload.get("start_ap_id") or "").strip()
+        end_ap_id = str(payload.get("end_ap_id") or "").strip()
+        fp_id = self._resolve_schema_cable_floorplan(start_ap_id, end_ap_id)
+        self._add_elec_cable(fp_id=fp_id)
+        cable_id = f"KV-{self._elec_cable_counter}"
+        panel = self.param_panel.elec_cable_panels.get(cable_id)
+        if not panel:
+            return
+
+        name = (payload.get("name") or "").strip() or cable_id
+        cable_type = (payload.get("type") or "").strip() or "5x1,5"
+        color = (payload.get("color") or "").strip() or "#ff9800"
+        try:
+            stroke_width = float(payload.get("stroke_width", 2.0))
+        except (TypeError, ValueError):
+            stroke_width = 2.0
+
+        panel.le_name.setText(name)
+        panel.set_type_text(cable_type)
+        self._on_elec_cable_type_changed(cable_id, cable_type)
+        panel.sb_stroke_width.setValue(stroke_width)
+        panel._color = QColor(color)
+        panel._update_color_button()
+        self._on_elec_cable_color_changed(cable_id, color)
+        self.canvas.set_elec_cable_stroke_width(cable_id, stroke_width)
+        self.canvas._cable_start_ap[cable_id] = start_ap_id
+        self.canvas._cable_end_ap[cable_id] = end_ap_id
+        self.canvas._elec_visible[cable_id] = bool(panel.get_parameters().get("visible", True))
+        self._rebuild_schema_cable_geometry(cable_id, start_ap_id, end_ap_id)
+        self.canvas.update()
+        self.canvas.elec_cable_changed.emit(cable_id)
+        self._refresh_elec_schema_window()
+
+    def _refresh_elec_schema_window(self, *_args):
+        if self._elec_schema_window is None:
+            return
+        if self._suspend_schema_refresh:
+            return
+        valid_ids = set(self.param_panel.elec_point_panels.keys())
+        self._elec_schema_ap_positions = {
+            pid: pos
+            for pid, pos in self._elec_schema_ap_positions.items()
+            if pid in valid_ids
+        }
+        ap_nodes, cable_edges = self._build_elec_schema_data()
+        self._elec_schema_window.set_data(
+            ap_nodes,
+            cable_edges,
+            manual_positions=self._elec_schema_ap_positions,
+            room_choices=self._collect_elec_room_choices(),
+        )
+
+    def _on_schema_ap_position_changed(self, point_id: str, x: float, y: float):
+        self._elec_schema_ap_positions[point_id] = [float(x), float(y)]
+        self._mark_dirty()
+
+    def _on_schema_edit_ap(self, point_id: str, payload: dict):
+        """Übernimmt bearbeitete AP-Eigenschaften aus dem Schema-Fenster."""
+        panel = self.param_panel.elec_point_panels.get(point_id)
+        if not panel:
+            return
+        panel.blockSignals(True)
+        try:
+            name = (payload.get("name") or "").strip()
+            panel.le_name.setText(name)
+            symbol = (payload.get("symbol") or "").strip()
+            if panel.cmb_symbol.findText(symbol) >= 0:
+                panel.cmb_symbol.setCurrentText(symbol)
+            icon_path = str(payload.get("icon_path") or "").strip()
+            builtin_path = BUILTIN_SYMBOLS.get(symbol, "") if symbol else ""
+            if icon_path and icon_path != builtin_path:
+                panel._icon_path = icon_path
+                panel.btn_icon.setText(Path(icon_path).name)
+                idx = panel.cmb_symbol.findText("(kein Symbol)")
+                if idx >= 0:
+                    panel.cmb_symbol.blockSignals(True)
+                    panel.cmb_symbol.setCurrentIndex(idx)
+                    panel.cmb_symbol.blockSignals(False)
+                self.canvas.set_elec_point_icon(point_id, icon_path)
+            elif symbol and panel.cmb_symbol.findText(symbol) >= 0:
+                panel._icon_path = builtin_path
+                panel.btn_icon.setText("Eigenes Bild…")
+                self.canvas.set_elec_point_icon(point_id, builtin_path)
+            else:
+                panel._icon_path = ""
+                panel.btn_icon.setText("Eigenes Bild…")
+                self.canvas.set_elec_point_icon(point_id, "")
+            color = (payload.get("color") or "").strip()
+            if color:
+                panel._color = QColor(color)
+                panel._update_color_button()
+                self._on_elec_point_color_changed(point_id, color)
+            try:
+                panel.sb_width.setValue(float(payload.get("width", panel.sb_width.value() * 10.0)) / 10.0)
+                panel.sb_height.setValue(float(payload.get("height", panel.sb_height.value() * 10.0)) / 10.0)
+            except (TypeError, ValueError):
+                pass
+            panel.chk_visible.setChecked(bool(payload.get("visible", panel.chk_visible.isChecked())))
+            panel.chk_label_visible.setChecked(bool(payload.get("label_visible", panel.chk_label_visible.isChecked())))
+            try:
+                panel.sb_label_size.setValue(float(payload.get("label_size", panel.sb_label_size.value())))
+            except (TypeError, ValueError):
+                pass
+            ap_type = str(payload.get("ap_type") or "standard")
+            panel.set_ap_type(ap_type)
+            position = (payload.get("position") or "").strip()
+            if position in {"Wand", "Decke", "Boden", "Freitext"}:
+                panel.cmb_position.setCurrentText(position)
+            elif position:
+                idx = panel.cmb_position.findText("Freitext")
+                if idx >= 0:
+                    panel.cmb_position.setCurrentIndex(idx)
+                panel.le_position_custom.setText(position)
+            try:
+                hff = float(payload.get("height_from_floor", 30))
+                panel.sb_height_from_floor.setValue(hff)
+            except (TypeError, ValueError):
+                pass
+            panel.set_smarthome_device_text(str(payload.get("smarthome_device") or ""))
+            panel.set_smarthome_device_color_text(str(payload.get("smarthome_device_color") or ""))
+            panel.te_note.setPlainText(str(payload.get("note") or ""))
+            uv_config = payload.get("uv_config")
+            if uv_config is not None:
+                panel.set_uv_config(uv_config)
+            up_config = payload.get("up_distribution_config")
+            if up_config is not None:
+                panel.set_up_distribution_config(up_config)
+        finally:
+            panel.blockSignals(False)
+        self._mark_dirty()
+        self._refresh_elec_schema_window()
+
+    def _on_schema_edit_cable(self, cable_id: str, payload: dict):
+        """Übernimmt bearbeitete Kabel-Eigenschaften aus dem Schema-Fenster."""
+        panel = self.param_panel.elec_cable_panels.get(cable_id)
+        if not panel:
+            return
+        panel.blockSignals(True)
+        try:
+            name = (payload.get("name") or "").strip()
+            panel.le_name.setText(name)
+            cable_type = (payload.get("type") or "").strip()
+            panel.set_type_text(cable_type)
+            color = (payload.get("color") or "").strip()
+            if color:
+                panel._color = QColor(color)
+                panel._update_color_button()
+                self._on_elec_cable_color_changed(cable_id, color)
+            panel.chk_visible.setChecked(bool(payload.get("visible", panel.chk_visible.isChecked())))
+            panel.chk_label_visible.setChecked(bool(payload.get("label_visible", panel.chk_label_visible.isChecked())))
+            panel.chk_type_label_visible.setChecked(
+                bool(payload.get("type_label_visible", panel.chk_type_label_visible.isChecked()))
+            )
+            try:
+                panel.sb_label_size.setValue(float(payload.get("label_size", panel.sb_label_size.value())))
+            except (TypeError, ValueError):
+                pass
+            try:
+                stroke_width = float(payload.get("stroke_width", 2.0))
+                panel.sb_stroke_width.setValue(stroke_width)
+            except (TypeError, ValueError):
+                pass
+            panel.te_comment.setPlainText(str(payload.get("comment") or ""))
+            start_ap = str(payload.get("start_ap_id") or "").strip()
+            end_ap = str(payload.get("end_ap_id") or "").strip()
+        finally:
+            panel.blockSignals(False)
+        if start_ap:
+            self.canvas._cable_start_ap[cable_id] = start_ap
+        elif "start_ap_id" in payload:  # explizit auf leer gesetzt
+            self.canvas._cable_start_ap.pop(cable_id, None)
+        if end_ap:
+            self.canvas._cable_end_ap[cable_id] = end_ap
+        elif "end_ap_id" in payload:
+            self.canvas._cable_end_ap.pop(cable_id, None)
+        self._rebuild_schema_cable_geometry(cable_id, start_ap, end_ap)
+        fp_id = self._resolve_schema_cable_floorplan(start_ap, end_ap)
+        if fp_id:
+            self.param_panel._element_floorplan[cable_id] = fp_id
+        self.canvas.update()
+        self.canvas.elec_cable_changed.emit(cable_id)
+        self._mark_dirty()
+
+    def _build_elec_schema_data(self) -> tuple[list[ApNode], list[CableEdge]]:
+        point_id_to_room = self._collect_point_id_to_room_name()
+
+        connected_points: set[str] = set()
+        for cable_id in self.param_panel.elec_cable_panels.keys():
+            start_ap_id, end_ap_id = self.canvas.get_cable_ap(cable_id)
+            if start_ap_id:
+                connected_points.add(start_ap_id)
+            if end_ap_id:
+                connected_points.add(end_ap_id)
+
+        ap_nodes: list[ApNode] = []
+        for point_id, panel in self.param_panel.elec_point_panels.items():
+            params = panel.get_parameters()
+            has_distributor = self._is_uv_type(params) or self._is_up_distribution_type(params)
+            size_px = self.canvas._elec_point_size_px.get(point_id, (56.0, 56.0))
+            ap_nodes.append(
+                ApNode(
+                    point_id=point_id,
+                    name=str(params.get("name", point_id) or point_id),
+                    room=point_id_to_room.get(point_id, "(ohne Raum)"),
+                    ap_type=str(params.get("ap_type", "standard") or "standard"),
+                    has_distributor_function=has_distributor,
+                    is_connected=point_id in connected_points,
+                    color=str(params.get("color", "#4fc3f7") or "#4fc3f7"),
+                    icon_path=str(params.get("icon_path", "") or ""),
+                    builtin_symbol=str(params.get("builtin_symbol", "") or ""),
+                    width_px=float(size_px[0]),
+                    height_px=float(size_px[1]),
+                    width_mm=float(params.get("width", 30.0) or 30.0),
+                    height_mm=float(params.get("height", 30.0) or 30.0),
+                    visible=bool(params.get("visible", True)),
+                    label_visible=bool(params.get("label_visible", True)),
+                    label_size=float(params.get("label_size", 12.0) or 12.0),
+                    position=str(params.get("position", "Wand") or "Wand"),
+                    height_from_floor=float(params.get("height_from_floor", 0.0) or 0.0),
+                    smarthome_device=str(params.get("smarthome_device", "") or ""),
+                    smarthome_device_color=str(params.get("smarthome_device_color", "") or ""),
+                    note=str(params.get("note", "") or ""),
+                    uv_config=params.get("uv_config"),
+                    up_distribution_config=params.get("up_distribution_config"),
+                )
+            )
+
+        cable_edges: list[CableEdge] = []
+        mm_per_px = self.canvas.get_mm_per_px()
+        for cable_id, panel in self.param_panel.elec_cable_panels.items():
+            params = panel.get_parameters()
+            length_px = self.canvas.get_elec_cable_length_px(cable_id)
+            start_ap_id, end_ap_id = self.canvas.get_cable_ap(cable_id)
+            cable_edges.append(
+                CableEdge(
+                    cable_id=cable_id,
+                    name=str(params.get("name", cable_id) or cable_id),
+                    cable_type=str(params.get("type", "") or ""),
+                    length_m=(length_px * mm_per_px) / 1000.0,
+                    color=str(params.get("color", "#ff9800") or "#ff9800"),
+                    stroke_width_px=float(params.get("stroke_width", 2.0) or 2.0),
+                    start_ap_id=str(start_ap_id or ""),
+                    end_ap_id=str(end_ap_id or ""),
+                    visible=bool(params.get("visible", True)),
+                    label_visible=bool(params.get("label_visible", True)),
+                    type_label_visible=bool(params.get("type_label_visible", False)),
+                    label_size=float(params.get("label_size", 12.0) or 12.0),
+                    comment=str(params.get("comment", "") or ""),
+                )
+            )
+
+        return ap_nodes, cable_edges
+
+    @staticmethod
+    def _sanitize_elec_schema_ap_positions(raw: dict) -> dict[str, list[float]]:
+        if not isinstance(raw, dict):
+            return {}
+        sanitized: dict[str, list[float]] = {}
+        for point_id, pos in raw.items():
+            pid = str(point_id or "").strip()
+            if not pid:
+                continue
+            if not isinstance(pos, (list, tuple)) or len(pos) != 2:
+                continue
+            try:
+                x = float(pos[0])
+                y = float(pos[1])
+            except (TypeError, ValueError):
+                continue
+            sanitized[pid] = [x, y]
+        return sanitized
 
     def _selected_object_type(self, item_id: str) -> str | None:
         if item_id in self.param_panel.floorplan_panels:
@@ -2912,6 +3374,7 @@ class MainWindow(QMainWindow):
         self._floorplan_counter = 0
         self._furniture_counter = 0
         self._pdf_export_pages = self._default_pdf_export_pages()
+        self._elec_schema_ap_positions = {}
 
         # Recreate canvas and panel
         old_canvas = self.canvas
@@ -3009,6 +3472,9 @@ class MainWindow(QMainWindow):
         # ── 2. JSON bauen – alle Pfade relativ zur Projektdatei ──────────
 
         params = self.param_panel.to_dict()
+        params["elec_schema_ap_positions"] = self._sanitize_elec_schema_ap_positions(
+            self._elec_schema_ap_positions
+        )
 
         # Grundrisse: absoluten Pfad → relativ
         for fid, fp_data in params.get("floorplans", {}).items():
@@ -3128,6 +3594,9 @@ class MainWindow(QMainWindow):
 
             # --- resolve floorplan file paths + load images -------------
             params = data.get("params", {})
+            self._elec_schema_ap_positions = self._sanitize_elec_schema_ap_positions(
+                params.get("elec_schema_ap_positions", {})
+            )
             for fid, fp_data in params.get("floorplans", {}).items():
                 rel_fp = fp_data.get("file_path", "")
                 if rel_fp:
