@@ -117,6 +117,8 @@ class CanvasWidget(QWidget):
         self._svg_renderer: Optional[QSvgRenderer] = None
         self._bg_pixmap: Optional[QPixmap] = None
         self._svg_size = (800.0, 600.0)
+        self._pixmap_cache: Dict[str, QPixmap] = {}
+        self._svg_renderer_cache: Dict[str, QSvgRenderer] = {}
 
         # Multiple floor plan layers
         self._floor_plans: Dict[str, FloorPlanLayer] = {}
@@ -370,13 +372,17 @@ class CanvasWidget(QWidget):
             return
         ext = os.path.splitext(filepath)[1].lower()
         if ext == ".svg":
-            layer.renderer = QSvgRenderer(filepath)
-            vb = layer.renderer.viewBox()
-            layer.size = (float(vb.width()), float(vb.height()))
+            renderer = self._get_cached_svg_renderer(filepath)
+            if renderer is not None:
+                layer.renderer = renderer
+                vb = renderer.viewBox()
+                layer.size = (float(vb.width()), float(vb.height()))
+            else:
+                layer.size = (100.0, 100.0)
         else:
-            pm = QPixmap(filepath)
-            if not pm.isNull():
-                layer.pixmap = pm
+            pm = self._get_cached_pixmap(filepath)
+            if pm is not None:
+                layer.pixmap = QPixmap(pm)
                 layer.size = (float(pm.width()), float(pm.height()))
             else:
                 layer.size = (100.0, 100.0)
@@ -392,6 +398,38 @@ class CanvasWidget(QWidget):
         if saved_polygon:
             layer.polygon = saved_polygon
         self.update()
+
+    @staticmethod
+    def _cache_key(path: str) -> str:
+        return os.path.normcase(os.path.normpath(path or ""))
+
+    def _get_cached_pixmap(self, path: str) -> Optional[QPixmap]:
+        key = self._cache_key(path)
+        if not key:
+            return None
+        cached = self._pixmap_cache.get(key)
+        if cached is not None and not cached.isNull():
+            return cached
+        pm = QPixmap(path)
+        if pm.isNull():
+            self._pixmap_cache.pop(key, None)
+            return None
+        self._pixmap_cache[key] = pm
+        return pm
+
+    def _get_cached_svg_renderer(self, path: str) -> Optional[QSvgRenderer]:
+        key = self._cache_key(path)
+        if not key:
+            return None
+        cached = self._svg_renderer_cache.get(key)
+        if cached is not None and cached.isValid():
+            return cached
+        renderer = QSvgRenderer(path)
+        if not renderer.isValid():
+            self._svg_renderer_cache.pop(key, None)
+            return None
+        self._svg_renderer_cache[key] = renderer
+        return renderer
 
     def set_floor_plan_transform(self, fp_id: str,
                                   offset_x: float, offset_y: float,
@@ -1291,16 +1329,16 @@ class CanvasWidget(QWidget):
 
     def set_elec_point_icon(self, point_id: str, path: str):
         if path and path.lower().endswith(".svg"):
-            renderer = QSvgRenderer(path)
-            if renderer.isValid():
+            renderer = self._get_cached_svg_renderer(path)
+            if renderer is not None:
                 self._elec_point_svgs[point_id] = renderer
                 self._elec_point_icons[point_id] = None
             else:
                 self._elec_point_svgs[point_id] = None
                 self._elec_point_icons[point_id] = None
         elif path:
-            pm = QPixmap(path)
-            self._elec_point_icons[point_id] = pm if not pm.isNull() else None
+            pm = self._get_cached_pixmap(path)
+            self._elec_point_icons[point_id] = QPixmap(pm) if pm is not None else None
             self._elec_point_svgs[point_id] = None
         else:
             self._elec_point_icons[point_id] = None
@@ -1694,16 +1732,16 @@ class CanvasWidget(QWidget):
 
     def set_hkv_icon(self, hkv_id: str, path: str):
         if path and path.lower().endswith(".svg"):
-            renderer = QSvgRenderer(path)
-            if renderer.isValid():
+            renderer = self._get_cached_svg_renderer(path)
+            if renderer is not None:
                 self._hkv_svgs[hkv_id] = renderer
                 self._hkv_icons[hkv_id] = None
             else:
                 self._hkv_svgs[hkv_id] = None
                 self._hkv_icons[hkv_id] = None
         elif path:
-            pm = QPixmap(path)
-            self._hkv_icons[hkv_id] = pm if not pm.isNull() else None
+            pm = self._get_cached_pixmap(path)
+            self._hkv_icons[hkv_id] = QPixmap(pm) if pm is not None else None
             self._hkv_svgs[hkv_id] = None
         else:
             self._hkv_icons[hkv_id] = None

@@ -471,19 +471,26 @@ class MainWindow(QMainWindow):
         """Restore canvas + param panel from a snapshot dict."""
         self._undo_blocked = True
         self._suspend_schema_refresh = True
+        window_updates_enabled = self.updatesEnabled()
+        canvas_updates_enabled = self.canvas.updatesEnabled()
+        panel_updates_enabled = self.param_panel.updatesEnabled()
+        canvas_signals_prev = self.canvas.blockSignals(True)
+        panel_signals_prev = self.param_panel.blockSignals(True)
+        self.setUpdatesEnabled(False)
+        self.canvas.setUpdatesEnabled(False)
+        self.param_panel.setUpdatesEnabled(False)
         # Keep current viewport during undo/redo (no jump in zoom/pan position)
         current_view_scale = self.canvas._scale
         current_view_offset = QPointF(self.canvas._offset)
         try:
-            # Clear existing data
+            # Clear existing canvas data (geometry only, no widget destruction)
             self.canvas.clear_data()
-            self.param_panel.clear_all_panels()
 
             # Restore canvas geometry
             self.canvas.from_dict(snap["canvas"])
 
-            # Restore param panels
-            self.param_panel.from_dict(snap["params"])
+            # Restore param panels (incremental – reuses existing widgets)
+            self.param_panel.update_panels_from_dict(snap["params"])
 
             # Restore counters
             c = snap.get("counters", {})
@@ -514,12 +521,16 @@ class MainWindow(QMainWindow):
 
             self._dirty = True
             self._update_title()
-            self.canvas.update()
         finally:
+            self.param_panel.blockSignals(panel_signals_prev)
+            self.canvas.blockSignals(canvas_signals_prev)
+            self.param_panel.setUpdatesEnabled(panel_updates_enabled)
+            self.canvas.setUpdatesEnabled(canvas_updates_enabled)
+            self.setUpdatesEnabled(window_updates_enabled)
+            self.canvas.update()
             self._suspend_schema_refresh = False
             self._refresh_elec_schema_window()
             # _undo_blocked stays True – caller or QTimer will reset it
-            pass
 
     def _reconnect_panels_after_restore(self):
         """Reconnect per-object panel signals after an undo/redo restore."""

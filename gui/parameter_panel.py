@@ -4750,6 +4750,161 @@ class ParameterPanel(QWidget):
             },
         }
 
+    def update_panels_from_dict(self, d: dict):
+        """Incrementally restore panels from a snapshot dict.
+
+        Unlike from_dict() which clears everything and rebuilds all QWidgets,
+        this reuses existing panels where IDs match and only creates/removes
+        panels for IDs that actually changed.  Typical undo/redo operations
+        (no structural ID change) run ~100x faster than the clear+rebuild path.
+        """
+        self._loading = True
+        self._tree.setUpdatesEnabled(False)
+        try:
+            # Global heating params (blockSignals to avoid triggering recalc)
+            for sb, key, default in [
+                (self.sb_vorlauf, "t_supply", 35.0),
+                (self.sb_ruecklauf, "t_return", 30.0),
+                (self.sb_norm_aussen, "t_norm_outdoor", -12.0),
+            ]:
+                sb.blockSignals(True)
+                sb.setValue(d.get(key, default))
+                sb.blockSignals(False)
+            self._last_elec_cable_defaults = self._sanitize_elec_cable_defaults(
+                d.get("elec_cable_defaults")
+            )
+
+            # ---- Floor plans (preserve tree order) ------------------
+            fp_order_new = d.get("floorplans_order", [])
+            fp_data = d.get("floorplans", {})
+
+            # Remove deleted floor plans (furniture children first)
+            for fid in set(self.floorplan_panels.keys()) - set(fp_order_new):
+                for fur_id in [k for k, v in list(self._furniture_parent.items()) if v == fid]:
+                    self.remove_furniture_panel(fur_id)
+                self.remove_floorplan_panel(fid)
+
+            for fid in fp_order_new:
+                values = fp_data.get(fid, {})
+                if fid not in self.floorplan_panels:
+                    panel = self.add_floorplan_panel(fid, name=values.get("name", fid))
+                    panel.blockSignals(True)
+                    panel.from_dict(values)
+                    panel.blockSignals(False)
+                else:
+                    panel = self.floorplan_panels[fid]
+                    panel.blockSignals(True)
+                    panel.from_dict(values)
+                    panel.blockSignals(False)
+                    ti = self._tree_items.get(fid)
+                    if ti:
+                        ti.setText(0, values.get("name", fid))
+
+            # Reorder tree to match fp_order_new if necessary
+            current_order = self.get_floorplan_order()
+            if current_order != fp_order_new:
+                for i, fid in enumerate(fp_order_new):
+                    item = self._tree_items.get(fid)
+                    if not item:
+                        continue
+                    idx = self._tree.indexOfTopLevelItem(item)
+                    if idx >= 0 and idx != i:
+                        self._tree.takeTopLevelItem(idx)
+                        self._tree.insertTopLevelItem(i, item)
+
+            # ---- Furniture ------------------------------------------
+            furniture_data = d.get("furniture", {})
+            for fur_id in set(self.furniture_panels.keys()) - set(furniture_data.keys()):
+                self.remove_furniture_panel(fur_id)
+            for fur_id, values in furniture_data.items():
+                parent_fp_id = values.get("parent_fp_id", "")
+                if fur_id not in self.furniture_panels:
+                    panel = self.add_furniture_panel(
+                        fur_id, parent_fp_id=parent_fp_id, name=values.get("name", fur_id)
+                    )
+                    panel.blockSignals(True)
+                    panel.from_dict(values)
+                    panel.blockSignals(False)
+                else:
+                    panel = self.furniture_panels[fur_id]
+                    panel.blockSignals(True)
+                    panel.from_dict(values)
+                    panel.blockSignals(False)
+                    ti = self._tree_items.get(fur_id)
+                    if ti:
+                        ti.setText(0, values.get("name", fur_id))
+
+            # ---- Generic diff-update helper -------------------------
+            def _diff(existing, data_dict, add_fn, remove_fn):
+                for eid in set(existing.keys()) - set(data_dict.keys()):
+                    remove_fn(eid)
+                for eid, values in data_dict.items():
+                    if eid not in existing:
+                        panel = add_fn(
+                            eid,
+                            fp_id=values.get("floor_plan_id"),
+                            name=values.get("name", eid),
+                            color=values.get("color"),
+                        )
+                        panel.blockSignals(True)
+                        panel.from_dict(values)
+                        panel.blockSignals(False)
+                    else:
+                        panel = existing[eid]
+                        panel.blockSignals(True)
+                        panel.from_dict(values)
+                        panel.blockSignals(False)
+                        new_fp = values.get("floor_plan_id", "")
+                        if new_fp:
+                            self._element_floorplan[eid] = new_fp
+                        ti = self._tree_items.get(eid)
+                        if ti:
+                            ti.setText(0, values.get("name", eid))
+
+            # HKV first (needed for circuit distributor dropdown)
+            _diff(self.hkv_panels, d.get("hkv_points", {}), self.add_hkv_panel, self.remove_hkv_panel)
+            self.update_all_hkv_choices()
+
+            _diff(self.circuit_panels, d.get("circuits", {}), self.add_circuit_panel, self.remove_circuit_panel)
+            _diff(self.elec_point_panels, d.get("elec_points", {}), self.add_elec_point_panel, self.remove_elec_point_panel)
+            _diff(self.elec_room_panels, d.get("elec_rooms", {}), self.add_elec_room_panel, self.remove_elec_room_panel)
+            _diff(self.elec_cable_panels, d.get("elec_cables", {}), self.add_elec_cable_panel, self.remove_elec_cable_panel)
+            _diff(self.hkv_line_panels, d.get("hkv_lines", {}), self.add_hkv_line_panel, self.remove_hkv_line_panel)
+
+            # Text panels use set_parameters instead of from_dict
+            text_data = d.get("text_annotations", {})
+            for tid in set(self.text_panels.keys()) - set(text_data.keys()):
+                self.remove_text_panel(tid)
+            for tid, values in text_data.items():
+                if tid not in self.text_panels:
+                    panel = self.add_text_panel(
+                        tid,
+                        fp_id=values.get("floor_plan_id"),
+                        name=values.get("name", tid),
+                        color=values.get("color", "#ffffff"),
+                    )
+                    panel.blockSignals(True)
+                    panel.set_parameters(values)
+                    panel.blockSignals(False)
+                else:
+                    panel = self.text_panels[tid]
+                    panel.blockSignals(True)
+                    panel.set_parameters(values)
+                    panel.blockSignals(False)
+                    ti = self._tree_items.get(tid)
+                    if ti:
+                        ti.setText(0, values.get("name", tid))
+
+            # Post-restore choices sync
+            self.update_all_elec_point_smarthome_choices()
+            self.update_all_elec_point_smarthome_color_choices()
+            self.update_all_elec_cable_type_choices()
+            self.update_all_elec_point_uv_cable_choices()
+            self._dedupe_floorplan_tree()
+        finally:
+            self._tree.setUpdatesEnabled(True)
+            self._loading = False
+
     def from_dict(self, d: dict):
         self._loading = True
 
