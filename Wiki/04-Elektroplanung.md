@@ -157,7 +157,10 @@ Die Zuordnung wird als strukturierte Daten im Projekt gespeichert und kann über
 | **Farbe** | Darstellungsfarbe |
 | **Typ** | Kabeltyp (z.B. „5x1,5") |
 | **Kommentar** | Freitext-Notiz |
+| **Kabeltyp im Plan** | Blendet den Kabeltyp direkt in der Plan-Beschriftung ein/aus |
 | **Schriftgröße** | Label-Schriftgröße |
+
+> **Hinweis:** Der Kabeltyp ist im Plan standardmäßig ausgeblendet. Wenn aktiviert, erscheint er als **eigene Beschriftung** (unabhängig vom Namen) und kann wie andere Labels per Drag & Drop separat verschoben werden.
 
 ### Berechnete Werte
 

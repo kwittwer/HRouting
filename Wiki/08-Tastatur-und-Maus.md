@@ -99,4 +99,4 @@ Bei Anschlusspunkten zeigt das Kontextmenü zusätzlich Informationszeilen an:
 
 ## Labels
 
-Alle Beschriftungen können jederzeit per **Drag & Drop** verschoben werden – unabhängig vom aktiven Modus.
+Alle Beschriftungen können jederzeit per **Drag & Drop** verschoben werden – unabhängig vom aktiven Modus. Das gilt auch für Kabel-Beschriftungen mit optional eingeblendetem Kabeltyp.

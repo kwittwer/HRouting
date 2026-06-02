@@ -606,14 +606,23 @@ class MainWindow(QMainWindow):
             panel.edit_cable_requested.connect(self._on_edit_elec_cable)
             panel.name_changed.connect(self._on_elec_cable_name_changed)
             panel.color_changed.connect(self._on_elec_cable_color_changed)
+            panel.type_changed.connect(self._on_elec_cable_type_changed)
             panel.comment_changed.connect(self._on_elec_cable_comment_changed)
             panel.visibility_changed.connect(self._on_elec_visibility_changed)
             panel.label_size_changed.connect(self._on_label_size_changed)
             panel.label_visibility_changed.connect(self._on_label_visibility_changed)
+            panel.type_label_visibility_changed.connect(
+                self._on_elec_cable_type_label_visibility_changed
+            )
             values = panel.get_parameters()
             self.canvas._label_map[kid] = values.get("name", kid)
             self.canvas._elec_visible[kid] = values.get("visible", True)
             self.canvas._elec_cable_notes[kid] = values.get("comment", "")
+            self.canvas.set_elec_cable_type_text(kid, values.get("type", ""))
+            self.canvas.set_elec_cable_type_label_visible(
+                kid,
+                values.get("type_label_visible", False),
+            )
             self.canvas.set_label_font_size(kid, values.get("label_size", 12.0))
             self.canvas.set_label_visible(kid, values.get("label_visible", True))
             self.canvas.set_color(kid, QColor(values.get("color", "#ff9800")))
@@ -2022,10 +2031,14 @@ class MainWindow(QMainWindow):
         panel.edit_cable_requested.connect(self._on_edit_elec_cable)
         panel.name_changed.connect(self._on_elec_cable_name_changed)
         panel.color_changed.connect(self._on_elec_cable_color_changed)
+        panel.type_changed.connect(self._on_elec_cable_type_changed)
         panel.comment_changed.connect(self._on_elec_cable_comment_changed)
         panel.visibility_changed.connect(self._on_elec_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
         panel.label_visibility_changed.connect(self._on_label_visibility_changed)
+        panel.type_label_visibility_changed.connect(
+            self._on_elec_cable_type_label_visibility_changed
+        )
         panel.stroke_width_changed.connect(self._on_elec_cable_stroke_width_changed)
         self._update_up_distribution_cable_choices_all()
         return panel
@@ -2086,6 +2099,14 @@ class MainWindow(QMainWindow):
 
     def _on_elec_cable_color_changed(self, cable_id: str, color: str):
         self.canvas.set_color(cable_id, QColor(color))
+
+    def _on_elec_cable_type_changed(self, cable_id: str, cable_type: str):
+        self.canvas.set_elec_cable_type_text(cable_id, cable_type)
+        self._mark_dirty_debounced()
+
+    def _on_elec_cable_type_label_visibility_changed(self, cable_id: str, visible: bool):
+        self.canvas.set_elec_cable_type_label_visible(cable_id, visible)
+        self._mark_dirty_debounced()
 
     def _on_elec_cable_comment_changed(self, cable_id: str, comment: str):
         self.canvas._elec_cable_notes[cable_id] = comment
@@ -2494,12 +2515,18 @@ class MainWindow(QMainWindow):
         panel.set_type_text(src.get("type", "5x1,5"))
         panel.te_comment.setPlainText(src.get("comment", ""))
         self.canvas._elec_cable_notes[new_id] = src.get("comment", "")
+        panel.chk_type_label_visible.setChecked(src.get("type_label_visible", False))
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
         c = src.get("color", "#ff9800")
         panel._color = QColor(c)
         panel._update_color_button()
         self.canvas._ensure_color(new_id)
         self.canvas.set_color(new_id, QColor(c))
+        self.canvas.set_elec_cable_type_text(new_id, src.get("type", ""))
+        self.canvas.set_elec_cable_type_label_visible(
+            new_id,
+            src.get("type_label_visible", False),
+        )
         self.canvas.set_label_font_size(new_id, src.get("label_size", 12.0))
         self.canvas.set_label_visible(new_id, src.get("label_visible", True))
         if source_id in self.canvas._elec_cables:
@@ -3277,13 +3304,22 @@ class MainWindow(QMainWindow):
                 panel.edit_cable_requested.connect(self._on_edit_elec_cable)
                 panel.name_changed.connect(self._on_elec_cable_name_changed)
                 panel.color_changed.connect(self._on_elec_cable_color_changed)
+                panel.type_changed.connect(self._on_elec_cable_type_changed)
                 panel.visibility_changed.connect(self._on_elec_visibility_changed)
                 panel.label_size_changed.connect(self._on_label_size_changed)
                 panel.label_visibility_changed.connect(self._on_label_visibility_changed)
+                panel.type_label_visibility_changed.connect(
+                    self._on_elec_cable_type_label_visibility_changed
+                )
                 panel.stroke_width_changed.connect(self._on_elec_cable_stroke_width_changed)
                 values = panel.get_parameters()
                 self.canvas._label_map[kid] = values.get("name", kid)
                 self.canvas._elec_visible[kid] = values.get("visible", True)
+                self.canvas.set_elec_cable_type_text(kid, values.get("type", ""))
+                self.canvas.set_elec_cable_type_label_visible(
+                    kid,
+                    values.get("type_label_visible", False),
+                )
                 self.canvas.set_label_font_size(kid, values.get("label_size", 12.0))
                 self.canvas.set_label_visible(kid, values.get("label_visible", True))
                 self.canvas.set_color(kid, QColor(values.get("color", "#ff9800")))

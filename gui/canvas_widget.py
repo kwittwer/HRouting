@@ -190,6 +190,8 @@ class CanvasWidget(QWidget):
         self._elec_cables:        Dict[str, List[QPointF]]        = {}
         self._elec_cable_notes:   Dict[str, str]                  = {}
         self._elec_cable_stroke_width: Dict[str, float]            = {}
+        self._elec_cable_type_text: Dict[str, str]                 = {}
+        self._elec_cable_type_label_visible: Dict[str, bool]       = {}
         self._elec_visible:       Dict[str, bool]                 = {}
 
         # Cable ↔ AP connections  (cable_id → point_id or "")
@@ -1346,13 +1348,27 @@ class CanvasWidget(QWidget):
         self._elec_cable_stroke_width[cable_id] = max(0.5, min(10.0, width))
         self.update()
 
+    def set_elec_cable_type_text(self, cable_id: str, cable_type: str):
+        self._elec_cable_type_text[cable_id] = str(cable_type or "").strip()
+        self.update()
+
+    def set_elec_cable_type_label_visible(self, cable_id: str, visible: bool):
+        self._elec_cable_type_label_visible[cable_id] = bool(visible)
+        self.update()
+
+    def _elec_cable_type_label_id(self, cable_id: str) -> str:
+        return f"{cable_id}::type"
+
     def delete_elec_cable(self, cable_id: str):
+        cable_type_label_id = self._elec_cable_type_label_id(cable_id)
         for d in (self._elec_cables, self._elec_visible,
                   self._elec_cable_notes, self._elec_cable_stroke_width,
+                  self._elec_cable_type_text, self._elec_cable_type_label_visible,
                   self._cable_start_ap, self._cable_end_ap,
                   self._label_positions, self._label_font_sizes, self._label_visible,
                   self._label_rects, self._label_draw_pos):
             d.pop(cable_id, None)
+            d.pop(cable_type_label_id, None)
         self._elec_cable_path_cache.pop(cable_id, None)
         self._color_map.pop(cable_id, None)
         self.update()
@@ -1949,6 +1965,9 @@ class CanvasWidget(QWidget):
         self._elec_point_smarthome_device_color.clear()
         self._elec_cables.clear()
         self._elec_cable_notes.clear()
+        self._elec_cable_stroke_width.clear()
+        self._elec_cable_type_text.clear()
+        self._elec_cable_type_label_visible.clear()
         self._elec_visible.clear()
         self._cable_start_ap.clear()
         self._cable_end_ap.clear()
@@ -2079,6 +2098,8 @@ class CanvasWidget(QWidget):
             },
             "elec_cable_notes": dict(self._elec_cable_notes),
             "elec_cable_stroke_width": dict(self._elec_cable_stroke_width),
+            "elec_cable_type_text": dict(self._elec_cable_type_text),
+            "elec_cable_type_label_visible": dict(self._elec_cable_type_label_visible),
             "cable_start_ap": dict(self._cable_start_ap),
             "cable_end_ap": dict(self._cable_end_ap),
             "elec_visible": dict(self._elec_visible),
@@ -2249,6 +2270,14 @@ class CanvasWidget(QWidget):
         }
         self._elec_cable_stroke_width = {
             cid: float(v) for cid, v in d.get("elec_cable_stroke_width", {}).items()
+        }
+        self._elec_cable_type_text = {
+            cid: str(v) for cid, v in d.get("elec_cable_type_text", {}).items()
+        }
+        loaded_type_visibility = d.get("elec_cable_type_label_visible", {})
+        self._elec_cable_type_label_visible = {
+            cid: bool(loaded_type_visibility.get(cid, False))
+            for cid in self._elec_cables.keys()
         }
         self._cable_start_ap = dict(d.get("cable_start_ap", {}))
         self._cable_end_ap = dict(d.get("cable_end_ap", {}))
@@ -4778,8 +4807,6 @@ class CanvasWidget(QWidget):
         for kid, kpts in self._elec_cables.items():
             if not self._elec_visible.get(kid, True):
                 continue
-            if not self._label_visible.get(kid, True):
-                continue
             if len(kpts) < 2:
                 continue
             mi = len(kpts) // 2
@@ -4788,9 +4815,28 @@ class CanvasWidget(QWidget):
             else:
                 mid = QPointF((kpts[mi - 1].x() + kpts[mi].x()) / 2,
                               (kpts[mi - 1].y() + kpts[mi].y()) / 2)
+            name_visible = self._label_visible.get(kid, True)
             text = self._label_map.get(kid, kid)
             col = self._color_map.get(kid, QColor("#ff9800"))
-            self._draw_item_label(painter, kid, mid, text, col)
+            if name_visible:
+                self._draw_item_label(painter, kid, mid, text, col)
+
+            type_label_id = self._elec_cable_type_label_id(kid)
+            cable_type = self._elec_cable_type_text.get(kid, "")
+            type_visible = self._elec_cable_type_label_visible.get(kid, False)
+            if type_visible and cable_type:
+                type_default_pos = QPointF(mid)
+                if name_visible:
+                    type_default_pos = QPointF(mid.x(), mid.y() + 14.0)
+                self._draw_item_label(
+                    painter,
+                    type_label_id,
+                    type_default_pos,
+                    cable_type,
+                    col,
+                    visible_override=True,
+                    size_override=self._label_font_sizes.get(kid, 12.0),
+                )
 
         # HKV labels
         for hid in self._hkv_points:
@@ -5198,18 +5244,27 @@ class CanvasWidget(QWidget):
     # ── Label helpers ──────────────────────────────────────────────── #
 
     def _draw_item_label(self, painter, item_id: str,
-                          default_pos: QPointF, text: str, color: QColor):
-        if not self._label_visible.get(item_id, True):
+                          default_pos: QPointF, text: str, color: QColor,
+                          visible_override: Optional[bool] = None,
+                          size_override: Optional[float] = None):
+        if visible_override is None and not self._label_visible.get(item_id, True):
+            return
+        if visible_override is False:
             return
         pos = self._label_positions.get(item_id, default_pos)
         size = self._label_font_sizes.get(item_id, 12.0)
+        if size_override is not None:
+            size = size_override
+        label_text = str(text or "")
+        lines = label_text.split("\n") if label_text else [""]
         font = painter.font()
         font.setPointSizeF(size / self._scale)
         painter.setFont(font)
         # background for readability
         fm = painter.fontMetrics()
-        tw = fm.horizontalAdvance(text)
-        th = fm.height()
+        tw = max((fm.horizontalAdvance(line) for line in lines), default=0)
+        line_h = fm.height()
+        th = line_h * len(lines)
         bg_rect = QRectF(pos.x() - 2, pos.y() - fm.ascent() - 1,
                          tw + 4, th + 2)
         bg = QColor("#2b2b2b")
@@ -5220,7 +5275,8 @@ class CanvasWidget(QWidget):
         # text
         painter.setPen(QPen(color))
         painter.setBrush(Qt.NoBrush)
-        painter.drawText(pos, text)
+        for index, line in enumerate(lines):
+            painter.drawText(QPointF(pos.x(), pos.y() + index * line_h), line)
         # store for hit testing & dragging
         self._label_rects[item_id] = bg_rect
         self._label_draw_pos[item_id] = pos

@@ -2257,6 +2257,7 @@ class ElektroCablePanel(QWidget):
     visibility_changed   = Signal(str, bool)
     label_size_changed   = Signal(str, float)
     label_visibility_changed = Signal(str, bool)
+    type_label_visibility_changed = Signal(str, bool)
     duplicate_requested  = Signal(str)
     stroke_width_changed = Signal(str, float)
 
@@ -2294,6 +2295,15 @@ class ElektroCablePanel(QWidget):
             lambda c: self.label_visibility_changed.emit(self.cable_id, c)
         )
         form.addRow(self.chk_label_visible)
+
+        self.chk_type_label_visible = QCheckBox("Kabeltyp im Plan")
+        self.chk_type_label_visible.setChecked(
+            bool(self._defaults.get("type_label_visible", False))
+        )
+        self.chk_type_label_visible.toggled.connect(
+            lambda c: self.type_label_visibility_changed.emit(self.cable_id, c)
+        )
+        form.addRow(self.chk_type_label_visible)
 
         self.le_name = QLineEdit(self._name)
         self.le_name.textChanged.connect(
@@ -2414,6 +2424,7 @@ class ElektroCablePanel(QWidget):
             "comment": self.te_comment.toPlainText(),
             "visible": self.chk_visible.isChecked(),
             "label_visible": self.chk_label_visible.isChecked(),
+            "type_label_visible": self.chk_type_label_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
             "stroke_width": self.sb_stroke_width.value(),
             "start_ap": self._start_ap,
@@ -2461,6 +2472,7 @@ class ElektroCablePanel(QWidget):
         self.te_comment.setPlainText(d.get("comment", ""))
         self.chk_visible.setChecked(d.get("visible", True))
         self.chk_label_visible.setChecked(d.get("label_visible", True))
+        self.chk_type_label_visible.setChecked(d.get("type_label_visible", False))
         self.sb_label_size.setValue(d.get("label_size", 12.0))
         self.sb_stroke_width.setValue(d.get("stroke_width", 2.0))
         self.set_start_ap(d.get("start_ap", ""))
@@ -4372,6 +4384,9 @@ class ParameterPanel(QWidget):
         panel.color_changed.connect(self._on_elec_cable_color_changed)
         panel.label_size_changed.connect(self._on_elec_cable_label_size_changed)
         panel.label_visibility_changed.connect(self._on_elec_cable_label_visibility_changed)
+        panel.type_label_visibility_changed.connect(
+            self._on_elec_cable_type_label_visibility_changed
+        )
         self._prop_layout.insertWidget(self._prop_layout.count() - 1, panel)
         panel.hide()
         self.elec_cable_panels[cable_id] = panel
@@ -4432,6 +4447,11 @@ class ParameterPanel(QWidget):
             return
         self._update_last_elec_cable_defaults(cable_id)
 
+    def _on_elec_cable_type_label_visibility_changed(self, cable_id: str, value: bool):
+        if self._loading:
+            return
+        self._update_last_elec_cable_defaults(cable_id)
+
     def _default_elec_cable_defaults(self) -> dict:
         return {
             "name": "",
@@ -4440,6 +4460,7 @@ class ParameterPanel(QWidget):
             "comment": "",
             "visible": True,
             "label_visible": True,
+            "type_label_visible": False,
             "label_size": 12.0,
         }
 
@@ -4459,6 +4480,10 @@ class ParameterPanel(QWidget):
             sanitized["visible"] = bool(defaults.get("visible", True))
         if "label_visible" in defaults:
             sanitized["label_visible"] = bool(defaults.get("label_visible", True))
+        if "type_label_visible" in defaults:
+            sanitized["type_label_visible"] = bool(
+                defaults.get("type_label_visible", False)
+            )
         if "label_size" in defaults:
             try:
                 sanitized["label_size"] = float(defaults.get("label_size", 12.0))
@@ -4478,6 +4503,7 @@ class ParameterPanel(QWidget):
             "comment": params.get("comment", ""),
             "visible": params.get("visible", True),
             "label_visible": params.get("label_visible", True),
+            "type_label_visible": params.get("type_label_visible", False),
             "label_size": params.get("label_size", 12.0),
         })
 
