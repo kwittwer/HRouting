@@ -740,6 +740,8 @@ class MainWindow(QMainWindow):
         self.canvas.context_menu_requested.connect(self._show_canvas_context_menu)
         self.canvas.floor_plan_transform_updated.connect(
             self._on_floor_plan_transform_from_canvas)
+        self.canvas.floor_plan_polygon_changed.connect(
+            lambda _: self._mark_dirty())
 
         # Treeview selection sync
         self.param_panel.item_selected.connect(self.canvas.set_selected_item)

@@ -104,6 +104,7 @@ class CanvasWidget(QWidget):
     object_double_clicked = Signal(str, str)  # (object_type, object_id)
     context_menu_requested = Signal(str, str, object, object)  # (object_type, object_id, canvas_pt, global_pos)
     floor_plan_transform_updated = Signal(str, float, float, float)  # (fp_id, ox, oy, rot)
+    floor_plan_polygon_changed = Signal(str)       # emitted when floor/furniture polygon point is moved/added/deleted
     floor_plan_polygon_finished = Signal(str, list)
     mode_changed = Signal()  # emitted when tool mode changes
     export_frame_drawn = Signal(object)  # emitted with QRectF when export frame is finalized
@@ -3003,12 +3004,22 @@ class CanvasWidget(QWidget):
         # ── EARLY CHECK: Click on any elec cable point to drag it directly ──
         # This allows quick editing without needing to enter edit mode first
         if event.button() == Qt.LeftButton and self._mode == ToolMode.NONE:
-            # Check all cables for a point hit
+            # Check all cables for a point hit.
+            # Skip endpoints that are anchored to an AP – those positions are
+            # "owned" by the AP and should be handled by the AP drag logic below.
             for cid, pts in self._elec_cables.items():
                 if not self._elec_visible.get(cid, True):
                     continue
                 threshold = 20.0 / self._scale
+                start_ap = self._cable_start_ap.get(cid, "")
+                end_ap   = self._cable_end_ap.get(cid, "")
+                last_idx = len(pts) - 1
                 for i, pt in enumerate(pts):
+                    # Skip AP-anchored endpoints so the AP can be dragged instead
+                    if i == 0 and start_ap and start_ap in self._elec_points:
+                        continue
+                    if i == last_idx and end_ap and end_ap in self._elec_points:
+                        continue
                     if _qdist(canvas_pt, pt) < threshold:
                         # Found a cable point - start dragging it
                         self._dragging_route_point = (cid, i)
@@ -3316,6 +3327,14 @@ class CanvasWidget(QWidget):
                     self._dragging_route_point = (cid, hit)
                     self.setCursor(Qt.ClosedHandCursor)
                     self.update()
+                    return
+                # No point hit: check if another object was clicked to switch editing
+                clicked_obj = self._hit_any_object(canvas_pt)
+                if clicked_obj and clicked_obj != ("elec_cable", cid):
+                    self._exit_edit_mode()
+                    self.object_clicked.emit(clicked_obj[0], clicked_obj[1])
+                    self.object_switched_from_edit.emit(clicked_obj[0], clicked_obj[1])
+                    return
                 return
             elif event.button() == Qt.RightButton:
                 hit = self._hit_elec_cable_point(canvas_pt, cid)
@@ -3340,26 +3359,12 @@ class CanvasWidget(QWidget):
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_elec_cable_id = None
+                self._dragging_route_point = None
                 self.setCursor(Qt.ArrowCursor)
                 self.update()
                 return
             # Consume any other button event while in edit mode
             return
-
-            clicked_obj = self._hit_any_object(canvas_pt)
-            current_target = self._current_edit_target()
-            # Don't leave edit mode when clicking only on floor/background.
-            # This enables marquee selection drag over the floor plan.
-            is_background_floor_hit = (
-                clicked_obj is not None
-                and clicked_obj[0] == "floor_polygon"
-                and (current_target is None or current_target[0] != "floor_polygon")
-            )
-            if clicked_obj and clicked_obj != current_target and not is_background_floor_hit:
-                self._exit_edit_mode()
-                self.object_clicked.emit(clicked_obj[0], clicked_obj[1])
-                self.object_switched_from_edit.emit(clicked_obj[0], clicked_obj[1])
-                return
 
         # ── Anschlussleitung zeichnen ──
         if self._mode == ToolMode.DRAW_SUPPLY_LINE:
@@ -3430,6 +3435,7 @@ class CanvasWidget(QWidget):
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_supply_cid = None
+                self._dragging_route_point = None
                 self.setCursor(Qt.ArrowCursor)
                 self.update()
                 return
@@ -3539,6 +3545,44 @@ class CanvasWidget(QWidget):
                 return
 
         # ── Polygon bearbeiten ──
+                # ── HKV-Verbindungsleitung bearbeiten ──
+                if self._mode == ToolMode.EDIT_HKV_LINE and self._edit_hkv_line_id:
+                    lid = self._edit_hkv_line_id
+                    if event.button() == Qt.LeftButton:
+                        hit = self._hit_hkv_line_point(canvas_pt, lid)
+                        if hit is not None:
+                            self._dragging_route_point = (lid, hit)
+                            self.setCursor(Qt.ClosedHandCursor)
+                        return
+                    elif event.button() == Qt.RightButton:
+                        hit = self._hit_hkv_line_point(canvas_pt, lid)
+                        if hit is not None:
+                            pts = self._hkv_lines.get(lid, [])
+                            if len(pts) > 2:
+                                del pts[hit]
+                                self.hkv_line_changed.emit(lid)
+                                self.update()
+                            return
+                        hit = self._hit_hkv_line_edge(canvas_pt, lid)
+                        if hit is not None:
+                            idx1, idx2 = hit
+                            pts = self._hkv_lines[lid]
+                            p1, p2 = pts[idx1], pts[idx2]
+                            mid = QPointF((p1.x() + p2.x()) * 0.5,
+                                          (p1.y() + p2.y()) * 0.5)
+                            pts.insert(idx2, mid)
+                            self.hkv_line_changed.emit(lid)
+                            self.update()
+                        return
+                    elif event.button() == Qt.MiddleButton:
+                        self._mode = ToolMode.NONE
+                        self._edit_hkv_line_id = None
+                        self._dragging_route_point = None
+                        self.setCursor(Qt.ArrowCursor)
+                        self.update()
+                        return
+
+                # ── Polygon bearbeiten ──
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
             cid = self._edit_polygon_cid
             if event.button() == Qt.LeftButton:
@@ -4070,8 +4114,13 @@ class CanvasWidget(QWidget):
                     pts = self._supply_lines[cid]
                     ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
                     base_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
-                    # Snap last point to nearest HKV
-                    if idx == len(pts) - 1:
+                    if idx == 0:
+                        # First point stays locked to the heating circuit start point
+                        locked = self._start_points.get(cid)
+                        if locked:
+                            pts[0] = QPointF(locked)
+                    elif idx == len(pts) - 1:
+                        # Snap last point to nearest HKV
                         hkv = self._find_nearest_hkv(base_pt)
                         if hkv:
                             pts[idx] = QPointF(self._hkv_points[hkv])
@@ -4144,9 +4193,11 @@ class CanvasWidget(QWidget):
 
         # ── Label dragging (works in any mode / NONE) ──
         if self._dragging_label:
-            new_pos = QPointF(
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            raw_pos = QPointF(
                 canvas_pt.x() - self._label_drag_offset.x(),
                 canvas_pt.y() - self._label_drag_offset.y())
+            new_pos = raw_pos if ctrl_held else self._snap_to_grid(raw_pos)
             self._label_positions[self._dragging_label] = new_pos
             self.update()
             return
@@ -4186,6 +4237,11 @@ class CanvasWidget(QWidget):
             if hover_cursor == Qt.ArrowCursor:
                 ap_hit = self._hit_elec_point(canvas_pt)
                 if ap_hit:
+                    hover_cursor = Qt.OpenHandCursor
+
+            if hover_cursor == Qt.ArrowCursor:
+                hkv_hover = self._hit_hkv(canvas_pt)
+                if hkv_hover:
                     hover_cursor = Qt.OpenHandCursor
 
             if hover_cursor == Qt.ArrowCursor:
@@ -4346,6 +4402,7 @@ class CanvasWidget(QWidget):
                 self._dragging_route_point = None
                 self._edit_drag_last_pos = None
                 if self._edit_floor_polygon_id and cid == self._edit_floor_polygon_id:
+                    self.floor_plan_polygon_changed.emit(cid)
                     self.update()
                     return
                 if self._edit_elec_room_id and cid == self._edit_elec_room_id:
