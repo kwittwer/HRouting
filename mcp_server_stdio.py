@@ -21,10 +21,15 @@ Konfiguration in ~/.copilot/mcp-config.json oder per --additional-mcp-config.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import logging
 import math
+import re
 import sys
+import unicodedata
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger("hrouting.mcp-stdio")
@@ -38,8 +43,14 @@ class ProjectState:
 
     def __init__(self):
         self.path: Path | None = None
+        self.project_id: str | None = None
         self.data: dict = self._empty_project()
         self._dirty = False
+        self._revision_version = 0
+        self._source_disk_hash = ""
+        self._source_mtime_utc = ""
+        self._transactions: list[dict] = []
+        self._last_validation_report: dict | None = None
 
     @property
     def dirty(self) -> bool:
@@ -48,9 +59,140 @@ class ProjectState:
     @dirty.setter
     def dirty(self, value: bool):
         self._dirty = value
+        if value:
+            self._revision_version += 1
         if value and self.path:
             self.save()
             logger.debug("Auto-save: %s", self.path)
+
+    @staticmethod
+    def _stable_hash(data: dict) -> str:
+        canonical = json.dumps(
+            data,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _disk_hash(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _path_project_id(path: Path) -> str:
+        base = str(path.resolve()).replace("\\", "/")
+        digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
+        return f"project-{digest}"
+
+    def _update_source_state(self):
+        if not self.path or not self.path.exists():
+            self._source_disk_hash = ""
+            self._source_mtime_utc = ""
+            return
+        self._source_disk_hash = self._disk_hash(self.path)
+        mtime = datetime.fromtimestamp(self.path.stat().st_mtime, tz=UTC)
+        self._source_mtime_utc = mtime.isoformat()
+
+    def get_revision(self) -> dict:
+        return {
+            "project_id": self.project_id,
+            "revision": {
+                "hash": self._stable_hash(self.data),
+                "version": self._revision_version,
+                "mtime_utc": self._source_mtime_utc,
+                "dirty": self._dirty,
+            },
+            "source_revision": {
+                "disk_hash": self._source_disk_hash,
+                "mtime_utc": self._source_mtime_utc,
+            },
+        }
+
+    def assert_in_sync(self, expected_revision: str = "") -> dict:
+        if not self.path:
+            return {
+                "in_sync": True,
+                "current_revision": self.get_revision().get("revision", {}),
+                "expected_revision": expected_revision or None,
+            }
+
+        if not self.path.exists():
+            return {
+                "in_sync": False,
+                "drift_reason": "PROJECT_FILE_MISSING",
+                "current_revision": self.get_revision().get("revision", {}),
+                "expected_revision": expected_revision or None,
+            }
+
+        current_disk_hash = self._disk_hash(self.path)
+        current = self.get_revision().get("revision", {})
+
+        if expected_revision and current.get("hash") != expected_revision:
+            return {
+                "in_sync": False,
+                "drift_reason": "REVISION_MISMATCH",
+                "current_revision": current,
+                "expected_revision": expected_revision,
+            }
+
+        if self._source_disk_hash and current_disk_hash != self._source_disk_hash:
+            return {
+                "in_sync": False,
+                "drift_reason": "DISK_CHANGED_OUTSIDE_SESSION",
+                "current_revision": current,
+                "expected_revision": expected_revision or None,
+            }
+
+        return {
+            "in_sync": True,
+            "current_revision": current,
+            "expected_revision": expected_revision or None,
+        }
+
+    def push_transaction(
+        self,
+        *,
+        before_data: dict,
+        delta: dict,
+        before_revision: str,
+        after_revision: str,
+    ) -> str:
+        tx_id = f"tx-{len(self._transactions) + 1}"
+        self._transactions.append({
+            "transaction_id": tx_id,
+            "before_data": before_data,
+            "delta": delta,
+            "before_revision": before_revision,
+            "after_revision": after_revision,
+            "created_at": datetime.now(tz=UTC).isoformat(),
+        })
+        return tx_id
+
+    def rollback_transaction(self, transaction_id: str = "") -> dict:
+        if not self._transactions:
+            return {"error": "TRANSACTION_NOT_FOUND"}
+
+        tx = None
+        if transaction_id:
+            for candidate in self._transactions:
+                if candidate.get("transaction_id") == transaction_id:
+                    tx = candidate
+                    break
+            if tx is None:
+                return {"error": "TRANSACTION_NOT_FOUND", "transaction_id": transaction_id}
+        else:
+            tx = self._transactions[-1]
+
+        self.data = copy.deepcopy(tx.get("before_data", self._empty_project()))
+        self.dirty = True
+
+        return {
+            "rolled_back": True,
+            "transaction_id": tx.get("transaction_id"),
+            "restored_revision": self.get_revision().get("revision", {}),
+            "reverted_delta": tx.get("delta", {}),
+        }
 
     @staticmethod
     def _empty_project() -> dict:
@@ -104,8 +246,17 @@ class ProjectState:
         try:
             self.data = json.loads(p.read_text(encoding="utf-8"))
             self.path = p
+            self.project_id = self._path_project_id(p)
             self._dirty = False
-            return {"status": "ok", "path": str(p), "info": self._summary()}
+            self._revision_version += 1
+            self._update_source_state()
+            return {
+                "status": "ok",
+                "path": str(p),
+                "project_id": self.project_id,
+                "revision": self.get_revision().get("revision", {}),
+                "info": self._summary(),
+            }
         except Exception as e:
             return {"error": f"Fehler beim Laden: {e}"}
 
@@ -120,8 +271,16 @@ class ProjectState:
                 encoding="utf-8",
             )
             self.path = target
+            if not self.project_id:
+                self.project_id = self._path_project_id(target)
             self._dirty = False
-            return {"status": "ok", "path": str(target)}
+            self._update_source_state()
+            return {
+                "status": "ok",
+                "path": str(target),
+                "project_id": self.project_id,
+                "revision": self.get_revision().get("revision", {}),
+            }
         except Exception as e:
             return {"error": f"Fehler beim Speichern: {e}"}
 
@@ -166,16 +325,269 @@ def _create_stdio_mcp():
         ),
     )
 
+    def _norm_text(value: str) -> str:
+        if value is None:
+            return ""
+        v = unicodedata.normalize("NFKD", value)
+        v = "".join(ch for ch in v if not unicodedata.combining(ch))
+        v = v.lower().strip()
+        v = re.sub(r"\s+", " ", v)
+        v = re.sub(r"[^a-z0-9 ]+", "", v)
+        return v
+
+    def _cable_endpoint_position(cable_id: str, side: str) -> list[float] | None:
+        poly = _state.data.get("canvas", {}).get("elec_cables", {}).get(cable_id, [])
+        if not poly:
+            return None
+        return poly[0] if side == "start" else poly[-1]
+
+    def _collect_candidate_points_by_name(name_value: str, normalized: bool = False) -> list[dict]:
+        points = _state.data.get("params", {}).get("elec_points", {})
+        target = _norm_text(name_value) if normalized else name_value
+        result: list[dict] = []
+        for pid, pdata in points.items():
+            pname = pdata.get("name", "")
+            cmp_name = _norm_text(pname) if normalized else pname
+            if cmp_name == target:
+                result.append({"point_id": pid, "name": pname})
+        return sorted(result, key=lambda x: x["point_id"])
+
+    def _candidate_from_geometry(cable_id: str, side: str, max_distance_px: float = 2500.0) -> list[dict]:
+        ep = _cable_endpoint_position(cable_id, side)
+        if ep is None:
+            return []
+        ex, ey = ep[0], ep[1]
+        points_pos = _state.data.get("canvas", {}).get("elec_points", {})
+        candidates: list[dict] = []
+        for pid, pos in points_pos.items():
+            if not isinstance(pos, list) or len(pos) < 2:
+                continue
+            dist = math.dist([ex, ey], [float(pos[0]), float(pos[1])])
+            confidence = max(0.0, 1.0 - (dist / max_distance_px))
+            if confidence <= 0:
+                continue
+            candidates.append({
+                "point_id": pid,
+                "confidence": round(confidence, 4),
+                "reason": "nearest_geometry",
+                "strategy": "nearest_geometry",
+                "distance_px": round(dist, 2),
+            })
+        candidates.sort(key=lambda c: (-c["confidence"], c["point_id"]))
+        return candidates[:8]
+
+    def _resolve_endpoint_candidates(
+        cable_id: str,
+        side: str,
+        value,
+        strategy: list[str] | None = None,
+        max_distance_px: float = 2500.0,
+        max_candidates: int = 8,
+    ) -> list[dict]:
+        strategies = strategy or [
+            "exact_id",
+            "exact_name",
+            "normalized_name",
+            "nearest_geometry",
+        ]
+        points = _state.data.get("params", {}).get("elec_points", {})
+        merged: dict[str, dict] = {}
+
+        def _upsert(candidate: dict):
+            pid = candidate["point_id"]
+            existing = merged.get(pid)
+            if existing is None or candidate["confidence"] > existing["confidence"]:
+                merged[pid] = candidate
+
+        str_value = value if isinstance(value, str) else ""
+
+        if "exact_id" in strategies and str_value and str_value in points:
+            _upsert({
+                "point_id": str_value,
+                "confidence": 1.0,
+                "reason": "exact_id",
+                "strategy": "exact_id",
+            })
+
+        if "exact_name" in strategies and str_value:
+            exact = _collect_candidate_points_by_name(str_value, normalized=False)
+            conf = 0.96 if len(exact) == 1 else 0.65
+            for item in exact:
+                _upsert({
+                    "point_id": item["point_id"],
+                    "confidence": conf,
+                    "reason": "exact_name",
+                    "strategy": "exact_name",
+                })
+
+        if "normalized_name" in strategies and str_value:
+            normalized = _collect_candidate_points_by_name(str_value, normalized=True)
+            conf = 0.9 if len(normalized) == 1 else 0.6
+            for item in normalized:
+                _upsert({
+                    "point_id": item["point_id"],
+                    "confidence": conf,
+                    "reason": "normalized_name",
+                    "strategy": "normalized_name",
+                })
+
+        if "nearest_geometry" in strategies:
+            for item in _candidate_from_geometry(
+                cable_id,
+                side,
+                max_distance_px=max_distance_px,
+            ):
+                _upsert(item)
+
+        ranked = sorted(merged.values(), key=lambda c: (-c["confidence"], c["point_id"]))
+        return ranked[:max_candidates]
+
+    def _collect_reference_issues(
+        scope: str = "elec_cables",
+        include_resolvable: bool = True,
+    ) -> list[dict]:
+        issues: list[dict] = []
+        if scope not in ("elec_cables", "all"):
+            return issues
+
+        params = _state.data.get("params", {})
+        canvas = _state.data.get("canvas", {})
+        points = params.get("elec_points", {})
+        cables = params.get("elec_cables", {})
+        start_map = canvas.get("cable_start_ap", {})
+        end_map = canvas.get("cable_end_ap", {})
+
+        for cable_id in sorted(cables.keys()):
+            for side, cmap, field in (
+                ("start", start_map, "start_ap_id"),
+                ("end", end_map, "end_ap_id"),
+            ):
+                value = cmap.get(cable_id, "")
+                reason = None
+                severity = "error"
+
+                if value is None or value == "":
+                    reason = "missing"
+                    severity = "warning"
+                elif not isinstance(value, str):
+                    reason = "invalid_type"
+                elif value in points:
+                    continue
+                else:
+                    same_name = _collect_candidate_points_by_name(value, normalized=False)
+                    same_norm = _collect_candidate_points_by_name(value, normalized=True)
+                    if len(same_name) == 1 or len(same_norm) == 1:
+                        reason = "name_instead_of_id"
+                    elif len(same_name) > 1 or len(same_norm) > 1:
+                        reason = "ambiguous_name"
+                    else:
+                        reason = "not_found"
+
+                candidates = []
+                if include_resolvable:
+                    candidates = _resolve_endpoint_candidates(cable_id, side, value)
+
+                issues.append({
+                    "issue_id": f"ref-{cable_id}-{side}",
+                    "category": "ref",
+                    "entity_type": "elec_cable",
+                    "entity_id": cable_id,
+                    "cable_id": cable_id,
+                    "side": side,
+                    "field": field,
+                    "value": value,
+                    "reason": reason,
+                    "severity": severity,
+                    "resolvable_candidates": candidates,
+                })
+
+        return issues
+
+    def _build_endpoint_delta(mappings: list[dict], strict: bool = True) -> dict:
+        params = _state.data.get("params", {})
+        canvas = _state.data.get("canvas", {})
+        cables = params.get("elec_cables", {})
+        points = params.get("elec_points", {})
+        start_map = canvas.setdefault("cable_start_ap", {})
+        end_map = canvas.setdefault("cable_end_ap", {})
+
+        conflicts: list[dict] = []
+        operations: list[dict] = []
+        seen: dict[tuple[str, str], str] = {}
+
+        for idx, mapping in enumerate(mappings):
+            cable_id = mapping.get("cable_id", "")
+            side = mapping.get("side", "")
+            target = mapping.get("target_point_id", "")
+
+            if side not in ("start", "end"):
+                conflicts.append({"index": idx, "error": "INVALID_SIDE", "mapping": mapping})
+                continue
+
+            if cable_id not in cables:
+                conflicts.append({"index": idx, "error": "CABLE_NOT_FOUND", "mapping": mapping})
+                continue
+
+            if target and target not in points:
+                conflicts.append({"index": idx, "error": "INVALID_TARGET_AP", "mapping": mapping})
+                continue
+
+            key = (cable_id, side)
+            if key in seen and seen[key] != target:
+                conflicts.append({
+                    "index": idx,
+                    "error": "CONFLICTING_MAPPING",
+                    "mapping": mapping,
+                    "previous_target": seen[key],
+                })
+                continue
+            seen[key] = target
+
+            cmap = start_map if side == "start" else end_map
+            before = cmap.get(cable_id, "")
+            after = target
+            if before == after:
+                continue
+
+            operations.append({
+                "op": "remove" if after == "" else "replace",
+                "path": f"/canvas/{'cable_start_ap' if side == 'start' else 'cable_end_ap'}/{cable_id}",
+                "before": before,
+                "after": after,
+                "cable_id": cable_id,
+                "side": side,
+            })
+
+        applicable = len(operations) > 0 and (not strict or len(conflicts) == 0)
+        return {
+            "applicable": applicable,
+            "strict": strict,
+            "operations": operations,
+            "conflicts": conflicts,
+        }
+
     # ── Projekt-Management ────────────────────────────────────────
 
     @mcp.tool()
-    def open_project(path: str) -> dict:
-        """HRP-Projektdatei öffnen/laden.
+    def open_project(path: str = "", project_id: str = "") -> dict:
+        """HRP-Projektdatei öffnen/laden oder aktives Projekt auswählen.
 
         Args:
             path: Pfad zur .hrp-Datei (absolut oder relativ)
+            project_id: Bereits geladene Projekt-ID.
         """
-        return _state.load(path)
+        if path:
+            return _state.load(path)
+        if project_id:
+            if _state.project_id == project_id:
+                return {
+                    "status": "ok",
+                    "project_id": _state.project_id,
+                    "revision": _state.get_revision().get("revision", {}),
+                    "info": _state._summary(),
+                }
+            return {"error": "PROJECT_NOT_FOUND", "project_id": project_id}
+        return {"error": "AMBIGUOUS_PROJECT_REF", "message": "Bitte path oder project_id angeben."}
 
     @mcp.tool()
     def save_project(path: str = "") -> dict:
@@ -185,6 +597,53 @@ def _create_stdio_mcp():
             path: Dateipfad (.hrp). Leer = aktueller Projektpfad.
         """
         return _state.save(path)
+
+    @mcp.tool()
+    def reload_project_from_disk(project_id: str = "", force: bool = False) -> dict:
+        """Projekt aus Datei neu laden und Session-Änderungen verwerfen.
+
+        Args:
+            project_id: Zu ladende Projekt-ID (leer = aktives Projekt)
+            force: True erzwingt Reload trotz ungespeicherter Änderungen.
+        """
+        if not _state.path:
+            return {"error": "PROJECT_NOT_OPEN"}
+        if project_id and _state.project_id != project_id:
+            return {"error": "PROJECT_NOT_FOUND", "project_id": project_id}
+        if _state.dirty and not force:
+            return {"error": "UNSAVED_CHANGES", "project_id": _state.project_id}
+
+        had_local_changes = bool(_state.dirty)
+        old_rev = _state.get_revision().get("revision", {})
+        load_result = _state.load(str(_state.path))
+        if load_result.get("error"):
+            return load_result
+
+        return {
+            "project_id": _state.project_id,
+            "old_revision": old_rev,
+            "new_revision": _state.get_revision().get("revision", {}),
+            "discarded_local_changes": had_local_changes,
+            "status": "reloaded",
+        }
+
+    @mcp.tool()
+    def get_project_revision(project_id: str = "") -> dict:
+        """Aktuelle Projekt-Revision (hash/version/mtime) abrufen."""
+        if project_id and _state.project_id != project_id:
+            return {"error": "PROJECT_NOT_FOUND", "project_id": project_id}
+        if not _state.project_id:
+            return {"error": "PROJECT_NOT_OPEN"}
+        return _state.get_revision()
+
+    @mcp.tool()
+    def assert_project_in_sync(project_id: str = "", expected_revision: str = "") -> dict:
+        """Prüft, ob Session und Datei synchron sind (inkl. optionaler Revision)."""
+        if project_id and _state.project_id != project_id:
+            return {"error": "PROJECT_NOT_FOUND", "project_id": project_id}
+        if not _state.project_id:
+            return {"error": "PROJECT_NOT_OPEN"}
+        return _state.assert_in_sync(expected_revision=expected_revision)
 
     @mcp.tool()
     def get_project_summary() -> dict:
@@ -584,24 +1043,479 @@ def _create_stdio_mcp():
     # ── Validierung ───────────────────────────────────────────────
 
     @mcp.tool()
-    def validate_project() -> dict:
-        """Projekt gegen das HRP-Schema validieren."""
-        try:
-            import jsonschema
-            schema_path = BASE_DIR / "hrp_schema.json"
-            if not schema_path.exists():
-                return {"valid": False, "errors": ["Schema nicht gefunden."]}
-            schema = json.loads(schema_path.read_text(encoding="utf-8"))
-            validator = jsonschema.Draft202012Validator(schema)
-            errors = [
-                {"path": "/".join(str(s) for s in e.absolute_path), "message": e.message}
-                for e in validator.iter_errors(_state.data)
+    def validate_project(categories: list[str] | None = None) -> dict:
+        """Projekt validieren (kategoriespezifisch).
+
+        Args:
+            categories: z.B. ['schema'], ['ref'] oder ['schema','ref'].
+                        Leer/None = ['schema','ref'].
+        """
+        selected = categories or ["schema", "ref"]
+        unsupported = [c for c in selected if c not in ("schema", "ref")]
+        if unsupported:
+            return {"error": "UNKNOWN_CATEGORY", "categories": unsupported}
+
+        by_category: dict[str, list] = {}
+        errors: list = []
+        warnings: list = []
+
+        if "schema" in selected:
+            try:
+                import jsonschema
+                schema_path = BASE_DIR / "hrp_schema.json"
+                if not schema_path.exists():
+                    schema_errors = [{"path": "", "message": "Schema nicht gefunden."}]
+                else:
+                    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+                    validator = jsonschema.Draft202012Validator(schema)
+                    schema_errors = [
+                        {
+                            "path": "/".join(str(s) for s in e.absolute_path),
+                            "message": e.message,
+                        }
+                        for e in validator.iter_errors(_state.data)
+                    ]
+                by_category["schema"] = schema_errors
+                errors.extend(schema_errors)
+            except ImportError:
+                return {"error": "jsonschema-Paket nicht installiert."}
+            except Exception as e:
+                by_category["schema"] = [{"path": "", "message": str(e)}]
+                errors.append({"path": "", "message": str(e)})
+
+        if "ref" in selected:
+            ref_issues = _collect_reference_issues(scope="all", include_resolvable=False)
+            by_category["ref"] = ref_issues
+            for issue in ref_issues:
+                if issue.get("severity") == "warning":
+                    warnings.append(issue)
+                else:
+                    errors.append(issue)
+
+        report = {
+            "valid": len(errors) == 0,
+            "categories": selected,
+            "issues_count": {
+                "total": sum(len(v) for v in by_category.values()),
+                **{k: len(v) for k, v in by_category.items()},
+            },
+            "issues_by_category": by_category,
+            "errors": errors,
+            "warnings": warnings,
+        }
+        _state._last_validation_report = report
+        return report
+
+    @mcp.tool()
+    def get_reference_issues(
+        scope: str = "elec_cables",
+        include_resolvable: bool = True,
+    ) -> dict:
+        """Fokussierte Referenz-Issues für Kabel-Endpunkte abrufen."""
+        if scope not in ("elec_cables", "all"):
+            return {"error": "UNSUPPORTED_SCOPE", "scope": scope}
+        issues = _collect_reference_issues(
+            scope=scope,
+            include_resolvable=include_resolvable,
+        )
+        return {
+            "scope": scope,
+            "include_resolvable": include_resolvable,
+            "issues": issues,
+            "count": len(issues),
+        }
+
+    @mcp.tool()
+    def suggest_endpoint_mapping(
+        cable_id: str,
+        side: str,
+        strategy: list[str] | None = None,
+    ) -> dict:
+        """Kandidaten für start/end AP-Mapping eines Kabels vorschlagen."""
+        if side not in ("start", "end"):
+            return {"error": "INVALID_SIDE", "side": side}
+        cables = _state.data.get("params", {}).get("elec_cables", {})
+        if cable_id not in cables:
+            return {"error": "CABLE_NOT_FOUND", "cable_id": cable_id}
+
+        cmap_key = "cable_start_ap" if side == "start" else "cable_end_ap"
+        current_value = _state.data.get("canvas", {}).get(cmap_key, {}).get(cable_id, "")
+        candidates = _resolve_endpoint_candidates(
+            cable_id,
+            side,
+            current_value,
+            strategy=strategy,
+        )
+        return {
+            "cable_id": cable_id,
+            "side": side,
+            "value": current_value,
+            "strategy": strategy or ["exact_id", "exact_name", "normalized_name", "nearest_geometry"],
+            "candidates": candidates,
+        }
+
+    @mcp.tool()
+    def bulk_suggest_endpoint_mappings(
+        missing_or_invalid: bool = True,
+        confidence_threshold: float = 0.8,
+        strategy: list[str] | None = None,
+    ) -> dict:
+        """Bulk-Vorschläge für fehlende/ungültige Kabel-Endpunkte erzeugen."""
+        issues = _collect_reference_issues(scope="elec_cables", include_resolvable=False)
+        suggestions = []
+        skipped = []
+
+        for issue in issues:
+            if missing_or_invalid and issue.get("reason") not in (
+                "missing", "not_found", "name_instead_of_id", "ambiguous_name", "invalid_type"
+            ):
+                continue
+            cable_id = issue.get("cable_id", "")
+            side = issue.get("side", "")
+            val = issue.get("value")
+
+            candidates = _resolve_endpoint_candidates(
+                cable_id,
+                side,
+                val,
+                strategy=strategy,
+            )
+            if not candidates:
+                skipped.append({"issue_id": issue.get("issue_id"), "reason": "NO_CANDIDATES"})
+                continue
+
+            top = candidates[0]
+            second = candidates[1] if len(candidates) > 1 else None
+            ambiguous = second is not None and abs(top["confidence"] - second["confidence"]) < 0.05
+
+            if top["confidence"] >= confidence_threshold and not ambiguous:
+                suggestions.append({
+                    "cable_id": cable_id,
+                    "side": side,
+                    "target_point_id": top["point_id"],
+                    "source_issue_id": issue.get("issue_id"),
+                    "confidence": top["confidence"],
+                    "reason": top.get("reason", ""),
+                    "strategy": top.get("strategy", ""),
+                })
+            else:
+                skipped.append({
+                    "issue_id": issue.get("issue_id"),
+                    "reason": "LOW_CONFIDENCE" if not ambiguous else "AMBIGUOUS_TOP_CANDIDATE",
+                    "top_confidence": top["confidence"],
+                })
+
+        suggestions.sort(key=lambda x: (x["cable_id"], x["side"], -x["confidence"]))
+        return {
+            "confidence_threshold": confidence_threshold,
+            "strategy": strategy or ["exact_id", "exact_name", "normalized_name", "nearest_geometry"],
+            "suggestions": suggestions,
+            "skipped": skipped,
+            "count": len(suggestions),
+        }
+
+    @mcp.tool()
+    def preview_endpoint_patch(mappings: list[dict], strict: bool = True) -> dict:
+        """Patch auf Kabel-Endpunkte simulieren (Diff/Konflikte/Impact)."""
+        current_revision = _state.get_revision().get("revision", {}).get("hash", "")
+        delta = _build_endpoint_delta(mappings, strict=strict)
+
+        simulated = copy.deepcopy(_state.data)
+        for op in delta["operations"]:
+            side_map = "cable_start_ap" if op.get("side") == "start" else "cable_end_ap"
+            cmap = simulated.setdefault("canvas", {}).setdefault(side_map, {})
+            cable_id = op.get("cable_id", "")
+            after = op.get("after", "")
+            if after:
+                cmap[cable_id] = after
+            else:
+                cmap.pop(cable_id, None)
+
+        after_revision = _state._stable_hash(simulated)
+        changed_cables = sorted({op.get("cable_id", "") for op in delta["operations"]})
+        preview_id = hashlib.sha1(
+            json.dumps({"rev": current_revision, "mappings": mappings}, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+
+        return {
+            "preview_id": preview_id,
+            "conflicts": delta["conflicts"],
+            "impact": {
+                "changed_operations": len(delta["operations"]),
+                "changed_cables": len(changed_cables),
+                "cable_ids": changed_cables,
+            },
+            "delta": {
+                "before_revision": current_revision,
+                "after_revision": after_revision,
+                "operations": delta["operations"],
+            },
+            "applicable": delta["applicable"],
+            "strict": strict,
+        }
+
+    @mcp.tool()
+    def apply_endpoint_patch(
+        mappings: list[dict],
+        mode: str = "transactional",
+        strict: bool = True,
+        expected_revision: str = "",
+    ) -> dict:
+        """Patch transaktional anwenden und maschinenlesbares Delta zurückgeben."""
+        if mode != "transactional":
+            return {"error": "UNSUPPORTED_MODE", "mode": mode}
+
+        sync = _state.assert_in_sync(expected_revision=expected_revision)
+        if not sync.get("in_sync", False):
+            return {"error": sync.get("drift_reason", "REVISION_MISMATCH"), "sync": sync}
+
+        preview = preview_endpoint_patch(mappings=mappings, strict=strict)
+        if strict and preview.get("conflicts"):
+            return {
+                "error": "CONFLICTS_PRESENT",
+                "conflicts": preview.get("conflicts", []),
+                "delta": preview.get("delta", {}),
+            }
+
+        operations = preview.get("delta", {}).get("operations", [])
+        if not operations:
+            return {
+                "transaction_id": None,
+                "committed": False,
+                "message": "NO_CHANGES",
+                "delta": preview.get("delta", {}),
+            }
+
+        before_data = copy.deepcopy(_state.data)
+        before_revision = _state.get_revision().get("revision", {}).get("hash", "")
+
+        for op in operations:
+            side = op.get("side")
+            side_map = "cable_start_ap" if side == "start" else "cable_end_ap"
+            cmap = _state.data.setdefault("canvas", {}).setdefault(side_map, {})
+            cable_id = op.get("cable_id", "")
+            after = op.get("after", "")
+            if after:
+                cmap[cable_id] = after
+            else:
+                cmap.pop(cable_id, None)
+
+        _state.dirty = True
+        after_revision = _state.get_revision().get("revision", {}).get("hash", "")
+        delta = {
+            "before_revision": before_revision,
+            "after_revision": after_revision,
+            "operations": operations,
+        }
+
+        transaction_id = _state.push_transaction(
+            before_data=before_data,
+            delta=delta,
+            before_revision=before_revision,
+            after_revision=after_revision,
+        )
+
+        return {
+            "transaction_id": transaction_id,
+            "committed": True,
+            "new_revision": _state.get_revision().get("revision", {}),
+            "delta": delta,
+            "changed_entities": {
+                "elec_cables": sorted({op.get("cable_id", "") for op in operations}),
+            },
+        }
+
+    @mcp.tool()
+    def rollback_last_patch(transaction_id: str = "") -> dict:
+        """Letzte (oder angegebene) transaktionale Änderung zurückrollen."""
+        return _state.rollback_transaction(transaction_id=transaction_id)
+
+    @mcp.tool()
+    def list_cables(
+        missing_start: bool = False,
+        missing_end: bool = False,
+        invalid_ref: bool = False,
+    ) -> dict:
+        """Kabel mit optionalem Referenz-Filter auflisten."""
+        params = _state.data.get("params", {})
+        canvas = _state.data.get("canvas", {})
+        points = params.get("elec_points", {})
+        cables = params.get("elec_cables", {})
+        start_map = canvas.get("cable_start_ap", {})
+        end_map = canvas.get("cable_end_ap", {})
+
+        result = []
+        for cable_id, cdata in sorted(cables.items()):
+            start_val = start_map.get(cable_id, "")
+            end_val = end_map.get(cable_id, "")
+            is_missing_start = start_val == ""
+            is_missing_end = end_val == ""
+            is_invalid_ref = (
+                (start_val != "" and start_val not in points)
+                or (end_val != "" and end_val not in points)
+            )
+
+            if missing_start and not is_missing_start:
+                continue
+            if missing_end and not is_missing_end:
+                continue
+            if invalid_ref and not is_invalid_ref:
+                continue
+
+            result.append({
+                "cable_id": cable_id,
+                "name": cdata.get("name", cable_id),
+                "start_ap": start_val,
+                "end_ap": end_val,
+                "missing_start": is_missing_start,
+                "missing_end": is_missing_end,
+                "invalid_ref": is_invalid_ref,
+            })
+
+        return {
+            "count": len(result),
+            "cables": result,
+        }
+
+    @mcp.tool()
+    def bulk_clear_invalid_endpoints(
+        missing_start: bool = False,
+        missing_end: bool = False,
+        invalid_ref: bool = True,
+        dry_run: bool = False,
+    ) -> dict:
+        """Ungültige Endpunkt-Referenzen in Bulk leeren."""
+        cable_data = list_cables(
+            missing_start=missing_start,
+            missing_end=missing_end,
+            invalid_ref=invalid_ref,
+        ).get("cables", [])
+        points = _state.data.get("params", {}).get("elec_points", {})
+        mappings = []
+        for c in cable_data:
+            if c.get("start_ap") and c.get("start_ap") not in points:
+                mappings.append({
+                    "cable_id": c["cable_id"],
+                    "side": "start",
+                    "target_point_id": "",
+                    "source_issue_id": f"clear-{c['cable_id']}-start",
+                    "confidence": 1.0,
+                })
+            if c.get("end_ap") and c.get("end_ap") not in points:
+                mappings.append({
+                    "cable_id": c["cable_id"],
+                    "side": "end",
+                    "target_point_id": "",
+                    "source_issue_id": f"clear-{c['cable_id']}-end",
+                    "confidence": 1.0,
+                })
+
+        if dry_run:
+            return preview_endpoint_patch(mappings=mappings, strict=False)
+
+        return apply_endpoint_patch(mappings=mappings, mode="transactional", strict=False)
+
+    @mcp.tool()
+    def bulk_apply_resolver(
+        strategy: list[str] | None = None,
+        threshold: float = 0.8,
+        dry_run: bool = True,
+        strict: bool = True,
+    ) -> dict:
+        """Resolver in Bulk anwenden (optional Dry-Run)."""
+        suggested = bulk_suggest_endpoint_mappings(
+            missing_or_invalid=True,
+            confidence_threshold=threshold,
+            strategy=strategy,
+        )
+        mappings = suggested.get("suggestions", [])
+        if dry_run:
+            preview = preview_endpoint_patch(mappings=mappings, strict=strict)
+            return {
+                "dry_run": True,
+                "proposed": len(mappings),
+                "preview": preview,
+                "skipped": suggested.get("skipped", []),
+            }
+
+        applied = apply_endpoint_patch(
+            mappings=mappings,
+            mode="transactional",
+            strict=strict,
+        )
+        return {
+            "dry_run": False,
+            "proposed": len(mappings),
+            "applied": applied,
+            "skipped": suggested.get("skipped", []),
+        }
+
+    @mcp.tool()
+    def export_validation_report(
+        categories: list[str] | None = None,
+        format: str = "json",
+        include_before_after: bool = True,
+    ) -> dict:
+        """Validierungsreport exportieren (json/md)."""
+        report = validate_project(categories=categories or ["ref"])
+        if report.get("error"):
+            return report
+
+        revision = _state.get_revision().get("revision", {})
+        payload = {
+            "generated_at": datetime.now(tz=UTC).isoformat(),
+            "project_id": _state.project_id,
+            "revision": revision,
+            "report": report,
+        }
+
+        if include_before_after and _state._transactions:
+            last_tx = _state._transactions[-1]
+            payload["before_after"] = {
+                "before_revision": last_tx.get("before_revision"),
+                "after_revision": last_tx.get("after_revision"),
+                "transaction_id": last_tx.get("transaction_id"),
+            }
+
+        if format == "json":
+            return {
+                "format": "json",
+                "summary": report.get("issues_count", {}),
+                "generated_at": payload["generated_at"],
+                "report": payload,
+            }
+
+        if format == "md":
+            summary = report.get("issues_count", {})
+            md = [
+                "# Validation Report",
+                "",
+                f"- project_id: {_state.project_id}",
+                f"- generated_at: {payload['generated_at']}",
+                f"- valid: {report.get('valid')}",
+                f"- total issues: {summary.get('total', 0)}",
             ]
-            return {"valid": len(errors) == 0, "errors": errors[:10]}
-        except ImportError:
-            return {"error": "jsonschema-Paket nicht installiert."}
-        except Exception as e:
-            return {"valid": False, "errors": [str(e)]}
+            for cat, count in summary.items():
+                if cat == "total":
+                    continue
+                md.append(f"- {cat}: {count}")
+            if include_before_after and payload.get("before_after"):
+                ba = payload["before_after"]
+                md.extend([
+                    "",
+                    "## Before/After",
+                    f"- transaction_id: {ba.get('transaction_id')}",
+                    f"- before_revision: {ba.get('before_revision')}",
+                    f"- after_revision: {ba.get('after_revision')}",
+                ])
+            return {
+                "format": "md",
+                "summary": summary,
+                "generated_at": payload["generated_at"],
+                "report": "\n".join(md),
+            }
+
+        return {"error": "UNSUPPORTED_FORMAT", "format": format}
 
     # ── Grundriss-Tools ───────────────────────────────────────────
 
