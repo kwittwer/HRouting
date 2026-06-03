@@ -802,6 +802,7 @@ class MainWindow(QMainWindow):
         self.param_panel.add_text_requested.connect(self._add_text)
         self.param_panel.delete_text_requested.connect(self._delete_text)
         self.param_panel.heating_global_changed.connect(self._recalc_all_circuits)
+        self.param_panel.bom_metadata_changed.connect(self._mark_dirty)
 
         # Dirty-tracking: jede inhaltliche Änderung markiert als unsaved
         self.canvas.polygon_finished.connect(self._mark_dirty)
@@ -4037,7 +4038,10 @@ class MainWindow(QMainWindow):
         if ptype == "heating":
             return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
         if ptype == "elektro":
-            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv", "el_up_distribution"]
+            return [
+                "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
+                "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
+            ]
         return []
 
     def _default_pdf_export_pages(self) -> list[dict]:
@@ -5045,6 +5049,8 @@ class MainWindow(QMainWindow):
                         "spec": str(slot.get("spec", "") or "").strip(),
                         "label": str(slot.get("label", "") or "").strip(),
                         "assignment": str(slot.get("assignment", "") or "").strip(),
+                        "manufacturer": str(slot.get("manufacturer", "") or "").strip(),
+                        "article_number": str(slot.get("article_number", "") or "").strip(),
                         "note": str(slot.get("note", "") or "").strip(),
                     }
                     for slot in slots if isinstance(slot, dict)
@@ -5080,6 +5086,8 @@ class MainWindow(QMainWindow):
                     "spec": slot["spec"],
                     "label": slot["label"],
                     "assignment": slot["assignment"],
+                    "manufacturer": slot["manufacturer"],
+                    "article_number": slot["article_number"],
                     "note": slot["note"],
                 })
         return rows
@@ -5116,6 +5124,8 @@ class MainWindow(QMainWindow):
                         "spec": str(s.get("spec", "") or "").strip(),
                         "label": str(s.get("label", "") or "").strip(),
                         "assignment": str(s.get("assignment", "") or "").strip(),
+                        "manufacturer": str(s.get("manufacturer", "") or "").strip(),
+                        "article_number": str(s.get("article_number", "") or "").strip(),
                         "note": str(s.get("note", "") or "").strip(),
                     }
                     for s in slots_raw if isinstance(s, dict)
@@ -5230,6 +5240,238 @@ class MainWindow(QMainWindow):
             type_name = self._describe_ap_type(params)
             counts[type_name] += 1
         return dict(sorted(counts.items(), key=lambda kv: kv[0].lower()))
+
+    @staticmethod
+    def _safe_te_count(te_start: int, te_end: int) -> int:
+        if te_end < te_start:
+            te_start, te_end = te_end, te_start
+        return max(0, (te_end - te_start + 1))
+
+    @staticmethod
+    def _bom_catalog_key(item_type: str, key: str) -> str:
+        return f"{str(item_type or '').strip()}|{str(key or '').strip()}"
+
+    def _apply_bom_metadata_to_rows(self, rows_by_section: dict[str, list[dict]]) -> dict[str, list[dict]]:
+        metadata = (
+            self.param_panel.get_bom_metadata()
+            if hasattr(self.param_panel, "get_bom_metadata")
+            else {}
+        )
+        catalog = metadata.get("item_catalog", {}) if isinstance(metadata, dict) else {}
+        custom_items = metadata.get("custom_items", []) if isinstance(metadata, dict) else []
+
+        enriched: dict[str, list[dict]] = {
+            key: [dict(row) for row in rows]
+            for key, rows in rows_by_section.items()
+        }
+        enriched.setdefault("custom_bom_rows", [])
+
+        for section_key, rows in enriched.items():
+            for row in rows:
+                row.setdefault("manufacturer", "")
+                row.setdefault("article_number", "")
+                item_type = str(row.get("item_type", "") or "")
+                item_key = str(row.get("key", "") or "")
+                catalog_key = self._bom_catalog_key(item_type, item_key)
+                entry = catalog.get(catalog_key, {}) if isinstance(catalog, dict) else {}
+                if isinstance(entry, dict):
+                    manufacturer = str(entry.get("manufacturer", "") or "").strip()
+                    article_number = str(entry.get("article_number", "") or "").strip()
+                    description_override = str(entry.get("description_override", "") or "").strip()
+                    if manufacturer:
+                        row["manufacturer"] = manufacturer
+                    if article_number:
+                        row["article_number"] = article_number
+                    if description_override:
+                        row["description"] = description_override
+
+        if isinstance(custom_items, list):
+            for item in custom_items:
+                if not isinstance(item, dict):
+                    continue
+                section_key = str(item.get("section_key", "custom_bom_rows") or "custom_bom_rows").strip()
+                section_key = section_key or "custom_bom_rows"
+                enriched.setdefault(section_key, [])
+                enriched[section_key].append({
+                    "category": str(item.get("category", "Manuell") or "Manuell").strip(),
+                    "item_type": str(item.get("item_type", "custom") or "custom").strip(),
+                    "key": str(item.get("key", item.get("custom_id", "")) or "").strip(),
+                    "description": str(item.get("description", "") or "").strip(),
+                    "unit": str(item.get("unit", "Stk") or "Stk").strip(),
+                    "quantity": float(item.get("quantity", 0.0) or 0.0),
+                    "manufacturer": str(item.get("manufacturer", "") or "").strip(),
+                    "article_number": str(item.get("article_number", "") or "").strip(),
+                    "note": str(item.get("note", "") or "").strip(),
+                    "custom_id": str(item.get("custom_id", "") or "").strip(),
+                })
+
+        return enriched
+
+    def _collect_bom_rows(
+        self,
+        hk_rows: list[dict],
+        kv_rows: list[dict],
+        ap_info_rows: list[dict],
+        uv_data: list[dict],
+        hl_rows: list[dict],
+    ) -> dict:
+        """Collect BOM rows + summaries for export/UI/PDF/MCP reuse."""
+        hk_by_diameter: dict[float, float] = defaultdict(float)
+        for row in hk_rows:
+            diameter = float(row.get("diameter_mm", 0.0) or 0.0)
+            hk_by_diameter[diameter] += float(row.get("total_m", 0.0) or 0.0)
+        hk_bom_rows = [
+            {
+                "category": "Heizrohr",
+                "item_type": "heating_pipe",
+                "key": f"{diameter:.1f}",
+                "description": f"Heizrohr {diameter:.1f} mm",
+                "unit": "m",
+                "quantity": length_m,
+                "meta": {"diameter_mm": diameter},
+            }
+            for diameter, length_m in sorted(hk_by_diameter.items())
+        ]
+
+        cable_by_type: dict[str, float] = defaultdict(float)
+        for row in kv_rows:
+            cable_type = str(row.get("type", "") or "").strip() or "(unbekannt)"
+            cable_by_type[cable_type] += float(row.get("length_m", 0.0) or 0.0)
+        cable_bom_rows = [
+            {
+                "category": "Elektro-Kabel",
+                "item_type": "elec_cable",
+                "key": cable_type,
+                "description": cable_type,
+                "unit": "m",
+                "quantity": length_m,
+                "meta": {"cable_type": cable_type},
+            }
+            for cable_type, length_m in sorted(cable_by_type.items(), key=lambda kv: kv[0].lower())
+        ]
+
+        ap_by_type: dict[str, int] = defaultdict(int)
+        for row in ap_info_rows:
+            ap_type = str(row.get("type", "") or "").strip() or "(kein Typ)"
+            ap_by_type[ap_type] += 1
+        ap_bom_rows = [
+            {
+                "category": "Anschlusspunkte",
+                "item_type": "ap",
+                "key": ap_type,
+                "description": ap_type,
+                "unit": "Stk",
+                "quantity": count,
+                "meta": {"ap_type": ap_type},
+            }
+            for ap_type, count in sorted(ap_by_type.items(), key=lambda kv: kv[0].lower())
+        ]
+
+        hkv_line_by_type: dict[str, float] = defaultdict(float)
+        for row in hl_rows:
+            line_type = str(row.get("type", "") or "").strip() or "(unbekannt)"
+            hkv_line_by_type[line_type] += float(row.get("length_m", 0.0) or 0.0)
+        hkv_line_bom_rows = [
+            {
+                "category": "HKV-Leitungen",
+                "item_type": "hkv_line",
+                "key": line_type,
+                "description": line_type,
+                "unit": "m",
+                "quantity": length_m,
+                "meta": {"line_type": line_type},
+            }
+            for line_type, length_m in sorted(hkv_line_by_type.items(), key=lambda kv: kv[0].lower())
+        ]
+
+        uv_device_summary: dict[tuple[str, str], dict] = {}
+        uv_busbar_summary: dict[tuple[str, int, int], dict] = {}
+        for uv in uv_data:
+            uv_name = str(uv.get("ap_name", "") or "").strip() or str(uv.get("ap_id", "") or "UV")
+            room = str(uv.get("room", "") or "").strip()
+
+            for slot in uv.get("slots", []) or []:
+                device_type = str(slot.get("device_type", "") or "").strip() or "(leer)"
+                te_size = max(1, int(slot.get("te_size", 1) or 1))
+                manufacturer = str(slot.get("manufacturer", "") or "").strip()
+                article_number = str(slot.get("article_number", "") or "").strip()
+                key = (uv_name, device_type, manufacturer, article_number)
+                if key not in uv_device_summary:
+                    uv_device_summary[key] = {
+                        "category": "UV-Geräte",
+                        "item_type": "uv_device",
+                        "key": device_type,
+                        "uv": uv_name,
+                        "room": room,
+                        "description": device_type,
+                        "unit": "Stk",
+                        "quantity": 0,
+                        "te_total": 0,
+                        "manufacturer": manufacturer,
+                        "article_number": article_number,
+                    }
+                uv_device_summary[key]["quantity"] += 1
+                uv_device_summary[key]["te_total"] += te_size
+
+            for busbar in uv.get("busbars", []) or []:
+                phase = str(busbar.get("phase", "") or "").strip()
+                if not phase:
+                    continue
+                te_start = max(1, int(busbar.get("te_start", 1) or 1))
+                te_end = max(1, int(busbar.get("te_end", 1) or 1))
+                if te_end < te_start:
+                    te_start, te_end = te_end, te_start
+                te_count = self._safe_te_count(te_start, te_end)
+                key = (phase, te_start, te_end)
+                if key not in uv_busbar_summary:
+                    uv_busbar_summary[key] = {
+                        "category": "UV-Phasenschienen",
+                        "item_type": "uv_busbar",
+                        "phase": phase,
+                        "description": f"Phasenschiene {phase}",
+                        "te_start": te_start,
+                        "te_end": te_end,
+                        "unit": "TE",
+                        "quantity": 0,
+                        "uv_count": 0,
+                        "uv_names": set(),
+                    }
+                uv_busbar_summary[key]["quantity"] += te_count
+                uv_busbar_summary[key]["uv_names"].add(uv_name)
+                uv_busbar_summary[key]["uv_count"] = len(uv_busbar_summary[key]["uv_names"])
+
+        uv_device_bom_rows = sorted(
+            uv_device_summary.values(),
+            key=lambda r: (
+                str(r.get("room", "") or "").lower(),
+                str(r.get("uv", "") or "").lower(),
+                str(r.get("description", "") or "").lower(),
+            ),
+        )
+        uv_busbar_bom_rows = []
+        for row in sorted(
+            uv_busbar_summary.values(),
+            key=lambda r: (
+                str(r.get("phase", "") or "").lower(),
+                int(r.get("te_start", 0) or 0),
+                int(r.get("te_end", 0) or 0),
+            ),
+        ):
+            row = dict(row)
+            row["uv_names"] = ", ".join(sorted(row.get("uv_names", set())))
+            uv_busbar_bom_rows.append(row)
+
+        rows_by_section = {
+            "hk_bom_rows": hk_bom_rows,
+            "cable_bom_rows": cable_bom_rows,
+            "ap_bom_rows": ap_bom_rows,
+            "hkv_line_bom_rows": hkv_line_bom_rows,
+            "uv_device_bom_rows": uv_device_bom_rows,
+            "uv_busbar_bom_rows": uv_busbar_bom_rows,
+            "custom_bom_rows": [],
+        }
+
+        return self._apply_bom_metadata_to_rows(rows_by_section)
 
     def _export_lengths(self):
         """Show a dialog with length tables, hydraulic overview and optional CSV export."""
@@ -5775,6 +6017,60 @@ class MainWindow(QMainWindow):
             up_layout.addWidget(tbl_up)
             tabs.addTab(up_widget, "🔀 Unterputzdose")
 
+        bom_data = self._collect_bom_rows(
+            hk_rows=hk_rows,
+            kv_rows=kv_rows,
+            ap_info_rows=ap_rows,
+            uv_data=self._collect_uv_data(point_id_to_room_name),
+            hl_rows=hl_rows,
+        )
+
+        bom_widget = QWidget()
+        bom_layout = QVBoxLayout(bom_widget)
+        bom_layout.addWidget(QLabel("<b>Stückliste – Zusammenfassung</b>"))
+
+        bom_rows = []
+        for section_key, section_name in [
+            ("hk_bom_rows", "Heizrohr"),
+            ("cable_bom_rows", "Elektro-Kabel"),
+            ("ap_bom_rows", "Anschlusspunkte"),
+            ("hkv_line_bom_rows", "HKV-Leitungen"),
+            ("uv_device_bom_rows", "UV-Geräte"),
+            ("uv_busbar_bom_rows", "UV-Phasenschienen"),
+            ("custom_bom_rows", "Manuelle Positionen"),
+        ]:
+            for row in bom_data.get(section_key, []):
+                bom_rows.append({
+                    "section": section_name,
+                    "description": row.get("description", ""),
+                    "manufacturer": row.get("manufacturer", ""),
+                    "article_number": row.get("article_number", ""),
+                    "unit": row.get("unit", ""),
+                    "quantity": row.get("quantity", 0),
+                    "note": (
+                        f"TE: {row.get('te_total', 0)}" if section_key == "uv_device_bom_rows"
+                        else f"TE {row.get('te_start', '')}-{row.get('te_end', '')}; UV: {row.get('uv_names', '')}" if section_key == "uv_busbar_bom_rows"
+                        else str(row.get("note", "") or "")
+                    ),
+                })
+
+        tbl_bom = QTableWidget(len(bom_rows), 7)
+        tbl_bom.setHorizontalHeaderLabels(["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz"])
+        tbl_bom.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        tbl_bom.setEditTriggers(QTableWidget.NoEditTriggers)
+        for i, row in enumerate(bom_rows):
+            tbl_bom.setItem(i, 0, QTableWidgetItem(str(row.get("section", ""))))
+            tbl_bom.setItem(i, 1, QTableWidgetItem(str(row.get("description", ""))))
+            tbl_bom.setItem(i, 2, QTableWidgetItem(str(row.get("manufacturer", ""))))
+            tbl_bom.setItem(i, 3, QTableWidgetItem(str(row.get("article_number", ""))))
+            tbl_bom.setItem(i, 4, QTableWidgetItem(str(row.get("unit", ""))))
+            item_qty = QTableWidgetItem(f"{float(row.get('quantity', 0.0) or 0.0):.2f}")
+            item_qty.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            tbl_bom.setItem(i, 5, item_qty)
+            tbl_bom.setItem(i, 6, QTableWidgetItem(str(row.get("note", ""))))
+        bom_layout.addWidget(tbl_bom)
+        tabs.addTab(bom_widget, "📦 Stückliste")
+
         # -- Tab: Anschlusspunkte Verkabelung --
         ap_widget = QWidget()
         ap_layout = QVBoxLayout(ap_widget)
@@ -5869,7 +6165,7 @@ class MainWindow(QMainWindow):
             lambda: self._save_lengths_csv(hk_rows, hk_sum, kv_rows, kv_sum,
                                            hkv_sum, ap_cables, hl_rows, hl_sum,
                                            ap_type_counts, room_ap_connections, uv_rows,
-                                           up_distribution_rows)
+                                           up_distribution_rows, bom_data)
         )
         btn_box.addButton(btn_csv, QDialogButtonBox.ActionRole)
         btn_box.addButton(QDialogButtonBox.Close)
@@ -5881,7 +6177,8 @@ class MainWindow(QMainWindow):
     def _save_lengths_csv(self, hk_rows, hk_sum, kv_rows, kv_sum, hkv_sum,
                            ap_cables=None, hl_rows=None, hl_sum=None,
                            ap_type_counts=None, room_ap_connections=None,
-                           uv_rows=None, up_distribution_rows=None):
+                           uv_rows=None, up_distribution_rows=None,
+                           bom_data=None):
         path, _ = QFileDialog.getSaveFileName(
             self, "Längen als CSV speichern", "laengen.csv",
             "CSV (*.csv)")
@@ -6067,6 +6364,38 @@ class MainWindow(QMainWindow):
                     row.get("mapping_note", ""),
                     row.get("distribution_note", ""),
                 ]))
+            lines.append("")
+
+        if bom_data:
+            lines.append("Stückliste - Zusammenfassung")
+            lines.append(sep.join(["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz"]))
+            for section_key, section_name in [
+                ("hk_bom_rows", "Heizrohr"),
+                ("cable_bom_rows", "Elektro-Kabel"),
+                ("ap_bom_rows", "Anschlusspunkte"),
+                ("hkv_line_bom_rows", "HKV-Leitungen"),
+                ("uv_device_bom_rows", "UV-Geräte"),
+                ("uv_busbar_bom_rows", "UV-Phasenschienen"),
+                ("custom_bom_rows", "Manuelle Positionen"),
+            ]:
+                for row in bom_data.get(section_key, []):
+                    note = ""
+                    if section_key == "uv_device_bom_rows":
+                        note = f"TE: {row.get('te_total', 0)}"
+                    elif section_key == "uv_busbar_bom_rows":
+                        note = f"TE {row.get('te_start', '')}-{row.get('te_end', '')}; UV: {row.get('uv_names', '')}"
+                    else:
+                        note = str(row.get("note", "") or "")
+
+                    lines.append(sep.join([
+                        section_name,
+                        str(row.get("description", "")),
+                        str(row.get("manufacturer", "")),
+                        str(row.get("article_number", "")),
+                        str(row.get("unit", "")),
+                        f"{float(row.get('quantity', 0.0) or 0.0):.2f}",
+                        note,
+                    ]))
             lines.append("")
 
         # HKV-Leitungen
@@ -6377,6 +6706,14 @@ class MainWindow(QMainWindow):
         for r in hl_rows:
             hl_sum[r["type"]] += r["length_m"]
 
+        bom_data = self._collect_bom_rows(
+            hk_rows=hk_rows,
+            kv_rows=kv_rows,
+            ap_info_rows=ap_info_rows,
+            uv_data=uv_data,
+            hl_rows=hl_rows,
+        )
+
         return {
             "t_supply": t_supply, "t_return": t_return,
             "hk_rows": hk_rows, "hkv_sum": hkv_sum,
@@ -6389,6 +6726,7 @@ class MainWindow(QMainWindow):
             "uv_data": uv_data,
             "up_distribution_rows": up_distribution_rows,
             "hl_rows": hl_rows, "hl_sum": hl_sum,
+            **bom_data,
         }
 
     # ── PDF-Export ──
@@ -6949,7 +7287,10 @@ class MainWindow(QMainWindow):
         page = ctx.page_rect()
         ctx.stamp(page)
 
-        sections = set(table_sections or ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv", "el_up_distribution"])
+        sections = set(table_sections or [
+            "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
+            "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
+        ])
 
         title_h = ctx.mm(8)
         ctx.painter.save()
@@ -6986,6 +7327,8 @@ class MainWindow(QMainWindow):
             or ("el_ap_infos" in sections and data.get("ap_info_rows"))
             or ("el_uv" in sections and (data.get("uv_data") or data.get("uv_rows")))
             or ("el_up_distribution" in sections and data.get("up_distribution_rows"))
+            or ("el_bom" in sections and data.get("cable_bom_rows"))
+            or ("el_uv_busbars" in sections and data.get("uv_busbar_bom_rows"))
         )
         if not table_available:
             return
@@ -7125,6 +7468,57 @@ class MainWindow(QMainWindow):
                     r.get("distribution_note", ""),
                 ]
                 for r in up_distribution_rows
+            ]
+            ctx.draw_table(page, y_after, headers, rows)
+
+        if "el_bom" in sections:
+            bom_rows = []
+            for section_name, key in [
+                ("Elektro-Kabel", "cable_bom_rows"),
+                ("Anschlusspunkte", "ap_bom_rows"),
+                ("HKV-Leitungen", "hkv_line_bom_rows"),
+                ("UV-Geräte", "uv_device_bom_rows"),
+                ("UV-Phasenschienen", "uv_busbar_bom_rows"),
+                ("Manuelle Positionen", "custom_bom_rows"),
+            ]:
+                for row in data.get(key, []) or []:
+                    note = ""
+                    if key == "uv_device_bom_rows":
+                        note = f"TE: {row.get('te_total', 0)}"
+                    elif key == "uv_busbar_bom_rows":
+                        note = f"TE {row.get('te_start', '')}-{row.get('te_end', '')}; UV: {row.get('uv_names', '')}"
+                    else:
+                        note = str(row.get("note", "") or "")
+                    bom_rows.append([
+                        section_name,
+                        str(row.get("description", "")),
+                        str(row.get("manufacturer", "")),
+                        str(row.get("article_number", "")),
+                        str(row.get("unit", "")),
+                        f"{float(row.get('quantity', 0.0) or 0.0):.2f}",
+                        note,
+                    ])
+            if bom_rows:
+                page = ctx.new_page(toc_title=f"{title} – Stückliste")
+                y_after = ctx.title(page, title)
+                y_after = ctx.section_heading(page, y_after, "Stückliste")
+                headers = ["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz"]
+                ctx.draw_table(page, y_after, headers, bom_rows)
+
+        if "el_uv_busbars" in sections and data.get("uv_busbar_bom_rows"):
+            page = ctx.new_page(toc_title=f"{title} – UV-Phasenschienen")
+            y_after = ctx.title(page, title)
+            y_after = ctx.section_heading(page, y_after, "UV-Phasenschienen")
+            headers = ["Phase", "TE Start", "TE Ende", "Menge (TE)", "UV"]
+            rows = [
+                [
+                    str(r.get("phase", "")),
+                    str(r.get("te_start", "")),
+                    str(r.get("te_end", "")),
+                    f"{float(r.get('quantity', 0.0) or 0.0):.2f}",
+                    str(r.get("uv_names", "")),
+                ]
+                for r in data.get("uv_busbar_bom_rows", [])
             ]
             ctx.draw_table(page, y_after, headers, rows)
 

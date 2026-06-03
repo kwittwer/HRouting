@@ -46,6 +46,8 @@ class PdfExportConfigDialog(QDialog):
         "el_ap_infos": "AP-Infos",
         "el_uv": "UV-Schaltschrank-Layout",
         "el_up_distribution": "Verteilung in Unterputzdose",
+        "el_bom": "Stückliste (Elektro)",
+        "el_uv_busbars": "UV-Phasenschienen",
     }
 
     def __init__(
@@ -256,7 +258,10 @@ class PdfExportConfigDialog(QDialog):
         if ptype == "heating":
             return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
         if ptype == "elektro":
-            return ["el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv", "el_up_distribution"]
+            return [
+                "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
+                "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
+            ]
         return []
 
     @staticmethod
@@ -264,7 +269,10 @@ class PdfExportConfigDialog(QDialog):
         if ptype == "heating":
             return {"hk_lengths", "hk_hydraulics", "hk_hkv_lines"}
         if ptype == "elektro":
-            return {"el_kabel", "el_ap_types", "el_ap_connections", "el_rooms", "el_ap_infos", "el_uv", "el_up_distribution"}
+            return {
+                "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
+                "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
+            }
         return set()
 
     def _load_pages_into_tree(self):

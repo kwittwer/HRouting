@@ -121,6 +121,8 @@
         "device_type": { "type": "string", "default": "", "description": "Art der Belegung (z.B. FI, LS, Reserve)." },
         "label": { "type": "string", "default": "", "description": "Freie Bezeichnung des Platzes." },
         "assignment": { "type": "string", "default": "", "description": "Optionales Kabel-/Stromkreis-Mapping als Freitext." },
+        "manufacturer": { "type": "string", "default": "", "description": "Hersteller des UV-Geräts für die Stückliste." },
+        "article_number": { "type": "string", "default": "", "description": "Artikelnummer des UV-Geräts für die Stückliste." },
         "note": { "type": "string", "default": "", "description": "Optionale Notiz zum Platz." },
         "te_size": { "type": "integer", "minimum": 1, "maximum": 8, "default": 1, "description": "Anzahl der belegten TE-Einheiten (z.B. FI = 2 TE)." },
         "spec": { "type": "string", "default": "", "description": "Typ-Kennzeichnung des Ger\u00e4ts, z.B. 'B16', 'Typ A 30mA', '63A'." }
@@ -571,6 +573,78 @@
       }
     },
 
+    "BomSettings": {
+      "type": "object",
+      "additionalProperties": true,
+      "default": {},
+      "properties": {
+        "version": { "type": "integer", "minimum": 1, "default": 1 },
+        "sections": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "default": {
+            "hk_bom_rows": true,
+            "cable_bom_rows": true,
+            "ap_bom_rows": true,
+            "hkv_line_bom_rows": true,
+            "uv_device_bom_rows": true,
+            "uv_busbar_bom_rows": true,
+            "custom_bom_rows": true
+          }
+        },
+        "rounding": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 6 },
+          "default": {
+            "length_m": 1,
+            "quantity": 1
+          }
+        },
+        "last_generated_at": {
+          "type": "string",
+          "default": "",
+          "description": "ISO-Zeitstempel der zuletzt erzeugten Stückliste."
+        },
+        "item_catalog": {
+          "type": "object",
+          "default": {},
+          "description": "Artikelstammdaten je BOM-Position, Key: '<item_type>|<key>'.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "manufacturer": { "type": "string", "default": "" },
+              "article_number": { "type": "string", "default": "" },
+              "description_override": { "type": "string", "default": "" },
+              "note": { "type": "string", "default": "" }
+            }
+          }
+        },
+        "custom_items": {
+          "type": "array",
+          "default": [],
+          "description": "Manuell ergänzte Stücklistenpositionen.",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "custom_id": { "type": "string", "default": "" },
+              "section_key": { "type": "string", "default": "custom_bom_rows" },
+              "category": { "type": "string", "default": "Manuell" },
+              "item_type": { "type": "string", "default": "custom" },
+              "key": { "type": "string", "default": "" },
+              "description": { "type": "string", "default": "" },
+              "unit": { "type": "string", "default": "Stk" },
+              "quantity": { "type": "number", "default": 0 },
+              "manufacturer": { "type": "string", "default": "" },
+              "article_number": { "type": "string", "default": "" },
+              "note": { "type": "string", "default": "" }
+            }
+          }
+        }
+      }
+    },
+
     "Params": {
       "type": "object",
       "description": "Parameter-Panel-Zustand: globale Einstellungen und alle Element-Definitionen.",
@@ -601,6 +675,10 @@
           "type": "object",
           "default": {},
           "description": "Zuletzt verwendete Kabel-Standardwerte."
+        },
+        "bom": {
+          "$ref": "#/$defs/BomSettings",
+          "description": "Persistierte Metadaten für Stücklisten-Export und MCP-Reports."
         },
         "floorplans_order": {
           "type": "array",

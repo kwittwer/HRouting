@@ -481,6 +481,14 @@ class UvSlotEditPopup(QDialog):
         self.le_label = QLineEdit(str(slot.get("label", "") or ""))
         form.addRow("Bezeichnung:", self.le_label)
 
+        self.le_manufacturer = QLineEdit(str(slot.get("manufacturer", "") or ""))
+        self.le_manufacturer.setPlaceholderText("z.B. Hager, ABB, Siemens")
+        form.addRow("Hersteller:", self.le_manufacturer)
+
+        self.le_article_number = QLineEdit(str(slot.get("article_number", "") or ""))
+        self.le_article_number.setPlaceholderText("z.B. MBN116")
+        form.addRow("Artikelnummer:", self.le_article_number)
+
         self.cmb_assignment = SafeComboBox()
         self.cmb_assignment.setEditable(True)
         self.cmb_assignment.addItem("")
@@ -508,6 +516,8 @@ class UvSlotEditPopup(QDialog):
             "te_size": self.sb_te_size.value(),
             "spec": self.le_spec.text().strip(),
             "label": self.le_label.text().strip(),
+            "manufacturer": self.le_manufacturer.text().strip(),
+            "article_number": self.le_article_number.text().strip(),
             "assignment": self.cmb_assignment.currentText().strip(),
             "note": self.le_note.text().strip(),
         }
@@ -1031,10 +1041,14 @@ class UvConfigDialog(QDialog):
         self.rail_widget.slot_moved.connect(self._on_slot_moved)
 
         # Tab 1 – editable table
-        # Columns: Reihe | TE | Belegung | TE-Br. | Typ/Kennz. | Bezeichnung | Kabel/Stromkreis | Notiz
-        self.tbl_slots = QTableWidget(0, 8)
+        # Columns: Reihe | TE | Belegung | TE-Br. | Typ/Kennz. | Bezeichnung |
+        #          Kabel/Stromkreis | Hersteller | Artikelnummer | Notiz
+        self.tbl_slots = QTableWidget(0, 10)
         self.tbl_slots.setHorizontalHeaderLabels(
-            ["Reihe", "TE", "Belegung", "TE-Br.", "Typ/Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
+            [
+                "Reihe", "TE", "Belegung", "TE-Br.", "Typ/Kennz.", "Bezeichnung",
+                "Kabel/Stromkreis", "Hersteller", "Artikelnummer", "Notiz",
+            ]
         )
         hdr = self.tbl_slots.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -1045,6 +1059,8 @@ class UvConfigDialog(QDialog):
         hdr.setSectionResizeMode(5, QHeaderView.Stretch)
         hdr.setSectionResizeMode(6, QHeaderView.Stretch)
         hdr.setSectionResizeMode(7, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(8, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(9, QHeaderView.Stretch)
         self.tbl_slots.verticalHeader().setVisible(False)
         self.tabs.addTab(self.tbl_slots, "Tabelle")
 
@@ -1088,7 +1104,8 @@ class UvConfigDialog(QDialog):
     def _capture_current_slots(self) -> list[dict]:
         """Read all rows from the table widget into a list of slot dicts.
         Columns: 0=Reihe, 1=TE, 2=Belegung(cmb), 3=TE-Breite(spinbox),
-                 4=Typ/Kennz., 5=Bezeichnung, 6=Kabel/Stromkreis(cmb), 7=Notiz"""
+                 4=Typ/Kennz., 5=Bezeichnung, 6=Kabel/Stromkreis(cmb),
+                 7=Hersteller, 8=Artikelnummer, 9=Notiz"""
         slots: list[dict] = []
         for row_idx in range(self.tbl_slots.rowCount()):
             row_item = self.tbl_slots.item(row_idx, 0)
@@ -1105,7 +1122,9 @@ class UvConfigDialog(QDialog):
             spec_item = self.tbl_slots.item(row_idx, 4)
             label_item = self.tbl_slots.item(row_idx, 5)
             assignment_combo = self.tbl_slots.cellWidget(row_idx, 6)
-            note_item = self.tbl_slots.item(row_idx, 7)
+            manufacturer_item = self.tbl_slots.item(row_idx, 7)
+            article_number_item = self.tbl_slots.item(row_idx, 8)
+            note_item = self.tbl_slots.item(row_idx, 9)
             slots.append({
                 "row": row_no,
                 "slot": slot_no,
@@ -1114,6 +1133,8 @@ class UvConfigDialog(QDialog):
                 "spec": spec_item.text().strip() if spec_item else "",
                 "label": label_item.text().strip() if label_item else "",
                 "assignment": assignment_combo.currentText().strip() if isinstance(assignment_combo, QComboBox) else "",
+                "manufacturer": manufacturer_item.text().strip() if manufacturer_item else "",
+                "article_number": article_number_item.text().strip() if article_number_item else "",
                 "note": note_item.text().strip() if note_item else "",
             })
         return slots
@@ -1135,6 +1156,8 @@ class UvConfigDialog(QDialog):
                     "spec": str(slot.get("spec", "") or "").strip(),
                     "label": str(slot.get("label", "") or "").strip(),
                     "assignment": str(slot.get("assignment", "") or "").strip(),
+                    "manufacturer": str(slot.get("manufacturer", "") or "").strip(),
+                    "article_number": str(slot.get("article_number", "") or "").strip(),
                     "note": str(slot.get("note", "") or "").strip(),
                 }
         return indexed
@@ -1195,9 +1218,19 @@ class UvConfigDialog(QDialog):
                 cmb_assignment.setCurrentText(str(slot.get("assignment", "") or "").strip())
                 self.tbl_slots.setCellWidget(idx, 6, cmb_assignment)
 
-                # col 7 – Notiz
+                # col 7 – Hersteller
                 self.tbl_slots.setItem(
-                    idx, 7, QTableWidgetItem(str(slot.get("note", "") or "").strip())
+                    idx, 7, QTableWidgetItem(str(slot.get("manufacturer", "") or "").strip())
+                )
+
+                # col 8 – Artikelnummer
+                self.tbl_slots.setItem(
+                    idx, 8, QTableWidgetItem(str(slot.get("article_number", "") or "").strip())
+                )
+
+                # col 9 – Notiz
+                self.tbl_slots.setItem(
+                    idx, 9, QTableWidgetItem(str(slot.get("note", "") or "").strip())
                 )
 
         self.lbl_summary.setText(f"{rows} Reihen mit je {modules_per_row} TE")
@@ -1235,7 +1268,13 @@ class UvConfigDialog(QDialog):
         cmb_a = self.tbl_slots.cellWidget(tbl_idx, 6)
         if isinstance(cmb_a, QComboBox):
             cmb_a.setCurrentText(data.get("assignment", ""))
-        note_item = self.tbl_slots.item(tbl_idx, 7)
+        manufacturer_item = self.tbl_slots.item(tbl_idx, 7)
+        if manufacturer_item:
+            manufacturer_item.setText(data.get("manufacturer", ""))
+        article_number_item = self.tbl_slots.item(tbl_idx, 8)
+        if article_number_item:
+            article_number_item.setText(data.get("article_number", ""))
+        note_item = self.tbl_slots.item(tbl_idx, 9)
         if note_item:
             note_item.setText(data.get("note", ""))
 
@@ -1243,7 +1282,8 @@ class UvConfigDialog(QDialog):
         """Reset a table row to empty values."""
         self._write_slot_to_table(row_no, slot_no, {
             "device_type": "", "te_size": 1,
-            "spec": "", "label": "", "assignment": "", "note": "",
+            "spec": "", "label": "", "assignment": "",
+            "manufacturer": "", "article_number": "", "note": "",
         })
 
     def _on_rail_slot_clicked(self, row_no: int, slot_no: int):
@@ -1388,8 +1428,269 @@ class UvConfigDialog(QDialog):
             return True
         return any(
             str(slot.get(key, "") or "").strip()
-            for key in ("device_type", "spec", "label", "assignment", "note")
+            for key in (
+                "device_type", "spec", "label", "assignment",
+                "manufacturer", "article_number", "note",
+            )
         )
+
+
+class BomMetadataDialog(QDialog):
+    """Editor for BOM catalog metadata and manual BOM rows."""
+
+    SECTION_CHOICES: list[tuple[str, str]] = [
+        ("hk_bom_rows", "Heizrohr"),
+        ("cable_bom_rows", "Elektro-Kabel"),
+        ("ap_bom_rows", "Anschlusspunkte"),
+        ("hkv_line_bom_rows", "HKV-Leitungen"),
+        ("uv_device_bom_rows", "UV-Geräte"),
+        ("uv_busbar_bom_rows", "UV-Phasenschienen"),
+        ("custom_bom_rows", "Manuelle Positionen"),
+    ]
+
+    def __init__(self, metadata: dict | None = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Stückliste bearbeiten")
+        self.resize(1120, 660)
+        self._base_metadata = copy.deepcopy(metadata or {})
+        self._build_ui()
+        self._load_from_metadata(self._base_metadata)
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+
+        info = QLabel(
+            "Pflege von Hersteller/Artikelnummern für bestehende Positionen "
+            "(Katalog) und frei manuelle Positionen."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#aaaaaa;")
+        root.addWidget(info)
+
+        tabs = QTabWidget()
+        root.addWidget(tabs, stretch=1)
+
+        catalog_tab = QWidget()
+        catalog_layout = QVBoxLayout(catalog_tab)
+        catalog_btns = QHBoxLayout()
+        btn_add_catalog = QPushButton("+ Katalogzeile")
+        btn_add_catalog.clicked.connect(self._add_catalog_row)
+        btn_remove_catalog = QPushButton("− Entfernen")
+        btn_remove_catalog.clicked.connect(self._remove_selected_catalog_rows)
+        catalog_btns.addWidget(btn_add_catalog)
+        catalog_btns.addWidget(btn_remove_catalog)
+        catalog_btns.addStretch(1)
+        catalog_layout.addLayout(catalog_btns)
+
+        self.tbl_catalog = QTableWidget(0, 6)
+        self.tbl_catalog.setHorizontalHeaderLabels([
+            "Item-Type", "Key", "Beschreibung Override", "Hersteller", "Artikelnummer", "Notiz",
+        ])
+        self.tbl_catalog.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tbl_catalog.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tbl_catalog.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.tbl_catalog.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.tbl_catalog.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.tbl_catalog.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.tbl_catalog.verticalHeader().setVisible(False)
+        catalog_layout.addWidget(self.tbl_catalog)
+        tabs.addTab(catalog_tab, "Katalog")
+
+        custom_tab = QWidget()
+        custom_layout = QVBoxLayout(custom_tab)
+        custom_btns = QHBoxLayout()
+        btn_add_custom = QPushButton("+ Manuelle Position")
+        btn_add_custom.clicked.connect(self._add_custom_row)
+        btn_remove_custom = QPushButton("− Entfernen")
+        btn_remove_custom.clicked.connect(self._remove_selected_custom_rows)
+        custom_btns.addWidget(btn_add_custom)
+        custom_btns.addWidget(btn_remove_custom)
+        custom_btns.addStretch(1)
+        custom_layout.addLayout(custom_btns)
+
+        self.tbl_custom = QTableWidget(0, 9)
+        self.tbl_custom.setHorizontalHeaderLabels([
+            "ID", "Bereich", "Kategorie", "Beschreibung", "Einheit", "Menge",
+            "Hersteller", "Artikelnummer", "Notiz",
+        ])
+        custom_hdr = self.tbl_custom.horizontalHeader()
+        custom_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        custom_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        custom_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        custom_hdr.setSectionResizeMode(3, QHeaderView.Stretch)
+        custom_hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        custom_hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        custom_hdr.setSectionResizeMode(6, QHeaderView.Stretch)
+        custom_hdr.setSectionResizeMode(7, QHeaderView.Stretch)
+        custom_hdr.setSectionResizeMode(8, QHeaderView.Stretch)
+        self.tbl_custom.verticalHeader().setVisible(False)
+        custom_layout.addWidget(self.tbl_custom)
+        tabs.addTab(custom_tab, "Manuell")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _next_custom_id(self) -> str:
+        existing: set[int] = set()
+        for row_idx in range(self.tbl_custom.rowCount()):
+            item = self.tbl_custom.item(row_idx, 0)
+            value = item.text().strip() if item else ""
+            if value.startswith("BOM-") and value.split("-", 1)[1].isdigit():
+                existing.add(int(value.split("-", 1)[1]))
+        n = 1
+        while n in existing:
+            n += 1
+        return f"BOM-{n}"
+
+    def _add_catalog_row(self, entry: dict | None = None):
+        entry = entry or {}
+        row_idx = self.tbl_catalog.rowCount()
+        self.tbl_catalog.insertRow(row_idx)
+        self.tbl_catalog.setItem(row_idx, 0, QTableWidgetItem(str(entry.get("item_type", "") or "").strip()))
+        self.tbl_catalog.setItem(row_idx, 1, QTableWidgetItem(str(entry.get("key", "") or "").strip()))
+        self.tbl_catalog.setItem(row_idx, 2, QTableWidgetItem(str(entry.get("description_override", "") or "").strip()))
+        self.tbl_catalog.setItem(row_idx, 3, QTableWidgetItem(str(entry.get("manufacturer", "") or "").strip()))
+        self.tbl_catalog.setItem(row_idx, 4, QTableWidgetItem(str(entry.get("article_number", "") or "").strip()))
+        self.tbl_catalog.setItem(row_idx, 5, QTableWidgetItem(str(entry.get("note", "") or "").strip()))
+
+    def _add_custom_row(self, item: dict | None = None):
+        item = item or {}
+        row_idx = self.tbl_custom.rowCount()
+        self.tbl_custom.insertRow(row_idx)
+        custom_id = str(item.get("custom_id", "") or "").strip() or self._next_custom_id()
+        self.tbl_custom.setItem(row_idx, 0, QTableWidgetItem(custom_id))
+
+        cmb_section = SafeComboBox()
+        cmb_section.setEditable(False)
+        for key, label in self.SECTION_CHOICES:
+            cmb_section.addItem(f"{label} ({key})", key)
+        current_section = str(item.get("section_key", "custom_bom_rows") or "custom_bom_rows").strip()
+        sec_idx = cmb_section.findData(current_section)
+        cmb_section.setCurrentIndex(sec_idx if sec_idx >= 0 else cmb_section.findData("custom_bom_rows"))
+        self.tbl_custom.setCellWidget(row_idx, 1, cmb_section)
+
+        self.tbl_custom.setItem(row_idx, 2, QTableWidgetItem(str(item.get("category", "Manuell") or "Manuell").strip()))
+        self.tbl_custom.setItem(row_idx, 3, QTableWidgetItem(str(item.get("description", "") or "").strip()))
+        self.tbl_custom.setItem(row_idx, 4, QTableWidgetItem(str(item.get("unit", "Stk") or "Stk").strip()))
+        self.tbl_custom.setItem(row_idx, 5, QTableWidgetItem(str(item.get("quantity", 0.0) or 0.0)))
+        self.tbl_custom.setItem(row_idx, 6, QTableWidgetItem(str(item.get("manufacturer", "") or "").strip()))
+        self.tbl_custom.setItem(row_idx, 7, QTableWidgetItem(str(item.get("article_number", "") or "").strip()))
+        self.tbl_custom.setItem(row_idx, 8, QTableWidgetItem(str(item.get("note", "") or "").strip()))
+
+    def _remove_selected_catalog_rows(self):
+        rows = sorted({idx.row() for idx in self.tbl_catalog.selectedIndexes()}, reverse=True)
+        for row_idx in rows:
+            self.tbl_catalog.removeRow(row_idx)
+
+    def _remove_selected_custom_rows(self):
+        rows = sorted({idx.row() for idx in self.tbl_custom.selectedIndexes()}, reverse=True)
+        for row_idx in rows:
+            self.tbl_custom.removeRow(row_idx)
+
+    def _load_from_metadata(self, metadata: dict):
+        self.tbl_catalog.setRowCount(0)
+        catalog = metadata.get("item_catalog", {}) if isinstance(metadata, dict) else {}
+        if isinstance(catalog, dict):
+            for catalog_key, entry in sorted(catalog.items(), key=lambda kv: str(kv[0]).lower()):
+                item_type, item_key = "", ""
+                raw_key = str(catalog_key or "")
+                if "|" in raw_key:
+                    item_type, item_key = raw_key.split("|", 1)
+                else:
+                    item_key = raw_key
+                row_data = {
+                    "item_type": item_type,
+                    "key": item_key,
+                    "description_override": str((entry or {}).get("description_override", "") or ""),
+                    "manufacturer": str((entry or {}).get("manufacturer", "") or ""),
+                    "article_number": str((entry or {}).get("article_number", "") or ""),
+                    "note": str((entry or {}).get("note", "") or ""),
+                }
+                self._add_catalog_row(row_data)
+
+        self.tbl_custom.setRowCount(0)
+        custom_items = metadata.get("custom_items", []) if isinstance(metadata, dict) else []
+        if isinstance(custom_items, list):
+            for item in custom_items:
+                if isinstance(item, dict):
+                    self._add_custom_row(item)
+
+    def get_metadata(self) -> dict:
+        result = copy.deepcopy(self._base_metadata) if isinstance(self._base_metadata, dict) else {}
+
+        item_catalog: dict[str, dict] = {}
+        for row_idx in range(self.tbl_catalog.rowCount()):
+            item_type_item = self.tbl_catalog.item(row_idx, 0)
+            key_item = self.tbl_catalog.item(row_idx, 1)
+            desc_item = self.tbl_catalog.item(row_idx, 2)
+            manufacturer_item = self.tbl_catalog.item(row_idx, 3)
+            article_item = self.tbl_catalog.item(row_idx, 4)
+            note_item = self.tbl_catalog.item(row_idx, 5)
+
+            item_type = item_type_item.text().strip() if item_type_item else ""
+            key = key_item.text().strip() if key_item else ""
+            if not item_type and not key:
+                continue
+            catalog_key = f"{item_type}|{key}" if item_type else key
+            item_catalog[catalog_key] = {
+                "description_override": desc_item.text().strip() if desc_item else "",
+                "manufacturer": manufacturer_item.text().strip() if manufacturer_item else "",
+                "article_number": article_item.text().strip() if article_item else "",
+                "note": note_item.text().strip() if note_item else "",
+            }
+
+        custom_items: list[dict] = []
+        for row_idx in range(self.tbl_custom.rowCount()):
+            custom_id_item = self.tbl_custom.item(row_idx, 0)
+            cmb_section = self.tbl_custom.cellWidget(row_idx, 1)
+            category_item = self.tbl_custom.item(row_idx, 2)
+            description_item = self.tbl_custom.item(row_idx, 3)
+            unit_item = self.tbl_custom.item(row_idx, 4)
+            quantity_item = self.tbl_custom.item(row_idx, 5)
+            manufacturer_item = self.tbl_custom.item(row_idx, 6)
+            article_item = self.tbl_custom.item(row_idx, 7)
+            note_item = self.tbl_custom.item(row_idx, 8)
+
+            custom_id = custom_id_item.text().strip() if custom_id_item else ""
+            if not custom_id:
+                custom_id = f"BOM-{row_idx + 1}"
+            section_key = str(cmb_section.currentData() or "custom_bom_rows").strip() if isinstance(cmb_section, QComboBox) else "custom_bom_rows"
+            category = category_item.text().strip() if category_item else "Manuell"
+            description = description_item.text().strip() if description_item else ""
+            unit = unit_item.text().strip() if unit_item else "Stk"
+            try:
+                quantity = float((quantity_item.text() if quantity_item else "0").replace(",", "."))
+            except Exception:
+                quantity = 0.0
+
+            if not any([
+                description,
+                quantity,
+                (manufacturer_item.text().strip() if manufacturer_item else ""),
+                (article_item.text().strip() if article_item else ""),
+                (note_item.text().strip() if note_item else ""),
+            ]):
+                continue
+
+            custom_items.append({
+                "custom_id": custom_id,
+                "section_key": section_key,
+                "category": category or "Manuell",
+                "item_type": "custom",
+                "key": custom_id,
+                "description": description,
+                "unit": unit or "Stk",
+                "quantity": quantity,
+                "manufacturer": manufacturer_item.text().strip() if manufacturer_item else "",
+                "article_number": article_item.text().strip() if article_item else "",
+                "note": note_item.text().strip() if note_item else "",
+            })
+
+        result["item_catalog"] = item_catalog
+        result["custom_items"] = custom_items
+        return result
 
     # ── Busbar (Phasenschienen) helpers ──────────────────────── #
 
@@ -3395,6 +3696,7 @@ class ParameterPanel(QWidget):
     all_hk_visibility_changed      = Signal(bool)
     all_elec_visibility_changed    = Signal(bool)
     heating_global_changed         = Signal()
+    bom_metadata_changed           = Signal()
     add_furniture_requested        = Signal(str)   # parent_fp_id
     delete_furniture_requested     = Signal(str)   # furniture_id
     furniture_size_changed         = Signal(str)   # furniture_id
@@ -3410,6 +3712,7 @@ class ParameterPanel(QWidget):
         self.elec_room_panels: dict[str, ElektroRoomPanel] = {}
         self.elec_cable_panels: dict[str, ElektroCablePanel] = {}
         self._last_elec_cable_defaults: dict = self._default_elec_cable_defaults()
+        self._bom_metadata: dict = self._default_bom_metadata()
         self.hkv_panels: dict[str, HkvPanel] = {}
         self.hkv_line_panels: dict[str, HkvLinePanel] = {}
         self.text_panels: dict[str, TextAnnotationPanel] = {}
@@ -3501,6 +3804,13 @@ class ParameterPanel(QWidget):
         self.btn_add_text.clicked.connect(
             lambda: self.add_text_requested.emit(self.get_active_floorplan_id() or ""))
         btn_row2.addWidget(self.btn_add_text)
+
+        self.btn_bom = QPushButton("📦 Stückliste")
+        self.btn_bom.setStyleSheet(
+            "background:#546e7a; color:white; padding:4px;"
+        )
+        self.btn_bom.clicked.connect(self._open_bom_editor)
+        btn_row2.addWidget(self.btn_bom)
         layout.addLayout(btn_row2)
 
         # ── Splitter: TreeView + Eigenschaften ─────────────────────
@@ -4677,6 +4987,120 @@ class ParameterPanel(QWidget):
             "t_norm_outdoor": self.sb_norm_aussen.value(),
         }
 
+    def _open_bom_editor(self):
+        dlg = BomMetadataDialog(self._bom_metadata, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._bom_metadata = self._sanitize_bom_metadata(dlg.get_metadata())
+        if not self._loading:
+            self.bom_metadata_changed.emit()
+
+    def _default_bom_metadata(self) -> dict:
+        return {
+            "version": 1,
+            "sections": {
+                "hk_bom_rows": True,
+                "cable_bom_rows": True,
+                "ap_bom_rows": True,
+                "hkv_line_bom_rows": True,
+                "uv_device_bom_rows": True,
+                "uv_busbar_bom_rows": True,
+                "custom_bom_rows": True,
+            },
+            "rounding": {
+                "length_m": 1,
+                "quantity": 1,
+            },
+            "last_generated_at": "",
+            "item_catalog": {},
+            "custom_items": [],
+        }
+
+    def _sanitize_bom_metadata(self, value) -> dict:
+        default = self._default_bom_metadata()
+        if not isinstance(value, dict):
+            return default
+
+        sections = dict(default["sections"])
+        for key, section_value in value.get("sections", {}).items():
+            sections[str(key)] = bool(section_value)
+
+        rounding = dict(default["rounding"])
+        for key, rounding_value in value.get("rounding", {}).items():
+            try:
+                rounding[str(key)] = max(0, min(6, int(rounding_value)))
+            except Exception:
+                continue
+
+        version = value.get("version", default["version"])
+        try:
+            version_int = max(1, int(version))
+        except Exception:
+            version_int = default["version"]
+
+        last_generated_at = str(value.get("last_generated_at", "") or "").strip()
+
+        item_catalog: dict[str, dict] = {}
+        raw_catalog = value.get("item_catalog", {})
+        if isinstance(raw_catalog, dict):
+            for raw_key, raw_value in raw_catalog.items():
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                rv = raw_value if isinstance(raw_value, dict) else {}
+                item_catalog[key] = {
+                    "manufacturer": str(rv.get("manufacturer", "") or "").strip(),
+                    "article_number": str(rv.get("article_number", "") or "").strip(),
+                    "description_override": str(rv.get("description_override", "") or "").strip(),
+                    "note": str(rv.get("note", "") or "").strip(),
+                }
+
+        custom_items: list[dict] = []
+        raw_custom_items = value.get("custom_items", [])
+        if isinstance(raw_custom_items, list):
+            for index, raw_item in enumerate(raw_custom_items, start=1):
+                if not isinstance(raw_item, dict):
+                    continue
+                custom_id = str(raw_item.get("custom_id", "") or "").strip() or f"BOM-{index}"
+                section_key = str(raw_item.get("section_key", "custom_bom_rows") or "custom_bom_rows").strip()
+                category = str(raw_item.get("category", "Manuell") or "Manuell").strip()
+                item_type = str(raw_item.get("item_type", "custom") or "custom").strip()
+                item_key = str(raw_item.get("key", custom_id) or custom_id).strip()
+                description = str(raw_item.get("description", "") or "").strip()
+                unit = str(raw_item.get("unit", "Stk") or "Stk").strip()
+                try:
+                    quantity = float(raw_item.get("quantity", 0.0) or 0.0)
+                except Exception:
+                    quantity = 0.0
+                custom_items.append({
+                    "custom_id": custom_id,
+                    "section_key": section_key,
+                    "category": category,
+                    "item_type": item_type,
+                    "key": item_key,
+                    "description": description,
+                    "unit": unit,
+                    "quantity": quantity,
+                    "manufacturer": str(raw_item.get("manufacturer", "") or "").strip(),
+                    "article_number": str(raw_item.get("article_number", "") or "").strip(),
+                    "note": str(raw_item.get("note", "") or "").strip(),
+                })
+
+        return {
+            "version": version_int,
+            "sections": sections,
+            "rounding": rounding,
+            "last_generated_at": last_generated_at,
+            "item_catalog": item_catalog,
+            "custom_items": custom_items,
+        }
+
+    def get_bom_metadata(self) -> dict:
+        return copy.deepcopy(self._bom_metadata)
+
+    def set_bom_metadata(self, metadata: dict | None):
+        self._bom_metadata = self._sanitize_bom_metadata(metadata)
+
     # ──────────────────────────────────────────────────────────────── #
     #  Serialization                                                    #
     # ──────────────────────────────────────────────────────────────── #
@@ -4684,6 +5108,7 @@ class ParameterPanel(QWidget):
     def clear_all_panels(self):
         """Remove all object panels (circuits, elec, HKV, floorplans) from the tree + layout."""
         self._last_elec_cable_defaults = self._default_elec_cable_defaults()
+        self._bom_metadata = self._default_bom_metadata()
         # Remove children first (they live under floorplan tree items)
         for tid in list(self.text_panels):
             self.remove_text_panel(tid)
@@ -4711,6 +5136,7 @@ class ParameterPanel(QWidget):
             "t_return": self.sb_ruecklauf.value(),
             "t_norm_outdoor": self.sb_norm_aussen.value(),
             "elec_cable_defaults": dict(self._last_elec_cable_defaults),
+            "bom": copy.deepcopy(self._bom_metadata),
             "floorplans_order": self.get_floorplan_order(),
             "floorplans": {
                 fid: p.to_dict() for fid, p in self.floorplan_panels.items()
@@ -4773,6 +5199,7 @@ class ParameterPanel(QWidget):
             self._last_elec_cable_defaults = self._sanitize_elec_cable_defaults(
                 d.get("elec_cable_defaults")
             )
+            self._bom_metadata = self._sanitize_bom_metadata(d.get("bom"))
 
             # ---- Floor plans (preserve tree order) ------------------
             fp_order_new = d.get("floorplans_order", [])
@@ -4914,6 +5341,7 @@ class ParameterPanel(QWidget):
         self._last_elec_cable_defaults = self._sanitize_elec_cable_defaults(
             d.get("elec_cable_defaults")
         )
+        self._bom_metadata = self._sanitize_bom_metadata(d.get("bom"))
 
         # Floorplans (in saved order)
         fp_order = d.get("floorplans_order", [])

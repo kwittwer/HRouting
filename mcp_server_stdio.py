@@ -229,6 +229,22 @@ class ProjectState:
                 "t_supply": 35.0, "t_return": 30.0,
                 "t_norm_outdoor": -12.0,
                 "elec_cable_defaults": {},
+                "bom": {
+                    "version": 1,
+                    "sections": {
+                        "hk_bom_rows": True,
+                        "cable_bom_rows": True,
+                        "ap_bom_rows": True,
+                        "hkv_line_bom_rows": True,
+                        "uv_device_bom_rows": True,
+                        "uv_busbar_bom_rows": True,
+                        "custom_bom_rows": True,
+                    },
+                    "rounding": {"length_m": 1, "quantity": 1},
+                    "last_generated_at": "",
+                    "item_catalog": {},
+                    "custom_items": [],
+                },
                 "floorplans_order": [], "floorplans": {},
                 "furniture": {}, "circuits": {},
                 "elec_points": {}, "elec_rooms": {},
@@ -566,6 +582,378 @@ def _create_stdio_mcp():
             "conflicts": conflicts,
         }
 
+    def _default_bom_metadata() -> dict:
+        return {
+            "version": 1,
+            "sections": {
+                "hk_bom_rows": True,
+                "cable_bom_rows": True,
+                "ap_bom_rows": True,
+                "hkv_line_bom_rows": True,
+                "uv_device_bom_rows": True,
+                "uv_busbar_bom_rows": True,
+                "custom_bom_rows": True,
+            },
+            "rounding": {
+                "length_m": 1,
+                "quantity": 1,
+            },
+            "last_generated_at": "",
+            "item_catalog": {},
+            "custom_items": [],
+        }
+
+    def _sanitize_bom_metadata(value) -> dict:
+        default = _default_bom_metadata()
+        if not isinstance(value, dict):
+            return default
+
+        sections = dict(default["sections"])
+        for key, section_value in value.get("sections", {}).items():
+            sections[str(key)] = bool(section_value)
+
+        rounding = dict(default["rounding"])
+        for key, rounding_value in value.get("rounding", {}).items():
+            try:
+                rounding[str(key)] = max(0, min(6, int(rounding_value)))
+            except Exception:
+                continue
+
+        try:
+            version = max(1, int(value.get("version", default["version"])))
+        except Exception:
+            version = default["version"]
+
+        item_catalog: dict[str, dict] = {}
+        raw_catalog = value.get("item_catalog", {})
+        if isinstance(raw_catalog, dict):
+            for raw_key, raw_value in raw_catalog.items():
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                rv = raw_value if isinstance(raw_value, dict) else {}
+                item_catalog[key] = {
+                    "manufacturer": str(rv.get("manufacturer", "") or "").strip(),
+                    "article_number": str(rv.get("article_number", "") or "").strip(),
+                    "description_override": str(rv.get("description_override", "") or "").strip(),
+                    "note": str(rv.get("note", "") or "").strip(),
+                }
+
+        custom_items: list[dict] = []
+        raw_custom_items = value.get("custom_items", [])
+        if isinstance(raw_custom_items, list):
+            for index, raw_item in enumerate(raw_custom_items, start=1):
+                if not isinstance(raw_item, dict):
+                    continue
+                custom_id = str(raw_item.get("custom_id", "") or "").strip() or f"BOM-{index}"
+                section_key = str(raw_item.get("section_key", "custom_bom_rows") or "custom_bom_rows").strip()
+                category = str(raw_item.get("category", "Manuell") or "Manuell").strip()
+                item_type = str(raw_item.get("item_type", "custom") or "custom").strip()
+                item_key = str(raw_item.get("key", custom_id) or custom_id).strip()
+                description = str(raw_item.get("description", "") or "").strip()
+                unit = str(raw_item.get("unit", "Stk") or "Stk").strip()
+                try:
+                    quantity = float(raw_item.get("quantity", 0.0) or 0.0)
+                except Exception:
+                    quantity = 0.0
+                custom_items.append({
+                    "custom_id": custom_id,
+                    "section_key": section_key,
+                    "category": category,
+                    "item_type": item_type,
+                    "key": item_key,
+                    "description": description,
+                    "unit": unit,
+                    "quantity": quantity,
+                    "manufacturer": str(raw_item.get("manufacturer", "") or "").strip(),
+                    "article_number": str(raw_item.get("article_number", "") or "").strip(),
+                    "note": str(raw_item.get("note", "") or "").strip(),
+                })
+
+        return {
+            "version": version,
+            "sections": sections,
+            "rounding": rounding,
+            "last_generated_at": str(value.get("last_generated_at", "") or "").strip(),
+            "item_catalog": item_catalog,
+            "custom_items": custom_items,
+        }
+
+    def _bom_catalog_key(item_type: str, key: str) -> str:
+        return f"{str(item_type or '').strip()}|{str(key or '').strip()}"
+
+    def _apply_bom_metadata(rows_by_section: dict[str, list[dict]], metadata: dict) -> dict[str, list[dict]]:
+        catalog = metadata.get("item_catalog", {}) if isinstance(metadata, dict) else {}
+        custom_items = metadata.get("custom_items", []) if isinstance(metadata, dict) else []
+
+        enriched: dict[str, list[dict]] = {
+            section: [dict(row) for row in rows]
+            for section, rows in rows_by_section.items()
+        }
+        enriched.setdefault("custom_bom_rows", [])
+
+        for section, rows in enriched.items():
+            for row in rows:
+                row.setdefault("manufacturer", "")
+                row.setdefault("article_number", "")
+                entry = {}
+                if isinstance(catalog, dict):
+                    item_type = str(row.get("item_type", "") or "")
+                    item_key = str(row.get("key", "") or "")
+                    entry = catalog.get(_bom_catalog_key(item_type, item_key), {})
+                if isinstance(entry, dict):
+                    manufacturer = str(entry.get("manufacturer", "") or "").strip()
+                    article_number = str(entry.get("article_number", "") or "").strip()
+                    description_override = str(entry.get("description_override", "") or "").strip()
+                    if manufacturer:
+                        row["manufacturer"] = manufacturer
+                    if article_number:
+                        row["article_number"] = article_number
+                    if description_override:
+                        row["description"] = description_override
+
+        if isinstance(custom_items, list):
+            for item in custom_items:
+                if not isinstance(item, dict):
+                    continue
+                section_key = str(item.get("section_key", "custom_bom_rows") or "custom_bom_rows").strip()
+                section_key = section_key or "custom_bom_rows"
+                enriched.setdefault(section_key, [])
+                enriched[section_key].append({
+                    "category": str(item.get("category", "Manuell") or "Manuell").strip(),
+                    "item_type": str(item.get("item_type", "custom") or "custom").strip(),
+                    "key": str(item.get("key", item.get("custom_id", "")) or "").strip(),
+                    "description": str(item.get("description", "") or "").strip(),
+                    "unit": str(item.get("unit", "Stk") or "Stk").strip(),
+                    "quantity": float(item.get("quantity", 0.0) or 0.0),
+                    "manufacturer": str(item.get("manufacturer", "") or "").strip(),
+                    "article_number": str(item.get("article_number", "") or "").strip(),
+                    "note": str(item.get("note", "") or "").strip(),
+                    "custom_id": str(item.get("custom_id", "") or "").strip(),
+                })
+
+        return enriched
+
+    def _next_custom_bom_id(custom_items: list[dict]) -> str:
+        existing: set[int] = set()
+        for item in custom_items:
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("custom_id", "") or "").strip()
+            if not value.startswith("BOM-"):
+                continue
+            suffix = value.split("-", 1)[1]
+            if suffix.isdigit():
+                existing.add(int(suffix))
+        n = 1
+        while n in existing:
+            n += 1
+        return f"BOM-{n}"
+
+    def _polyline_length_m(points: list, mm_per_px: float) -> float:
+        if not isinstance(points, list) or len(points) < 2:
+            return 0.0
+        length_px = 0.0
+        for idx in range(1, len(points)):
+            x0, y0 = points[idx - 1]
+            x1, y1 = points[idx]
+            length_px += math.hypot(float(x1) - float(x0), float(y1) - float(y0))
+        return length_px * mm_per_px / 1000.0
+
+    def _safe_te_count(te_start: int, te_end: int) -> int:
+        if te_end < te_start:
+            te_start, te_end = te_end, te_start
+        return max(0, (te_end - te_start + 1))
+
+    def _collect_bom_data() -> dict:
+        params = _state.data.get("params", {})
+        canvas = _state.data.get("canvas", {})
+        mm_per_px = float(canvas.get("mm_per_px", 1.0) or 1.0)
+
+        hk_by_diameter: dict[float, float] = {}
+        for circuit_id, cdata in params.get("circuits", {}).items():
+            diameter = float(cdata.get("diameter", 0.0) or 0.0)
+            route_m = _polyline_length_m(canvas.get("manual_routes", {}).get(circuit_id, []), mm_per_px)
+            supply_m = _polyline_length_m(canvas.get("supply_lines", {}).get(circuit_id, []), mm_per_px)
+            hk_by_diameter[diameter] = hk_by_diameter.get(diameter, 0.0) + route_m + supply_m
+
+        hk_bom_rows = [
+            {
+                "category": "Heizrohr",
+                "item_type": "heating_pipe",
+                "key": f"{diameter:.1f}",
+                "description": f"Heizrohr {diameter:.1f} mm",
+                "unit": "m",
+                "quantity": quantity,
+                "meta": {"diameter_mm": diameter},
+            }
+            for diameter, quantity in sorted(hk_by_diameter.items())
+        ]
+
+        cable_by_type: dict[str, float] = {}
+        for cable_id, cdata in params.get("elec_cables", {}).items():
+            cable_type = str(cdata.get("cable_type", cdata.get("name", cable_id)) or "").strip() or "(unbekannt)"
+            length_m = _polyline_length_m(canvas.get("elec_cables", {}).get(cable_id, []), mm_per_px)
+            cable_by_type[cable_type] = cable_by_type.get(cable_type, 0.0) + length_m
+
+        cable_bom_rows = [
+            {
+                "category": "Elektro-Kabel",
+                "item_type": "elec_cable",
+                "key": cable_type,
+                "description": cable_type,
+                "unit": "m",
+                "quantity": quantity,
+                "meta": {"cable_type": cable_type},
+            }
+            for cable_type, quantity in sorted(cable_by_type.items(), key=lambda kv: kv[0].lower())
+        ]
+
+        ap_by_type: dict[str, int] = {}
+        for point_id, pdata in params.get("elec_points", {}).items():
+            ap_type = str(
+                pdata.get("builtin_symbol")
+                or pdata.get("ap_type")
+                or pdata.get("name")
+                or point_id
+            ).strip() or "(kein Typ)"
+            ap_by_type[ap_type] = ap_by_type.get(ap_type, 0) + 1
+
+        ap_bom_rows = [
+            {
+                "category": "Anschlusspunkte",
+                "item_type": "ap",
+                "key": ap_type,
+                "description": ap_type,
+                "unit": "Stk",
+                "quantity": quantity,
+                "meta": {"ap_type": ap_type},
+            }
+            for ap_type, quantity in sorted(ap_by_type.items(), key=lambda kv: kv[0].lower())
+        ]
+
+        hkv_line_by_type: dict[str, float] = {}
+        for line_id, ldata in params.get("hkv_lines", {}).items():
+            line_type = str(ldata.get("line_type") or ldata.get("name") or line_id).strip() or "(unbekannt)"
+            length_m = _polyline_length_m(canvas.get("hkv_lines", {}).get(line_id, []), mm_per_px)
+            hkv_line_by_type[line_type] = hkv_line_by_type.get(line_type, 0.0) + length_m
+
+        hkv_line_bom_rows = [
+            {
+                "category": "HKV-Leitungen",
+                "item_type": "hkv_line",
+                "key": line_type,
+                "description": line_type,
+                "unit": "m",
+                "quantity": quantity,
+                "meta": {"line_type": line_type},
+            }
+            for line_type, quantity in sorted(hkv_line_by_type.items(), key=lambda kv: kv[0].lower())
+        ]
+
+        uv_device_summary: dict[tuple[str, str, str, str], dict] = {}
+        uv_busbar_summary: dict[tuple[str, int, int], dict] = {}
+        for point_id, pdata in params.get("elec_points", {}).items():
+            uv_config = pdata.get("uv_config") or {}
+            if not isinstance(uv_config, dict):
+                continue
+            uv_name = str(pdata.get("name") or point_id).strip() or point_id
+
+            for slot in uv_config.get("slots", []) or []:
+                if not isinstance(slot, dict):
+                    continue
+                device_type = str(slot.get("device_type", "") or "").strip() or "(leer)"
+                te_size = max(1, int(slot.get("te_size", 1) or 1))
+                manufacturer = str(slot.get("manufacturer", "") or "").strip()
+                article_number = str(slot.get("article_number", "") or "").strip()
+                key = (uv_name, device_type, manufacturer, article_number)
+                if key not in uv_device_summary:
+                    uv_device_summary[key] = {
+                        "category": "UV-Geräte",
+                        "item_type": "uv_device",
+                        "key": device_type,
+                        "uv": uv_name,
+                        "description": device_type,
+                        "unit": "Stk",
+                        "quantity": 0,
+                        "te_total": 0,
+                        "manufacturer": manufacturer,
+                        "article_number": article_number,
+                    }
+                uv_device_summary[key]["quantity"] += 1
+                uv_device_summary[key]["te_total"] += te_size
+
+            for busbar in uv_config.get("busbars", []) or []:
+                if not isinstance(busbar, dict):
+                    continue
+                phase = str(busbar.get("phase", "") or "").strip()
+                if not phase:
+                    continue
+                te_start = max(1, int(busbar.get("te_start", 1) or 1))
+                te_end = max(1, int(busbar.get("te_end", 1) or 1))
+                if te_end < te_start:
+                    te_start, te_end = te_end, te_start
+                te_count = _safe_te_count(te_start, te_end)
+                key = (phase, te_start, te_end)
+                if key not in uv_busbar_summary:
+                    uv_busbar_summary[key] = {
+                        "category": "UV-Phasenschienen",
+                        "item_type": "uv_busbar",
+                        "phase": phase,
+                        "description": f"Phasenschiene {phase}",
+                        "te_start": te_start,
+                        "te_end": te_end,
+                        "unit": "TE",
+                        "quantity": 0,
+                        "uv_count": 0,
+                        "uv_names": set(),
+                    }
+                uv_busbar_summary[key]["quantity"] += te_count
+                uv_busbar_summary[key]["uv_names"].add(uv_name)
+                uv_busbar_summary[key]["uv_count"] = len(uv_busbar_summary[key]["uv_names"])
+
+        uv_device_bom_rows = sorted(
+            uv_device_summary.values(),
+            key=lambda r: (str(r.get("uv", "")).lower(), str(r.get("description", "")).lower()),
+        )
+        uv_busbar_bom_rows = []
+        for row in sorted(
+            uv_busbar_summary.values(),
+            key=lambda r: (
+                str(r.get("phase", "")).lower(),
+                int(r.get("te_start", 0) or 0),
+                int(r.get("te_end", 0) or 0),
+            ),
+        ):
+            row_copy = dict(row)
+            row_copy["uv_names"] = ", ".join(sorted(row.get("uv_names", set())))
+            uv_busbar_bom_rows.append(row_copy)
+
+        rows_by_section = {
+            "hk_bom_rows": hk_bom_rows,
+            "cable_bom_rows": cable_bom_rows,
+            "ap_bom_rows": ap_bom_rows,
+            "hkv_line_bom_rows": hkv_line_bom_rows,
+            "uv_device_bom_rows": uv_device_bom_rows,
+            "uv_busbar_bom_rows": uv_busbar_bom_rows,
+            "custom_bom_rows": [],
+        }
+
+        metadata = _sanitize_bom_metadata(params.get("bom"))
+        rows_by_section = _apply_bom_metadata(rows_by_section, metadata)
+
+        return {
+            "rows_by_section": rows_by_section,
+            "totals": {
+                section: round(
+                    sum(float(row.get("quantity", 0.0) or 0.0) for row in rows),
+                    3,
+                )
+                for section, rows in rows_by_section.items()
+            },
+            "item_counts": {section: len(rows) for section, rows in rows_by_section.items()},
+        }
+
     # ── Projekt-Management ────────────────────────────────────────
 
     @mcp.tool()
@@ -671,6 +1059,195 @@ def _create_stdio_mcp():
     def get_project_json() -> dict:
         """Vollständiges Projekt als JSON zurückgeben."""
         return _state.data
+
+    @mcp.tool()
+    def get_bom_metadata() -> dict:
+        """Persistierte Stücklisten-Metadaten lesen (params.bom)."""
+        meta = _state.data.setdefault("params", {}).get("bom")
+        return _sanitize_bom_metadata(meta)
+
+    @mcp.tool()
+    def set_bom_metadata(metadata: dict, merge: bool = True) -> dict:
+        """Stücklisten-Metadaten setzen (persistiert in params.bom)."""
+        params = _state.data.setdefault("params", {})
+        current = _sanitize_bom_metadata(params.get("bom"))
+        base = copy.deepcopy(current) if merge else _default_bom_metadata()
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                if key in ("sections", "rounding", "item_catalog") and isinstance(value, dict):
+                    merged = dict(base.get(key, {}))
+                    merged.update(value)
+                    base[key] = merged
+                elif key == "custom_items" and isinstance(value, list):
+                    base[key] = value
+                else:
+                    base[key] = value
+        params["bom"] = _sanitize_bom_metadata(base)
+        _state.dirty = True
+        return {
+            "status": "ok",
+            "bom": params["bom"],
+        }
+
+    @mcp.tool()
+    def upsert_bom_catalog_entry(
+        item_type: str,
+        key: str,
+        manufacturer: str = "",
+        article_number: str = "",
+        description_override: str = "",
+        note: str = "",
+    ) -> dict:
+        """Hersteller-/Artikeldaten für eine BOM-Position setzen."""
+        params = _state.data.setdefault("params", {})
+        metadata = _sanitize_bom_metadata(params.get("bom"))
+        catalog = dict(metadata.get("item_catalog", {}))
+        catalog_key = _bom_catalog_key(item_type, key)
+        if not catalog_key or catalog_key == "|":
+            return {"error": "INVALID_ITEM_KEY"}
+        catalog[catalog_key] = {
+            "manufacturer": str(manufacturer or "").strip(),
+            "article_number": str(article_number or "").strip(),
+            "description_override": str(description_override or "").strip(),
+            "note": str(note or "").strip(),
+        }
+        metadata["item_catalog"] = catalog
+        params["bom"] = _sanitize_bom_metadata(metadata)
+        _state.dirty = True
+        return {
+            "status": "ok",
+            "catalog_key": catalog_key,
+            "entry": catalog[catalog_key],
+        }
+
+    @mcp.tool()
+    def add_manual_bom_item(
+        category: str,
+        description: str,
+        unit: str,
+        quantity: float,
+        manufacturer: str = "",
+        article_number: str = "",
+        note: str = "",
+        section_key: str = "custom_bom_rows",
+        custom_id: str = "",
+    ) -> dict:
+        """Manuelle Stücklistenposition hinzufügen/überschreiben."""
+        params = _state.data.setdefault("params", {})
+        metadata = _sanitize_bom_metadata(params.get("bom"))
+        items = list(metadata.get("custom_items", []))
+        item_id = str(custom_id or "").strip() or _next_custom_bom_id(items)
+
+        new_item = {
+            "custom_id": item_id,
+            "section_key": str(section_key or "custom_bom_rows").strip() or "custom_bom_rows",
+            "category": str(category or "Manuell").strip() or "Manuell",
+            "item_type": "custom",
+            "key": item_id,
+            "description": str(description or "").strip(),
+            "unit": str(unit or "Stk").strip() or "Stk",
+            "quantity": float(quantity or 0.0),
+            "manufacturer": str(manufacturer or "").strip(),
+            "article_number": str(article_number or "").strip(),
+            "note": str(note or "").strip(),
+        }
+
+        replaced = False
+        for idx, existing in enumerate(items):
+            if str(existing.get("custom_id", "") or "").strip() == item_id:
+                items[idx] = new_item
+                replaced = True
+                break
+        if not replaced:
+            items.append(new_item)
+
+        metadata["custom_items"] = items
+        params["bom"] = _sanitize_bom_metadata(metadata)
+        _state.dirty = True
+        return {
+            "status": "ok",
+            "action": "updated" if replaced else "created",
+            "item": new_item,
+        }
+
+    @mcp.tool()
+    def remove_manual_bom_item(custom_id: str) -> dict:
+        """Manuelle Stücklistenposition löschen."""
+        item_id = str(custom_id or "").strip()
+        if not item_id:
+            return {"error": "INVALID_CUSTOM_ID"}
+        params = _state.data.setdefault("params", {})
+        metadata = _sanitize_bom_metadata(params.get("bom"))
+        items = list(metadata.get("custom_items", []))
+        before = len(items)
+        items = [
+            item for item in items
+            if str(item.get("custom_id", "") or "").strip() != item_id
+        ]
+        if len(items) == before:
+            return {"error": "CUSTOM_ITEM_NOT_FOUND", "custom_id": item_id}
+
+        metadata["custom_items"] = items
+        params["bom"] = _sanitize_bom_metadata(metadata)
+        _state.dirty = True
+        return {"status": "ok", "deleted": item_id}
+
+    @mcp.tool()
+    def get_bom_summary() -> dict:
+        """Aggregierte Stückliste inkl. UV-Geräte und UV-Phasenschienen."""
+        bom = _collect_bom_data()
+        metadata = _sanitize_bom_metadata(_state.data.setdefault("params", {}).get("bom"))
+        generated_at = datetime.now(tz=UTC).isoformat()
+        return {
+            "generated_at": generated_at,
+            "metadata": metadata,
+            "summary": bom,
+        }
+
+    @mcp.tool()
+    def export_bom_report(format: str = "json") -> dict:
+        """Stücklisten-Report als JSON oder Markdown erzeugen."""
+        payload = get_bom_summary()
+        if payload.get("error"):
+            return payload
+
+        if format == "json":
+            return {
+                "format": "json",
+                "generated_at": payload.get("generated_at", ""),
+                "report": payload,
+            }
+
+        if format == "md":
+            summary = payload.get("summary", {})
+            totals = summary.get("totals", {})
+            item_counts = summary.get("item_counts", {})
+            lines = [
+                "# Stückliste",
+                "",
+                f"- generated_at: {payload.get('generated_at', '')}",
+                f"- sections: {len(summary.get('rows_by_section', {}))}",
+            ]
+            for section in [
+                "hk_bom_rows",
+                "cable_bom_rows",
+                "ap_bom_rows",
+                "hkv_line_bom_rows",
+                "uv_device_bom_rows",
+                "uv_busbar_bom_rows",
+                "custom_bom_rows",
+            ]:
+                lines.append(
+                    f"- {section}: items={item_counts.get(section, 0)}, total={totals.get(section, 0)}"
+                )
+            return {
+                "format": "md",
+                "generated_at": payload.get("generated_at", ""),
+                "report": "\n".join(lines),
+                "summary": summary,
+            }
+
+        return {"error": "UNSUPPORTED_FORMAT", "format": format}
 
     # ── Lese-Tools ────────────────────────────────────────────────
 
