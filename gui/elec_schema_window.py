@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QComboBox,
@@ -807,6 +808,7 @@ class ElecSchemaWindow(QMainWindow):
     ap_positions_changed = Signal(dict)
     edit_ap_requested = Signal(str, dict)   # point_id, payload
     edit_cable_requested = Signal(str, dict)  # cable_id, payload
+    duplicate_selection_requested = Signal(list, list)  # ap_ids, cable_ids
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -841,6 +843,8 @@ class ElecSchemaWindow(QMainWindow):
         self._view_group_drag_state: dict | None = None
         self._cable_drag_state: dict | None = None
         self._cable_rewire_state: dict | None = None
+        self._cable_pick_state: dict | None = None
+        self._copied_selection: dict[str, list[str]] | None = None
         self._rewire_preview_item: QGraphicsPathItem | None = None
         self._rewire_endpoint_tolerance_px = 14.0
         self._rewire_drop_tolerance_px = 56.0
@@ -865,6 +869,9 @@ class ElecSchemaWindow(QMainWindow):
         self.lbl_zoom = QLabel("100%")
         self.lbl_zoom.setMinimumWidth(52)
         self.lbl_zoom.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_mode = QLabel("")
+        self.lbl_mode.setVisible(False)
+        self.lbl_mode.setStyleSheet("color:#ffd54f; font-weight:bold;")
 
         top.addWidget(self.btn_add_ap)
         top.addWidget(self.btn_add_cable)
@@ -875,6 +882,7 @@ class ElecSchemaWindow(QMainWindow):
         top.addWidget(self.btn_zoom_in)
         top.addWidget(self.btn_zoom_reset)
         top.addWidget(self.lbl_zoom)
+        top.addWidget(self.lbl_mode)
         top.addWidget(self.btn_fit)
         top.addWidget(self.btn_refresh)
         root.addLayout(top)
@@ -910,6 +918,7 @@ class ElecSchemaWindow(QMainWindow):
         self.btn_zoom_reset.clicked.connect(self._zoom_reset)
         self.btn_fit.clicked.connect(self._fit_to_content)
         self._update_zoom_label()
+        self._update_mode_indicator()
 
     def set_data(
         self,
@@ -924,6 +933,10 @@ class ElecSchemaWindow(QMainWindow):
         self._selected_cable_ids &= set(self._cable_edges.keys())
         if self._active_cable_id and self._active_cable_id not in self._selected_cable_ids:
             self._active_cable_id = next(iter(self._selected_cable_ids), None)
+        if self._cable_pick_state is not None:
+            pick_cable_id = str(self._cable_pick_state.get("cable_id", "") or "")
+            if pick_cable_id not in self._cable_edges:
+                self._cancel_cable_pick_mode()
         self._room_choices = list(room_choices or [])
         if manual_positions is not None:
             sanitized: dict[str, tuple[float, float]] = {}
@@ -948,6 +961,226 @@ class ElecSchemaWindow(QMainWindow):
         dlg = _AddCableDialog(self._ap_nodes, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.add_cable_requested.emit(dlg.get_payload())
+
+    def _find_context_ids_at(self, scene_pos: QPointF) -> tuple[set[str], set[str]]:
+        item = self.scene.itemAt(scene_pos, self.view.transform())
+        while item is not None:
+            if isinstance(item, _ApNodeItem):
+                point_id = str(getattr(item, "_point_id", "") or "")
+                return ({point_id} if point_id else set(), set())
+            if isinstance(item, _CablePathItem):
+                cable_id = str(getattr(item, "_cable_id", "") or "")
+                return (set(), {cable_id} if cable_id else set())
+            if isinstance(item, _CableEndpointHandle):
+                cable_id = str(getattr(item, "_cable_id", "") or "")
+                return (set(), {cable_id} if cable_id else set())
+            item = item.parentItem()
+        return set(), set()
+
+    def _context_target_ids(self, clicked_ap_ids: set[str], clicked_cable_ids: set[str]) -> tuple[list[str], list[str]]:
+        if self._selected_ap_ids or self._selected_cable_ids:
+            ap_ids = sorted(self._selected_ap_ids)
+            cable_ids = sorted(self._selected_cable_ids)
+        else:
+            ap_ids = sorted(clicked_ap_ids)
+            cable_ids = sorted(clicked_cable_ids)
+        return ap_ids, cable_ids
+
+    def _delete_ids(self, ap_ids: list[str], cable_ids: list[str]):
+        if self._cable_pick_state is not None:
+            self._cancel_cable_pick_mode()
+        for cable_id in cable_ids:
+            if cable_id in self._cable_edges:
+                self.delete_cable_requested.emit(cable_id)
+        for point_id in ap_ids:
+            if point_id in self._ap_nodes:
+                self.delete_ap_requested.emit(point_id)
+
+    def _copy_ids(self, ap_ids: list[str], cable_ids: list[str]):
+        if not ap_ids and not cable_ids:
+            self._copied_selection = None
+            return
+        self._copied_selection = {
+            "ap_ids": list(ap_ids),
+            "cable_ids": list(cable_ids),
+        }
+
+    def _paste_copied_ids(self):
+        payload = self._copied_selection
+        if not payload:
+            return
+        ap_ids = [pid for pid in payload.get("ap_ids", []) if pid in self._ap_nodes]
+        cable_ids = [cid for cid in payload.get("cable_ids", []) if cid in self._cable_edges]
+        if not ap_ids and not cable_ids:
+            return
+        self.duplicate_selection_requested.emit(ap_ids, cable_ids)
+
+    def _open_context_menu(self, scene_pos: QPointF, global_pos):
+        clicked_ap_ids, clicked_cable_ids = self._find_context_ids_at(scene_pos)
+        if (
+            not self._selected_ap_ids
+            and not self._selected_cable_ids
+            and (clicked_ap_ids or clicked_cable_ids)
+        ):
+            active_cable = next(iter(clicked_cable_ids), None)
+            self._set_selection(set(clicked_ap_ids), set(clicked_cable_ids), active_cable)
+
+        target_ap_ids, target_cable_ids = self._context_target_ids(clicked_ap_ids, clicked_cable_ids)
+
+        menu = QMenu(self)
+        add_ap_action = menu.addAction("➕ AP hinzufügen")
+        add_cable_action = menu.addAction("➕ Kabel hinzufügen")
+        menu.addSeparator()
+        delete_action = menu.addAction("🗑 Löschen")
+        copy_action = menu.addAction("📋 Kopieren")
+        paste_action = menu.addAction("📥 Einfügen")
+
+        can_apply_target = bool(target_ap_ids or target_cable_ids)
+        delete_action.setEnabled(can_apply_target)
+        copy_action.setEnabled(can_apply_target)
+        paste_action.setEnabled(self._copied_selection is not None)
+
+        chosen = menu.exec(global_pos.toPoint() if hasattr(global_pos, "toPoint") else global_pos)
+        if chosen is None:
+            return
+        if chosen == add_ap_action:
+            self._open_add_ap_dialog()
+            return
+        if chosen == add_cable_action:
+            self._open_add_cable_dialog()
+            return
+        if chosen == delete_action:
+            self._delete_ids(target_ap_ids, target_cable_ids)
+            return
+        if chosen == copy_action:
+            self._copy_ids(target_ap_ids, target_cable_ids)
+            return
+        if chosen == paste_action:
+            self._paste_copied_ids()
+            return
+
+    def start_cable_pick_mode(self, cable_id: str):
+        edge = self._cable_edges.get(cable_id)
+        if edge is None:
+            return
+
+        start_ap_id = str(edge.start_ap_id or "").strip()
+        end_ap_id = str(edge.end_ap_id or "").strip()
+        if start_ap_id and end_ap_id:
+            self._cancel_cable_pick_mode()
+            return
+
+        if not start_ap_id and not end_ap_id:
+            pending = ["start", "end"]
+        elif not start_ap_id:
+            pending = ["start"]
+        else:
+            pending = ["end"]
+
+        self._cable_pick_state = {
+            "cable_id": cable_id,
+            "pending": pending,
+        }
+        self._set_selection(set(), {cable_id}, cable_id)
+        self._update_mode_indicator()
+
+    def _cancel_cable_pick_mode(self):
+        self._cable_pick_state = None
+        self._update_mode_indicator()
+
+    def _update_mode_indicator(self):
+        state = self._cable_pick_state
+        if not state:
+            self.lbl_mode.clear()
+            self.lbl_mode.setVisible(False)
+            self.view.unsetCursor()
+            self.lbl_hint.setText(
+                "Anzeige: AP-Name, Raum, Verteilerfunktion, Anschlussstatus | Kabel: Name, Typ, Länge"
+            )
+            self._apply_selection_visuals()
+            return
+
+        cable_id = str(state.get("cable_id", "") or "")
+        pending = list(state.get("pending", []))
+        if pending:
+            next_label = "Start-AP" if pending[0] == "start" else "End-AP"
+        else:
+            next_label = "AP"
+
+        self.lbl_mode.setText(f"🧲 Kabel-Ziehmodus: {cable_id} – wähle {next_label} (ESC = Abbrechen)")
+        self.lbl_mode.setVisible(True)
+        self.view.setCursor(Qt.CursorShape.CrossCursor)
+        self.lbl_hint.setText(
+            "Kabel-Ziehmodus aktiv: Klick auf AP setzt fehlenden Anschluss. ESC bricht ab."
+        )
+        self._apply_selection_visuals()
+
+    def _cable_pick_locked_ap_id(self) -> str | None:
+        state = self._cable_pick_state
+        if not state:
+            return None
+        cable_id = str(state.get("cable_id", "") or "")
+        edge = self._cable_edges.get(cable_id)
+        if edge is None:
+            return None
+        pending = list(state.get("pending", []))
+        if not pending:
+            return None
+        if pending[0] == "start":
+            ap_id = str(edge.end_ap_id or "").strip()
+        else:
+            ap_id = str(edge.start_ap_id or "").strip()
+        return ap_id or None
+
+    def _apply_cable_pick_click(self, point_id: str):
+        state = self._cable_pick_state
+        if not state:
+            return
+
+        cable_id = str(state.get("cable_id", "") or "")
+        edge = self._cable_edges.get(cable_id)
+        if edge is None:
+            self._cancel_cable_pick_mode()
+            return
+
+        pending = list(state.get("pending", []))
+        if not pending:
+            self._cancel_cable_pick_mode()
+            return
+
+        endpoint = pending.pop(0)
+        start_ap_id = str(edge.start_ap_id or "").strip()
+        end_ap_id = str(edge.end_ap_id or "").strip()
+        if endpoint == "start":
+            start_ap_id = point_id
+            edge.start_ap_id = point_id
+        else:
+            end_ap_id = point_id
+            edge.end_ap_id = point_id
+
+        payload = {
+            "name": edge.name,
+            "type": edge.cable_type,
+            "color": edge.color,
+            "visible": edge.visible,
+            "label_visible": edge.label_visible,
+            "type_label_visible": edge.type_label_visible,
+            "label_size": edge.label_size,
+            "stroke_width": edge.stroke_width_px,
+            "start_ap_id": start_ap_id,
+            "end_ap_id": end_ap_id,
+            "comment": edge.comment,
+        }
+        self.edit_cable_requested.emit(cable_id, payload)
+
+        if pending:
+            self._cable_pick_state = {
+                "cable_id": cable_id,
+                "pending": pending,
+            }
+        else:
+            self._cable_pick_state = None
+        self._update_mode_indicator()
 
     def _open_delete_ap_dialog(self):
         items = sorted(
@@ -1374,6 +1607,7 @@ class ElecSchemaWindow(QMainWindow):
             text.setFont(font)
             text.setBrush(QBrush(QColor("#ffffff")))
             text.setPos(w / 2 + 8.0, -h / 2)
+            text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
     def _draw_symbol(self, parent_item: QGraphicsRectItem, rect: QRectF, node: ApNode):
         icon_path = (node.icon_path or "").strip()
@@ -1397,6 +1631,7 @@ class ElecSchemaWindow(QMainWindow):
                         painter.end()
                 item = QGraphicsPixmapItem(img, parent_item)
                 item.setPos(rect.left(), rect.top())
+                item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                 return
 
         pix = QPixmap(icon_path)
@@ -1410,6 +1645,7 @@ class ElecSchemaWindow(QMainWindow):
         )
         item = QGraphicsPixmapItem(scaled, parent_item)
         item.setPos(rect.center().x() - scaled.width() / 2, rect.center().y() - scaled.height() / 2)
+        item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
     def _on_ap_node_moved(self, point_id: str, x: float, y: float):
         if self._is_rendering:
@@ -1451,6 +1687,10 @@ class ElecSchemaWindow(QMainWindow):
     def _on_ap_node_mouse_press(self, point_id: str, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return True
+
+        if self._cable_pick_state is not None:
+            self._apply_cable_pick_click(point_id)
+            return False
 
         mods = event.modifiers()
         if mods & Qt.KeyboardModifier.ControlModifier:
@@ -1568,6 +1808,9 @@ class ElecSchemaWindow(QMainWindow):
         return True
 
     def _on_cable_endpoint_handle_press(self, cable_id: str, endpoint_kind: str, event):
+        if self._cable_pick_state is not None:
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if self._active_cable_id != cable_id:
@@ -1580,6 +1823,9 @@ class ElecSchemaWindow(QMainWindow):
             event.accept()
 
     def _on_cable_mouse_press(self, cable_id: str, event):
+        if self._cable_pick_state is not None:
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         mods = event.modifiers()
@@ -1863,7 +2109,14 @@ class ElecSchemaWindow(QMainWindow):
         return self._finalize_cable_rewire(cable_id, scene_pos)
 
     def _on_view_mouse_press(self, event) -> bool:
+        if event.button() == Qt.MouseButton.RightButton:
+            scene_pos = self.view.mapToScene(event.position().toPoint())
+            self._open_context_menu(scene_pos, event.globalPosition())
+            return True
+
         if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        if self._cable_pick_state is not None:
             return False
         if self._cable_rewire_state is not None:
             return False
@@ -1970,6 +2223,8 @@ class ElecSchemaWindow(QMainWindow):
         self._apply_selection_visuals()
 
     def _apply_selection_visuals(self):
+        pick_state = self._cable_pick_state
+        locked_ap_id = self._cable_pick_locked_ap_id()
         for point_id, item in self._ap_items.items():
             node = self._ap_nodes.get(point_id)
             if node is None:
@@ -1977,9 +2232,20 @@ class ElecSchemaWindow(QMainWindow):
             color = QColor(node.color)
             fill = QColor(color)
             is_selected = point_id in self._selected_ap_ids
-            fill.setAlpha(100 if is_selected else 60)
-            item.setBrush(QBrush(fill))
-            item.setPen(QPen(color, 3.0 if is_selected else 2.0))
+            if pick_state is not None:
+                if point_id == locked_ap_id:
+                    locked_fill = QColor("#43aa8b")
+                    locked_fill.setAlpha(85)
+                    item.setBrush(QBrush(locked_fill))
+                    item.setPen(QPen(QColor("#8cffc1"), 3.2))
+                else:
+                    fill.setAlpha(90)
+                    item.setBrush(QBrush(fill))
+                    item.setPen(QPen(QColor("#ffd54f"), 3.0 if is_selected else 2.6))
+            else:
+                fill.setAlpha(100 if is_selected else 60)
+                item.setBrush(QBrush(fill))
+                item.setPen(QPen(color, 3.0 if is_selected else 2.0))
 
         for cable_id, item in self._cable_items.items():
             edge = self._cable_edges.get(cable_id)
@@ -2035,9 +2301,18 @@ class ElecSchemaWindow(QMainWindow):
             self.edit_ap_requested.emit(point_id, dlg.get_payload())
 
     def _on_cable_dblclick(self, cable_id: str):
+        if self._cable_pick_state is not None:
+            return
         edge = self._cable_edges.get(cable_id)
         if edge is None:
             return
         dlg = _EditCableDialog(edge, self._ap_nodes, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.edit_cable_requested.emit(cable_id, dlg.get_payload())
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and self._cable_pick_state is not None:
+            self._cancel_cable_pick_mode()
+            event.accept()
+            return
+        super().keyPressEvent(event)

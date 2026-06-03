@@ -2223,6 +2223,7 @@ class MainWindow(QMainWindow):
             self._elec_schema_window.ap_positions_changed.connect(self._on_schema_ap_positions_changed)
             self._elec_schema_window.edit_ap_requested.connect(self._on_schema_edit_ap)
             self._elec_schema_window.edit_cable_requested.connect(self._on_schema_edit_cable)
+            self._elec_schema_window.duplicate_selection_requested.connect(self._on_schema_duplicate_selection)
         self._refresh_elec_schema_window()
         self._elec_schema_window.show()
         self._elec_schema_window.raise_()
@@ -2352,6 +2353,7 @@ class MainWindow(QMainWindow):
     def _on_schema_add_cable(self, payload: dict):
         start_ap_id = str(payload.get("start_ap_id") or "").strip()
         end_ap_id = str(payload.get("end_ap_id") or "").strip()
+        needs_pick_mode = not start_ap_id or not end_ap_id
         fp_id = self._resolve_schema_cable_floorplan(start_ap_id, end_ap_id)
         self._add_elec_cable(fp_id=fp_id)
         cable_id = f"KV-{self._elec_cable_counter}"
@@ -2382,6 +2384,8 @@ class MainWindow(QMainWindow):
         self.canvas.update()
         self.canvas.elec_cable_changed.emit(cable_id)
         self._refresh_elec_schema_window()
+        if needs_pick_mode and self._elec_schema_window is not None:
+            self._elec_schema_window.start_cable_pick_mode(cable_id)
 
     def _refresh_elec_schema_window(self, *_args):
         if self._elec_schema_window is None:
@@ -2424,6 +2428,55 @@ class MainWindow(QMainWindow):
             changed = True
         if changed:
             self._record_mutation(debounced=False)
+
+    def _on_schema_duplicate_selection(self, ap_ids: list[str], cable_ids: list[str]):
+        selected_ap_ids = [pid for pid in ap_ids if pid in self.param_panel.elec_point_panels]
+        selected_cable_ids = [cid for cid in cable_ids if cid in self.param_panel.elec_cable_panels]
+        if not selected_ap_ids and not selected_cable_ids:
+            return
+
+        id_map: dict[str, str] = {}
+        any_created = False
+
+        for source_ap_id in selected_ap_ids:
+            new_ap_id = self._duplicate_elec_point(source_ap_id)
+            if not new_ap_id:
+                continue
+            id_map[source_ap_id] = new_ap_id
+            source_pos = self._elec_schema_ap_positions.get(source_ap_id)
+            if isinstance(source_pos, (list, tuple)) and len(source_pos) == 2:
+                try:
+                    self._elec_schema_ap_positions[new_ap_id] = [
+                        float(source_pos[0]) + 20.0,
+                        float(source_pos[1]) + 20.0,
+                    ]
+                except (TypeError, ValueError):
+                    pass
+            any_created = True
+
+        for source_cable_id in selected_cable_ids:
+            new_cable_id = self._duplicate_elec_cable(source_cable_id)
+            if not new_cable_id:
+                continue
+
+            source_start = str(self.canvas._cable_start_ap.get(source_cable_id, "") or "").strip()
+            source_end = str(self.canvas._cable_end_ap.get(source_cable_id, "") or "").strip()
+            new_start = id_map.get(source_start, "")
+            new_end = id_map.get(source_end, "")
+
+            if new_start or new_end:
+                self.canvas._cable_start_ap[new_cable_id] = new_start
+                self.canvas._cable_end_ap[new_cable_id] = new_end
+                self._rebuild_schema_cable_geometry(new_cable_id, new_start, new_end)
+
+            any_created = True
+
+        if not any_created:
+            return
+
+        self.canvas.update()
+        self._refresh_elec_schema_window()
+        self._mark_dirty()
 
     def _on_schema_edit_ap(self, point_id: str, payload: dict):
         """Übernimmt bearbeitete AP-Eigenschaften aus dem Schema-Fenster."""
