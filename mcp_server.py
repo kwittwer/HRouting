@@ -555,8 +555,6 @@ def _create_mcp(window: MainWindow, bridge):
 
         return invoke(_apply)
 
-    _refresh_source_state()
-
     # ── Tool-Logging: Jeden Tool-Aufruf ins Log-Fenster schreiben ──
     import functools as _functools
     import inspect as _inspect
