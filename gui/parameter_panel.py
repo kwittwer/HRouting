@@ -392,9 +392,24 @@ PHASE_COLORS: dict[str, str] = {
     "L":  "#ff7043",
 }
 
-# Special phase name for 3-phase rotating busbar (L1→L2→L3 per TE)
+# Special phase names for rotating busbars
 THREE_PHASE_LABEL = "L1/L2/L3"
 _THREE_PHASE_ROTATION = ["L1", "L2", "L3"]
+
+THREE_PHASE_N_LABEL = "3~N"
+_THREE_PHASE_N_ROTATION = ["L1", "L2", "L3", "N"]
+
+# 3~N4: L1, L2, L3, N (einmalig an TE 4), danach L1, L2, L3 zyklisch
+THREE_PHASE_N4_LABEL = "3~N4"
+
+def _get_3n4_phase(idx: int) -> str:
+    """Phasensequenz für 3~N4: L1, L2, L3, N (idx 3), dann L1/L2/L3 zyklisch."""
+    if idx < 3:
+        return ("L1", "L2", "L3")[idx]
+    elif idx == 3:
+        return "N"
+    else:
+        return ("L1", "L2", "L3")[(idx - 4) % 3]
 
 
 class UvSlotEditPopup(QDialog):
@@ -812,6 +827,33 @@ class UvRailWidget(QWidget):
                             te_bw = int(slot_w)
                             phase_idx = (te_g - bb_te_start) % 3
                             te_phase = _THREE_PHASE_ROTATION[phase_idx]
+                            te_color = PHASE_COLORS.get(te_phase, "#888888")
+                            painter.fillRect(te_bx, by, te_bw, busbar_strip_h, QColor(te_color))
+                            painter.setFont(font_busbar)
+                            painter.setPen(QColor("#ffffff"))
+                            painter.drawText(te_bx + 1, by, te_bw - 2, busbar_strip_h,
+                                             Qt.AlignHCenter | Qt.AlignVCenter, te_phase)
+                    elif bb_phase == THREE_PHASE_N_LABEL:
+                        # Vierphasige Sammelschiene mit N: L1→L2→L3→N zyklisch
+                        for te_g in range(vis_start, vis_end + 1):
+                            local_te = te_g - te_row_start  # 0-based within row
+                            te_bx = int(self.LEFT_MARGIN + local_te * slot_w)
+                            te_bw = int(slot_w)
+                            phase_idx = (te_g - bb_te_start) % 4
+                            te_phase = _THREE_PHASE_N_ROTATION[phase_idx]
+                            te_color = PHASE_COLORS.get(te_phase, "#888888")
+                            painter.fillRect(te_bx, by, te_bw, busbar_strip_h, QColor(te_color))
+                            painter.setFont(font_busbar)
+                            painter.setPen(QColor("#ffffff"))
+                            painter.drawText(te_bx + 1, by, te_bw - 2, busbar_strip_h,
+                                             Qt.AlignHCenter | Qt.AlignVCenter, te_phase)
+                    elif bb_phase == THREE_PHASE_N4_LABEL:
+                        # 3~N4: L1, L2, L3, N (einmalig TE 4), dann L1/L2/L3 zyklisch
+                        for te_g in range(vis_start, vis_end + 1):
+                            local_te = te_g - te_row_start  # 0-based within row
+                            te_bx = int(self.LEFT_MARGIN + local_te * slot_w)
+                            te_bw = int(slot_w)
+                            te_phase = _get_3n4_phase(te_g - bb_te_start)
                             te_color = PHASE_COLORS.get(te_phase, "#888888")
                             painter.fillRect(te_bx, by, te_bw, busbar_strip_h, QColor(te_color))
                             painter.setFont(font_busbar)
@@ -1468,7 +1510,7 @@ class UvConfigDialog(QDialog):
         # Phase combo
         cmb = SafeComboBox()
         cmb.setEditable(True)
-        for p in (THREE_PHASE_LABEL, "L1", "L2", "L3", "N", "PE", "L"):
+        for p in (THREE_PHASE_LABEL, THREE_PHASE_N_LABEL, THREE_PHASE_N4_LABEL, "L1", "L2", "L3", "N", "PE", "L"):
             cmb.addItem(p)
         phase = str((busbar or {}).get("phase", "L1") or "L1")
         cmb.setCurrentText(phase)
@@ -1477,14 +1519,15 @@ class UvConfigDialog(QDialog):
         self.tbl_busbars.setCellWidget(row_idx, 0, cmb)
 
         # Color button
-        is_3p = (phase == THREE_PHASE_LABEL)
+        is_multi_phase = (phase == THREE_PHASE_LABEL or phase == THREE_PHASE_N_LABEL
+                          or phase == THREE_PHASE_N4_LABEL)
         default_color = PHASE_COLORS.get(phase, "#888888")
         color = str((busbar or {}).get("color", default_color) or default_color)
         btn = QPushButton()
         btn.setFixedHeight(22)
         btn.setProperty("busbar_color", color)
-        if is_3p:
-            self._apply_three_phase_btn_style(btn)
+        if is_multi_phase:
+            self._apply_three_phase_btn_style(btn, phase)
         else:
             self._update_busbar_color_btn(btn, color)
             btn.clicked.connect(lambda checked=False, ri=row_idx: self._pick_busbar_color(ri))
@@ -1520,8 +1563,8 @@ class UvConfigDialog(QDialog):
         btn = self.tbl_busbars.cellWidget(row_idx, 1)
         if not isinstance(btn, QPushButton):
             return
-        if phase == THREE_PHASE_LABEL:
-            self._apply_three_phase_btn_style(btn)
+        if phase in (THREE_PHASE_LABEL, THREE_PHASE_N_LABEL, THREE_PHASE_N4_LABEL):
+            self._apply_three_phase_btn_style(btn, phase)
         else:
             btn.setEnabled(True)
             # Re-connect click if it was previously a 3-phase button (no click handler)
@@ -1534,16 +1577,41 @@ class UvConfigDialog(QDialog):
                 self._update_busbar_color_btn(btn, PHASE_COLORS[phase])
 
     @staticmethod
-    def _apply_three_phase_btn_style(btn: QPushButton):
-        """Style a color button as the 3-phase gradient and disable it."""
-        btn.setText("L1 / L2 / L3")
-        btn.setStyleSheet(
-            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 #e53935, stop:0.32 #e53935, "
-            "stop:0.34 #43a047, stop:0.65 #43a047, "
-            "stop:0.67 #1e88e5, stop:1 #1e88e5);"
-            "color: #ffffff; border: 1px solid #555; border-radius: 2px;"
-        )
+    def _apply_three_phase_btn_style(btn: QPushButton, phase_label: str = THREE_PHASE_LABEL):
+        """Style a color button as the multi-phase gradient and disable it."""
+        if phase_label == THREE_PHASE_N_LABEL:
+            # 4-phase cycling: L1 (25%) → L2 (25%) → L3 (25%) → N (25%)
+            btn.setText("3~N")
+            btn.setStyleSheet(
+                "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "stop:0 #e53935, stop:0.23 #e53935, "
+                "stop:0.25 #43a047, stop:0.48 #43a047, "
+                "stop:0.50 #1e88e5, stop:0.73 #1e88e5, "
+                "stop:0.75 #1565c0, stop:1 #1565c0);"
+                "color: #ffffff; border: 1px solid #555; border-radius: 2px;"
+            )
+        elif phase_label == THREE_PHASE_N4_LABEL:
+            # L1, L2, L3, N (TE4), dann L1/L2/L3 – Gradient zeigt L1/L2/L3+N
+            btn.setText("3~N4")
+            btn.setStyleSheet(
+                "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "stop:0 #e53935, stop:0.18 #e53935, "
+                "stop:0.20 #43a047, stop:0.38 #43a047, "
+                "stop:0.40 #1e88e5, stop:0.58 #1e88e5, "
+                "stop:0.60 #1565c0, stop:0.73 #1565c0, "
+                "stop:0.75 #e53935, stop:1 #1e88e5);"
+                "color: #ffffff; border: 1px solid #555; border-radius: 2px;"
+            )
+        else:
+            # 3-phase: L1 (33%) → L2 (33%) → L3 (33%)
+            btn.setText("L1 / L2 / L3")
+            btn.setStyleSheet(
+                "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "stop:0 #e53935, stop:0.32 #e53935, "
+                "stop:0.34 #43a047, stop:0.65 #43a047, "
+                "stop:0.67 #1e88e5, stop:1 #1e88e5);"
+                "color: #ffffff; border: 1px solid #555; border-radius: 2px;"
+            )
         btn.setEnabled(False)
 
     def _pick_busbar_color(self, row_idx: int):

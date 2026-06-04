@@ -133,7 +133,7 @@
       "type": "object",
       "required": ["phase"],
       "properties": {
-        "phase": { "type": "string", "description": "Phasenbezeichnung, z.B. L1, L2, L3, N, PE oder 'L1/L2/L3' für dreiphasige Sammelschiene (L1→L2→L3 je TE). Mehrere Einträge mit derselben Phase sind erlaubt (nicht-zusammenhängende Bereiche)." },
+        "phase": { "type": "string", "description": "Phasenbezeichnung, z.B. L1, L2, L3, N, PE oder 'L1/L2/L3' für dreiphasige Sammelschiene (L1→L2→L3 je TE), '3~N' für vierphasige Sammelschiene mit Neutral (L1→L2→L3→N je TE, zyklisch) oder '3~N4' für Sammelschiene mit einmaliger N-Lücke an Position 4 (L1, L2, L3, N, L1, L2, L3, ...) passend zu 4-poligen FI. Mehrere Einträge mit derselben Phase sind erlaubt (nicht-zusammenhängende Bereiche)." },
         "color": { "type": "string", "default": "#e53935", "description": "Farbe der Phasenschiene als Hex-Code (#rrggbb)." },
         "te_start": { "type": "integer", "minimum": 1, "description": "Erste globale TE-Nummer der Phasenschiene (inklusiv). Pflicht wenn te_ranges nicht gesetzt." },
         "te_end": { "type": "integer", "minimum": 1, "description": "Letzte globale TE-Nummer der Phasenschiene (inklusiv). Pflicht wenn te_ranges nicht gesetzt." },

@@ -8065,6 +8065,51 @@ class _PdfContext:
                                        slot_w - self.mm(0.4), bb_strip_h),
                                 Qt.AlignHCenter | Qt.AlignVCenter, ph,
                             )
+                    elif bb_phase == "3~N":
+                        # Vierphasige Sammelschiene mit N: L1→L2→L3→N zyklisch
+                        _3pn_colors = {"L1": "#e53935", "L2": "#43a047", "L3": "#1e88e5", "N": "#1565c0"}
+                        for te_g in range(vis_s, vis_e + 1):
+                            local_te = te_g - row_te_start_g  # 0-based within row
+                            te_bx = rail_x0 + local_te * slot_w
+                            ph = ("L1", "L2", "L3", "N")[(te_g - bb_te_s) % 4]
+                            self.painter.fillRect(
+                                QRectF(te_bx, bb_y, slot_w, bb_strip_h),
+                                QBrush(QColor(_3pn_colors[ph])),
+                            )
+                            self.painter.setFont(QFont("Arial", 3, QFont.Bold))
+                            self.painter.setPen(QColor("#ffffff"))
+                            self.painter.drawText(
+                                QRectF(te_bx + self.mm(0.2), bb_y,
+                                       slot_w - self.mm(0.4), bb_strip_h),
+                                Qt.AlignHCenter | Qt.AlignVCenter, ph,
+                            )
+                    elif bb_phase == "3~N4":
+                        # 3~N4: L1, L2, L3, N (einmalig an TE 4), dann L1/L2/L3 zyklisch
+                        _3pn4_colors = {"L1": "#e53935", "L2": "#43a047", "L3": "#1e88e5", "N": "#1565c0"}
+
+                        def _ph_3n4(idx: int) -> str:
+                            if idx < 3:
+                                return ("L1", "L2", "L3")[idx]
+                            elif idx == 3:
+                                return "N"
+                            else:
+                                return ("L1", "L2", "L3")[(idx - 4) % 3]
+
+                        for te_g in range(vis_s, vis_e + 1):
+                            local_te = te_g - row_te_start_g  # 0-based within row
+                            te_bx = rail_x0 + local_te * slot_w
+                            ph = _ph_3n4(te_g - bb_te_s)
+                            self.painter.fillRect(
+                                QRectF(te_bx, bb_y, slot_w, bb_strip_h),
+                                QBrush(QColor(_3pn4_colors[ph])),
+                            )
+                            self.painter.setFont(QFont("Arial", 3, QFont.Bold))
+                            self.painter.setPen(QColor("#ffffff"))
+                            self.painter.drawText(
+                                QRectF(te_bx + self.mm(0.2), bb_y,
+                                       slot_w - self.mm(0.4), bb_strip_h),
+                                Qt.AlignHCenter | Qt.AlignVCenter, ph,
+                            )
                     else:
                         local_s = vis_s - row_te_start_g  # 0-based within row
                         local_e = vis_e - row_te_start_g  # 0-based within row
