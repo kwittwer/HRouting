@@ -1434,6 +1434,137 @@ class UvConfigDialog(QDialog):
             )
         )
 
+    # ── Busbar (Phasenschienen) helpers ──────────────────────── #
+
+    def _capture_current_busbars(self) -> list[dict]:
+        """Read all rows from tbl_busbars into a list of busbar dicts."""
+        busbars: list[dict] = []
+        for row_idx in range(self.tbl_busbars.rowCount()):
+            cmb_phase = self.tbl_busbars.cellWidget(row_idx, 0)
+            btn_color = self.tbl_busbars.cellWidget(row_idx, 1)
+            sb_start = self.tbl_busbars.cellWidget(row_idx, 2)
+            sb_end = self.tbl_busbars.cellWidget(row_idx, 3)
+            if not all([cmb_phase, btn_color, sb_start, sb_end]):
+                continue
+            phase = cmb_phase.currentText().strip() if isinstance(cmb_phase, QComboBox) else ""
+            color = btn_color.property("busbar_color") or "#888888"
+            te_start = sb_start.value() if isinstance(sb_start, QSpinBox) else 1
+            te_end = sb_end.value() if isinstance(sb_end, QSpinBox) else 1
+            if phase:
+                busbars.append({
+                    "phase": phase,
+                    "color": color,
+                    "te_start": te_start,
+                    "te_end": te_end,
+                })
+        return busbars
+
+    def _add_busbar_row(self, busbar: dict | None = None):
+        """Append a row to tbl_busbars, optionally pre-filled from busbar dict."""
+        total_te = self.sb_rows.value() * self.sb_modules.value()
+        row_idx = self.tbl_busbars.rowCount()
+        self.tbl_busbars.insertRow(row_idx)
+
+        # Phase combo
+        cmb = SafeComboBox()
+        cmb.setEditable(True)
+        for p in (THREE_PHASE_LABEL, "L1", "L2", "L3", "N", "PE", "L"):
+            cmb.addItem(p)
+        phase = str((busbar or {}).get("phase", "L1") or "L1")
+        cmb.setCurrentText(phase)
+        cmb.currentTextChanged.connect(lambda p, ri=row_idx: self._on_busbar_phase_changed(ri, p))
+        cmb.currentTextChanged.connect(lambda _: self._refresh_visual())
+        self.tbl_busbars.setCellWidget(row_idx, 0, cmb)
+
+        # Color button
+        is_3p = (phase == THREE_PHASE_LABEL)
+        default_color = PHASE_COLORS.get(phase, "#888888")
+        color = str((busbar or {}).get("color", default_color) or default_color)
+        btn = QPushButton()
+        btn.setFixedHeight(22)
+        btn.setProperty("busbar_color", color)
+        if is_3p:
+            self._apply_three_phase_btn_style(btn)
+        else:
+            self._update_busbar_color_btn(btn, color)
+            btn.clicked.connect(lambda checked=False, ri=row_idx: self._pick_busbar_color(ri))
+        self.tbl_busbars.setCellWidget(row_idx, 1, btn)
+
+        # TE-Start spinbox
+        sb_start = QSpinBox()
+        sb_start.setRange(1, max(1, total_te))
+        sb_start.setValue(int((busbar or {}).get("te_start", 1) or 1))
+        sb_start.valueChanged.connect(lambda _: self._refresh_visual())
+        self.tbl_busbars.setCellWidget(row_idx, 2, sb_start)
+
+        # TE-Ende spinbox
+        sb_end = QSpinBox()
+        sb_end.setRange(1, max(1, total_te))
+        sb_end.setValue(int((busbar or {}).get("te_end", sb_start.value()) or sb_start.value()))
+        sb_end.valueChanged.connect(lambda _: self._refresh_visual())
+        self.tbl_busbars.setCellWidget(row_idx, 3, sb_end)
+
+        self._refresh_visual()
+
+    def _remove_busbar_row(self):
+        """Remove the currently selected busbar row."""
+        selected = self.tbl_busbars.currentRow()
+        if selected >= 0:
+            self.tbl_busbars.removeRow(selected)
+        elif self.tbl_busbars.rowCount() > 0:
+            self.tbl_busbars.removeRow(self.tbl_busbars.rowCount() - 1)
+        self._refresh_visual()
+
+    def _on_busbar_phase_changed(self, row_idx: int, phase: str):
+        """When a phase is selected, update the color button accordingly."""
+        btn = self.tbl_busbars.cellWidget(row_idx, 1)
+        if not isinstance(btn, QPushButton):
+            return
+        if phase == THREE_PHASE_LABEL:
+            self._apply_three_phase_btn_style(btn)
+        else:
+            btn.setEnabled(True)
+            # Re-connect click if it was previously a 3-phase button (no click handler)
+            try:
+                btn.clicked.disconnect()
+            except RuntimeError:
+                pass
+            btn.clicked.connect(lambda checked=False, ri=row_idx: self._pick_busbar_color(ri))
+            if phase in PHASE_COLORS:
+                self._update_busbar_color_btn(btn, PHASE_COLORS[phase])
+
+    @staticmethod
+    def _apply_three_phase_btn_style(btn: QPushButton):
+        """Style a color button as the 3-phase gradient and disable it."""
+        btn.setText("L1 / L2 / L3")
+        btn.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #e53935, stop:0.32 #e53935, "
+            "stop:0.34 #43a047, stop:0.65 #43a047, "
+            "stop:0.67 #1e88e5, stop:1 #1e88e5);"
+            "color: #ffffff; border: 1px solid #555; border-radius: 2px;"
+        )
+        btn.setEnabled(False)
+
+    def _pick_busbar_color(self, row_idx: int):
+        """Open color picker for the busbar color button at row_idx."""
+        btn = self.tbl_busbars.cellWidget(row_idx, 1)
+        if not isinstance(btn, QPushButton):
+            return
+        current = btn.property("busbar_color") or "#888888"
+        color = QColorDialog.getColor(QColor(current), self, "Farbe wählen")
+        if color.isValid():
+            self._update_busbar_color_btn(btn, color.name())
+            self._refresh_visual()
+
+    @staticmethod
+    def _update_busbar_color_btn(btn: QPushButton, color: str):
+        btn.setProperty("busbar_color", color)
+        btn.setStyleSheet(
+            f"background-color: {color}; color: #ffffff; border: 1px solid #555; border-radius: 2px;"
+        )
+        btn.setText(color)
+
 
 class BomMetadataDialog(QDialog):
     """Editor for BOM catalog metadata and manual BOM rows."""
@@ -1691,137 +1822,6 @@ class BomMetadataDialog(QDialog):
         result["item_catalog"] = item_catalog
         result["custom_items"] = custom_items
         return result
-
-    # ── Busbar (Phasenschienen) helpers ──────────────────────── #
-
-    def _capture_current_busbars(self) -> list[dict]:
-        """Read all rows from tbl_busbars into a list of busbar dicts."""
-        busbars: list[dict] = []
-        for row_idx in range(self.tbl_busbars.rowCount()):
-            cmb_phase = self.tbl_busbars.cellWidget(row_idx, 0)
-            btn_color = self.tbl_busbars.cellWidget(row_idx, 1)
-            sb_start = self.tbl_busbars.cellWidget(row_idx, 2)
-            sb_end = self.tbl_busbars.cellWidget(row_idx, 3)
-            if not all([cmb_phase, btn_color, sb_start, sb_end]):
-                continue
-            phase = cmb_phase.currentText().strip() if isinstance(cmb_phase, QComboBox) else ""
-            color = btn_color.property("busbar_color") or "#888888"
-            te_start = sb_start.value() if isinstance(sb_start, QSpinBox) else 1
-            te_end = sb_end.value() if isinstance(sb_end, QSpinBox) else 1
-            if phase:
-                busbars.append({
-                    "phase": phase,
-                    "color": color,
-                    "te_start": te_start,
-                    "te_end": te_end,
-                })
-        return busbars
-
-    def _add_busbar_row(self, busbar: dict | None = None):
-        """Append a row to tbl_busbars, optionally pre-filled from busbar dict."""
-        total_te = self.sb_rows.value() * self.sb_modules.value()
-        row_idx = self.tbl_busbars.rowCount()
-        self.tbl_busbars.insertRow(row_idx)
-
-        # Phase combo
-        cmb = SafeComboBox()
-        cmb.setEditable(True)
-        for p in (THREE_PHASE_LABEL, "L1", "L2", "L3", "N", "PE", "L"):
-            cmb.addItem(p)
-        phase = str((busbar or {}).get("phase", "L1") or "L1")
-        cmb.setCurrentText(phase)
-        cmb.currentTextChanged.connect(lambda p, ri=row_idx: self._on_busbar_phase_changed(ri, p))
-        cmb.currentTextChanged.connect(lambda _: self._refresh_visual())
-        self.tbl_busbars.setCellWidget(row_idx, 0, cmb)
-
-        # Color button
-        is_3p = (phase == THREE_PHASE_LABEL)
-        default_color = PHASE_COLORS.get(phase, "#888888")
-        color = str((busbar or {}).get("color", default_color) or default_color)
-        btn = QPushButton()
-        btn.setFixedHeight(22)
-        btn.setProperty("busbar_color", color)
-        if is_3p:
-            self._apply_three_phase_btn_style(btn)
-        else:
-            self._update_busbar_color_btn(btn, color)
-            btn.clicked.connect(lambda checked=False, ri=row_idx: self._pick_busbar_color(ri))
-        self.tbl_busbars.setCellWidget(row_idx, 1, btn)
-
-        # TE-Start spinbox
-        sb_start = QSpinBox()
-        sb_start.setRange(1, max(1, total_te))
-        sb_start.setValue(int((busbar or {}).get("te_start", 1) or 1))
-        sb_start.valueChanged.connect(lambda _: self._refresh_visual())
-        self.tbl_busbars.setCellWidget(row_idx, 2, sb_start)
-
-        # TE-Ende spinbox
-        sb_end = QSpinBox()
-        sb_end.setRange(1, max(1, total_te))
-        sb_end.setValue(int((busbar or {}).get("te_end", sb_start.value()) or sb_start.value()))
-        sb_end.valueChanged.connect(lambda _: self._refresh_visual())
-        self.tbl_busbars.setCellWidget(row_idx, 3, sb_end)
-
-        self._refresh_visual()
-
-    def _remove_busbar_row(self):
-        """Remove the currently selected busbar row."""
-        selected = self.tbl_busbars.currentRow()
-        if selected >= 0:
-            self.tbl_busbars.removeRow(selected)
-        elif self.tbl_busbars.rowCount() > 0:
-            self.tbl_busbars.removeRow(self.tbl_busbars.rowCount() - 1)
-        self._refresh_visual()
-
-    def _on_busbar_phase_changed(self, row_idx: int, phase: str):
-        """When a phase is selected, update the color button accordingly."""
-        btn = self.tbl_busbars.cellWidget(row_idx, 1)
-        if not isinstance(btn, QPushButton):
-            return
-        if phase == THREE_PHASE_LABEL:
-            self._apply_three_phase_btn_style(btn)
-        else:
-            btn.setEnabled(True)
-            # Re-connect click if it was previously a 3-phase button (no click handler)
-            try:
-                btn.clicked.disconnect()
-            except RuntimeError:
-                pass
-            btn.clicked.connect(lambda checked=False, ri=row_idx: self._pick_busbar_color(ri))
-            if phase in PHASE_COLORS:
-                self._update_busbar_color_btn(btn, PHASE_COLORS[phase])
-
-    @staticmethod
-    def _apply_three_phase_btn_style(btn: QPushButton):
-        """Style a color button as the 3-phase gradient and disable it."""
-        btn.setText("L1 / L2 / L3")
-        btn.setStyleSheet(
-            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 #e53935, stop:0.32 #e53935, "
-            "stop:0.34 #43a047, stop:0.65 #43a047, "
-            "stop:0.67 #1e88e5, stop:1 #1e88e5);"
-            "color: #ffffff; border: 1px solid #555; border-radius: 2px;"
-        )
-        btn.setEnabled(False)
-
-    def _pick_busbar_color(self, row_idx: int):
-        """Open color picker for the busbar color button at row_idx."""
-        btn = self.tbl_busbars.cellWidget(row_idx, 1)
-        if not isinstance(btn, QPushButton):
-            return
-        current = btn.property("busbar_color") or "#888888"
-        color = QColorDialog.getColor(QColor(current), self, "Farbe wählen")
-        if color.isValid():
-            self._update_busbar_color_btn(btn, color.name())
-            self._refresh_visual()
-
-    @staticmethod
-    def _update_busbar_color_btn(btn: QPushButton, color: str):
-        btn.setProperty("busbar_color", color)
-        btn.setStyleSheet(
-            f"background-color: {color}; color: #ffffff; border: 1px solid #555; border-radius: 2px;"
-        )
-        btn.setText(color)
 
 
 class UpDistributionDialog(QDialog):
