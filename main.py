@@ -19,7 +19,7 @@ import ctypes
 import re
 from pathlib import Path
 
-VERSION = "0.1.45"
+VERSION = "0.1.46"
 
 # Windows: AppUserModelID muss VOR allen Qt-Imports gesetzt werden,
 # damit die Taskleiste das App-Icon statt des Python-Icons zeigt.
