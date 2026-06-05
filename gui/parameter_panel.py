@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSplitter, QAbstractItemView,
     QDialog, QDialogButtonBox, QSpinBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QTabWidget, QSizePolicy,
+    QMenu,
 )
 from pathlib import Path
 from PySide6.QtGui import QColor, QPixmap, QPainter, QFont, QPen, QBrush, QFontMetrics
@@ -3291,6 +3292,14 @@ class FloorPlanPanel(QWidget):
     move_up_requested      = Signal(str)            # fp_id
     move_down_requested    = Signal(str)            # fp_id
     add_furniture_requested = Signal(str)           # fp_id
+    helper_visibility_changed = Signal(str, bool)
+    helper_color_changed = Signal(str, str)
+    helper_length_changed = Signal(str, float)
+    helper_width_changed = Signal(str, float)
+    helper_style_changed = Signal(str, str)
+    helper_draw_requested = Signal(str)
+    helper_edit_requested = Signal(str)
+    helper_clear_requested = Signal(str)
 
     def __init__(self, fp_id: str, name: str | None = None, parent=None):
         super().__init__(parent)
@@ -3483,6 +3492,107 @@ class FloorPlanPanel(QWidget):
         ref_color_row.addWidget(self.btn_ref_color, stretch=1)
         layout.addLayout(ref_color_row)
 
+        # ── Hilfslinien ─────────────────────────────────────────────
+        sep_helper = QFrame()
+        sep_helper.setFrameShape(QFrame.HLine)
+        sep_helper.setStyleSheet("color:#555;")
+        layout.addWidget(sep_helper)
+
+        helper_title = QLabel("📐 Hilfslinien")
+        helper_title.setStyleSheet("font-weight:bold; padding:4px 0;")
+        layout.addWidget(helper_title)
+
+        self.chk_helper_visible = QCheckBox("Hilfslinien sichtbar")
+        self.chk_helper_visible.setChecked(True)
+        self.chk_helper_visible.toggled.connect(
+            lambda c: self.helper_visibility_changed.emit(self.fp_id, c)
+        )
+        layout.addWidget(self.chk_helper_visible)
+
+        helper_action_row = QHBoxLayout()
+        self.btn_helper_draw = QPushButton("📐 Zeichnen")
+        self.btn_helper_draw.setToolTip("Hilfslinien für diesen Grundriss zeichnen")
+        self.btn_helper_draw.setStyleSheet(
+            "background:#555; color:white; padding:4px;"
+        )
+        self.btn_helper_draw.clicked.connect(
+            lambda: self.helper_draw_requested.emit(self.fp_id)
+        )
+        helper_action_row.addWidget(self.btn_helper_draw)
+
+        self.btn_helper_edit = QPushButton("✥ Bearbeiten")
+        self.btn_helper_edit.setToolTip("Hilfslinien dieses Grundrisses bearbeiten")
+        self.btn_helper_edit.setStyleSheet(
+            "background:#555; color:white; padding:4px;"
+        )
+        self.btn_helper_edit.clicked.connect(
+            lambda: self.helper_edit_requested.emit(self.fp_id)
+        )
+        helper_action_row.addWidget(self.btn_helper_edit)
+
+        self.btn_helper_clear = QPushButton("✕ Löschen")
+        self.btn_helper_clear.setToolTip("Alle Hilfslinien dieses Grundrisses löschen")
+        self.btn_helper_clear.setStyleSheet(
+            "background:#6b2d2d; color:white; padding:4px;"
+        )
+        self.btn_helper_clear.clicked.connect(
+            lambda: self.helper_clear_requested.emit(self.fp_id)
+        )
+        helper_action_row.addWidget(self.btn_helper_clear)
+        layout.addLayout(helper_action_row)
+
+        helper_color_row = QHBoxLayout()
+        helper_color_label = QLabel("Farbe:")
+        self.btn_helper_color = QPushButton()
+        self.btn_helper_color.setFixedHeight(32)
+        self._helper_color = "#f8f32b"
+        self.btn_helper_color.setStyleSheet(f"background:{self._helper_color};")
+        self.btn_helper_color.clicked.connect(self._choose_helper_line_color)
+        helper_color_row.addWidget(helper_color_label)
+        helper_color_row.addWidget(self.btn_helper_color, stretch=1)
+        layout.addLayout(helper_color_row)
+
+        helper_form = QFormLayout()
+        helper_form.setContentsMargins(0, 0, 0, 0)
+        helper_form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+
+        self.sb_helper_length = SafeDoubleSpinBox()
+        self.sb_helper_length.setRange(0.01, 200.0)
+        self.sb_helper_length.setDecimals(3)
+        self.sb_helper_length.setSingleStep(0.1)
+        self.sb_helper_length.setValue(1.0)
+        self.sb_helper_length.setSuffix(" m")
+        self.sb_helper_length.valueChanged.connect(
+            lambda v: self.helper_length_changed.emit(self.fp_id, v * 1000.0)
+        )
+        helper_form.addRow("Standardlänge:", self.sb_helper_length)
+
+        self.sb_helper_width = SafeDoubleSpinBox()
+        self.sb_helper_width.setRange(0.5, 20.0)
+        self.sb_helper_width.setDecimals(1)
+        self.sb_helper_width.setSingleStep(0.5)
+        self.sb_helper_width.setValue(2.0)
+        self.sb_helper_width.setSuffix(" px")
+        self.sb_helper_width.valueChanged.connect(
+            lambda v: self.helper_width_changed.emit(self.fp_id, v)
+        )
+        helper_form.addRow("Linienstärke:", self.sb_helper_width)
+
+        self.cb_helper_style = SafeComboBox()
+        self.cb_helper_style.addItem("Durchgezogen", "solid")
+        self.cb_helper_style.addItem("Gestrichelt", "dash")
+        self.cb_helper_style.addItem("Gepunktet", "dot")
+        self.cb_helper_style.addItem("Strich-Punkt", "dashdot")
+        self.cb_helper_style.setCurrentIndex(1)
+        self.cb_helper_style.currentIndexChanged.connect(
+            lambda idx: self.helper_style_changed.emit(
+                self.fp_id,
+                str(self.cb_helper_style.itemData(idx) or "dash"),
+            )
+        )
+        helper_form.addRow("Linienstil:", self.cb_helper_style)
+        layout.addLayout(helper_form)
+
         # Reihenfolge (up/down) + Delete
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.HLine)
@@ -3656,6 +3766,15 @@ class FloorPlanPanel(QWidget):
             self.btn_ref_color.setStyleSheet(f"background:{self._ref_line_color};")
             self.ref_line_color_changed.emit(self.fp_id, self._ref_line_color)
 
+    def _choose_helper_line_color(self):
+        color = QColorDialog.getColor(
+            QColor(self._helper_color), self, "Hilfslinien-Farbe wählen"
+        )
+        if color.isValid():
+            self._helper_color = color.name()
+            self.btn_helper_color.setStyleSheet(f"background:{self._helper_color};")
+            self.helper_color_changed.emit(self.fp_id, self._helper_color)
+
     def update_scale_label(self, mm_per_px: float):
         self.lbl_scale.setText(f"Ma\u00dfstab: {mm_per_px / 1000:.6f} m/px")
         self.btn_apply.setStyleSheet(
@@ -3670,6 +3789,11 @@ class FloorPlanPanel(QWidget):
             "polygon_color": self._polygon_color.name(),
             "ref_line_visible": self.chk_ref_visible.isChecked(),
             "ref_line_color": self._ref_line_color,
+            "helper_line_visible": self.chk_helper_visible.isChecked(),
+            "helper_line_color": self._helper_color,
+            "helper_target_length_mm": self.sb_helper_length.value() * 1000.0,
+            "helper_line_width_px": self.sb_helper_width.value(),
+            "helper_line_style": str(self.cb_helper_style.currentData() or "dash"),
             "opacity": self.sb_opacity.value(),
             "offset_x": self.sb_offset_x.value(),
             "offset_y": self.sb_offset_y.value(),
@@ -3691,6 +3815,14 @@ class FloorPlanPanel(QWidget):
         self._ref_line_color = d.get("ref_line_color", "#ffdd00")
         self.btn_ref_color.setStyleSheet(f"background:{self._ref_line_color};")
         self.chk_ref_visible.setChecked(d.get("ref_line_visible", True))
+        self._helper_color = d.get("helper_line_color", "#f8f32b")
+        self.btn_helper_color.setStyleSheet(f"background:{self._helper_color};")
+        self.chk_helper_visible.setChecked(d.get("helper_line_visible", True))
+        self.sb_helper_length.setValue(d.get("helper_target_length_mm", 1000.0) / 1000.0)
+        self.sb_helper_width.setValue(d.get("helper_line_width_px", 2.0))
+        helper_style = str(d.get("helper_line_style", "dash") or "dash")
+        idx = self.cb_helper_style.findData(helper_style)
+        self.cb_helper_style.setCurrentIndex(idx if idx >= 0 else 1)
         self.sb_opacity.setValue(d.get("opacity", 1.0))
         self.sb_offset_x.setValue(d.get("offset_x", 0.0))
         self.sb_offset_y.setValue(d.get("offset_y", 0.0))
@@ -3739,6 +3871,14 @@ class ParameterPanel(QWidget):
     floorplan_ref_line          = Signal(str)
     floorplan_ref_line_color_changed = Signal(str, str)  # (fp_id, color hex)
     floorplan_ref_line_visibility_changed = Signal(str, bool)  # (fp_id, visible)
+    floorplan_helper_visibility_changed = Signal(str, bool)
+    floorplan_helper_color_changed = Signal(str, str)
+    floorplan_helper_length_changed = Signal(str, float)
+    floorplan_helper_width_changed = Signal(str, float)
+    floorplan_helper_style_changed = Signal(str, str)
+    floorplan_helper_draw_requested = Signal(str)
+    floorplan_helper_edit_requested = Signal(str)
+    floorplan_helper_clear_requested = Signal(str)
     floorplan_ref_confirmed     = Signal(str, float)
     floorplan_transform_changed = Signal(str)
     floorplan_opacity_changed   = Signal(str, float)
@@ -3895,12 +4035,14 @@ class ParameterPanel(QWidget):
         self._tree.setDropIndicatorShown(True)
         self._tree.setDragDropMode(QAbstractItemView.InternalMove)
         self._tree.setDefaultDropAction(Qt.MoveAction)
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
 
         # Floor plan items are created dynamically via add_floorplan_panel()
         # Connect AFTER initial setup to avoid spurious signals
         self._tree.currentItemChanged.connect(self._on_tree_selection)
         self._tree.itemChanged.connect(self._on_tree_item_changed)
         self._tree.items_dropped.connect(self._on_tree_items_dropped)
+        self._tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         splitter.addWidget(self._tree)
 
         # -- Eigenschaftenbereich (property panel) -------------------
@@ -4191,6 +4333,58 @@ class ParameterPanel(QWidget):
             )
             self._loading = False
 
+    def _show_tree_context_menu(self, pos):
+        menu = QMenu(self)
+        current = self._tree.itemAt(pos)
+
+        expand_all = menu.addAction("Alle aufklappen")
+        expand_all.triggered.connect(self._tree.expandAll)
+
+        collapse_all = menu.addAction("Alle zuklappen")
+        collapse_all.triggered.connect(self._tree.collapseAll)
+
+        menu.addSeparator()
+        expand_top = menu.addAction("Nur Grundrisse aufklappen")
+        expand_top.triggered.connect(self._expand_top_level_items)
+
+        collapse_top = menu.addAction("Nur Grundrisse zuklappen")
+        collapse_top.triggered.connect(self._collapse_top_level_items)
+
+        menu.addSeparator()
+        expand_branch = menu.addAction("Auswahl aufklappen")
+        collapse_branch = menu.addAction("Auswahl zuklappen")
+        expand_branch.setEnabled(current is not None)
+        collapse_branch.setEnabled(current is not None)
+        if current is not None:
+            expand_branch.triggered.connect(
+                lambda checked=False, item=current: self._set_expanded_recursive(item, True)
+            )
+            collapse_branch.triggered.connect(
+                lambda checked=False, item=current: self._set_expanded_recursive(item, False)
+            )
+
+        global_pos = self._tree.viewport().mapToGlobal(pos)
+        menu.exec(global_pos)
+
+    def _expand_top_level_items(self):
+        for i in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(i)
+            if item:
+                item.setExpanded(True)
+
+    def _collapse_top_level_items(self):
+        for i in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(i)
+            if item:
+                item.setExpanded(False)
+
+    def _set_expanded_recursive(self, item: QTreeWidgetItem, expanded: bool):
+        item.setExpanded(expanded)
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child:
+                self._set_expanded_recursive(child, expanded)
+
     def select_item(self, item_id: str):
         """Programmatically select an item in the tree."""
         tree_item = self._tree_items.get(item_id)
@@ -4323,6 +4517,14 @@ class ParameterPanel(QWidget):
         panel.ref_line_requested.connect(self.floorplan_ref_line)
         panel.ref_line_color_changed.connect(self.floorplan_ref_line_color_changed)
         panel.ref_line_visibility_changed.connect(self.floorplan_ref_line_visibility_changed)
+        panel.helper_visibility_changed.connect(self.floorplan_helper_visibility_changed)
+        panel.helper_color_changed.connect(self.floorplan_helper_color_changed)
+        panel.helper_length_changed.connect(self.floorplan_helper_length_changed)
+        panel.helper_width_changed.connect(self.floorplan_helper_width_changed)
+        panel.helper_style_changed.connect(self.floorplan_helper_style_changed)
+        panel.helper_draw_requested.connect(self.floorplan_helper_draw_requested)
+        panel.helper_edit_requested.connect(self.floorplan_helper_edit_requested)
+        panel.helper_clear_requested.connect(self.floorplan_helper_clear_requested)
         panel.ref_length_confirmed.connect(self.floorplan_ref_confirmed)
         panel.transform_changed.connect(self.floorplan_transform_changed)
         panel.opacity_changed.connect(self.floorplan_opacity_changed)
@@ -4343,35 +4545,35 @@ class ParameterPanel(QWidget):
         fp_item.setCheckState(0, Qt.Checked)
         self._tree_items[fp_id] = fp_item
 
-        hk_item = QTreeWidgetItem(fp_item, ["\U0001f525 Heizkreise"])
+        hk_item = QTreeWidgetItem(fp_item, ["──── Heizung ────"])
         hk_item.setFlags((hk_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         hk_item.setCheckState(0, Qt.Checked)
 
-        hkv_item = QTreeWidgetItem(fp_item, ["Heizkreisverteiler"])
+        hkv_item = QTreeWidgetItem(fp_item, ["♨ Heizung · Verteiler (HKV)"])
         hkv_item.setFlags((hkv_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         hkv_item.setCheckState(0, Qt.Checked)
 
-        hkv_line_item = QTreeWidgetItem(fp_item, ["HKV-Leitungen"])
+        hkv_line_item = QTreeWidgetItem(fp_item, ["↔ Heizung · HKV-Leitungen"])
         hkv_line_item.setFlags((hkv_line_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         hkv_line_item.setCheckState(0, Qt.Checked)
 
-        ap_item = QTreeWidgetItem(fp_item, ["\u26a1 Anschlusspunkte"])
+        ap_item = QTreeWidgetItem(fp_item, ["──── Elektro ────"])
         ap_item.setFlags((ap_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         ap_item.setCheckState(0, Qt.Checked)
 
-        room_item = QTreeWidgetItem(fp_item, ["🏠 Räume"])
+        room_item = QTreeWidgetItem(fp_item, ["🏠 Elektro · Räume"])
         room_item.setFlags((room_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         room_item.setCheckState(0, Qt.Checked)
 
-        kv_item = QTreeWidgetItem(fp_item, ["Kabelverbindungen"])
+        kv_item = QTreeWidgetItem(fp_item, ["⚡ Elektro · Kabelverbindungen"])
         kv_item.setFlags((kv_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         kv_item.setCheckState(0, Qt.Checked)
 
-        text_item = QTreeWidgetItem(fp_item, ["\U0001f4dd Beschriftungen"])
+        text_item = QTreeWidgetItem(fp_item, ["──── Sonstiges ────"])
         text_item.setFlags((text_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         text_item.setCheckState(0, Qt.Checked)
 
-        furniture_item = QTreeWidgetItem(fp_item, ["🪑 Einrichtung"])
+        furniture_item = QTreeWidgetItem(fp_item, ["🪑 Sonstiges · Einrichtung"])
         furniture_item.setFlags((furniture_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         furniture_item.setCheckState(0, Qt.Checked)
 

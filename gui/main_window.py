@@ -35,7 +35,7 @@ from PySide6.QtGui import (
     QAction, QColor, QFont, QPainter, QPageLayout,
     QPen, QBrush, QPolygonF, QPainterPath, QKeySequence, QImage, QShortcut,
 )
-from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF, QTimer, QByteArray, QBuffer, QIODevice
+from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF, QTimer, QByteArray, QBuffer, QIODevice, QSize
 from PySide6.QtPrintSupport import QPrinter
 
 from gui.canvas_widget import CanvasWidget, COLORS
@@ -92,6 +92,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_toolbar()
+        self.canvas.set_helper_line_target_length_mm(self._helper_len_spin.value() * 1000.0)
         self._build_menubar()
         self._build_shortcuts()
         self._connect_signals()
@@ -127,26 +128,41 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self):
         tb = QToolBar("Werkzeuge")
         tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        tb.setIconSize(QSize(16, 16))
         self.addToolBar(tb)
 
-        for label, slot in [
-            ("📄 Neues Projekt",          self._new_project),
-            ("📂 Grundriss laden",         self._open_svg),
-            ("💾 Speichern",              self._save_project),
-            ("💾 Speichern unter…",       self._save_project_as),
-            ("📂 Projekt öffnen…",        self._open_project),
-            ("📤 SVG exportieren",        self._export_svg),
-            ("📊 Projektübersicht",       self._export_lengths),
-            ("📄 Als PDF exportieren",    self._export_pdf),
+        def _add_toolbar_group_separator():
+            sep = QLabel("│")
+            sep.setStyleSheet("color:#666; font-size:14px; padding:0 6px;")
+            tb.addWidget(sep)
+
+        file_lbl = QLabel("Datei")
+        file_lbl.setStyleSheet("color:#9aa0a6; font-size:11px;")
+        tb.addWidget(file_lbl)
+        for text, tooltip, slot in [
+            ("📄", "Neues Projekt", self._new_project),
+            ("📂", "Grundriss laden", self._open_svg),
+            ("💾", "Speichern", self._save_project),
+            ("🖫", "Speichern unter…", self._save_project_as),
+            ("📁", "Projekt öffnen…", self._open_project),
+            ("📤", "SVG exportieren", self._export_svg),
+            ("📊", "Projektübersicht", self._export_lengths),
+            ("📄", "Als PDF exportieren", self._export_pdf),
         ]:
-            act = QAction(label, self)
+            act = QAction(text, self)
+            act.setToolTip(tooltip)
+            act.setStatusTip(tooltip)
             act.triggered.connect(slot)
             tb.addAction(act)
-            tb.addSeparator()
+        _add_toolbar_group_separator()
 
         # Snap-angle dropdown
-        tb.addSeparator()
-        lbl = QLabel("  Fangwinkel: ")
+        snap_lbl = QLabel("Fang")
+        snap_lbl.setStyleSheet("color:#9aa0a6; font-size:11px;")
+        tb.addWidget(snap_lbl)
+        lbl = QLabel("∡")
+        lbl.setToolTip("Fangwinkel")
         tb.addWidget(lbl)
         self._snap_combo = SafeComboBox()
         self._snap_combo.addItem("Aus",   0)
@@ -156,43 +172,54 @@ class MainWindow(QMainWindow):
         self._snap_combo.setCurrentIndex(2)   # default 90°
         self._snap_combo.currentIndexChanged.connect(self._on_snap_angle_changed)
         tb.addWidget(self._snap_combo)
+        _add_toolbar_group_separator()
 
         # ── Grid controls ──────────────────────────────────────────────
-        tb.addSeparator()
-        self._grid_cb = QCheckBox(" Raster")
+        grid_lbl = QLabel("Raster")
+        grid_lbl.setStyleSheet("color:#9aa0a6; font-size:11px;")
+        tb.addWidget(grid_lbl)
+        self._grid_cb = QCheckBox("◫")
+        self._grid_cb.setToolTip("Raster ein/aus")
         self._grid_cb.setChecked(False)
         self._grid_cb.stateChanged.connect(self._on_grid_toggled)
         tb.addWidget(self._grid_cb)
 
-        tb.addWidget(QLabel("  Abstand: "))
+        dist_lbl = QLabel("d")
+        dist_lbl.setToolTip("Rasterabstand")
+        tb.addWidget(dist_lbl)
         self._grid_spin = SafeDoubleSpinBox()
         self._grid_spin.setDecimals(2)
         self._grid_spin.setRange(0.01, 10.0)
         self._grid_spin.setSingleStep(0.01)
         self._grid_spin.setValue(0.10)
         self._grid_spin.setSuffix(" m")
-        self._grid_spin.setFixedWidth(120)
+        self._grid_spin.setFixedWidth(90)
         self._grid_spin.valueChanged.connect(self._on_grid_spacing_changed)
         tb.addWidget(self._grid_spin)
 
-        self._grid_color_btn = QPushButton("Rasterfarbe")
-        self._grid_color_btn.setFixedWidth(90)
+        self._grid_color_btn = QPushButton("▦")
+        self._grid_color_btn.setToolTip("Rasterfarbe")
+        self._grid_color_btn.setFixedWidth(28)
         self._grid_color_btn.clicked.connect(self._on_grid_color_pick)
         self._update_grid_color_btn(QColor(255, 255, 255, 60))
         tb.addWidget(self._grid_color_btn)
 
-        self._bg_color_btn = QPushButton("Hintergrund")
-        self._bg_color_btn.setFixedWidth(100)
+        self._bg_color_btn = QPushButton("◼")
+        self._bg_color_btn.setToolTip("Hintergrundfarbe")
+        self._bg_color_btn.setFixedWidth(28)
         self._bg_color_btn.clicked.connect(self._on_bg_color_pick)
         self._update_bg_color_btn(QColor("#2b2b2b"))
         tb.addWidget(self._bg_color_btn)
+        _add_toolbar_group_separator()
 
         # ── Measurement tool ──
-        tb.addSeparator()
-        self._measure_btn = QPushButton("📏 Messen")
+        measure_lbl = QLabel("Messen")
+        measure_lbl.setStyleSheet("color:#9aa0a6; font-size:11px;")
+        tb.addWidget(measure_lbl)
+        self._measure_btn = QPushButton("📏")
         self._measure_btn.setToolTip("Abstand zwischen zwei Punkten messen")
         self._measure_btn.setCheckable(True)
-        self._measure_btn.setFixedWidth(80)
+        self._measure_btn.setFixedWidth(36)
         self._measure_btn.clicked.connect(self._on_measure_toggled)
         tb.addWidget(self._measure_btn)
 
@@ -209,14 +236,85 @@ class MainWindow(QMainWindow):
         self._clear_measure_btn.clicked.connect(self._on_clear_measurements)
         tb.addWidget(self._clear_measure_btn)
 
-        # ── Export-Rahmen tool ──
+        self._angle_measure_btn = QPushButton("∠")
+        self._angle_measure_btn.setToolTip("Winkel über 3 Punkte messen")
+        self._angle_measure_btn.setCheckable(True)
+        self._angle_measure_btn.setFixedWidth(36)
+        self._angle_measure_btn.clicked.connect(self._on_angle_measure_toggled)
+        tb.addWidget(self._angle_measure_btn)
+
+        self._clear_angle_btn = QPushButton("✕")
+        self._clear_angle_btn.setToolTip("Alle Winkelmessungen löschen")
+        self._clear_angle_btn.setFixedWidth(28)
+        self._clear_angle_btn.clicked.connect(self._on_clear_angle_measurements)
+        tb.addWidget(self._clear_angle_btn)
+
         tb.addSeparator()
-        self._export_frame_btn = QPushButton("⬚ Export-Rahmen")
+        helper_lbl = QLabel("Hilfslinien")
+        helper_lbl.setStyleSheet("color:#9aa0a6; font-size:11px;")
+        tb.addWidget(helper_lbl)
+        self._helper_draw_btn = QPushButton("📐")
+        self._helper_draw_btn.setToolTip("Hilfslinie mit definierter Länge einzeichnen")
+        self._helper_draw_btn.setCheckable(True)
+        self._helper_draw_btn.setFixedWidth(36)
+        self._helper_draw_btn.clicked.connect(self._on_helper_draw_toggled)
+        tb.addWidget(self._helper_draw_btn)
+
+        self._helper_edit_btn = QPushButton("✥")
+        self._helper_edit_btn.setToolTip("Hilfslinien bearbeiten (ziehen/löschen)")
+        self._helper_edit_btn.setCheckable(True)
+        self._helper_edit_btn.setFixedWidth(36)
+        self._helper_edit_btn.clicked.connect(self._on_helper_edit_toggled)
+        tb.addWidget(self._helper_edit_btn)
+
+        len_lbl = QLabel("L")
+        len_lbl.setToolTip("Hilfslinien-Länge")
+        tb.addWidget(len_lbl)
+        self._helper_len_spin = SafeDoubleSpinBox()
+        self._helper_len_spin.setDecimals(3)
+        self._helper_len_spin.setRange(0.01, 200.0)
+        self._helper_len_spin.setSingleStep(0.1)
+        self._helper_len_spin.setValue(1.0)
+        self._helper_len_spin.setSuffix(" m")
+        self._helper_len_spin.setFixedWidth(90)
+        self._helper_len_spin.valueChanged.connect(self._on_helper_length_changed)
+        tb.addWidget(self._helper_len_spin)
+
+        self._clear_helper_btn = QPushButton("✕")
+        self._clear_helper_btn.setToolTip("Alle Hilfslinien löschen")
+        self._clear_helper_btn.setFixedWidth(28)
+        self._clear_helper_btn.clicked.connect(self._on_clear_helper_lines)
+        tb.addWidget(self._clear_helper_btn)
+
+        self._helper_color_btn = QPushButton()
+        self._helper_color_btn.setToolTip("Hilfslinien-Farbe")
+        self._helper_color_btn.setFixedWidth(28)
+        self._helper_color_btn.setStyleSheet("background:#f8f32b;")
+        self._helper_color_btn.clicked.connect(self._on_helper_color_pick)
+        tb.addWidget(self._helper_color_btn)
+
+        for widget in (
+            helper_lbl,
+            self._helper_draw_btn,
+            self._helper_edit_btn,
+            len_lbl,
+            self._helper_len_spin,
+            self._clear_helper_btn,
+            self._helper_color_btn,
+        ):
+            widget.setVisible(False)
+        _add_toolbar_group_separator()
+
+        # ── Export-Rahmen tool ──
+        export_lbl = QLabel("Export")
+        export_lbl.setStyleSheet("color:#9aa0a6; font-size:11px;")
+        tb.addWidget(export_lbl)
+        self._export_frame_btn = QPushButton("⬚")
         self._export_frame_btn.setToolTip(
             "Export-Rahmen aufziehen – Linksklick ziehen, Rechtsklick löschen, ESC abbrechen"
         )
         self._export_frame_btn.setCheckable(True)
-        self._export_frame_btn.setFixedWidth(120)
+        self._export_frame_btn.setFixedWidth(36)
         self._export_frame_btn.clicked.connect(self._on_export_frame_toggled)
         tb.addWidget(self._export_frame_btn)
 
@@ -776,6 +874,22 @@ class MainWindow(QMainWindow):
             self._on_floorplan_ref_line_color_changed)
         self.param_panel.floorplan_ref_line_visibility_changed.connect(
             self._on_floorplan_ref_line_visibility_changed)
+        self.param_panel.floorplan_helper_visibility_changed.connect(
+            self._on_floorplan_helper_visibility_changed)
+        self.param_panel.floorplan_helper_color_changed.connect(
+            self._on_floorplan_helper_color_changed)
+        self.param_panel.floorplan_helper_length_changed.connect(
+            self._on_floorplan_helper_length_changed)
+        self.param_panel.floorplan_helper_width_changed.connect(
+            self._on_floorplan_helper_width_changed)
+        self.param_panel.floorplan_helper_style_changed.connect(
+            self._on_floorplan_helper_style_changed)
+        self.param_panel.floorplan_helper_draw_requested.connect(
+            self._on_floorplan_helper_draw_requested)
+        self.param_panel.floorplan_helper_edit_requested.connect(
+            self._on_floorplan_helper_edit_requested)
+        self.param_panel.floorplan_helper_clear_requested.connect(
+            self._on_floorplan_helper_clear_requested)
         self.param_panel.floorplan_ref_confirmed.connect(self._on_floorplan_ref_confirmed)
         self.param_panel.floorplan_transform_changed.connect(self._on_floorplan_transform)
         self.param_panel.floorplan_opacity_changed.connect(self._on_floorplan_opacity)
@@ -821,6 +935,7 @@ class MainWindow(QMainWindow):
         self.canvas.hkv_placed.connect(self._mark_dirty)
         self.canvas.hkv_line_changed.connect(self._mark_dirty)
         self.canvas.text_placed.connect(self._mark_dirty)
+        self.canvas.helper_lines_changed.connect(self._mark_dirty)
         self.canvas.ref_line_set.connect(self._mark_dirty)
         self.canvas.start_point_moved.connect(self._mark_dirty)
         self.param_panel.heating_global_changed.connect(self._mark_dirty)
@@ -899,6 +1014,109 @@ class MainWindow(QMainWindow):
         self.canvas.clear_measurements()
         self.status.showMessage("Messlinien gelöscht", 2000)
 
+    def _on_angle_measure_toggled(self, checked: bool):
+        if checked:
+            self.canvas.start_angle_measure()
+            self._measure_btn.blockSignals(True)
+            self._measure_btn.setChecked(False)
+            self._measure_btn.blockSignals(False)
+            self.status.showMessage(
+                "∠ Winkel messen – 3x Linksklick (P1, Scheitel, P3), Rechtsklick: zurück/abbrechen"
+            )
+        else:
+            from gui.canvas_widget import ToolMode
+            if self.canvas._mode == ToolMode.MEASURE_ANGLE:
+                self.canvas._mode = ToolMode.NONE
+                self.canvas._angle_measure_p1 = None
+                self.canvas._angle_measure_p2 = None
+                self.canvas._angle_measure_p3 = None
+                self.canvas.setCursor(Qt.ArrowCursor)
+                self.canvas.mode_changed.emit()
+                self.canvas.update()
+
+    def _on_clear_angle_measurements(self):
+        self.canvas.clear_angle_measurements()
+        self.status.showMessage("Winkelmessungen gelöscht", 2000)
+
+    def _on_helper_length_changed(self, meters: float):
+        fp_id = self.param_panel.get_active_floorplan_id()
+        self.canvas.set_helper_line_target_length_mm(meters * 1000.0, fp_id, resize_selected=True)
+        panel = self.param_panel.floorplan_panels.get(fp_id or "")
+        if panel:
+            panel.sb_helper_length.blockSignals(True)
+            panel.sb_helper_length.setValue(meters)
+            panel.sb_helper_length.blockSignals(False)
+        self._mark_dirty()
+
+    def _on_helper_draw_toggled(self, checked: bool):
+        if checked:
+            fp_id = self.param_panel.get_active_floorplan_id()
+            self.canvas.start_draw_helper_line(fp_id)
+            self._helper_edit_btn.blockSignals(True)
+            self._helper_edit_btn.setChecked(False)
+            self._helper_edit_btn.blockSignals(False)
+            self._measure_btn.blockSignals(True)
+            self._measure_btn.setChecked(False)
+            self._measure_btn.blockSignals(False)
+            self._angle_measure_btn.blockSignals(True)
+            self._angle_measure_btn.setChecked(False)
+            self._angle_measure_btn.blockSignals(False)
+            self.status.showMessage(
+                "📐 Hilfslinie – Linksklick Start, Linksklick Richtung (Länge fix aus Feld), Rechtsklick: Abbruch"
+            )
+        else:
+            from gui.canvas_widget import ToolMode
+            if self.canvas._mode == ToolMode.DRAW_HELPER_LINE:
+                self.canvas._mode = ToolMode.NONE
+                self.canvas._helper_draw_start = None
+                self.canvas._helper_draw_current = None
+                self.canvas.setCursor(Qt.ArrowCursor)
+                self.canvas.mode_changed.emit()
+                self.canvas.update()
+
+    def _on_helper_edit_toggled(self, checked: bool):
+        if checked:
+            fp_id = self.param_panel.get_active_floorplan_id()
+            self.canvas.start_edit_helper_lines(fp_id)
+            self._helper_draw_btn.blockSignals(True)
+            self._helper_draw_btn.setChecked(False)
+            self._helper_draw_btn.blockSignals(False)
+            self.status.showMessage(
+                "✥ Hilfslinien bearbeiten – Linksklick wählen/ziehen, Rechtsklick löschen, Entf löscht Auswahl"
+            )
+        else:
+            from gui.canvas_widget import ToolMode
+            if self.canvas._mode == ToolMode.EDIT_HELPER_LINE:
+                self.canvas._mode = ToolMode.NONE
+                self.canvas._helper_dragging_endpoint = None
+                self.canvas._helper_dragging_whole_id = None
+                self.canvas._helper_drag_start = None
+                self.canvas._helper_drag_origin = []
+                self.canvas.setCursor(Qt.ArrowCursor)
+                self.canvas.mode_changed.emit()
+                self.canvas.update()
+
+    def _on_clear_helper_lines(self):
+        fp_id = self.param_panel.get_active_floorplan_id()
+        self.canvas.clear_helper_lines(fp_id)
+        self.status.showMessage("Hilfslinien gelöscht", 2000)
+
+    def _on_helper_color_pick(self):
+        fp_id = self.param_panel.get_active_floorplan_id()
+        color = QColorDialog.getColor(
+            QColor(self.canvas.get_helper_line_color(fp_id)),
+            self,
+            "Hilfslinien-Farbe wählen",
+        )
+        if color.isValid():
+            hex_color = color.name()
+            self.canvas.set_helper_line_color(hex_color, fp_id)
+            self._helper_color_btn.setStyleSheet(f"background:{hex_color};")
+            panel = self.param_panel.floorplan_panels.get(fp_id or "")
+            if panel:
+                panel.btn_helper_color.setStyleSheet(f"background:{hex_color};")
+            self._mark_dirty()
+
     def _on_measure_color_pick(self):
         """Open colour picker for measurement lines."""
         color = QColorDialog.getColor(
@@ -938,6 +1156,18 @@ class MainWindow(QMainWindow):
             self._measure_btn.blockSignals(True)
             self._measure_btn.setChecked(False)
             self._measure_btn.blockSignals(False)
+        if self.canvas._mode != ToolMode.MEASURE_ANGLE:
+            self._angle_measure_btn.blockSignals(True)
+            self._angle_measure_btn.setChecked(False)
+            self._angle_measure_btn.blockSignals(False)
+        if self.canvas._mode != ToolMode.DRAW_HELPER_LINE:
+            self._helper_draw_btn.blockSignals(True)
+            self._helper_draw_btn.setChecked(False)
+            self._helper_draw_btn.blockSignals(False)
+        if self.canvas._mode != ToolMode.EDIT_HELPER_LINE:
+            self._helper_edit_btn.blockSignals(True)
+            self._helper_edit_btn.setChecked(False)
+            self._helper_edit_btn.blockSignals(False)
         if self.canvas._mode != ToolMode.DRAW_EXPORT_FRAME:
             self._export_frame_btn.blockSignals(True)
             self._export_frame_btn.setChecked(False)
@@ -961,6 +1191,13 @@ class MainWindow(QMainWindow):
         # Measure color
         measure_color = QColor(c.get_measure_color())
         self._measure_color_btn.setStyleSheet(f"background:{measure_color.name()};")
+        fp_id = self.param_panel.get_active_floorplan_id()
+        c.set_active_helper_floor(fp_id)
+        helper_color = QColor(c.get_helper_line_color(fp_id))
+        self._helper_color_btn.setStyleSheet(f"background:{helper_color.name()};")
+        self._helper_len_spin.blockSignals(True)
+        self._helper_len_spin.setValue(max(0.01, c.get_helper_line_target_length_mm(fp_id) / 1000.0))
+        self._helper_len_spin.blockSignals(False)
 
         # Snap angle
         angle = c._snap_angle
@@ -1137,6 +1374,9 @@ class MainWindow(QMainWindow):
         if panel:
             panel.set_file_path(path)
         self.canvas.load_floor_plan_image(fp_id, path)
+        layer = self.canvas._floor_plans.get(fp_id)
+        if panel and layer and layer.ref_p1 and layer.ref_p2 and layer.mm_per_px > 0:
+            panel.update_scale_label(layer.mm_per_px)
         # If this is the first floor plan, set legacy svg_path + fit window
         if not self._svg_path:
             self._svg_path = path
@@ -1185,6 +1425,42 @@ class MainWindow(QMainWindow):
         self.canvas.set_ref_line_visible(fp_id, visible)
         self._mark_dirty()
 
+    def _on_floorplan_helper_visibility_changed(self, fp_id: str, visible: bool):
+        self.canvas.set_helper_line_visible(fp_id, visible)
+        self._sync_toolbar_from_canvas()
+        self._mark_dirty()
+
+    def _on_floorplan_helper_color_changed(self, fp_id: str, color: str):
+        self.canvas.set_helper_line_color(color, fp_id)
+        self._sync_toolbar_from_canvas()
+        self._mark_dirty()
+
+    def _on_floorplan_helper_length_changed(self, fp_id: str, length_mm: float):
+        self.canvas.set_helper_line_target_length_mm(length_mm, fp_id, resize_selected=True)
+        self._sync_toolbar_from_canvas()
+        self._mark_dirty()
+
+    def _on_floorplan_helper_width_changed(self, fp_id: str, width_px: float):
+        self.canvas.set_helper_line_width(fp_id, width_px)
+        self._mark_dirty()
+
+    def _on_floorplan_helper_style_changed(self, fp_id: str, style_key: str):
+        self.canvas.set_helper_line_style(fp_id, style_key)
+        self._mark_dirty()
+
+    def _on_floorplan_helper_draw_requested(self, fp_id: str):
+        self.canvas.set_active_helper_floor(fp_id)
+        self._on_helper_draw_toggled(True)
+
+    def _on_floorplan_helper_edit_requested(self, fp_id: str):
+        self.canvas.set_active_helper_floor(fp_id)
+        self._on_helper_edit_toggled(True)
+
+    def _on_floorplan_helper_clear_requested(self, fp_id: str):
+        self.canvas.clear_helper_lines(fp_id)
+        self.status.showMessage("Hilfslinien dieses Grundrisses gelöscht", 2000)
+        self._mark_dirty()
+
     def _on_floorplan_ref_confirmed(self, fp_id: str, length_mm: float):
         layer = self.canvas._floor_plans.get(fp_id)
         if not layer:
@@ -1217,6 +1493,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_mm_per_px(mm_per_px)
 
         new_global = self.canvas._mm_per_px if self.canvas._mm_per_px > 0 else 1.0
+        self.canvas.rescale_all_layer_ref_points(old_global, new_global, skip_fp_id=fp_id)
         new_ls = mm_per_px / new_global if mm_per_px > 0 else 1.0
 
         # Rescale ref points so they stay on the correct image position
@@ -1249,13 +1526,16 @@ class MainWindow(QMainWindow):
 
     def _on_floorplan_visibility(self, fp_id: str, visible: bool):
         self.canvas.set_floor_plan_visible(fp_id, visible)
+        self._sync_toolbar_from_canvas()
 
     def _on_floorplan_move(self, fp_id: str):
+        self.canvas.set_active_helper_floor(fp_id)
         self.canvas.start_move_floor_plan(fp_id)
         self.status.showMessage(
             f"\u2725 Grundriss verschieben \u2013 Ziehen mit linker Maustaste, ESC zum Beenden")
 
     def _on_floorplan_rotate(self, fp_id: str):
+        self.canvas.set_active_helper_floor(fp_id)
         self.canvas.start_rotate_floor_plan(fp_id)
         self.status.showMessage(
             f"\u21bb Grundriss drehen \u2013 Ziehen mit linker Maustaste, ESC zum Beenden")
@@ -1535,6 +1815,18 @@ class MainWindow(QMainWindow):
                     lambda checked=False, pid=context_id: self._context_edit_ap_note(pid)
                 )
 
+        menu.addSeparator()
+        tools_menu = menu.addMenu("🧰 Werkzeuge")
+        tools_menu.addAction("📏 Abstand messen", self._context_activate_measure)
+        tools_menu.addAction("∠ Winkel messen", self._context_activate_angle_measure)
+        tools_menu.addSeparator()
+        tools_menu.addAction("📐 Hilfslinie zeichnen", self._context_activate_helper_draw)
+        tools_menu.addAction("✥ Hilfslinien bearbeiten", self._context_activate_helper_edit)
+        tools_menu.addAction("✕ Hilfslinien löschen", self._on_clear_helper_lines)
+        tools_menu.addSeparator()
+        tools_menu.addAction("⬚ Export-Rahmen setzen", self._context_activate_export_frame)
+        tools_menu.addAction("✕ Export-Rahmen löschen", self._on_clear_export_frame)
+
         if self._copy_buffer:
             if selected_id:
                 menu.addSeparator()
@@ -1546,6 +1838,28 @@ class MainWindow(QMainWindow):
 
         pos = global_pos.toPoint() if hasattr(global_pos, "toPoint") else global_pos
         menu.exec(pos)
+
+    def _context_activate_measure(self):
+        self._measure_btn.setChecked(True)
+        self._on_measure_toggled(True)
+
+    def _context_activate_angle_measure(self):
+        self._angle_measure_btn.setChecked(True)
+        self._on_angle_measure_toggled(True)
+
+    def _context_activate_helper_draw(self):
+        self.canvas.set_active_helper_floor(self.param_panel.get_active_floorplan_id())
+        self._helper_draw_btn.setChecked(True)
+        self._on_helper_draw_toggled(True)
+
+    def _context_activate_helper_edit(self):
+        self.canvas.set_active_helper_floor(self.param_panel.get_active_floorplan_id())
+        self._helper_edit_btn.setChecked(True)
+        self._on_helper_edit_toggled(True)
+
+    def _context_activate_export_frame(self):
+        self._export_frame_btn.setChecked(True)
+        self._on_export_frame_toggled(True)
 
     def _context_info_lines(self, context_type: str | None, context_id: str | None) -> list[str]:
         if not context_type or not context_id:
@@ -4654,6 +4968,35 @@ class MainWindow(QMainWindow):
                 painter.setFont(_svg_font(font_size))
                 painter.setPen(QPen(color))
                 painter.drawText(pos, content)
+
+        helper_font = _svg_font(10.0)
+        helper_floor_ids = [floor_plan_id] if floor_plan_id else self.canvas._floor_plan_order
+        for fid in helper_floor_ids:
+            fp_layer = self.canvas._floor_plans.get(fid)
+            if not fp_layer or not fp_layer.visible:
+                continue
+            if not self.canvas.get_helper_line_visible(fid):
+                continue
+            helper_pen = QPen(
+                QColor(self.canvas.get_helper_line_color(fid)),
+                self.canvas.get_helper_line_width(fid),
+                self.canvas._helper_line_pen_style(self.canvas.get_helper_line_style(fid)),
+            )
+            visible_map = self.canvas._floor_helper_line_visible.get(fid, {})
+            for hid, pts in self.canvas._floor_helper_lines.get(fid, {}).items():
+                if not visible_map.get(hid, True) or len(pts) < 2:
+                    continue
+                p1, p2 = pts[0], pts[1]
+                painter.setPen(helper_pen)
+                painter.setBrush(QBrush(helper_pen.color()))
+                painter.drawLine(p1, p2)
+                painter.drawEllipse(p1, 2.5, 2.5)
+                painter.drawEllipse(p2, 2.5, 2.5)
+                px_len = ((p2.x() - p1.x()) ** 2 + (p2.y() - p1.y()) ** 2) ** 0.5
+                mm_len = px_len * self.canvas._mm_per_px if self.canvas._mm_per_px > 0 else 0.0
+                mid = QPointF((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2 - 8.0)
+                painter.setFont(helper_font)
+                painter.drawText(mid, f"{mm_len / 1000:.3f} m")
 
         painter.restore()
 

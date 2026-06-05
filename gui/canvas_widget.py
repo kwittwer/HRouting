@@ -87,6 +87,9 @@ class ToolMode(Enum):
     MOVE_FLOOR_PLAN  = auto()
     ROTATE_FLOOR_PLAN = auto()
     MEASURE          = auto()
+    MEASURE_ANGLE    = auto()
+    DRAW_HELPER_LINE = auto()
+    EDIT_HELPER_LINE = auto()
     DRAW_EXPORT_FRAME = auto()
     PLACE_TEXT       = auto()
     MOVE_TEXT        = auto()
@@ -113,6 +116,7 @@ class CanvasWidget(QWidget):
     floor_plan_polygon_finished = Signal(str, list)
     mode_changed = Signal()  # emitted when tool mode changes
     export_frame_drawn = Signal(object)  # emitted with QRectF when export frame is finalized
+    helper_lines_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -175,6 +179,21 @@ class CanvasWidget(QWidget):
         self._label_map:     Dict[str, str]                      = {}
         self._helper_lines:  Dict[str, List[QPointF]]            = {}
         self._show_helper_line: Dict[str, bool]                  = {}
+        self._floor_helper_lines: Dict[str, Dict[str, List[QPointF]]] = {}
+        self._floor_helper_line_visible: Dict[str, Dict[str, bool]] = {}
+        self._floor_helper_settings: Dict[str, Dict[str, object]] = {}
+        self._helper_line_counter: int                            = 0
+        self._helper_selected_id: Optional[str]                  = None
+        self._helper_selected_floor_id: Optional[str]            = None
+        self._helper_active_floor_id: Optional[str]              = None
+        self._helper_dragging_endpoint: Optional[Tuple[str, int]] = None
+        self._helper_dragging_whole_id: Optional[str]            = None
+        self._helper_drag_start: Optional[QPointF]               = None
+        self._helper_drag_origin: List[QPointF]                  = []
+        self._helper_draw_start: Optional[QPointF]               = None
+        self._helper_draw_current: Optional[QPointF]             = None
+        self._helper_target_length_mm: float                     = 1000.0
+        self._helper_line_color: str                              = "#f8f32b"
         self._manual_routes: Dict[str, List[QPointF]]            = {}
         self._route_wall_dist_px: Dict[str, float]               = {}
         self._route_line_dist_px: Dict[str, float]               = {}
@@ -268,6 +287,10 @@ class CanvasWidget(QWidget):
         self._measure_p2: Optional[QPointF] = None
         self._measure_lines: List[Tuple[QPointF, QPointF, float]] = []  # persisted lines
         self._measure_color: str = "#00e5ff"  # Color for measurement tool
+        self._angle_measure_p1: Optional[QPointF] = None
+        self._angle_measure_p2: Optional[QPointF] = None
+        self._angle_measure_p3: Optional[QPointF] = None
+        self._angle_measurements: List[Tuple[QPointF, QPointF, QPointF, float]] = []
 
         # Reference line configuration per floor plan
         self._ref_line_colors: Dict[str, str] = {}  # fp_id -> hex color
@@ -356,6 +379,9 @@ class CanvasWidget(QWidget):
         self._floor_plans[fp_id] = layer
         if fp_id not in self._floor_plan_order:
             self._floor_plan_order.append(fp_id)
+        self._ensure_helper_floor(fp_id)
+        if not self._helper_active_floor_id:
+            self.set_active_helper_floor(fp_id)
         if filepath:
             self.load_floor_plan_image(fp_id, filepath)
         return layer
@@ -363,14 +389,43 @@ class CanvasWidget(QWidget):
     def remove_floor_plan(self, fp_id: str):
         self._floor_plans.pop(fp_id, None)
         self._floor_polygon_world_cache.pop(fp_id, None)
+        self._floor_helper_lines.pop(fp_id, None)
+        self._floor_helper_line_visible.pop(fp_id, None)
+        self._floor_helper_settings.pop(fp_id, None)
         if fp_id in self._floor_plan_order:
             self._floor_plan_order.remove(fp_id)
+        if self._helper_selected_floor_id == fp_id:
+            self._helper_selected_id = None
+            self._helper_selected_floor_id = None
+        if self._helper_active_floor_id == fp_id:
+            self._helper_active_floor_id = None
+            self.set_active_helper_floor(None)
         self.update()
 
     def load_floor_plan_image(self, fp_id: str, filepath: str):
         layer = self._floor_plans.get(fp_id)
         if not layer:
             return
+        had_loaded_image = layer.renderer is not None or layer.pixmap is not None
+        old_global_mpp = self._mm_per_px if self._mm_per_px > 0 else 1.0
+        old_native_size = tuple(layer.size)
+        old_layer_mpp = layer.mm_per_px if layer.mm_per_px > 0 else old_global_mpp
+        old_render_size = self._layer_render_size_for_scale(
+            layer,
+            old_global_mpp,
+            layer_mm_per_px=old_layer_mpp,
+            native_size=old_native_size,
+        )
+        old_ref_image_points = None
+        if had_loaded_image and layer.ref_p1 is not None and layer.ref_p2 is not None:
+            old_ref_image_points = (
+                self._world_to_layer_image_point(
+                    layer, layer.ref_p1, old_render_size, old_native_size
+                ),
+                self._world_to_layer_image_point(
+                    layer, layer.ref_p2, old_render_size, old_native_size
+                ),
+            )
         layer.file_path = filepath
         # Preserve existing polygon (important for undo restore)
         saved_polygon = layer.polygon
@@ -404,6 +459,55 @@ class CanvasWidget(QWidget):
         # initialise layer to match so it renders at native pixel size.
         if self._mm_per_px > 1.0 and layer.mm_per_px == 1.0:
             layer.mm_per_px = self._mm_per_px
+        if old_ref_image_points and old_native_size[0] > 0 and old_native_size[1] > 0:
+            new_native_size = tuple(layer.size)
+            p1_img_old, p2_img_old = old_ref_image_points
+            p1_img_new = QPointF(
+                p1_img_old.x() * new_native_size[0] / old_native_size[0],
+                p1_img_old.y() * new_native_size[1] / old_native_size[1],
+            )
+            p2_img_new = QPointF(
+                p2_img_old.x() * new_native_size[0] / old_native_size[0],
+                p2_img_old.y() * new_native_size[1] / old_native_size[1],
+            )
+
+            if not (layer.fixed_width_mm > 0 and layer.fixed_height_mm > 0):
+                px_len = math.hypot(
+                    p2_img_new.x() - p1_img_new.x(),
+                    p2_img_new.y() - p1_img_new.y(),
+                )
+                if px_len > 1e-9 and layer.ref_length_mm > 0:
+                    layer.mm_per_px = layer.ref_length_mm / px_len
+
+            new_global_mpp = old_global_mpp
+            if layer.mm_per_px > 0 and (
+                self._mm_per_px == 1.0
+                or (self._floor_plan_order and self._floor_plan_order[0] == fp_id)
+            ):
+                new_global_mpp = layer.mm_per_px
+
+            if abs(new_global_mpp - old_global_mpp) > 1e-9:
+                self.rescale_all_layer_ref_points(
+                    old_global_mpp,
+                    new_global_mpp,
+                    skip_fp_id=fp_id,
+                )
+                self._mm_per_px = new_global_mpp
+
+            new_render_size = self._layer_render_size_for_scale(
+                layer,
+                self._mm_per_px,
+                native_size=new_native_size,
+            )
+            layer.ref_p1 = self._layer_image_to_world_point(
+                layer, p1_img_new, new_render_size, new_native_size
+            )
+            layer.ref_p2 = self._layer_image_to_world_point(
+                layer, p2_img_new, new_render_size, new_native_size
+            )
+            if self._ref_floor_id == fp_id:
+                self._ref_p1 = QPointF(layer.ref_p1)
+                self._ref_p2 = QPointF(layer.ref_p2)
         # Restore polygon if it existed (e.g. during undo restore)
         if saved_polygon:
             layer.polygon = saved_polygon
@@ -464,42 +568,147 @@ class CanvasWidget(QWidget):
             layer.rotation = rotation
             self.update()
 
+    @staticmethod
+    def _world_to_layer_local_point(world_pt: QPointF,
+                                    rendered_size: Tuple[float, float],
+                                    offset_x: float,
+                                    offset_y: float,
+                                    rotation_deg: float) -> QPointF:
+        sw = rendered_size[0] if rendered_size[0] > 0 else 1.0
+        sh = rendered_size[1] if rendered_size[1] > 0 else 1.0
+        cx = sw / 2 + offset_x
+        cy = sh / 2 + offset_y
+        rad = math.radians(-rotation_deg)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+        dx = world_pt.x() - cx
+        dy = world_pt.y() - cy
+        return QPointF(
+            dx * cos_r - dy * sin_r + sw / 2,
+            dx * sin_r + dy * cos_r + sh / 2,
+        )
+
+    @staticmethod
+    def _layer_local_to_world_point(local_pt: QPointF,
+                                    rendered_size: Tuple[float, float],
+                                    offset_x: float,
+                                    offset_y: float,
+                                    rotation_deg: float) -> QPointF:
+        sw = rendered_size[0] if rendered_size[0] > 0 else 1.0
+        sh = rendered_size[1] if rendered_size[1] > 0 else 1.0
+        cx = sw / 2 + offset_x
+        cy = sh / 2 + offset_y
+        rad = math.radians(rotation_deg)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+        rx = local_pt.x() - sw / 2
+        ry = local_pt.y() - sh / 2
+        return QPointF(
+            cx + rx * cos_r - ry * sin_r,
+            cy + rx * sin_r + ry * cos_r,
+        )
+
+    def _world_to_layer_image_point(self,
+                                    layer: "FloorPlanLayer",
+                                    world_pt: QPointF,
+                                    rendered_size: Tuple[float, float],
+                                    native_size: Tuple[float, float]) -> QPointF:
+        local_pt = self._world_to_layer_local_point(
+            world_pt,
+            rendered_size,
+            layer.offset_x,
+            layer.offset_y,
+            layer.rotation,
+        )
+        sw = rendered_size[0] if rendered_size[0] > 0 else 1.0
+        sh = rendered_size[1] if rendered_size[1] > 0 else 1.0
+        nw = native_size[0] if native_size[0] > 0 else 1.0
+        nh = native_size[1] if native_size[1] > 0 else 1.0
+        return QPointF(local_pt.x() * nw / sw, local_pt.y() * nh / sh)
+
+    def _layer_image_to_world_point(self,
+                                    layer: "FloorPlanLayer",
+                                    image_pt: QPointF,
+                                    rendered_size: Tuple[float, float],
+                                    native_size: Tuple[float, float]) -> QPointF:
+        nw = native_size[0] if native_size[0] > 0 else 1.0
+        nh = native_size[1] if native_size[1] > 0 else 1.0
+        sw = rendered_size[0] if rendered_size[0] > 0 else 1.0
+        sh = rendered_size[1] if rendered_size[1] > 0 else 1.0
+        local_pt = QPointF(image_pt.x() * sw / nw, image_pt.y() * sh / nh)
+        return self._layer_local_to_world_point(
+            local_pt,
+            rendered_size,
+            layer.offset_x,
+            layer.offset_y,
+            layer.rotation,
+        )
+
+    def remap_layer_ref_points(self, fp_id: str,
+                               old_render_size: Tuple[float, float],
+                               new_render_size: Tuple[float, float],
+                               old_native_size: Optional[Tuple[float, float]] = None,
+                               new_native_size: Optional[Tuple[float, float]] = None):
+        """Adjust ref_p1/ref_p2 for changed render and/or source image sizes."""
+        layer = self._floor_plans.get(fp_id)
+        if not layer:
+            return
+        old_native_size = old_native_size or layer.size
+        new_native_size = new_native_size or layer.size
+        if (
+            old_render_size == new_render_size
+            and old_native_size == new_native_size
+        ):
+            return
+        if old_native_size[0] <= 0 or old_native_size[1] <= 0:
+            return
+        for attr in ("ref_p1", "ref_p2"):
+            pt = getattr(layer, attr)
+            if pt is None:
+                continue
+            old_image_pt = self._world_to_layer_image_point(
+                layer, pt, old_render_size, old_native_size
+            )
+            new_image_pt = QPointF(
+                old_image_pt.x() * new_native_size[0] / old_native_size[0],
+                old_image_pt.y() * new_native_size[1] / old_native_size[1],
+            )
+            setattr(
+                layer,
+                attr,
+                self._layer_image_to_world_point(
+                    layer, new_image_pt, new_render_size, new_native_size
+                ),
+            )
+        if self._ref_floor_id == fp_id:
+            self._ref_p1 = layer.ref_p1
+            self._ref_p2 = layer.ref_p2
+
+    def rescale_all_layer_ref_points(self,
+                                     old_global_mm_per_px: float,
+                                     new_global_mm_per_px: float,
+                                     skip_fp_id: Optional[str] = None):
+        if abs(new_global_mm_per_px - old_global_mm_per_px) <= 1e-9:
+            return
+        for fid, layer in self._floor_plans.items():
+            if fid == skip_fp_id or (layer.ref_p1 is None and layer.ref_p2 is None):
+                continue
+            old_render_size = self._layer_render_size_for_scale(
+                layer, old_global_mm_per_px
+            )
+            new_render_size = self._layer_render_size_for_scale(
+                layer, new_global_mm_per_px
+            )
+            self.remap_layer_ref_points(fid, old_render_size, new_render_size)
+
     def rescale_layer_ref_points(self, fp_id: str,
                                   old_ls: float, new_ls: float):
         """Adjust ref_p1/ref_p2 when the layer's render scale changes."""
         layer = self._floor_plans.get(fp_id)
         if not layer or old_ls == new_ls or old_ls == 0:
             return
-        import math
         w, h = layer.size
-        old_sw, old_sh = w * old_ls, h * old_ls
-        new_sw, new_sh = w * new_ls, h * new_ls
-        old_cx = old_sw / 2 + layer.offset_x
-        old_cy = old_sh / 2 + layer.offset_y
-        new_cx = new_sw / 2 + layer.offset_x
-        new_cy = new_sh / 2 + layer.offset_y
-        rot = math.radians(layer.rotation)
-        cos_r, sin_r = math.cos(rot), math.sin(rot)
-        cos_nr, sin_nr = math.cos(-rot), math.sin(-rot)
-        for attr in ("ref_p1", "ref_p2"):
-            pt = getattr(layer, attr)
-            if pt is None:
-                continue
-            # Undo old paint transform → image-pixel coords
-            rx, ry = pt.x() - old_cx, pt.y() - old_cy
-            ix = rx * cos_nr - ry * sin_nr + old_sw / 2
-            iy = rx * sin_nr + ry * cos_nr + old_sh / 2
-            img_x, img_y = ix / old_ls, iy / old_ls
-            # Apply new paint transform
-            nx = img_x * new_ls - new_sw / 2
-            ny = img_y * new_ls - new_sh / 2
-            fx = nx * cos_r - ny * sin_r + new_cx
-            fy = nx * sin_r + ny * cos_r + new_cy
-            setattr(layer, attr, QPointF(fx, fy))
-        # Sync global ref points
-        if self._ref_floor_id == fp_id:
-            self._ref_p1 = layer.ref_p1
-            self._ref_p2 = layer.ref_p2
+        old_render_size = (w * old_ls, h * old_ls)
+        new_render_size = (w * new_ls, h * new_ls)
+        self.remap_layer_ref_points(fp_id, old_render_size, new_render_size)
 
     def set_floor_plan_size_mm(self, fp_id: str,
                                width_mm: float, height_mm: float):
@@ -510,17 +719,24 @@ class CanvasWidget(QWidget):
             layer.fixed_height_mm = height_mm
             self.update()
 
+    def _layer_render_size_for_scale(self, layer: "FloorPlanLayer",
+                                     global_mm_per_px: float,
+                                     layer_mm_per_px: Optional[float] = None,
+                                     native_size: Optional[Tuple[float, float]] = None) -> Tuple[float, float]:
+        ref_mpp = global_mm_per_px if global_mm_per_px > 0 else 1.0
+        if layer.fixed_width_mm > 0 and layer.fixed_height_mm > 0:
+            return (layer.fixed_width_mm / ref_mpp,
+                    layer.fixed_height_mm / ref_mpp)
+        mm_per_px = layer.mm_per_px if layer_mm_per_px is None else layer_mm_per_px
+        ls = mm_per_px / ref_mpp if mm_per_px > 0 else 1.0
+        w, h = native_size or layer.size
+        return (w * ls, h * ls)
+
     def _layer_render_size(self, layer: "FloorPlanLayer") -> Tuple[float, float]:
         """Gibt die gerenderte (Breite, Höhe) in Canvas-Pixeln zurück.
         Wenn fixed_width_mm/fixed_height_mm gesetzt sind, werden diese verwendet,
         andernfalls die mm_per_px-basierte Skalierung."""
-        ref_mpp = self._mm_per_px if self._mm_per_px > 0 else 1.0
-        if layer.fixed_width_mm > 0 and layer.fixed_height_mm > 0:
-            return (layer.fixed_width_mm / ref_mpp,
-                    layer.fixed_height_mm / ref_mpp)
-        ls = layer.mm_per_px / ref_mpp if layer.mm_per_px > 0 else 1.0
-        w, h = layer.size
-        return (w * ls, h * ls)
+        return self._layer_render_size_for_scale(layer, self._mm_per_px)
 
     def set_floor_plan_opacity(self, fp_id: str, opacity: float):
         layer = self._floor_plans.get(fp_id)
@@ -569,6 +785,245 @@ class CanvasWidget(QWidget):
         """Remove all persisted measurement lines."""
         self._measure_lines.clear()
         self.update()
+
+    def start_angle_measure(self):
+        """Enter angle measurement mode (3 points)."""
+        self._mode = ToolMode.MEASURE_ANGLE
+        self._angle_measure_p1 = None
+        self._angle_measure_p2 = None
+        self._angle_measure_p3 = None
+        self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
+        self.update()
+
+    def clear_angle_measurements(self):
+        self._angle_measurements.clear()
+        self.update()
+
+    def _default_helper_settings(self) -> Dict[str, object]:
+        return {
+            "visible": True,
+            "color": "#f8f32b",
+            "target_length_mm": 1000.0,
+            "line_width_px": 2.0,
+            "line_style": "dash",
+        }
+
+    def _ensure_helper_floor(self, floor_id: Optional[str]) -> Optional[str]:
+        if floor_id and floor_id in self._floor_plans:
+            fid = floor_id
+        elif self._helper_active_floor_id and self._helper_active_floor_id in self._floor_plans:
+            fid = self._helper_active_floor_id
+        elif self._floor_plan_order:
+            fid = self._floor_plan_order[0]
+        else:
+            fid = None
+        if not fid:
+            return None
+        self._floor_helper_lines.setdefault(fid, {})
+        self._floor_helper_line_visible.setdefault(fid, {})
+        settings = self._floor_helper_settings.setdefault(fid, self._default_helper_settings())
+        default_settings = self._default_helper_settings()
+        for key, value in default_settings.items():
+            settings.setdefault(key, value)
+        return fid
+
+    def _helper_settings(self, floor_id: Optional[str]) -> Dict[str, object]:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return self._default_helper_settings()
+        return self._floor_helper_settings[fid]
+
+    def _helper_floor_lines(self, floor_id: Optional[str]) -> Dict[str, List[QPointF]]:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return {}
+        return self._floor_helper_lines[fid]
+
+    def _helper_floor_visible_map(self, floor_id: Optional[str]) -> Dict[str, bool]:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return {}
+        return self._floor_helper_line_visible[fid]
+
+    def _helper_line_pen_style(self, style_key: str):
+        style = str(style_key or "dash").strip().lower()
+        if style == "solid":
+            return Qt.SolidLine
+        if style == "dot":
+            return Qt.DotLine
+        if style == "dashdot":
+            return Qt.DashDotLine
+        return Qt.DashLine
+
+    def set_active_helper_floor(self, floor_id: Optional[str]):
+        fid = self._ensure_helper_floor(floor_id)
+        self._helper_active_floor_id = fid
+        if fid:
+            settings = self._helper_settings(fid)
+            self._helper_target_length_mm = float(settings.get("target_length_mm", 1000.0))
+            self._helper_line_color = str(settings.get("color", "#f8f32b"))
+        self.update()
+
+    def set_helper_line_target_length_mm(self, length_mm: float,
+                                         floor_id: Optional[str] = None,
+                                         resize_selected: bool = False):
+        fid = self._ensure_helper_floor(floor_id)
+        length_mm = max(1.0, float(length_mm))
+        self._helper_target_length_mm = length_mm
+        if not fid:
+            return
+        settings = self._helper_settings(fid)
+        settings["target_length_mm"] = length_mm
+        if (resize_selected
+                and self._helper_selected_id
+                and self._helper_selected_floor_id == fid
+                and self._mm_per_px > 0):
+            pts = self._floor_helper_lines.get(fid, {}).get(self._helper_selected_id)
+            if pts and len(pts) >= 2:
+                start = pts[0]
+                end = pts[1]
+                dx = end.x() - start.x()
+                dy = end.y() - start.y()
+                direction_len = math.hypot(dx, dy)
+                if direction_len > 1e-9:
+                    target_px = length_mm / self._mm_per_px
+                    ux = dx / direction_len
+                    uy = dy / direction_len
+                    pts[1] = QPointF(start.x() + ux * target_px,
+                                     start.y() + uy * target_px)
+                    self.helper_lines_changed.emit()
+        self.update()
+
+    def get_helper_line_target_length_mm(self, floor_id: Optional[str] = None) -> float:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return float(self._helper_target_length_mm)
+        settings = self._helper_settings(fid)
+        return float(settings.get("target_length_mm", 1000.0))
+
+    def set_helper_line_color(self, color: str, floor_id: Optional[str] = None):
+        fid = self._ensure_helper_floor(floor_id)
+        self._helper_line_color = color
+        if fid:
+            settings = self._helper_settings(fid)
+            settings["color"] = str(color)
+        self.update()
+
+    def get_helper_line_color(self, floor_id: Optional[str] = None) -> str:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return self._helper_line_color
+        settings = self._helper_settings(fid)
+        return str(settings.get("color", "#f8f32b"))
+
+    def set_helper_line_visible(self, floor_id: str, visible: bool):
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return
+        settings = self._helper_settings(fid)
+        settings["visible"] = bool(visible)
+        self.update()
+
+    def get_helper_line_visible(self, floor_id: str) -> bool:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return True
+        settings = self._helper_settings(fid)
+        return bool(settings.get("visible", True))
+
+    def set_helper_line_width(self, floor_id: str, width_px: float):
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return
+        settings = self._helper_settings(fid)
+        settings["line_width_px"] = max(0.5, float(width_px))
+        self.update()
+
+    def get_helper_line_width(self, floor_id: str) -> float:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return 2.0
+        settings = self._helper_settings(fid)
+        return float(settings.get("line_width_px", 2.0))
+
+    def set_helper_line_style(self, floor_id: str, style_key: str):
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return
+        style = str(style_key or "dash").strip().lower()
+        if style not in {"solid", "dash", "dot", "dashdot"}:
+            style = "dash"
+        settings = self._helper_settings(fid)
+        settings["line_style"] = style
+        self.update()
+
+    def get_helper_line_style(self, floor_id: str) -> str:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return "dash"
+        settings = self._helper_settings(fid)
+        style = str(settings.get("line_style", "dash")).strip().lower()
+        return style if style in {"solid", "dash", "dot", "dashdot"} else "dash"
+
+    def start_draw_helper_line(self, floor_id: Optional[str] = None):
+        self.set_active_helper_floor(floor_id)
+        self._mode = ToolMode.DRAW_HELPER_LINE
+        self._helper_draw_start = None
+        self._helper_draw_current = None
+        self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
+        self.update()
+
+    def start_edit_helper_lines(self, floor_id: Optional[str] = None):
+        self.set_active_helper_floor(floor_id)
+        self._mode = ToolMode.EDIT_HELPER_LINE
+        self._helper_dragging_endpoint = None
+        self._helper_dragging_whole_id = None
+        self._helper_drag_start = None
+        self._helper_drag_origin = []
+        self.setCursor(Qt.ArrowCursor)
+        self.mode_changed.emit()
+        self.update()
+
+    def clear_helper_lines(self, floor_id: Optional[str] = None):
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return
+        self._floor_helper_lines.get(fid, {}).clear()
+        self._floor_helper_line_visible.get(fid, {}).clear()
+        self._helper_selected_id = None
+        self._helper_selected_floor_id = None
+        self.helper_lines_changed.emit()
+        self.update()
+
+    def delete_selected_helper_line(self):
+        if not self._helper_selected_id or not self._helper_selected_floor_id:
+            return
+        lines = self._floor_helper_lines.get(self._helper_selected_floor_id, {})
+        visible = self._floor_helper_line_visible.get(self._helper_selected_floor_id, {})
+        if self._helper_selected_id in lines:
+            lines.pop(self._helper_selected_id, None)
+            visible.pop(self._helper_selected_id, None)
+            self._helper_selected_id = None
+            self._helper_selected_floor_id = None
+            self.helper_lines_changed.emit()
+            self.update()
+
+    def _next_helper_line_id(self) -> str:
+        self._helper_line_counter += 1
+        existing_ids = set()
+        for floor_map in self._floor_helper_lines.values():
+            existing_ids.update(floor_map.keys())
+        while f"HL-{self._helper_line_counter}" in existing_ids:
+            self._helper_line_counter += 1
+        return f"HL-{self._helper_line_counter}"
+
+    def _snap_measure_point(self, pt: QPointF) -> QPointF:
+        ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+        if self._grid_visible and not ctrl_held:
+            return self._snap_to_grid(pt)
+        return pt
 
     def set_measure_color(self, color: str):
         """Set color for measurement tool (hex string, e.g. '#00ff00')."""
@@ -1995,6 +2450,19 @@ class CanvasWidget(QWidget):
         self._label_map.clear()
         self._helper_lines.clear()
         self._show_helper_line.clear()
+        self._floor_helper_lines.clear()
+        self._floor_helper_line_visible.clear()
+        self._floor_helper_settings.clear()
+        self._helper_selected_id = None
+        self._helper_selected_floor_id = None
+        self._helper_active_floor_id = None
+        self._helper_dragging_endpoint = None
+        self._helper_dragging_whole_id = None
+        self._helper_drag_start = None
+        self._helper_drag_origin = []
+        self._helper_draw_start = None
+        self._helper_draw_current = None
+        self._helper_line_counter = 0
         self._manual_routes.clear()
         self._route_wall_dist_px.clear()
         self._route_line_dist_px.clear()
@@ -2036,6 +2504,13 @@ class CanvasWidget(QWidget):
         self._text_comments.clear()
         self._text_visible.clear()
         self._text_rects.clear()
+        self._measure_lines.clear()
+        self._measure_p1 = None
+        self._measure_p2 = None
+        self._angle_measurements.clear()
+        self._angle_measure_p1 = None
+        self._angle_measure_p2 = None
+        self._angle_measure_p3 = None
         self._label_positions.clear()
         self._label_font_sizes.clear()
         self._label_visible.clear()
@@ -2100,8 +2575,30 @@ class CanvasWidget(QWidget):
                 float(self._export_frame.height()),
             ] if self._export_frame else None,
             "measure_color": self._measure_color,
+            "helper_line_color": self._helper_line_color,
             "ref_line_colors": dict(self._ref_line_colors),
             "ref_line_visible": dict(self._ref_line_visible),
+            "floor_helper_lines": {
+                fid: {
+                    hid: [(pts[0].x(), pts[0].y()), (pts[1].x(), pts[1].y())]
+                    for hid, pts in helper_map.items() if len(pts) >= 2
+                }
+                for fid, helper_map in self._floor_helper_lines.items()
+            },
+            "floor_helper_line_visible": {
+                fid: dict(visible_map)
+                for fid, visible_map in self._floor_helper_line_visible.items()
+            },
+            "floor_helper_settings": {
+                fid: {
+                    "visible": bool(settings.get("visible", True)),
+                    "color": str(settings.get("color", "#f8f32b")),
+                    "target_length_mm": float(settings.get("target_length_mm", 1000.0)),
+                    "line_width_px": float(settings.get("line_width_px", 2.0)),
+                    "line_style": str(settings.get("line_style", "dash")),
+                }
+                for fid, settings in self._floor_helper_settings.items()
+            },
             "polygons": {
                 cid: [(p.x(), p.y()) for p in pts]
                 for cid, pts in self._polygons.items()
@@ -2259,6 +2756,8 @@ class CanvasWidget(QWidget):
         # Restore color settings
         if "measure_color" in d:
             self._measure_color = d["measure_color"]
+        if "helper_line_color" in d:
+            self._helper_line_color = str(d["helper_line_color"])
         if "ref_line_colors" in d:
             self._ref_line_colors = dict(d["ref_line_colors"])
         if "ref_line_visible" in d:
@@ -2364,6 +2863,84 @@ class CanvasWidget(QWidget):
             self._text_colors[tid] = tdata.get("color", "#ffffff")
             self._text_comments[tid] = tdata.get("comment", "")
             self._text_visible[tid] = tdata.get("visible", True)
+        self._floor_helper_lines.clear()
+        self._floor_helper_line_visible.clear()
+        self._floor_helper_settings.clear()
+        self._helper_line_counter = 0
+
+        for fid, settings in d.get("floor_helper_settings", {}).items():
+            fid_s = str(fid)
+            if not isinstance(settings, dict):
+                settings = {}
+            self._floor_helper_settings[fid_s] = {
+                "visible": bool(settings.get("visible", True)),
+                "color": str(settings.get("color", self._helper_line_color)),
+                "target_length_mm": max(1.0, float(settings.get("target_length_mm", self._helper_target_length_mm))),
+                "line_width_px": max(0.5, float(settings.get("line_width_px", 2.0))),
+                "line_style": str(settings.get("line_style", "dash")).strip().lower(),
+            }
+
+        for fid, helper_map in d.get("floor_helper_lines", {}).items():
+            fid_s = str(fid)
+            lines: Dict[str, List[QPointF]] = {}
+            for hid, pts in (helper_map or {}).items():
+                if not isinstance(pts, list) or len(pts) < 2:
+                    continue
+                p1 = QPointF(float(pts[0][0]), float(pts[0][1]))
+                p2 = QPointF(float(pts[1][0]), float(pts[1][1]))
+                hid_s = str(hid)
+                lines[hid_s] = [p1, p2]
+                try:
+                    if hid_s.startswith("HL-"):
+                        self._helper_line_counter = max(self._helper_line_counter, int(hid_s.split("-")[1]))
+                except (IndexError, ValueError):
+                    pass
+            self._floor_helper_lines[fid_s] = lines
+
+        for fid, visible_map in d.get("floor_helper_line_visible", {}).items():
+            fid_s = str(fid)
+            vis_dict: Dict[str, bool] = {}
+            for hid, vis in (visible_map or {}).items():
+                vis_dict[str(hid)] = bool(vis)
+            self._floor_helper_line_visible[fid_s] = vis_dict
+
+        # Legacy migration: global helper lines -> first serialized floor plan
+        legacy_lines = d.get("global_helper_lines", {})
+        if legacy_lines:
+            legacy_floor_id = None
+            fp_list = d.get("floor_plans", [])
+            if fp_list and isinstance(fp_list, list):
+                first_fp = fp_list[0] if fp_list else {}
+                if isinstance(first_fp, dict):
+                    legacy_floor_id = str(first_fp.get("fp_id", "") or "")
+            if not legacy_floor_id:
+                legacy_floor_id = "grundriss-1"
+
+            self._floor_helper_lines.setdefault(legacy_floor_id, {})
+            self._floor_helper_line_visible.setdefault(legacy_floor_id, {})
+            self._floor_helper_settings.setdefault(legacy_floor_id, self._default_helper_settings())
+
+            for hid, pts in legacy_lines.items():
+                if not isinstance(pts, list) or len(pts) < 2:
+                    continue
+                hid_s = str(hid)
+                if hid_s in self._floor_helper_lines[legacy_floor_id]:
+                    continue
+                p1 = QPointF(float(pts[0][0]), float(pts[0][1]))
+                p2 = QPointF(float(pts[1][0]), float(pts[1][1]))
+                self._floor_helper_lines[legacy_floor_id][hid_s] = [p1, p2]
+                self._floor_helper_line_visible[legacy_floor_id][hid_s] = True
+                try:
+                    if hid_s.startswith("HL-"):
+                        self._helper_line_counter = max(self._helper_line_counter, int(hid_s.split("-")[1]))
+                except (IndexError, ValueError):
+                    pass
+
+            legacy_visible = d.get("helper_line_visible", {})
+            for hid, vis in legacy_visible.items():
+                hid_s = str(hid)
+                if hid_s in self._floor_helper_lines[legacy_floor_id]:
+                    self._floor_helper_line_visible[legacy_floor_id][hid_s] = bool(vis)
         # Floor plan layers (geometry only – images are loaded by main_window)
         for fp_d in d.get("floor_plans", []):
             fid = fp_d.get("fp_id")
@@ -2388,6 +2965,18 @@ class CanvasWidget(QWidget):
                 layer.ref_p2 = QPointF(*ref[1])
             poly = fp_d.get("polygon", [])
             layer.polygon = [QPointF(x, y) for x, y in poly]
+            self._ensure_helper_floor(fid)
+
+        # Ensure visibility map and settings are aligned with existing lines
+        for fid, lines in self._floor_helper_lines.items():
+            vis_map = self._floor_helper_line_visible.setdefault(fid, {})
+            for hid in lines.keys():
+                vis_map.setdefault(hid, True)
+            self._floor_helper_settings.setdefault(fid, self._default_helper_settings())
+
+        self._helper_selected_id = None
+        self._helper_selected_floor_id = None
+        self.set_active_helper_floor(self._helper_active_floor_id)
         self.update()
 
     # ------------------------------------------------------------------ #
@@ -2453,6 +3042,36 @@ class CanvasWidget(QWidget):
             for i, pt in enumerate(pts):
                 if _qdist(canvas_pt, pt) < threshold:
                     return cid, i
+        return None
+
+    def _hit_global_helper_line_endpoint(self, canvas_pt: QPointF) -> Optional[Tuple[str, int]]:
+        fid = self._ensure_helper_floor(self._helper_active_floor_id)
+        if not fid:
+            return None
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
+        lines = self._floor_helper_lines.get(fid, {})
+        visible = self._floor_helper_line_visible.get(fid, {})
+        for hid, pts in lines.items():
+            if not visible.get(hid, True) or len(pts) < 2:
+                continue
+            if _qdist(canvas_pt, pts[0]) < threshold:
+                return hid, 0
+            if _qdist(canvas_pt, pts[1]) < threshold:
+                return hid, 1
+        return None
+
+    def _hit_global_helper_line(self, canvas_pt: QPointF) -> Optional[str]:
+        fid = self._ensure_helper_floor(self._helper_active_floor_id)
+        if not fid:
+            return None
+        threshold = self._px_to_canvas_units(HIT_EDGE_RADIUS_PX)
+        lines = self._floor_helper_lines.get(fid, {})
+        visible = self._floor_helper_line_visible.get(fid, {})
+        for hid, pts in lines.items():
+            if not visible.get(hid, True) or len(pts) < 2:
+                continue
+            if _point_segment_distance(canvas_pt, pts[0], pts[1]) <= threshold:
+                return hid
         return None
 
     def _point_in_polygon(self, point: QPointF, polygon: List[QPointF]) -> bool:
@@ -3115,6 +3734,125 @@ class CanvasWidget(QWidget):
                     self.update()
             return
 
+        # ── Winkel messen ──
+        if self._mode == ToolMode.MEASURE_ANGLE:
+            if event.button() == Qt.LeftButton:
+                snapped_pt = self._snap_measure_point(canvas_pt)
+                if self._angle_measure_p1 is None:
+                    self._angle_measure_p1 = snapped_pt
+                elif self._angle_measure_p2 is None:
+                    self._angle_measure_p2 = snapped_pt
+                else:
+                    self._angle_measure_p3 = snapped_pt
+                    p1 = self._angle_measure_p1
+                    p2 = self._angle_measure_p2
+                    p3 = self._angle_measure_p3
+                    v1x, v1y = p1.x() - p2.x(), p1.y() - p2.y()
+                    v2x, v2y = p3.x() - p2.x(), p3.y() - p2.y()
+                    l1 = math.hypot(v1x, v1y)
+                    l2 = math.hypot(v2x, v2y)
+                    if l1 > 1e-9 and l2 > 1e-9:
+                        dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (l1 * l2)))
+                        angle_deg = math.degrees(math.acos(dot))
+                        self._angle_measurements.append((QPointF(p1), QPointF(p2), QPointF(p3), angle_deg))
+                    self._angle_measure_p1 = None
+                    self._angle_measure_p2 = None
+                    self._angle_measure_p3 = None
+                self.update()
+            elif event.button() == Qt.RightButton:
+                if self._angle_measure_p2 is not None:
+                    self._angle_measure_p2 = None
+                    self._angle_measure_p3 = None
+                elif self._angle_measure_p1 is not None:
+                    self._angle_measure_p1 = None
+                else:
+                    self._mode = ToolMode.NONE
+                    self.setCursor(Qt.ArrowCursor)
+                    self.mode_changed.emit()
+                self.update()
+            return
+
+        # ── Hilfslinie zeichnen ──
+        if self._mode == ToolMode.DRAW_HELPER_LINE:
+            fid = self._ensure_helper_floor(self._helper_active_floor_id)
+            if not fid:
+                return
+            if event.button() == Qt.LeftButton:
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                snapped_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                if self._helper_draw_start is None:
+                    self._helper_draw_start = QPointF(snapped_pt)
+                    self._helper_draw_current = QPointF(snapped_pt)
+                else:
+                    start = self._helper_draw_start
+                    end = self._helper_draw_current or snapped_pt
+                    dx = end.x() - start.x()
+                    dy = end.y() - start.y()
+                    direction_len = math.hypot(dx, dy)
+                    if direction_len > 1e-9 and self._mm_per_px > 0:
+                        settings = self._helper_settings(fid)
+                        target_length_mm = float(settings.get("target_length_mm", self._helper_target_length_mm))
+                        target_px = target_length_mm / self._mm_per_px
+                        ux = dx / direction_len
+                        uy = dy / direction_len
+                        final_end = QPointF(start.x() + ux * target_px,
+                                            start.y() + uy * target_px)
+                        hid = self._next_helper_line_id()
+                        self._floor_helper_lines.setdefault(fid, {})[hid] = [QPointF(start), final_end]
+                        self._floor_helper_line_visible.setdefault(fid, {})[hid] = True
+                        self._helper_selected_id = hid
+                        self._helper_selected_floor_id = fid
+                        self.helper_lines_changed.emit()
+                    self._helper_draw_start = None
+                    self._helper_draw_current = None
+                self.update()
+            elif event.button() == Qt.RightButton:
+                self._helper_draw_start = None
+                self._helper_draw_current = None
+                self.update()
+            return
+
+        # ── Hilfslinien bearbeiten ──
+        if self._mode == ToolMode.EDIT_HELPER_LINE:
+            fid = self._ensure_helper_floor(self._helper_active_floor_id)
+            if not fid:
+                return
+            if event.button() == Qt.LeftButton:
+                endpoint_hit = self._hit_global_helper_line_endpoint(canvas_pt)
+                if endpoint_hit:
+                    hid, idx = endpoint_hit
+                    self._helper_selected_id = hid
+                    self._helper_selected_floor_id = fid
+                    self._helper_dragging_endpoint = (hid, idx)
+                    self.setCursor(Qt.ClosedHandCursor)
+                    self.update()
+                    return
+                line_hit = self._hit_global_helper_line(canvas_pt)
+                if line_hit:
+                    self._helper_selected_id = line_hit
+                    self._helper_selected_floor_id = fid
+                    self._helper_dragging_whole_id = line_hit
+                    self._helper_drag_start = canvas_pt
+                    pts = self._floor_helper_lines.get(fid, {}).get(line_hit, [])
+                    self._helper_drag_origin = [QPointF(p) for p in pts]
+                    self.setCursor(Qt.ClosedHandCursor)
+                    self.update()
+                    return
+                self._helper_selected_id = None
+                self._helper_selected_floor_id = None
+                self.update()
+            elif event.button() == Qt.RightButton:
+                line_hit = self._hit_global_helper_line(canvas_pt)
+                if line_hit:
+                    self._floor_helper_lines.get(fid, {}).pop(line_hit, None)
+                    self._floor_helper_line_visible.get(fid, {}).pop(line_hit, None)
+                    if self._helper_selected_id == line_hit:
+                        self._helper_selected_id = None
+                        self._helper_selected_floor_id = None
+                    self.helper_lines_changed.emit()
+                    self.update()
+            return
+
         # ── Export-Rahmen zeichnen ──
         if self._mode == ToolMode.DRAW_EXPORT_FRAME:
             if event.button() == Qt.LeftButton:
@@ -3137,7 +3875,6 @@ class CanvasWidget(QWidget):
             if event.button() == Qt.LeftButton and self._active_floor_id:
                 layer = self._floor_plans.get(self._active_floor_id)
                 if layer:
-                    import math
                     if layer.polygon:
                         sw, sh = self._floor_polygon_render_size(layer)
                     else:
@@ -3735,7 +4472,10 @@ class CanvasWidget(QWidget):
     def mouseMoveEvent(self, event):
         pos       = QPointF(event.position())
         canvas_pt = self._to_canvas(pos)
-        self._mouse_pos = canvas_pt
+        if self._mode == ToolMode.MEASURE_ANGLE:
+            self._mouse_pos = self._snap_measure_point(canvas_pt)
+        else:
+            self._mouse_pos = canvas_pt
 
         if self._panning and self._pan_start:
             delta        = pos - self._pan_start
@@ -3745,6 +4485,10 @@ class CanvasWidget(QWidget):
             self._constraint_violation_point = None
             self._constraint_violation_line = None
             self._constraint_violation_reason = ""
+            self.update()
+            return
+
+        if self._mode == ToolMode.MEASURE_ANGLE:
             self.update()
             return
 
@@ -3826,7 +4570,6 @@ class CanvasWidget(QWidget):
             if self._floor_drag_start:
                 layer = self._floor_plans.get(self._active_floor_id)
                 if layer:
-                    import math
                     if layer.polygon:
                         sw, sh = self._floor_polygon_render_size(layer)
                     else:
@@ -3861,6 +4604,41 @@ class CanvasWidget(QWidget):
             self._export_frame_current = QPointF(canvas_pt)
             self.update()
             return
+
+        if self._mode == ToolMode.DRAW_HELPER_LINE and self._helper_draw_start is not None:
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            self._helper_draw_current = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+            self.update()
+            return
+
+        if self._mode == ToolMode.EDIT_HELPER_LINE:
+            fid = self._ensure_helper_floor(self._helper_active_floor_id)
+            if not fid:
+                return
+            if self._helper_dragging_endpoint:
+                hid, idx = self._helper_dragging_endpoint
+                pts = self._floor_helper_lines.get(fid, {}).get(hid)
+                if pts and len(pts) == 2:
+                    ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                    pts[idx] = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                    self.update()
+                return
+            if self._helper_dragging_whole_id and self._helper_drag_start:
+                hid = self._helper_dragging_whole_id
+                pts = self._floor_helper_lines.get(fid, {}).get(hid)
+                if pts and len(pts) == 2 and len(self._helper_drag_origin) == 2:
+                    dx = canvas_pt.x() - self._helper_drag_start.x()
+                    dy = canvas_pt.y() - self._helper_drag_start.y()
+                    pts[0] = QPointF(self._helper_drag_origin[0].x() + dx,
+                                    self._helper_drag_origin[0].y() + dy)
+                    pts[1] = QPointF(self._helper_drag_origin[1].x() + dx,
+                                    self._helper_drag_origin[1].y() + dy)
+                    ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                    if not ctrl_held:
+                        pts[0] = self._snap_to_grid(pts[0])
+                        pts[1] = self._snap_to_grid(pts[1])
+                    self.update()
+                return
 
         if self._mode == ToolMode.MOVE_START and self._dragging_start:
             ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
@@ -4325,6 +5103,22 @@ class CanvasWidget(QWidget):
                 self.update()
                 return
 
+            if self._mode == ToolMode.EDIT_HELPER_LINE:
+                changed = False
+                if self._helper_dragging_endpoint:
+                    self._helper_dragging_endpoint = None
+                    changed = True
+                if self._helper_dragging_whole_id:
+                    self._helper_dragging_whole_id = None
+                    self._helper_drag_start = None
+                    self._helper_drag_origin = []
+                    changed = True
+                if changed:
+                    self.setCursor(Qt.ArrowCursor)
+                    self.helper_lines_changed.emit()
+                    self.update()
+                    return
+
             # ── Grundriss verschieben abschliessen ──
             if self._mode == ToolMode.MOVE_FLOOR_PLAN and self._active_floor_id:
                 layer = self._floor_plans.get(self._active_floor_id)
@@ -4556,6 +5350,16 @@ class CanvasWidget(QWidget):
             # Measurement
             self._measure_p1 = None
             self._measure_p2 = None
+            self._angle_measure_p1 = None
+            self._angle_measure_p2 = None
+            self._angle_measure_p3 = None
+            self._helper_draw_start = None
+            self._helper_draw_current = None
+            self._helper_dragging_endpoint = None
+            self._helper_dragging_whole_id = None
+            self._helper_drag_start = None
+            self._helper_drag_origin = []
+            self._helper_selected_floor_id = None
             self._export_frame_start = None
             self._export_frame_current = None
             self.setCursor(Qt.ArrowCursor)
@@ -4573,6 +5377,8 @@ class CanvasWidget(QWidget):
                 self._delete_route_point(cid, idx)
             self._dragging_route_point = None
             self.update()
+        elif event.key() == Qt.Key_Delete and self._mode == ToolMode.EDIT_HELPER_LINE:
+            self.delete_selected_helper_line()
 
     # ------------------------------------------------------------------ #
     #  Painting                                                            #
@@ -4943,6 +5749,8 @@ class CanvasWidget(QWidget):
 
         # ── Messlinien ────────────────────────────────────────────
         self._draw_measurements(painter)
+        self._draw_angle_measurements(painter)
+        self._draw_global_helper_lines(painter)
 
         # ── Maße beim Verschieben anzeigen ────────────────────────
         self._draw_drag_distance_overlay(painter)
@@ -4997,6 +5805,121 @@ class CanvasWidget(QWidget):
                 painter.setFont(font)
                 painter.setPen(QPen(color))
                 painter.drawText(mid, f"{mm_len / 1000:.3f} m")
+
+    def _draw_angle_measurements(self, painter: QPainter):
+        color = QColor(self._measure_color)
+        r = 4.0 / self._scale
+        pen = QPen(color, 2.0 / self._scale, Qt.DashDotLine)
+        font = painter.font()
+        font.setPointSizeF(10.0 / self._scale)
+
+        def draw_triplet(p1: QPointF, p2: QPointF, p3: QPointF, angle_deg: float):
+            painter.setPen(pen)
+            painter.drawLine(p2, p1)
+            painter.drawLine(p2, p3)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(p1, r, r)
+            painter.drawEllipse(p2, r, r)
+            painter.drawEllipse(p3, r, r)
+            painter.setFont(font)
+            painter.setPen(QPen(color))
+            label_pos = QPointF(
+                p3.x() + 8.0 / self._scale,
+                p3.y() - 8.0 / self._scale,
+            )
+            painter.drawText(
+                label_pos,
+                f"{angle_deg:.1f}°"
+            )
+
+        for p1, p2, p3, angle_deg in self._angle_measurements:
+            draw_triplet(p1, p2, p3, angle_deg)
+
+        if self._mode == ToolMode.MEASURE_ANGLE:
+            if self._angle_measure_p1 is not None and self._angle_measure_p2 is not None:
+                p1 = self._angle_measure_p1
+                p2 = self._angle_measure_p2
+                p3 = self._mouse_pos if self._mouse_pos is not None else self._angle_measure_p2
+                v1x, v1y = p1.x() - p2.x(), p1.y() - p2.y()
+                v2x, v2y = p3.x() - p2.x(), p3.y() - p2.y()
+                l1 = math.hypot(v1x, v1y)
+                l2 = math.hypot(v2x, v2y)
+                angle_deg = 0.0
+                if l1 > 1e-9 and l2 > 1e-9:
+                    dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (l1 * l2)))
+                    angle_deg = math.degrees(math.acos(dot))
+                draw_triplet(p1, p2, p3, angle_deg)
+            elif self._angle_measure_p1 is not None:
+                p2 = self._mouse_pos if self._mouse_pos is not None else self._angle_measure_p1
+                painter.setPen(pen)
+                painter.drawLine(self._angle_measure_p1, p2)
+                painter.setBrush(QBrush(color))
+                painter.drawEllipse(self._angle_measure_p1, r, r)
+                painter.drawEllipse(p2, r, r)
+
+    def _draw_global_helper_lines(self, painter: QPainter):
+        r = 3.5 / self._scale
+        font = painter.font()
+        font.setPointSizeF(10.0 / self._scale)
+
+        for fid in self._floor_plan_order:
+            layer = self._floor_plans.get(fid)
+            if not layer or not layer.visible:
+                continue
+            settings = self._helper_settings(fid)
+            if not bool(settings.get("visible", True)):
+                continue
+            color = QColor(str(settings.get("color", "#f8f32b")))
+            width_px = max(0.5, float(settings.get("line_width_px", 2.0)))
+            style = self._helper_line_pen_style(str(settings.get("line_style", "dash")))
+            base_pen = QPen(color, width_px / self._scale, style)
+            visible_map = self._floor_helper_line_visible.get(fid, {})
+            for hid, pts in self._floor_helper_lines.get(fid, {}).items():
+                if not visible_map.get(hid, True) or len(pts) < 2:
+                    continue
+                p1, p2 = pts[0], pts[1]
+                pen = QPen(base_pen)
+                if hid == self._helper_selected_id and fid == self._helper_selected_floor_id:
+                    pen.setColor(QColor("#ffd166"))
+                    pen.setWidthF(max(pen.widthF(), 3.0 / self._scale))
+                painter.setPen(pen)
+                painter.setBrush(QBrush(pen.color()))
+                painter.drawLine(p1, p2)
+                painter.drawEllipse(p1, r, r)
+                painter.drawEllipse(p2, r, r)
+                px_len = _qdist(p1, p2)
+                mm_len = px_len * self._mm_per_px if self._mm_per_px > 0 else 0.0
+                mid = QPointF((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2 - 10 / self._scale)
+                painter.setFont(font)
+                painter.drawText(mid, f"{mm_len / 1000:.3f} m")
+
+        if self._mode == ToolMode.DRAW_HELPER_LINE and self._helper_draw_start and self._helper_draw_current:
+            fid = self._ensure_helper_floor(self._helper_active_floor_id)
+            settings = self._helper_settings(fid)
+            p1 = self._helper_draw_start
+            p2 = self._helper_draw_current
+            dx = p2.x() - p1.x()
+            dy = p2.y() - p1.y()
+            direction_len = math.hypot(dx, dy)
+            if direction_len > 1e-9 and self._mm_per_px > 0:
+                target_px = float(settings.get("target_length_mm", self._helper_target_length_mm)) / self._mm_per_px
+                ux = dx / direction_len
+                uy = dy / direction_len
+                p2 = QPointF(p1.x() + ux * target_px, p1.y() + uy * target_px)
+            color = QColor(str(settings.get("color", "#f8f32b")))
+            width_px = max(0.5, float(settings.get("line_width_px", 2.0)))
+            style = self._helper_line_pen_style(str(settings.get("line_style", "dash")))
+            base_pen = QPen(color, width_px / self._scale, style)
+            painter.setPen(base_pen)
+            painter.setBrush(QBrush(base_pen.color()))
+            painter.drawLine(p1, p2)
+            painter.drawEllipse(p1, r, r)
+            painter.drawEllipse(p2, r, r)
+            px_len = _qdist(p1, p2)
+            mm_len = px_len * self._mm_per_px if self._mm_per_px > 0 else 0.0
+            mid = QPointF((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2 - 10 / self._scale)
+            painter.setFont(font)
+            painter.drawText(mid, f"{mm_len / 1000:.3f} m")
 
     def _draw_export_frame(self, painter: QPainter):
         """Draw persisted and in-progress export frame."""
