@@ -93,6 +93,7 @@ class ToolMode(Enum):
     DRAW_EXPORT_FRAME = auto()
     PLACE_TEXT       = auto()
     MOVE_TEXT        = auto()
+    MOVE_MEASURE_LABEL = auto()
 
 class CanvasWidget(QWidget):
     polygon_finished  = Signal(str, list)
@@ -287,6 +288,12 @@ class CanvasWidget(QWidget):
         self._measure_p2: Optional[QPointF] = None
         self._measure_lines: List[Tuple[QPointF, QPointF, float]] = []  # persisted lines
         self._measure_color: str = "#00e5ff"  # Color for measurement tool
+        # Positions for measurement labels (persisted)
+        self._measure_label_positions: List[Tuple[float, float]] = []
+        # Positions for helper line labels (persisted)
+        self._helper_label_positions: Dict[str, Dict[str, Tuple[float, float]]] = {}
+        # Currently dragging label index
+        self._dragging_measure_label_idx: Optional[int] = None
         self._angle_measure_p1: Optional[QPointF] = None
         self._angle_measure_p2: Optional[QPointF] = None
         self._angle_measure_p3: Optional[QPointF] = None
@@ -2575,6 +2582,11 @@ class CanvasWidget(QWidget):
                 float(self._export_frame.height()),
             ] if self._export_frame else None,
             "measure_color": self._measure_color,
+            "measure_label_positions": [list(p) for p in self._measure_label_positions],
+            "helper_label_positions": {
+                fid: {hid: [float(pos[0]), float(pos[1])] for hid, pos in helper_map.items()}
+                for fid, helper_map in self._helper_label_positions.items()
+            },
             "helper_line_color": self._helper_line_color,
             "ref_line_colors": dict(self._ref_line_colors),
             "ref_line_visible": dict(self._ref_line_visible),
@@ -2756,6 +2768,22 @@ class CanvasWidget(QWidget):
         # Restore color settings
         if "measure_color" in d:
             self._measure_color = d["measure_color"]
+        if "measure_label_positions" in d:
+            try:
+                self._measure_label_positions = [ (float(x), float(y)) for x, y in d.get("measure_label_positions", []) ]
+            except Exception:
+                self._measure_label_positions = []
+        if "helper_label_positions" in d:
+            try:
+                self._helper_label_positions = {
+                    fid: {
+                        hid: (float(pos[0]), float(pos[1]))
+                        for hid, pos in helper_map.items()
+                    }
+                    for fid, helper_map in d.get("helper_label_positions", {}).items()
+                }
+            except Exception:
+                self._helper_label_positions = {}
         if "helper_line_color" in d:
             self._helper_line_color = str(d["helper_line_color"])
         if "ref_line_colors" in d:
@@ -3720,6 +3748,10 @@ class CanvasWidget(QWidget):
                         self._measure_lines.append(
                             (QPointF(self._measure_p1),
                              QPointF(self._measure_p2), mm_len))
+                        # Default label position: midpoint
+                        mid_x = (self._measure_p1.x() + self._measure_p2.x()) / 2.0
+                        mid_y = (self._measure_p1.y() + self._measure_p2.y()) / 2.0
+                        self._measure_label_positions.append((float(mid_x), float(mid_y)))
                     self._measure_p1 = None
                     self._measure_p2 = None
                 self.update()
@@ -4407,7 +4439,7 @@ class CanvasWidget(QWidget):
                 return
 
         # ── Text-Annotation verschieben ──
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and self._mode == ToolMode.NONE:
             text_hit = self._hit_text_annotation(canvas_pt)
             if text_hit:
                 self.object_clicked.emit("text", text_hit)
@@ -4416,7 +4448,7 @@ class CanvasWidget(QWidget):
                 return
 
         # ── Label verschieben ──
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and self._mode == ToolMode.NONE:
             label_hit = self._hit_label(canvas_pt)
             if label_hit:
                 self.object_clicked.emit("label", label_hit)
@@ -4491,6 +4523,48 @@ class CanvasWidget(QWidget):
         if self._mode == ToolMode.MEASURE_ANGLE:
             self.update()
             return
+
+        # ── Dragging any label ──
+        if self._dragging_label:
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            raw_pos = QPointF(
+                canvas_pt.x() - self._label_drag_offset.x(),
+                canvas_pt.y() - self._label_drag_offset.y())
+            new_pos = raw_pos if ctrl_held else self._snap_to_grid(raw_pos)
+            if self._dragging_label.startswith("measure:"):
+                try:
+                    idx = int(self._dragging_label.split(":", 1)[1])
+                except ValueError:
+                    idx = None
+                if idx is not None:
+                    anchor_pos = QPointF(new_pos.x(), new_pos.y() + 10 / self._scale)
+                    if 0 <= idx < len(self._measure_label_positions):
+                        self._measure_label_positions[idx] = (float(anchor_pos.x()), float(anchor_pos.y()))
+                    else:
+                        self._measure_label_positions.append((float(anchor_pos.x()), float(anchor_pos.y())))
+            elif self._dragging_label.startswith("helper:"):
+                parts = self._dragging_label.split(":", 2)
+                if len(parts) == 3:
+                    fid, hid = parts[1], parts[2]
+                    self._helper_label_positions.setdefault(fid, {})[hid] = (float(new_pos.x()), float(new_pos.y()))
+            else:
+                self._label_positions[self._dragging_label] = new_pos
+            self.update()
+            return
+
+        # ── Hover: show hand cursor when over a measurement label (NONE mode) ──
+        if self._mode == ToolMode.NONE and self._measure_label_positions:
+            thresh = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
+            for lp in self._measure_label_positions:
+                try:
+                    lab_pt = QPointF(lp[0], lp[1])
+                except Exception:
+                    continue
+                if _qdist(canvas_pt, lab_pt) < thresh:
+                    self.setCursor(Qt.OpenHandCursor)
+                    break
+            else:
+                self.setCursor(Qt.ArrowCursor)
 
         # ── Handle dragging of whole elec cable (NONE mode) ──
         if (
@@ -5052,6 +5126,13 @@ class CanvasWidget(QWidget):
             return
 
         if event.button() == Qt.LeftButton:
+            # Finalize measurement label drag
+            if self._mode == ToolMode.MOVE_MEASURE_LABEL and self._dragging_measure_label_idx is not None:
+                self._dragging_measure_label_idx = None
+                self._mode = ToolMode.NONE
+                self.setCursor(Qt.ArrowCursor)
+                self.update()
+                return
             if self._mode == ToolMode.NONE and self._dragging_elec_cable_id:
                 cid = self._dragging_elec_cable_id
                 self._dragging_elec_cable_id = None
@@ -5392,6 +5473,8 @@ class CanvasWidget(QWidget):
         painter.save()
         painter.translate(self._offset)
         painter.scale(self._scale, self._scale)
+        self._label_rects.clear()
+        self._label_draw_pos.clear()
 
         # Background: floor plan layers (back → front)
         # Each layer is scaled so its real-world size matches the global
@@ -5636,8 +5719,6 @@ class CanvasWidget(QWidget):
             self._draw_supply_line_in_progress(painter)
 
         # ── Labels (drawn last, always on top) ────────────────────────
-        self._label_rects.clear()
-        self._label_draw_pos.clear()
         for cid, pts in self._polygons.items():
             if not self._circuit_visible.get(cid, True):
                 continue
@@ -5772,20 +5853,41 @@ class CanvasWidget(QWidget):
         font = painter.font()
         font.setPointSizeF(10.0 / self._scale)
 
+        def draw_text_with_background(pt: QPointF, text: str, label_id: Optional[str] = None, text_color: Optional[QColor] = None):
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            pad = 3.0 / self._scale
+            width = metrics.horizontalAdvance(text)
+            height = metrics.height()
+            ascent = metrics.ascent()
+            rect = QRectF(
+                pt.x() - pad,
+                pt.y() - ascent - pad,
+                width + 2 * pad,
+                height + 2 * pad,
+            )
+            painter.fillRect(rect, QColor(0, 0, 0, 180))
+            painter.setPen(QPen(text_color or color))
+            painter.drawText(pt, text)
+            if label_id:
+                self._label_rects[label_id] = rect
+                self._label_draw_pos[label_id] = QPointF(pt)
+
         # Draw persisted measurement lines
-        for p1, p2, mm_len in self._measure_lines:
+        for idx, (p1, p2, mm_len) in enumerate(self._measure_lines):
             painter.setPen(pen)
             painter.drawLine(p1, p2)
             painter.setBrush(QBrush(color))
             painter.drawEllipse(p1, r, r)
             painter.drawEllipse(p2, r, r)
-            mid = QPointF(
-                (p1.x() + p2.x()) / 2,
-                (p1.y() + p2.y()) / 2 - 10 / self._scale,
-            )
-            painter.setFont(font)
-            painter.setPen(QPen(color))
-            painter.drawText(mid, f"{mm_len / 1000:.3f} m")
+            if idx < len(self._measure_label_positions):
+                lp = self._measure_label_positions[idx]
+                anchor_pos = QPointF(lp[0], lp[1])
+            else:
+                anchor_pos = QPointF((p1.x() + p2.x()) / 2,
+                                     (p1.y() + p2.y()) / 2)
+            draw_pos = QPointF(anchor_pos.x(), anchor_pos.y() - 10 / self._scale)
+            draw_text_with_background(draw_pos, f"{mm_len / 1000:.3f} m", f"measure:{idx}")
 
         # Draw in-progress measurement
         if self._mode == ToolMode.MEASURE and self._measure_p1:
@@ -5802,9 +5904,7 @@ class CanvasWidget(QWidget):
                     (self._measure_p1.x() + p2.x()) / 2,
                     (self._measure_p1.y() + p2.y()) / 2 - 10 / self._scale,
                 )
-                painter.setFont(font)
-                painter.setPen(QPen(color))
-                painter.drawText(mid, f"{mm_len / 1000:.3f} m")
+                draw_text_with_background(mid, f"{mm_len / 1000:.3f} m")
 
     def _draw_angle_measurements(self, painter: QPainter):
         color = QColor(self._measure_color)
@@ -5812,6 +5912,23 @@ class CanvasWidget(QWidget):
         pen = QPen(color, 2.0 / self._scale, Qt.DashDotLine)
         font = painter.font()
         font.setPointSizeF(10.0 / self._scale)
+
+        def draw_text_with_background(pt: QPointF, text: str):
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            pad = 3.0 / self._scale
+            width = metrics.horizontalAdvance(text)
+            height = metrics.height()
+            ascent = metrics.ascent()
+            rect = QRectF(
+                pt.x() - pad,
+                pt.y() - ascent - pad,
+                width + 2 * pad,
+                height + 2 * pad,
+            )
+            painter.fillRect(rect, QColor(0, 0, 0, 180))
+            painter.setPen(QPen(color))
+            painter.drawText(pt, text)
 
         def draw_triplet(p1: QPointF, p2: QPointF, p3: QPointF, angle_deg: float):
             painter.setPen(pen)
@@ -5821,16 +5938,11 @@ class CanvasWidget(QWidget):
             painter.drawEllipse(p1, r, r)
             painter.drawEllipse(p2, r, r)
             painter.drawEllipse(p3, r, r)
-            painter.setFont(font)
-            painter.setPen(QPen(color))
             label_pos = QPointF(
                 p3.x() + 8.0 / self._scale,
                 p3.y() - 8.0 / self._scale,
             )
-            painter.drawText(
-                label_pos,
-                f"{angle_deg:.1f}°"
-            )
+            draw_text_with_background(label_pos, f"{angle_deg:.1f}°")
 
         for p1, p2, p3, angle_deg in self._angle_measurements:
             draw_triplet(p1, p2, p3, angle_deg)
@@ -5862,6 +5974,26 @@ class CanvasWidget(QWidget):
         font = painter.font()
         font.setPointSizeF(10.0 / self._scale)
 
+        def draw_text_with_background(pt: QPointF, text: str, text_color: QColor, label_id: Optional[str] = None):
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            pad = 3.0 / self._scale
+            width = metrics.horizontalAdvance(text)
+            height = metrics.height()
+            ascent = metrics.ascent()
+            rect = QRectF(
+                pt.x() - pad,
+                pt.y() - ascent - pad,
+                width + 2 * pad,
+                height + 2 * pad,
+            )
+            painter.fillRect(rect, QColor(0, 0, 0, 180))
+            painter.setPen(QPen(text_color))
+            painter.drawText(pt, text)
+            if label_id:
+                self._label_rects[label_id] = rect
+                self._label_draw_pos[label_id] = QPointF(pt)
+
         for fid in self._floor_plan_order:
             layer = self._floor_plans.get(fid)
             if not layer or not layer.visible:
@@ -5889,9 +6021,13 @@ class CanvasWidget(QWidget):
                 painter.drawEllipse(p2, r, r)
                 px_len = _qdist(p1, p2)
                 mm_len = px_len * self._mm_per_px if self._mm_per_px > 0 else 0.0
-                mid = QPointF((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2 - 10 / self._scale)
-                painter.setFont(font)
-                painter.drawText(mid, f"{mm_len / 1000:.3f} m")
+                helper_id = f"helper:{fid}:{hid}"
+                if fid in self._helper_label_positions and hid in self._helper_label_positions[fid]:
+                    label_pos = QPointF(*self._helper_label_positions[fid][hid])
+                else:
+                    label_pos = QPointF((p1.x() + p2.x()) / 2,
+                                         (p1.y() + p2.y()) / 2 - 10 / self._scale)
+                draw_text_with_background(label_pos, f"{mm_len / 1000:.3f} m", pen.color(), helper_id)
 
         if self._mode == ToolMode.DRAW_HELPER_LINE and self._helper_draw_start and self._helper_draw_current:
             fid = self._ensure_helper_floor(self._helper_active_floor_id)
@@ -5918,8 +6054,7 @@ class CanvasWidget(QWidget):
             px_len = _qdist(p1, p2)
             mm_len = px_len * self._mm_per_px if self._mm_per_px > 0 else 0.0
             mid = QPointF((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2 - 10 / self._scale)
-            painter.setFont(font)
-            painter.drawText(mid, f"{mm_len / 1000:.3f} m")
+            draw_text_with_background(mid, f"{mm_len / 1000:.3f} m", base_pen.color())
 
     def _draw_export_frame(self, painter: QPainter):
         """Draw persisted and in-progress export frame."""
