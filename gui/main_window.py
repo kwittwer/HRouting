@@ -38,7 +38,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QSettings, QMarginsF, QRectF, QDateTime, QPointF, QTimer, QByteArray, QBuffer, QIODevice, QSize
 from PySide6.QtPrintSupport import QPrinter
 
-from gui.canvas_widget import CanvasWidget, COLORS
+from gui.canvas_widget import CanvasWidget, COLORS, ToolMode
 from gui.parameter_panel import ParameterPanel, SafeDoubleSpinBox, SafeComboBox, BUILTIN_SYMBOLS
 from gui.pdf_export_dialog import PdfExportConfigDialog
 from gui.elec_schema_window import ElecSchemaWindow, ApNode, CableEdge
@@ -938,6 +938,11 @@ class MainWindow(QMainWindow):
         self.canvas.helper_lines_changed.connect(self._mark_dirty)
         self.canvas.ref_line_set.connect(self._mark_dirty)
         self.canvas.start_point_moved.connect(self._mark_dirty)
+        self.canvas.label_moved.connect(self._mark_dirty)
+        self.canvas.measure_changed.connect(self._mark_dirty)
+        self.canvas.export_frame_drawn.connect(self._mark_dirty)
+        self.canvas.multi_selection_changed.connect(self._on_multi_selection_changed)
+        self.canvas.multi_objects_moved.connect(self._mark_dirty)
         self.param_panel.heating_global_changed.connect(self._mark_dirty)
 
         # Elektro-Strangschema live aktualisieren
@@ -1393,7 +1398,7 @@ class MainWindow(QMainWindow):
         self.canvas.start_draw_floor_plan_polygon(fp_id)
         self.status.showMessage(
             f"{fp_id}: Einrichtungs-Polygon zeichnen  |  "
-            "Linksklick = Punkt  |  Rechtsklick = Fertig  |  ESC = Abbruch"
+            "Linksklick = Punkt  |  Enter/Doppelklick = Fertig  |  ESC = Abbruch  |  Rechtsklick = Kontextmenü"
         )
 
     def _on_floorplan_polygon_finished(self, fp_id: str, points: list):
@@ -1584,7 +1589,7 @@ class MainWindow(QMainWindow):
         self.canvas.start_drawing(cid)
         self.status.showMessage(
             f"{cid}: Polygon zeichnen  |  "
-            "Linksklick = Punkt  |  Rechtsklick = Fertig  |  ESC = Abbruch"
+            "Linksklick = Punkt  |  Enter/Doppelklick = Fertig  |  ESC = Abbruch  |  Rechtsklick = Kontextmenü"
         )
 
     def _on_polygon_finished(self, circuit_id: str, points: list):
@@ -1634,7 +1639,7 @@ class MainWindow(QMainWindow):
         )
         self.status.showMessage(
             f"{circuit_id}: Manuellen Rohrverlauf zeichnen  |  "
-            "Linksklick = Punkt  |  Rechtsklick = Fertig  |  ESC = Abbruch"
+            "Linksklick = Punkt  |  Enter/Doppelklick = Fertig  |  ESC = Abbruch  |  Rechtsklick = Kontextmenü"
         )
 
     def _on_route_changed(self, circuit_id: str):
@@ -1674,14 +1679,14 @@ class MainWindow(QMainWindow):
         self.canvas.start_draw_supply_line(circuit_id)
         self.status.showMessage(
             f"{circuit_id}: Zuleitung zeichnen (ab Punkt S)  |  "
-            "Linksklick = Punkt  |  Rechtsklick = Fertig  |  ESC = Abbruch"
+            "Linksklick = Punkt  |  Enter/Doppelklick = Fertig  |  ESC = Abbruch  |  Rechtsklick = Kontextmenü"
         )
 
     def _on_edit_supply_requested(self, circuit_id: str):
         self.canvas.start_edit_supply_line(circuit_id)
         self.status.showMessage(
-            f"Zuleitung bearbeiten: Links=Verschieben, Rechts auf Punkt=Löschen, "
-            f"Rechts auf Kante=Einfügen, Mitteltaste/ESC=Beenden."
+            f"Zuleitung bearbeiten: Linksklick=Verschieben, Doppelklick auf Punkt=Löschen, "
+            f"Doppelklick auf Kante=Einfügen, Mitteltaste/ESC=Beenden, Rechtsklick=Kontextmenü."
         )
 
     def _on_spacing_changed(self, circuit_id: str):
@@ -1738,7 +1743,7 @@ class MainWindow(QMainWindow):
 
     def _show_canvas_context_menu(self, obj_type: str, obj_id: str,
                                   canvas_pt, global_pos):
-        if obj_id:
+        if obj_id and obj_type not in {"polygon", "elec_room", "helper_line"}:
             self.param_panel.select_item(obj_id)
 
         selected_id = self.param_panel.get_selected_item_id()
@@ -1748,6 +1753,25 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
 
+        placing_mode = self.canvas._mode in {
+            ToolMode.PLACE_ELEC_POINT,
+            ToolMode.PLACE_HKV,
+            ToolMode.PLACE_TEXT,
+        }
+        if placing_mode:
+            cancel_place_action = menu.addAction("✕ Platzierung abbrechen")
+            cancel_place_action.triggered.connect(
+                lambda checked=False: self.canvas.cancel_active_placement()
+            )
+            menu.addSeparator()
+
+        # Multi-selection context menu
+        if self.canvas._multi_selected:
+            multi_count = len(self.canvas._multi_selected)
+            move_multi_action = menu.addAction(f"✥ {multi_count} Objekte verschieben")
+            move_multi_action.triggered.connect(self._show_move_multi_hint)
+            menu.addSeparator()
+
         info_lines = self._context_info_lines(context_type, context_id)
         if info_lines:
             for line in info_lines:
@@ -1755,7 +1779,31 @@ class MainWindow(QMainWindow):
                 info_action.setEnabled(False)
             menu.addSeparator()
 
-        if selected_id:
+        # ── Helper Line spezifische Menüeinträge ──
+        if obj_type == "helper_line" and obj_id:
+            hid = obj_id
+            fid = self.canvas._helper_selected_floor_id
+            
+            edit_length_action = menu.addAction("✏️ Länge ändern…")
+            edit_length_action.triggered.connect(
+                lambda checked=False, hid_=hid, fid_=fid: self._context_edit_helper_line_length(hid_, fid_)
+            )
+            
+            is_fixed = self.canvas._floor_helper_line_fixed.get(fid, {}).get(hid, False)
+            fixed_text = "✓ Länge fixiert" if is_fixed else "☐ Länge fixieren"
+            toggle_fixed_action = menu.addAction(fixed_text)
+            toggle_fixed_action.triggered.connect(
+                lambda checked=False, hid_=hid, fid_=fid: self._context_toggle_helper_line_fixed(hid_, fid_)
+            )
+            
+            delete_action = menu.addAction("🗑️ Löschen")
+            delete_action.triggered.connect(
+                lambda checked=False, hid_=hid, fid_=fid: self._context_delete_helper_line(hid_, fid_)
+            )
+            
+            menu.addSeparator()
+
+        elif selected_id:
             copy_action = menu.addAction("📋 Kopieren")
             copy_action.triggered.connect(self._copy_selected_object)
 
@@ -1765,7 +1813,7 @@ class MainWindow(QMainWindow):
             delete_action = menu.addAction("🗑️ Löschen")
             delete_action.triggered.connect(self._delete_selected_object)
 
-            if context_type in {"elec_point", "hkv", "text"}:
+            if context_type in {"elec_point", "hkv", "text", "elec_cable"}:
                 move_hint = menu.addAction("✥ Verschieben")
                 move_hint.triggered.connect(
                     lambda checked=False, t=context_type: self._show_move_hint(t)
@@ -1815,17 +1863,22 @@ class MainWindow(QMainWindow):
                     lambda checked=False, pid=context_id: self._context_edit_ap_note(pid)
                 )
 
-        menu.addSeparator()
-        tools_menu = menu.addMenu("🧰 Werkzeuge")
-        tools_menu.addAction("📏 Abstand messen", self._context_activate_measure)
-        tools_menu.addAction("∠ Winkel messen", self._context_activate_angle_measure)
-        tools_menu.addSeparator()
-        tools_menu.addAction("📐 Hilfslinie zeichnen", self._context_activate_helper_draw)
-        tools_menu.addAction("✥ Hilfslinien bearbeiten", self._context_activate_helper_edit)
-        tools_menu.addAction("✕ Hilfslinien löschen", self._on_clear_helper_lines)
-        tools_menu.addSeparator()
-        tools_menu.addAction("⬚ Export-Rahmen setzen", self._context_activate_export_frame)
-        tools_menu.addAction("✕ Export-Rahmen löschen", self._on_clear_export_frame)
+        if not (obj_type == "helper_line"):
+            menu.addSeparator()
+            tools_menu = menu.addMenu("🧰 Werkzeuge")
+            tools_menu.addAction("📏 Abstand messen", self._context_activate_measure)
+            tools_menu.addAction("∠ Winkel messen", self._context_activate_angle_measure)
+            tools_menu.addSeparator()
+            tools_menu.addAction("📐 Hilfslinie zeichnen", self._context_activate_helper_draw)
+            tools_menu.addAction("✥ Hilfslinien bearbeiten", self._context_activate_helper_edit)
+            tools_menu.addAction("✕ Hilfslinien löschen", self._on_clear_helper_lines)
+            tools_menu.addSeparator()
+            tools_menu.addAction("⬚ Export-Rahmen setzen", self._context_activate_export_frame)
+            tools_menu.addAction("✕ Export-Rahmen löschen", self._on_clear_export_frame)
+        else:
+            menu.addSeparator()
+            tools_menu = menu.addMenu("🧰 Werkzeuge")
+            tools_menu.addAction("✕ Hilfslinien löschen", self._on_clear_helper_lines)
 
         if self._copy_buffer:
             if selected_id:
@@ -1860,6 +1913,41 @@ class MainWindow(QMainWindow):
     def _context_activate_export_frame(self):
         self._export_frame_btn.setChecked(True)
         self._on_export_frame_toggled(True)
+
+    def _context_edit_helper_line_length(self, helper_id: str, floor_id: str | None):
+        fid = floor_id or self.canvas._helper_selected_floor_id
+        if not fid or not helper_id:
+            return
+        current_mm = self.canvas.get_helper_line_length_mm(fid, helper_id)
+        current_m = max(0.001, float(current_mm) / 1000.0)
+        value_m, ok = QInputDialog.getDouble(
+            self,
+            "Hilfslinie: Länge ändern",
+            "Länge (m):",
+            current_m,
+            0.001,
+            1000.0,
+            3,
+        )
+        if not ok:
+            return
+        self.canvas.set_helper_line_length_mm(fid, helper_id, value_m * 1000.0)
+        self._mark_dirty()
+
+    def _context_toggle_helper_line_fixed(self, helper_id: str, floor_id: str | None):
+        fid = floor_id or self.canvas._helper_selected_floor_id
+        if not fid or not helper_id:
+            return
+        cur = self.canvas.is_helper_line_length_fixed(fid, helper_id)
+        self.canvas.set_helper_line_length_fixed(fid, helper_id, not cur)
+        self._mark_dirty()
+
+    def _context_delete_helper_line(self, helper_id: str, floor_id: str | None):
+        fid = floor_id or self.canvas._helper_selected_floor_id
+        if not fid or not helper_id:
+            return
+        self.canvas.delete_helper_line(fid, helper_id)
+        self._mark_dirty()
 
     def _context_info_lines(self, context_type: str | None, context_id: str | None) -> list[str]:
         if not context_type or not context_id:
@@ -1990,12 +2078,29 @@ class MainWindow(QMainWindow):
             "elec_point": "Anschlusspunkt",
             "hkv": "HKV",
             "text": "Text",
+            "elec_cable": "Kabel",
         }
         label = labels.get(obj_type, "Objekt")
         self.status.showMessage(
             f"{label} verschieben: Mit linker Maustaste im Zeichenfeld ziehen.",
             3500,
         )
+
+    def _show_move_multi_hint(self):
+        count = len(self.canvas._multi_selected)
+        self.status.showMessage(
+            f"Verschieben von {count} Objekten: Alt + Linke Maustaste halten + bewegen",
+            3500,
+        )
+
+    def _on_multi_selection_changed(self, selected_set):
+        count = len(selected_set)
+        if count == 0:
+            self.status.showMessage("")
+        else:
+            self.status.showMessage(
+                f"{count} Objekt(e) selektiert. Alt+Drag zum Verschieben oder Rechtsklick für Menü"
+            )
 
     def _context_insert_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF):
         if not obj_type or not obj_id:
@@ -2045,22 +2150,22 @@ class MainWindow(QMainWindow):
         self.canvas.start_edit_floor_plan_polygon(fp_id)
         self.status.showMessage(
             "Einrichtungs-Polygon bearbeiten: Linksklick zum Verschieben, "
-            "Rechtsklick auf Punkt zum Löschen, Rechtsklick auf Kante zum Einfügen, "
-            "Mitteltaste oder ESC zum Beenden."
+            "Doppelklick auf Punkt zum Löschen, Doppelklick auf Kante zum Einfügen, "
+            "Mitteltaste oder ESC zum Beenden, Rechtsklick=Kontextmenü."
         )
 
     def _on_edit_polygon_requested(self, circuit_id: str):
         self.canvas.start_edit_polygon(circuit_id)
         self.status.showMessage(
-            f"Polygon bearbeiten: Linksklick zum Verschieben, Rechtsklick auf Punkt zum Löschen, "
-            f"Rechtsklick auf Kante zum Einfügen, Mitteltaste oder ESC zum Beenden."
+            f"Polygon bearbeiten: Linksklick zum Verschieben, Doppelklick auf Punkt zum Löschen, "
+            f"Doppelklick auf Kante zum Einfügen, Mitteltaste oder ESC zum Beenden, Rechtsklick=Kontextmenü."
         )
 
     def _on_edit_route_requested(self, circuit_id: str):
         self.canvas.start_edit_route(circuit_id)
         self.status.showMessage(
-            f"Rohrverlauf bearbeiten: Linksklick zum Verschieben, Rechtsklick auf Punkt zum Löschen, "
-            f"Rechtsklick auf Kante zum Einfügen, Mitteltaste oder ESC zum Beenden."
+            f"Rohrverlauf bearbeiten: Linksklick zum Verschieben, Doppelklick auf Punkt zum Löschen, "
+            f"Doppelklick auf Kante zum Einfügen, Mitteltaste oder ESC zum Beenden, Rechtsklick=Kontextmenü."
         )
 
     def _on_circuit_name_changed(self, circuit_id: str, name: str):
@@ -2240,8 +2345,7 @@ class MainWindow(QMainWindow):
             point_id, params["width"], params["height"])
         self.status.showMessage(
             f"{point_id}: Klicke auf den Plan um den Anschlusspunkt "
-            "zu platzieren. ESC = Abbruch"
-        )
+            "zu platzieren. ESC = Abbruch, Rechtsklick = Kontextmenü")
 
     def _on_elec_point_placed(self, point_id: str):
         self._update_elec_point_room_assignments()
@@ -2345,14 +2449,14 @@ class MainWindow(QMainWindow):
         self.canvas.start_draw_elec_room(room_id)
         self.status.showMessage(
             f"{room_id}: Raum-Polygon zeichnen  |  "
-            "Linksklick = Punkt  |  Rechtsklick = Fertig  |  ESC = Abbruch"
+            "Linksklick = Punkt  |  Enter/Doppelklick = Fertig  |  ESC = Abbruch  |  Rechtsklick = Kontextmenü"
         )
 
     def _on_edit_elec_room(self, room_id: str):
         self.canvas.start_edit_elec_room_polygon(room_id)
         self.status.showMessage(
-            "Raum-Polygon bearbeiten: Linksklick zum Verschieben, Rechtsklick auf Punkt zum Löschen, "
-            "Rechtsklick auf Kante zum Einfügen, Mitteltaste oder ESC zum Beenden."
+            "Raum-Polygon bearbeiten: Linksklick zum Verschieben, Doppelklick auf Punkt zum Löschen, "
+            "Doppelklick auf Kante zum Einfügen, Mitteltaste oder ESC zum Beenden, Rechtsklick=Kontextmenü."
         )
 
     def _on_elec_room_polygon_finished(self, room_id: str, points: list):
@@ -2448,14 +2552,14 @@ class MainWindow(QMainWindow):
         self.canvas.start_draw_elec_cable(cable_id)
         self.status.showMessage(
             f"{cable_id}: Kabel zeichnen  |  "
-            "Linksklick = Punkt  |  Rechtsklick = Fertig  |  ESC = Abbruch"
+            "Linksklick = Punkt  |  Enter/Doppelklick = Fertig  |  ESC = Abbruch  |  Rechtsklick = Kontextmenü"
         )
 
     def _on_edit_elec_cable(self, cable_id: str):
         self.canvas.start_edit_elec_cable(cable_id)
         self.status.showMessage(
-            f"Kabel bearbeiten: Links=Verschieben, Rechts auf Punkt=Löschen, "
-            f"Rechts auf Kante=Einfügen, Mitteltaste/ESC=Beenden."
+            f"Kabel bearbeiten: Linksklick=Verschieben, Doppelklick auf Punkt=Löschen, "
+            f"Doppelklick auf Kante=Einfügen, Mitteltaste/ESC=Beenden, Rechtsklick=Kontextmenü."
         )
 
     def _on_elec_cable_changed(self, cable_id: str):
@@ -3458,7 +3562,7 @@ class MainWindow(QMainWindow):
             hkv_id, params["width"], params["height"])
         self.status.showMessage(
             f"{hkv_id}: Klicke auf den Plan um den Heizkreisverteiler "
-            "zu platzieren. ESC = Abbruch")
+            "zu platzieren. ESC = Abbruch, Rechtsklick = Kontextmenü")
 
     def _on_hkv_placed(self, hkv_id: str):
         self.status.showMessage(
@@ -3519,14 +3623,14 @@ class MainWindow(QMainWindow):
         self.canvas.start_draw_hkv_line(line_id)
         self.status.showMessage(
             f"{line_id}: HKV-Leitung zeichnen  |  "
-            "Linksklick = Punkt  |  Rechtsklick = Fertig  |  ESC = Abbruch")
+            "Linksklick = Punkt  |  Enter/Doppelklick = Fertig  |  ESC = Abbruch  |  Rechtsklick = Kontextmenü")
 
     def _on_edit_hkv_line(self, line_id: str):
         self.canvas.start_edit_hkv_line(line_id)
         self.status.showMessage(
-            "HKV-Leitung bearbeiten: Links=Verschieben, "
-            "Rechts auf Punkt=Löschen, Rechts auf Kante=Einfügen, "
-            "Mitteltaste/ESC=Beenden.")
+            "HKV-Leitung bearbeiten: Linksklick=Verschieben, "
+            "Doppelklick auf Punkt=Löschen, Doppelklick auf Kante=Einfügen, "
+            "Mitteltaste/ESC=Beenden, Rechtsklick=Kontextmenü.")
 
     def _on_hkv_line_changed(self, line_id: str):
         length_px = self.canvas.get_hkv_line_length_px(line_id)
@@ -3616,7 +3720,7 @@ class MainWindow(QMainWindow):
         )
         self.status.showMessage(
             f"{text_id}: Klicke auf den Plan um den Text zu platzieren. "
-            "ESC = Abbruch")
+            "ESC = Abbruch, Rechtsklick = Kontextmenü")
 
     def _on_text_placed(self, text_id: str):
         self.status.showMessage(f"✅ Text {text_id} platziert.")

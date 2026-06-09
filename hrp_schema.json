@@ -68,6 +68,37 @@
       "description": "Referenzlinie: zwei Endpunkte [[x1,y1],[x2,y2]]."
     },
 
+    "HelperLine": {
+      "type": "object",
+      "required": ["points", "length_mm", "color"],
+      "properties": {
+        "points": {
+          "$ref": "#/$defs/Polyline",
+          "description": "Endpunkte der Hilfslinie [[x1,y1],[x2,y2]] in Canvas-Pixeln."
+        },
+        "length_mm": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Länge der Hilfslinie in Millimetern (reale Welt)."
+        },
+        "length_fixed": {
+          "type": "boolean",
+          "default": false,
+          "description": "Wenn wahr, ist die Länge fixiert und nur die Position ändert sich beim Verschieben."
+        },
+        "color": {
+          "$ref": "#/$defs/HexColor",
+          "default": "#f8f32b",
+          "description": "Anzeigefarbe der Hilfslinie."
+        },
+        "visible": {
+          "type": "boolean",
+          "default": true,
+          "description": "Sichtbarkeit der Hilfslinie."
+        }
+      }
+    },
+
     "ExportFrame": {
       "oneOf": [
         {
@@ -286,6 +317,17 @@
           "additionalProperties": { "type": "boolean" },
           "default": {},
           "description": "Referenzlinien-Sichtbarkeit pro Grundriss-ID."
+        },
+        "helper_lines_per_floor": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/$defs/HelperLine" },
+            "default": {},
+            "description": "Hilfslinien pro Floor-ID. Struktur: { floor_id: { helper_id: HelperLine } }"
+          },
+          "default": {},
+          "description": "Persistierte Hilfslinien pro Grundriss-Layer (floor_id → { helper-1: {...}, helper-2: {...} })."
         },
 
         "polygons": {

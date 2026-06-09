@@ -17,7 +17,7 @@
 import math
 import os
 from enum import Enum, auto
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import Qt, QPointF, Signal, QRectF
@@ -118,6 +118,11 @@ class CanvasWidget(QWidget):
     mode_changed = Signal()  # emitted when tool mode changes
     export_frame_drawn = Signal(object)  # emitted with QRectF when export frame is finalized
     helper_lines_changed = Signal()
+    label_moved = Signal(str)
+    measure_changed = Signal()
+    multi_selection_changed = Signal(set)  # emitted with set of (obj_type, obj_id) tuples
+    will_move_multi_objects = Signal()  # emitted before multi-object move starts
+    multi_objects_moved = Signal()  # emitted after multi-object move completes
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -182,10 +187,13 @@ class CanvasWidget(QWidget):
         self._show_helper_line: Dict[str, bool]                  = {}
         self._floor_helper_lines: Dict[str, Dict[str, List[QPointF]]] = {}
         self._floor_helper_line_visible: Dict[str, Dict[str, bool]] = {}
+        self._floor_helper_line_length_mm: Dict[str, Dict[str, float]] = {}  # {floor_id: {helper_id: length_mm}}
+        self._floor_helper_line_fixed: Dict[str, Dict[str, bool]] = {}      # {floor_id: {helper_id: length_fixed}}
         self._floor_helper_settings: Dict[str, Dict[str, object]] = {}
         self._helper_line_counter: int                            = 0
         self._helper_selected_id: Optional[str]                  = None
         self._helper_selected_floor_id: Optional[str]            = None
+        self._helper_hover_endpoint: Optional[Tuple[str, str, int]] = None
         self._helper_active_floor_id: Optional[str]              = None
         self._helper_dragging_endpoint: Optional[Tuple[str, int]] = None
         self._helper_dragging_whole_id: Optional[str]            = None
@@ -195,6 +203,7 @@ class CanvasWidget(QWidget):
         self._helper_draw_current: Optional[QPointF]             = None
         self._helper_target_length_mm: float                     = 1000.0
         self._helper_line_color: str                              = "#f8f32b"
+        self._helper_line_intersections: List[tuple] = []  # [(intersection_pt, angle_deg, hid1, hid2), ...]
         self._manual_routes: Dict[str, List[QPointF]]            = {}
         self._route_wall_dist_px: Dict[str, float]               = {}
         self._route_line_dist_px: Dict[str, float]               = {}
@@ -351,6 +360,17 @@ class CanvasWidget(QWidget):
         # Selection highlight from treeview
         self._selected_item_id: Optional[str] = None  # id of currently treeview-selected element
         self._selected_item_type: Optional[str] = None  # type: polygon, elec_point, hkv, etc
+        self._hover_object: Optional[Tuple[str, str]] = None
+        self._ghost_preview_pos: Optional[QPointF] = None
+
+        # Multi-select and batch move functionality
+        self._multi_selected: Set[Tuple[str, str]] = set()  # Set von (obj_type, obj_id)
+        self._selection_rect: Optional[QRectF] = None  # Drag-Rahmen beim Box-Select
+        self._selection_start: Optional[QPointF] = None  # Startpunkt beim Rahmen-Ziehen
+        self._is_selecting_by_drag: bool = False  # Flag: gerade Box-Selection?
+        self._dragging_multi: Set[Tuple[str, str]] = set()  # Aktuell verschobene Objekte
+        self._drag_multi_start_positions: Dict[Tuple[str, str], QPointF] = {}  # Start-Positionen
+        self._drag_multi_anchor: Optional[QPointF] = None  # Maus-Anchor beim Multi-Drag
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -785,12 +805,15 @@ class CanvasWidget(QWidget):
         self._mode = ToolMode.MEASURE
         self._measure_p1 = None
         self._measure_p2 = None
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
         self.update()
 
     def clear_measurements(self):
         """Remove all persisted measurement lines."""
         self._measure_lines.clear()
+        self.measure_changed.emit()
         self.update()
 
     def start_angle_measure(self):
@@ -805,7 +828,21 @@ class CanvasWidget(QWidget):
 
     def clear_angle_measurements(self):
         self._angle_measurements.clear()
+        self.measure_changed.emit()
         self.update()
+
+    def cancel_active_placement(self) -> bool:
+        if self._mode not in (ToolMode.PLACE_ELEC_POINT, ToolMode.PLACE_HKV, ToolMode.PLACE_TEXT):
+            return False
+        self._placing_elec_point_id = None
+        self._placing_hkv_id = None
+        self._placing_text_id = None
+        self._ghost_preview_pos = None
+        self._mode = ToolMode.NONE
+        self.setCursor(Qt.ArrowCursor)
+        self.mode_changed.emit()
+        self.update()
+        return True
 
     def _default_helper_settings(self) -> Dict[str, object]:
         return {
@@ -829,6 +866,8 @@ class CanvasWidget(QWidget):
             return None
         self._floor_helper_lines.setdefault(fid, {})
         self._floor_helper_line_visible.setdefault(fid, {})
+        self._floor_helper_line_length_mm.setdefault(fid, {})
+        self._floor_helper_line_fixed.setdefault(fid, {})
         settings = self._floor_helper_settings.setdefault(fid, self._default_helper_settings())
         default_settings = self._default_helper_settings()
         for key, value in default_settings.items():
@@ -999,6 +1038,8 @@ class CanvasWidget(QWidget):
             return
         self._floor_helper_lines.get(fid, {}).clear()
         self._floor_helper_line_visible.get(fid, {}).clear()
+        self._floor_helper_line_length_mm.get(fid, {}).clear()
+        self._floor_helper_line_fixed.get(fid, {}).clear()
         self._helper_selected_id = None
         self._helper_selected_floor_id = None
         self.helper_lines_changed.emit()
@@ -1009,13 +1050,81 @@ class CanvasWidget(QWidget):
             return
         lines = self._floor_helper_lines.get(self._helper_selected_floor_id, {})
         visible = self._floor_helper_line_visible.get(self._helper_selected_floor_id, {})
+        lengths = self._floor_helper_line_length_mm.get(self._helper_selected_floor_id, {})
+        fixed_map = self._floor_helper_line_fixed.get(self._helper_selected_floor_id, {})
         if self._helper_selected_id in lines:
             lines.pop(self._helper_selected_id, None)
             visible.pop(self._helper_selected_id, None)
+            lengths.pop(self._helper_selected_id, None)
+            fixed_map.pop(self._helper_selected_id, None)
             self._helper_selected_id = None
             self._helper_selected_floor_id = None
             self.helper_lines_changed.emit()
             self.update()
+
+    def delete_helper_line(self, floor_id: str, helper_id: str):
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return
+        self._floor_helper_lines.get(fid, {}).pop(helper_id, None)
+        self._floor_helper_line_visible.get(fid, {}).pop(helper_id, None)
+        self._floor_helper_line_length_mm.get(fid, {}).pop(helper_id, None)
+        self._floor_helper_line_fixed.get(fid, {}).pop(helper_id, None)
+        if self._helper_selected_id == helper_id and self._helper_selected_floor_id == fid:
+            self._helper_selected_id = None
+            self._helper_selected_floor_id = None
+        self.helper_lines_changed.emit()
+        self.update()
+
+    def is_helper_line_length_fixed(self, floor_id: str, helper_id: str) -> bool:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return False
+        return bool(self._floor_helper_line_fixed.get(fid, {}).get(helper_id, False))
+
+    def set_helper_line_length_fixed(self, floor_id: str, helper_id: str, fixed: bool):
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return
+        self._floor_helper_line_fixed.setdefault(fid, {})[helper_id] = bool(fixed)
+        self.helper_lines_changed.emit()
+        self.update()
+
+    def get_helper_line_length_mm(self, floor_id: str, helper_id: str) -> float:
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return 0.0
+        cached = self._floor_helper_line_length_mm.get(fid, {}).get(helper_id)
+        if cached is not None:
+            return float(cached)
+        pts = self._floor_helper_lines.get(fid, {}).get(helper_id, [])
+        if len(pts) < 2 or self._mm_per_px <= 0:
+            return 0.0
+        return _qdist(pts[0], pts[1]) * self._mm_per_px
+
+    def set_helper_line_length_mm(self, floor_id: str, helper_id: str, length_mm: float):
+        fid = self._ensure_helper_floor(floor_id)
+        if not fid:
+            return
+        pts = self._floor_helper_lines.get(fid, {}).get(helper_id)
+        if not pts or len(pts) < 2 or self._mm_per_px <= 0:
+            return
+        length_mm = max(1.0, float(length_mm))
+        p1, p2 = pts[0], pts[1]
+        dx = p2.x() - p1.x()
+        dy = p2.y() - p1.y()
+        current_len = math.hypot(dx, dy)
+        if current_len <= 1e-9:
+            p2 = QPointF(p1.x() + (length_mm / self._mm_per_px), p1.y())
+        else:
+            ux = dx / current_len
+            uy = dy / current_len
+            target_px = length_mm / self._mm_per_px
+            p2 = QPointF(p1.x() + ux * target_px, p1.y() + uy * target_px)
+        self._floor_helper_lines[fid][helper_id] = [QPointF(p1), QPointF(p2)]
+        self._floor_helper_line_length_mm.setdefault(fid, {})[helper_id] = length_mm
+        self.helper_lines_changed.emit()
+        self.update()
 
     def _next_helper_line_id(self) -> str:
         self._helper_line_counter += 1
@@ -1154,7 +1263,9 @@ class CanvasWidget(QWidget):
         self._current_elec_room_id = None
         self._current_points = []
         self._ensure_color(circuit_id)
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
 
     def start_draw_elec_room(self, room_id: str):
         self._mode = ToolMode.DRAW_POLY
@@ -1163,7 +1274,9 @@ class CanvasWidget(QWidget):
         self._current_points = []
         self._elec_room_visible.setdefault(room_id, True)
         self._ensure_color(room_id)
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
 
     def start_draw_floor_plan_polygon(self, fp_id: str):
         """Start drawing a polygon as alternative source for a floor plan layer."""
@@ -1172,7 +1285,9 @@ class CanvasWidget(QWidget):
         self._mode = ToolMode.DRAW_FURNITURE_POLY
         self._current_furniture_id = fp_id
         self._current_points = []
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
 
     def start_route_drawing(self, circuit_id: str,
                             wall_distance_mm: float,
@@ -1195,7 +1310,9 @@ class CanvasWidget(QWidget):
         self._constraint_violation_point = None
         self._constraint_violation_line = None
         self._constraint_violation_reason = ""
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
         self.update()
 
     def start_edit_polygon(self, circuit_id: str):
@@ -1719,7 +1836,9 @@ class CanvasWidget(QWidget):
         self._current_supply_cid = circuit_id
         self._current_supply_preview = None
         self._mode = ToolMode.DRAW_SUPPLY_LINE
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
         self.update()
 
     def start_edit_supply_line(self, circuit_id: str):
@@ -1790,7 +1909,9 @@ class CanvasWidget(QWidget):
         self._ensure_color(point_id)
         self._placing_elec_point_id = point_id
         self._mode = ToolMode.PLACE_ELEC_POINT
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
         self.update()
 
     def update_elec_point_size(self, point_id: str,
@@ -1826,7 +1947,9 @@ class CanvasWidget(QWidget):
         self._drawing_cable_from_start = False
         self._current_elec_cable_preview = None
         self._mode = ToolMode.DRAW_ELEC_CABLE
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
         self.update()
 
     def start_edit_elec_cable(self, cable_id: str):
@@ -1986,6 +2109,75 @@ class CanvasWidget(QWidget):
         return QPointF(anchor.x() + math.cos(rad) * dist,
                        anchor.y() + math.sin(rad) * dist)
 
+    def _apply_helper_construction_snap(self,
+                                        anchor: QPointF,
+                                        target: QPointF,
+                                        tolerance_deg: float = 3.0,
+                                        floor_id: Optional[str] = None,
+                                        exclude_line_id: str = "") -> QPointF:
+        """Snap helper-line direction to exact 45° multiples when close enough.
+
+        This yields exact 45°/90° constructions (and corresponding opposite angles)
+        while keeping free movement outside the tolerance window.
+        """
+        dx = target.x() - anchor.x()
+        dy = target.y() - anchor.y()
+        dist = math.hypot(dx, dy)
+        if dist < 1e-6:
+            return target
+
+        angle_deg = math.degrees(math.atan2(dy, dx))
+
+        candidate_angles: List[float] = []
+
+        # 1) Globale Konstruktionsachsen: Vielfache von 45°
+        for k in range(-8, 9):
+            candidate_angles.append(k * 45.0)
+
+        # 2) Relative Konstruktionsachsen: an vorhandene Hilfslinien am Anchor andocken
+        fid = floor_id or self._helper_active_floor_id
+        if fid:
+            lines = self._floor_helper_lines.get(fid, {})
+            visible = self._floor_helper_line_visible.get(fid, {})
+            anchor_tol = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
+            for hid, pts in lines.items():
+                if hid == exclude_line_id or not visible.get(hid, True) or len(pts) < 2:
+                    continue
+                p1, p2 = pts[0], pts[1]
+                base_vec = None
+                if _qdist(anchor, p1) <= anchor_tol:
+                    base_vec = (p2.x() - p1.x(), p2.y() - p1.y())
+                elif _qdist(anchor, p2) <= anchor_tol:
+                    base_vec = (p1.x() - p2.x(), p1.y() - p2.y())
+                if base_vec is None:
+                    continue
+                bvx, bvy = base_vec
+                blen = math.hypot(bvx, bvy)
+                if blen < 1e-9:
+                    continue
+                base_angle = math.degrees(math.atan2(bvy, bvx))
+                # ±45° und ±90° relativ zur Basis, plus Fortsetzung (0°)
+                for delta in (-180.0, -135.0, -90.0, -45.0, 0.0, 45.0, 90.0, 135.0, 180.0):
+                    candidate_angles.append(base_angle + delta)
+
+        # Bestes Kandidatenwinkelziel wählen
+        best_angle = None
+        best_diff = float("inf")
+        for cand in candidate_angles:
+            diff = abs(((angle_deg - cand + 180.0) % 360.0) - 180.0)
+            if diff < best_diff:
+                best_diff = diff
+                best_angle = cand
+
+        if best_angle is None or best_diff > tolerance_deg:
+            return target
+
+        rad = math.radians(best_angle)
+        return QPointF(
+            anchor.x() + math.cos(rad) * dist,
+            anchor.y() + math.sin(rad) * dist,
+        )
+
     def _hit_any_object(self, canvas_pt: QPointF) -> Optional[Tuple[str, str]]:
         """Try to hit any clickable object. Returns (object_type, object_id) or None.
         Checks in this order: foreground objects first, floor plans last."""
@@ -2125,6 +2317,49 @@ class CanvasWidget(QWidget):
             self.setCursor(Qt.ArrowCursor)
             self.update()
 
+    def _is_object_visible(self, obj_type: str, obj_id: str) -> bool:
+        """Check if an object is visible based on its visibility flags."""
+        if obj_type == "polygon":
+            return self._circuit_visible.get(obj_id, True)
+        elif obj_type == "elec_point":
+            return self._elec_visible.get(obj_id, True)
+        elif obj_type == "elec_room":
+            return self._elec_room_visible.get(obj_id, True)
+        elif obj_type == "elec_cable":
+            return self._elec_visible.get(obj_id, True)
+        elif obj_type == "hkv":
+            return self._hkv_visible.get(obj_id, True)
+        elif obj_type == "hkv_line":
+            return self._hkv_line_visible.get(obj_id, True)
+        elif obj_type == "text":
+            return True  # Text annotations always visible
+        return True
+
+    def _is_multi_selectable_type(self, obj_type: str) -> bool:
+        """Only these object types participate in multi-selection and Alt-drag."""
+        return obj_type in {"elec_point", "hkv", "text", "elec_cable"}
+
+    def _get_all_selectable_objects(self) -> List[Tuple[str, str]]:
+        """Get list of all selectable (visible) objects on canvas."""
+        result = []
+        # Electrical points
+        for ap_id in self._elec_points.keys():
+            if self._is_object_visible("elec_point", ap_id):
+                result.append(("elec_point", ap_id))
+        # HKV points
+        for hkv_id in self._hkv_points.keys():
+            if self._is_object_visible("hkv", hkv_id):
+                result.append(("hkv", hkv_id))
+        # Text annotations
+        for text_id in self._text_annotations.keys():
+            if self._is_object_visible("text", text_id):
+                result.append(("text", text_id))
+        # Electrical cables
+        for cable_id in self._elec_cables.keys():
+            if self._is_object_visible("elec_cable", cable_id):
+                result.append(("elec_cable", cable_id))
+        return result
+
     def _get_multiselect_points_world(self) -> Optional[Tuple[str, List[QPointF]]]:
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
             pts = self._polygons.get(self._edit_polygon_cid, [])
@@ -2193,7 +2428,9 @@ class CanvasWidget(QWidget):
         self._ensure_color(hkv_id)
         self._placing_hkv_id = hkv_id
         self._mode = ToolMode.PLACE_HKV
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
         self.update()
 
     def update_hkv_size(self, hkv_id: str,
@@ -2278,7 +2515,9 @@ class CanvasWidget(QWidget):
         self._current_hkv_line_id = line_id
         self._current_hkv_line_preview = None
         self._mode = ToolMode.DRAW_HKV_LINE
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
         self.update()
 
     def start_edit_hkv_line(self, line_id: str):
@@ -2373,7 +2612,9 @@ class CanvasWidget(QWidget):
         self._text_visible.setdefault(text_id, True)
         self._placing_text_id = text_id
         self._mode = ToolMode.PLACE_TEXT
+        self._ghost_preview_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
         self.update()
 
     def update_text_content(self, text_id: str, content: str):
@@ -2407,6 +2648,36 @@ class CanvasWidget(QWidget):
         for tid, rect in self._text_rects.items():
             if rect.contains(canvas_pt) and self._text_visible.get(tid, True):
                 return tid
+        return None
+
+    def _hit_helper_line(self, canvas_pt: QPointF, radius_px: float = HIT_EDGE_RADIUS_PX) -> Optional[tuple]:
+        """
+        Prüfe ob ein Punkt eine Hilfslinie trifft.
+        
+        Returns:
+            Tuple (floor_id, helper_id) oder None
+        """
+        radius_canvas = radius_px / self._scale if self._scale > 0 else radius_px
+        
+        for fid in self._floor_plan_order:
+            layer = self._floor_plans.get(fid)
+            if not layer or not layer.visible:
+                continue
+            
+            helper_lines = self._floor_helper_lines.get(fid, {})
+            visible_map = self._floor_helper_line_visible.get(fid, {})
+            
+            for hid, pts in helper_lines.items():
+                if not visible_map.get(hid, True) or len(pts) < 2:
+                    continue
+                
+                # Prüfe Distanz zu Strecke
+                p1, p2 = pts[0], pts[1]
+                dist = _point_segment_distance(canvas_pt, p1, p2)
+                
+                if dist < radius_canvas:
+                    return (fid, hid)
+        
         return None
 
     def get_start_point_px(self, circuit_id: str) -> Optional[Tuple[float, float]]:
@@ -2601,6 +2872,19 @@ class CanvasWidget(QWidget):
                 fid: dict(visible_map)
                 for fid, visible_map in self._floor_helper_line_visible.items()
             },
+            "helper_lines_per_floor": {
+                fid: {
+                    hid: {
+                        "points": [(pts[0].x(), pts[0].y()), (pts[1].x(), pts[1].y())],
+                        "length_mm": float(self._floor_helper_line_length_mm.get(fid, {}).get(hid, 1000.0)),
+                        "length_fixed": bool(self._floor_helper_line_fixed.get(fid, {}).get(hid, False)),
+                        "color": str(self._helper_settings(fid).get("color", "#f8f32b")),
+                        "visible": bool(self._floor_helper_line_visible.get(fid, {}).get(hid, True)),
+                    }
+                    for hid, pts in helper_map.items() if len(pts) >= 2
+                }
+                for fid, helper_map in self._floor_helper_lines.items()
+            },
             "floor_helper_settings": {
                 fid: {
                     "visible": bool(settings.get("visible", True)),
@@ -2610,6 +2894,19 @@ class CanvasWidget(QWidget):
                     "line_style": str(settings.get("line_style", "dash")),
                 }
                 for fid, settings in self._floor_helper_settings.items()
+            },
+            "helper_lines_per_floor": {
+                fid: {
+                    hid: {
+                        "points": [(pts[0].x(), pts[0].y()), (pts[1].x(), pts[1].y())],
+                        "length_mm": float(self.get_helper_line_length_mm(fid, hid)),
+                        "length_fixed": bool(self._floor_helper_line_fixed.get(fid, {}).get(hid, False)),
+                        "color": str(self._helper_settings(fid).get("color", "#f8f32b")),
+                        "visible": bool(self._floor_helper_line_visible.get(fid, {}).get(hid, True)),
+                    }
+                    for hid, pts in helper_map.items() if len(pts) >= 2
+                }
+                for fid, helper_map in self._floor_helper_lines.items()
             },
             "polygons": {
                 cid: [(p.x(), p.y()) for p in pts]
@@ -2893,6 +3190,8 @@ class CanvasWidget(QWidget):
             self._text_visible[tid] = tdata.get("visible", True)
         self._floor_helper_lines.clear()
         self._floor_helper_line_visible.clear()
+        self._floor_helper_line_length_mm.clear()
+        self._floor_helper_line_fixed.clear()
         self._floor_helper_settings.clear()
         self._helper_line_counter = 0
 
@@ -2911,6 +3210,8 @@ class CanvasWidget(QWidget):
         for fid, helper_map in d.get("floor_helper_lines", {}).items():
             fid_s = str(fid)
             lines: Dict[str, List[QPointF]] = {}
+            self._floor_helper_line_length_mm.setdefault(fid_s, {})
+            self._floor_helper_line_fixed.setdefault(fid_s, {})
             for hid, pts in (helper_map or {}).items():
                 if not isinstance(pts, list) or len(pts) < 2:
                     continue
@@ -2918,6 +3219,8 @@ class CanvasWidget(QWidget):
                 p2 = QPointF(float(pts[1][0]), float(pts[1][1]))
                 hid_s = str(hid)
                 lines[hid_s] = [p1, p2]
+                self._floor_helper_line_length_mm[fid_s][hid_s] = _qdist(p1, p2) * self._mm_per_px if self._mm_per_px > 0 else 0.0
+                self._floor_helper_line_fixed[fid_s][hid_s] = False
                 try:
                     if hid_s.startswith("HL-"):
                         self._helper_line_counter = max(self._helper_line_counter, int(hid_s.split("-")[1]))
@@ -2946,6 +3249,8 @@ class CanvasWidget(QWidget):
 
             self._floor_helper_lines.setdefault(legacy_floor_id, {})
             self._floor_helper_line_visible.setdefault(legacy_floor_id, {})
+            self._floor_helper_line_length_mm.setdefault(legacy_floor_id, {})
+            self._floor_helper_line_fixed.setdefault(legacy_floor_id, {})
             self._floor_helper_settings.setdefault(legacy_floor_id, self._default_helper_settings())
 
             for hid, pts in legacy_lines.items():
@@ -2958,6 +3263,8 @@ class CanvasWidget(QWidget):
                 p2 = QPointF(float(pts[1][0]), float(pts[1][1]))
                 self._floor_helper_lines[legacy_floor_id][hid_s] = [p1, p2]
                 self._floor_helper_line_visible[legacy_floor_id][hid_s] = True
+                self._floor_helper_line_length_mm[legacy_floor_id][hid_s] = _qdist(p1, p2) * self._mm_per_px if self._mm_per_px > 0 else 0.0
+                self._floor_helper_line_fixed[legacy_floor_id][hid_s] = False
                 try:
                     if hid_s.startswith("HL-"):
                         self._helper_line_counter = max(self._helper_line_counter, int(hid_s.split("-")[1]))
@@ -2969,6 +3276,50 @@ class CanvasWidget(QWidget):
                 hid_s = str(hid)
                 if hid_s in self._floor_helper_lines[legacy_floor_id]:
                     self._floor_helper_line_visible[legacy_floor_id][hid_s] = bool(vis)
+        
+        # Load extended helper line metadata from helper_lines_per_floor (neue Struktur)
+        for fid, helper_map in d.get("helper_lines_per_floor", {}).items():
+            fid_s = str(fid)
+            self._floor_helper_lines.setdefault(fid_s, {})
+            self._floor_helper_line_visible.setdefault(fid_s, {})
+            self._floor_helper_line_length_mm.setdefault(fid_s, {})
+            self._floor_helper_line_fixed.setdefault(fid_s, {})
+            
+            for hid, helper_data in (helper_map or {}).items():
+                if not isinstance(helper_data, dict):
+                    continue
+                
+                pts = helper_data.get("points", [])
+                if not isinstance(pts, list) or len(pts) < 2:
+                    continue
+                
+                hid_s = str(hid)
+                p1 = QPointF(float(pts[0][0]), float(pts[0][1]))
+                p2 = QPointF(float(pts[1][0]), float(pts[1][1]))
+                
+                # Storepoints
+                self._floor_helper_lines[fid_s][hid_s] = [p1, p2]
+                
+                # Store metadata
+                self._floor_helper_line_length_mm[fid_s][hid_s] = float(helper_data.get("length_mm", 1000.0))
+                self._floor_helper_line_fixed[fid_s][hid_s] = bool(helper_data.get("length_fixed", False))
+                self._floor_helper_line_visible[fid_s][hid_s] = bool(helper_data.get("visible", True))
+                
+                # Update color if provided
+                if "color" in helper_data:
+                    settings = self._floor_helper_settings.setdefault(fid_s, self._default_helper_settings())
+                    settings["color"] = str(helper_data.get("color", "#f8f32b"))
+                
+                try:
+                    if hid_s.startswith("HL-") or hid_s.startswith("helper-"):
+                        try:
+                            num = int(hid_s.split("-")[1])
+                            self._helper_line_counter = max(self._helper_line_counter, num)
+                        except (IndexError, ValueError):
+                            pass
+                except (IndexError, ValueError):
+                    pass
+        
         # Floor plan layers (geometry only – images are loaded by main_window)
         for fp_d in d.get("floor_plans", []):
             fid = fp_d.get("fp_id")
@@ -3086,6 +3437,23 @@ class CanvasWidget(QWidget):
                 return hid, 0
             if _qdist(canvas_pt, pts[1]) < threshold:
                 return hid, 1
+        return None
+
+    def _hit_any_helper_line_endpoint(self, canvas_pt: QPointF) -> Optional[Tuple[str, str, int]]:
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
+        for fid in self._floor_plan_order:
+            layer = self._floor_plans.get(fid)
+            if not layer or not layer.visible:
+                continue
+            lines = self._floor_helper_lines.get(fid, {})
+            visible = self._floor_helper_line_visible.get(fid, {})
+            for hid, pts in lines.items():
+                if not visible.get(hid, True) or len(pts) < 2:
+                    continue
+                if _qdist(canvas_pt, pts[0]) < threshold:
+                    return fid, hid, 0
+                if _qdist(canvas_pt, pts[1]) < threshold:
+                    return fid, hid, 1
         return None
 
     def _hit_global_helper_line(self, canvas_pt: QPointF) -> Optional[str]:
@@ -3398,6 +3766,62 @@ class CanvasWidget(QWidget):
         canvas_pt = self._to_canvas(QPointF(event.position()))
         threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
 
+        # In Draw-Polygon mode: double-click on last point finishes polygon
+        if self._mode == ToolMode.DRAW_POLY and self._current_points:
+            last_pt = self._current_points[-1]
+            if _qdist(canvas_pt, last_pt) < threshold:
+                if len(self._current_points) >= 3:
+                    pts = [(p.x(), p.y()) for p in self._current_points]
+                    if self._current_elec_room_id:
+                        rid = self._current_elec_room_id
+                        self._elec_room_polygons[rid] = list(self._current_points)
+                        self._elec_room_visible.setdefault(rid, True)
+                        self.elec_room_polygon_finished.emit(rid, pts)
+                    elif self._current_circuit_id:
+                        self._polygons[self._current_circuit_id] = list(self._current_points)
+                        self._start_points[self._current_circuit_id] = self._current_points[0]
+                        self.polygon_finished.emit(self._current_circuit_id, pts)
+                self._mode = ToolMode.NONE
+                self._current_points = []
+                self._current_elec_room_id = None
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                self.update()
+            return
+
+        # In Draw-Furniture-Polygon mode: double-click on last point finishes polygon
+        if self._mode == ToolMode.DRAW_FURNITURE_POLY and self._current_points:
+            last_pt = self._current_points[-1]
+            if _qdist(canvas_pt, last_pt) < threshold:
+                if len(self._current_points) >= 3 and self._current_furniture_id:
+                    layer = self._floor_plans.get(self._current_furniture_id)
+                    if layer:
+                        min_x = min(p.x() for p in self._current_points)
+                        min_y = min(p.y() for p in self._current_points)
+                        max_x = max(p.x() for p in self._current_points)
+                        max_y = max(p.y() for p in self._current_points)
+                        w = max(1.0, max_x - min_x)
+                        h = max(1.0, max_y - min_y)
+                        layer.size = (w, h)
+                        layer.offset_x = min_x
+                        layer.offset_y = min_y
+                        layer.rotation = 0.0
+                        layer.file_path = ""
+                        layer.renderer = None
+                        layer.pixmap = None
+                        layer.polygon = [QPointF(p.x() - min_x, p.y() - min_y) for p in self._current_points]
+                        pts = [(p.x(), p.y()) for p in self._current_points]
+                        self.floor_plan_polygon_finished.emit(self._current_furniture_id, pts)
+                self._mode = ToolMode.NONE
+                self._current_furniture_id = None
+                self._current_points = []
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                self.update()
+            return
+
         # In Draw-Supply-Line mode: double-click on last point finishes the supply line
         if self._mode == ToolMode.DRAW_SUPPLY_LINE and self._current_supply_cid and self._current_supply_points:
             last_pt = self._current_supply_points[-1]
@@ -3418,8 +3842,11 @@ class CanvasWidget(QWidget):
                 self._current_supply_points = []
                 self._current_supply_preview = None
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
-                self.supply_line_changed.emit(cid)
+                self.mode_changed.emit()
+                if len(self._supply_lines.get(cid, [])) >= 2:
+                    self.supply_line_changed.emit(cid)
                 self.update()
             return
 
@@ -3444,8 +3871,11 @@ class CanvasWidget(QWidget):
                 self._drawing_cable_from_start = False
                 self._current_elec_cable_preview = None
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
-                self.elec_cable_changed.emit(cid)
+                self.mode_changed.emit()
+                if len(self._elec_cables.get(cid, [])) >= 2:
+                    self.elec_cable_changed.emit(cid)
                 self.update()
             return
 
@@ -3477,8 +3907,11 @@ class CanvasWidget(QWidget):
                 self._current_hkv_line_points = []
                 self._current_hkv_line_preview = None
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
-                self.hkv_line_changed.emit(lid)
+                self.mode_changed.emit()
+                if len(self._hkv_lines.get(lid, [])) >= 2:
+                    self.hkv_line_changed.emit(lid)
                 self.update()
             return
 
@@ -3487,7 +3920,8 @@ class CanvasWidget(QWidget):
             last_pt = self._current_route_points[-1]
             if _qdist(canvas_pt, last_pt) < threshold:
                 cid = self._current_route_cid
-                self._manual_routes[cid] = list(self._current_route_points)
+                if len(self._current_route_points) >= 2:
+                    self._manual_routes[cid] = list(self._current_route_points)
                 self._current_route_cid = None
                 self._current_route_points = []
                 self._current_route_preview_end = None
@@ -3495,8 +3929,11 @@ class CanvasWidget(QWidget):
                 self._constraint_violation_line = None
                 self._constraint_violation_reason = ""
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
-                self.route_changed.emit(cid)
+                self.mode_changed.emit()
+                if len(self._manual_routes.get(cid, [])) >= 2:
+                    self.route_changed.emit(cid)
                 self.update()
             return
 
@@ -3505,6 +3942,120 @@ class CanvasWidget(QWidget):
             hit = self._hit_route_point_in_circuit(canvas_pt, self._edit_route_cid)
             if hit is not None:
                 self._snap_route_point_to_valid(self._edit_route_cid, hit)
+                return
+            edge_hit = self._hit_route_edge(canvas_pt, self._edit_route_cid)
+            if edge_hit is not None:
+                idx1, idx2 = edge_hit
+                pts = self._manual_routes[self._edit_route_cid]
+                p1 = pts[idx1]
+                p2 = pts[idx2]
+                midpt = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+                self._insert_route_point(self._edit_route_cid, idx1, idx2, midpt)
+            return
+
+        if self._mode == ToolMode.EDIT_ELEC_CABLE and self._edit_elec_cable_id:
+            cid = self._edit_elec_cable_id
+            hit = self._hit_elec_cable_point(canvas_pt, cid)
+            if hit is not None:
+                pts = self._elec_cables.get(cid, [])
+                if len(pts) > 2:
+                    del pts[hit]
+                    self.elec_cable_changed.emit(cid)
+                    self.update()
+                return
+            edge_hit = self._hit_elec_cable_edge(canvas_pt, cid)
+            if edge_hit is not None:
+                idx1, idx2 = edge_hit
+                pts = self._elec_cables[cid]
+                p1, p2 = pts[idx1], pts[idx2]
+                mid = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+                pts.insert(idx2, mid)
+                self.elec_cable_changed.emit(cid)
+                self.update()
+            return
+
+        if self._mode == ToolMode.EDIT_SUPPLY_LINE and self._edit_supply_cid:
+            cid = self._edit_supply_cid
+            hit = self._hit_supply_line_point(canvas_pt, cid)
+            if hit is not None:
+                pts = self._supply_lines.get(cid, [])
+                if len(pts) > 2:
+                    del pts[hit]
+                    self.supply_line_changed.emit(cid)
+                    self.update()
+                return
+            edge_hit = self._hit_supply_line_edge(canvas_pt, cid)
+            if edge_hit is not None:
+                idx1, idx2 = edge_hit
+                pts = self._supply_lines[cid]
+                p1, p2 = pts[idx1], pts[idx2]
+                mid = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+                pts.insert(idx2, mid)
+                self.supply_line_changed.emit(cid)
+                self.update()
+            return
+
+        if self._mode == ToolMode.EDIT_HKV_LINE and self._edit_hkv_line_id:
+            lid = self._edit_hkv_line_id
+            hit = self._hit_hkv_line_point(canvas_pt, lid)
+            if hit is not None:
+                pts = self._hkv_lines.get(lid, [])
+                if len(pts) > 2:
+                    del pts[hit]
+                    self.hkv_line_changed.emit(lid)
+                    self.update()
+                return
+            edge_hit = self._hit_hkv_line_edge(canvas_pt, lid)
+            if edge_hit is not None:
+                idx1, idx2 = edge_hit
+                pts = self._hkv_lines[lid]
+                p1, p2 = pts[idx1], pts[idx2]
+                mid = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+                pts.insert(idx2, mid)
+                self.hkv_line_changed.emit(lid)
+                self.update()
+            return
+
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
+            cid = self._edit_polygon_cid
+            hit = self._hit_polygon_point(canvas_pt, cid)
+            if hit is not None:
+                self._delete_polygon_point(cid, hit)
+                return
+            edge_hit = self._hit_polygon_edge(canvas_pt, cid)
+            if edge_hit is not None:
+                idx1, idx2 = edge_hit
+                p1 = self._polygons[cid][idx1]
+                p2 = self._polygons[cid][idx2]
+                midpt = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+                self._insert_polygon_point(cid, idx1, idx2, midpt)
+            return
+
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_elec_room_id:
+            rid = self._edit_elec_room_id
+            hit = self._hit_polygon_point(canvas_pt, rid)
+            if hit is not None:
+                self._delete_polygon_point(rid, hit)
+                return
+            edge_hit = self._hit_polygon_edge(canvas_pt, rid)
+            if edge_hit is not None:
+                idx1, idx2 = edge_hit
+                p1 = self._elec_room_polygons[rid][idx1]
+                p2 = self._elec_room_polygons[rid][idx2]
+                midpt = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
+                self._insert_polygon_point(rid, idx1, idx2, midpt)
+            return
+
+        if self._mode == ToolMode.EDIT_POLYGON and self._edit_floor_polygon_id:
+            fid = self._edit_floor_polygon_id
+            hit = self._hit_floor_polygon_point(canvas_pt, fid)
+            if hit is not None:
+                self._delete_floor_polygon_point(fid, hit)
+                return
+            edge_hit = self._hit_floor_polygon_edge(canvas_pt, fid)
+            if edge_hit is not None:
+                idx1, idx2 = edge_hit
+                self._insert_floor_polygon_point(fid, idx1, idx2, canvas_pt)
             return
 
         # Outside NONE mode: snap any route point or ignore
@@ -3540,6 +4091,7 @@ class CanvasWidget(QWidget):
                     self._mode = ToolMode.DRAW_ELEC_CABLE
                     self._current_elec_cable_preview = None
                     self.setCursor(Qt.CrossCursor)
+                    self.mode_changed.emit()
                     self.update()
                     return
                 # First point hit → resume drawing from the start
@@ -3550,6 +4102,7 @@ class CanvasWidget(QWidget):
                     self._mode = ToolMode.DRAW_ELEC_CABLE
                     self._current_elec_cable_preview = None
                     self.setCursor(Qt.CrossCursor)
+                    self.mode_changed.emit()
                     self.update()
                     return
                 # Edge hit → edit mode
@@ -3571,6 +4124,7 @@ class CanvasWidget(QWidget):
                     self._mode = ToolMode.DRAW_HKV_LINE
                     self._current_hkv_line_preview = None
                     self.setCursor(Qt.CrossCursor)
+                    self.mode_changed.emit()
                     self.update()
                     return
                 # Edge hit → edit mode
@@ -3592,6 +4146,7 @@ class CanvasWidget(QWidget):
                     self._mode = ToolMode.DRAW_SUPPLY_LINE
                     self._current_supply_preview = None
                     self.setCursor(Qt.CrossCursor)
+                    self.mode_changed.emit()
                     self.update()
                     return
                 # Edge hit → edit mode
@@ -3616,6 +4171,7 @@ class CanvasWidget(QWidget):
                     self._constraint_violation_line = None
                     self._constraint_violation_reason = ""
                     self.setCursor(Qt.CrossCursor)
+                    self.mode_changed.emit()
                     self.update()
                     return
                 # Edge hit → edit mode
@@ -3660,59 +4216,166 @@ class CanvasWidget(QWidget):
             self._panning   = True
             return
 
-        # ── EARLY CHECK: Click on any elec cable point to drag it directly ──
-        # This allows quick editing without needing to enter edit mode first
+        if event.button() == Qt.RightButton:
+            obj = self._hit_any_object(canvas_pt)
+            if not obj:
+                text_hit = self._hit_text_annotation(canvas_pt)
+                if text_hit:
+                    obj = ("text", text_hit)
+            if not obj:
+                label_hit = self._hit_label(canvas_pt)
+                if label_hit:
+                    obj = ("label", label_hit)
+            if not obj:
+                helper_hit = self._hit_helper_line(canvas_pt)
+                if helper_hit:
+                    fid, hid = helper_hit
+                    obj = ("helper_line", hid)
+                    self._helper_selected_id = hid
+                    self._helper_selected_floor_id = fid
+                    self.update()
+            obj_type = obj[0] if obj else ""
+            obj_id = obj[1] if obj else ""
+            if obj_id:
+                self.object_clicked.emit(obj_type, obj_id)
+            self.context_menu_requested.emit(obj_type, obj_id, QPointF(canvas_pt), event.globalPosition())
+            return
+
+        # ──── Shift+Click: Toggle multi-selection (BEFORE all mode checks) ────
+        if event.button() == Qt.LeftButton and event.modifiers() & Qt.ShiftModifier and self._mode == ToolMode.NONE:
+            # APs should be easy to add/remove with Shift, even near overlapping cables.
+            obj = None
+            ap_hit = self._find_nearest_ap(canvas_pt, threshold_px=22.0)
+            if ap_hit:
+                obj = ("elec_point", ap_hit)
+            else:
+                obj = self._hit_any_object(canvas_pt)
+                if not obj:
+                    text_hit = self._hit_text_annotation(canvas_pt)
+                    if text_hit:
+                        obj = ("text", text_hit)
+            if obj:
+                obj_type, obj_id = obj
+                if self._is_multi_selectable_type(obj_type) and self._is_object_visible(obj_type, obj_id):
+                    item = (obj_type, obj_id)
+                    if item in self._multi_selected:
+                        self._multi_selected.discard(item)
+                    else:
+                        self._multi_selected.add(item)
+                    self.multi_selection_changed.emit(self._multi_selected.copy())
+                    self.update()
+            return
+
+        # ──── Ctrl+Drag: Box-selection (BEFORE all mode checks) ────
+        if event.button() == Qt.LeftButton and event.modifiers() & Qt.ControlModifier and self._mode == ToolMode.NONE:
+            self._is_selecting_by_drag = True
+            self._selection_start = canvas_pt
+            self._selection_rect = None
+            self.setCursor(Qt.CrossCursor)
+            self.update()
+            return
+
+        # ── Multi-Select & Multi-Move: Alt+Drag ──
         if event.button() == Qt.LeftButton and self._mode == ToolMode.NONE:
-            # Check all cables for a point hit.
-            # Skip endpoints that are anchored to an AP – those positions are
-            # "owned" by the AP and should be handled by the AP drag logic below.
-            for cid, pts in self._elec_cables.items():
-                if not self._elec_visible.get(cid, True):
-                    continue
-                threshold = self._px_to_canvas_units(HIT_CABLE_POINT_RADIUS_PX)
-                start_ap = self._cable_start_ap.get(cid, "")
-                end_ap   = self._cable_end_ap.get(cid, "")
-                last_idx = len(pts) - 1
-                for i, pt in enumerate(pts):
-                    # Skip AP-anchored endpoints so the AP can be dragged instead
-                    if i == 0 and start_ap and start_ap in self._elec_points:
-                        continue
-                    if i == last_idx and end_ap and end_ap in self._elec_points:
-                        continue
-                    if _qdist(canvas_pt, pt) < threshold:
-                        # Found a cable point - start dragging it
-                        self._dragging_route_point = (cid, i)
+            # Alt+Drag: Move multi-selected objects
+            if event.modifiers() & Qt.AltModifier:
+                obj = None
+                ap_hit = self._find_nearest_ap(canvas_pt, threshold_px=22.0)
+                if ap_hit:
+                    obj = ("elec_point", ap_hit)
+                else:
+                    obj = self._hit_any_object(canvas_pt)
+                    if not obj:
+                        text_hit = self._hit_text_annotation(canvas_pt)
+                        if text_hit:
+                            obj = ("text", text_hit)
+                if obj:
+                    obj_type, obj_id = obj
+                    if not self._is_multi_selectable_type(obj_type):
+                        return
+                    item = (obj_type, obj_id)
+                    # If clicked object is in multi-selection, move all selected
+                    if item in self._multi_selected:
+                        self._dragging_multi = self._multi_selected.copy()
+                    # Otherwise move only the clicked object
+                    else:
+                        self._dragging_multi = {item}
+                    
+                    if self._dragging_multi:
+                        self._drag_multi_anchor = canvas_pt
+                        self._drag_multi_start_positions.clear()
+                        # Store start positions for all selected objects
+                        for sel_type, sel_id in self._dragging_multi:
+                            if sel_type == "elec_point":
+                                if sel_id in self._elec_points:
+                                    self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._elec_points[sel_id])
+                            elif sel_type == "hkv":
+                                if sel_id in self._hkv_points:
+                                    self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._hkv_points[sel_id])
+                            elif sel_type == "text":
+                                if sel_id in self._text_annotations:
+                                    self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._text_annotations[sel_id])
+                            elif sel_type == "elec_cable":
+                                if sel_id in self._elec_cables:
+                                    pts = [QPointF(p) for p in self._elec_cables[sel_id]]
+                                    self._drag_multi_start_positions[(sel_type, sel_id)] = pts
+                        self.will_move_multi_objects.emit()
                         self.setCursor(Qt.ClosedHandCursor)
                         self.update()
                         return
 
-            # Check cable edges for whole-cable drag
-            for cid, pts in self._elec_cables.items():
-                if not self._elec_visible.get(cid, True) or len(pts) < 2:
-                    continue
-                if self._hit_elec_cable_edge(canvas_pt, cid) is None:
-                    continue
-                self.object_clicked.emit("elec_cable", cid)
-                self._dragging_elec_cable_id = cid
-                self._dragging_elec_cable_start = QPointF(canvas_pt)
-                self._dragging_elec_cable_origin = [QPointF(p) for p in pts]
-                self._dragging_elec_cable_fixed_indices = set()
-                start_ap = self._cable_start_ap.get(cid)
-                end_ap = self._cable_end_ap.get(cid)
-                if start_ap and start_ap in self._elec_points:
-                    self._dragging_elec_cable_fixed_indices.add(0)
-                if end_ap and end_ap in self._elec_points:
-                    self._dragging_elec_cable_fixed_indices.add(len(pts) - 1)
-                self.setCursor(Qt.ClosedHandCursor)
-                self.update()
-                return
+        # ── EARLY CHECK: Click on any elec cable point to drag it directly ──
+        # This allows quick editing without needing to enter edit mode first
+        if event.button() == Qt.LeftButton and self._mode == ToolMode.NONE:
+            # APs have priority over overlapping cable geometry.
+            # If an AP is hit, let the AP handling below take over.
+            prioritize_ap = self._hit_elec_point(canvas_pt) is not None
 
-        if event.button() == Qt.RightButton and self._mode == ToolMode.NONE:
-            obj = self._hit_any_object(canvas_pt)
-            obj_type = obj[0] if obj else ""
-            obj_id = obj[1] if obj else ""
-            self.context_menu_requested.emit(obj_type, obj_id, QPointF(canvas_pt), event.globalPosition())
-            return
+            # Check all cables for a point hit.
+            # Skip endpoints that are anchored to an AP – those positions are
+            # "owned" by the AP and should be handled by the AP drag logic below.
+            if not prioritize_ap:
+                for cid, pts in self._elec_cables.items():
+                    if not self._elec_visible.get(cid, True):
+                        continue
+                    threshold = self._px_to_canvas_units(HIT_CABLE_POINT_RADIUS_PX)
+                    start_ap = self._cable_start_ap.get(cid, "")
+                    end_ap   = self._cable_end_ap.get(cid, "")
+                    last_idx = len(pts) - 1
+                    for i, pt in enumerate(pts):
+                        # Skip AP-anchored endpoints so the AP can be dragged instead
+                        if i == 0 and start_ap and start_ap in self._elec_points:
+                            continue
+                        if i == last_idx and end_ap and end_ap in self._elec_points:
+                            continue
+                        if _qdist(canvas_pt, pt) < threshold:
+                            # Found a cable point - start dragging it
+                            self._dragging_route_point = (cid, i)
+                            self.setCursor(Qt.ClosedHandCursor)
+                            self.update()
+                            return
+
+            # Check cable edges for whole-cable drag
+            if not prioritize_ap:
+                for cid, pts in self._elec_cables.items():
+                    if not self._elec_visible.get(cid, True) or len(pts) < 2:
+                        continue
+                    if self._hit_elec_cable_edge(canvas_pt, cid) is None:
+                        continue
+                    self.object_clicked.emit("elec_cable", cid)
+                    self._dragging_elec_cable_id = cid
+                    self._dragging_elec_cable_start = QPointF(canvas_pt)
+                    self._dragging_elec_cable_origin = [QPointF(p) for p in pts]
+                    self._dragging_elec_cable_fixed_indices = set()
+                    start_ap = self._cable_start_ap.get(cid)
+                    end_ap = self._cable_end_ap.get(cid)
+                    if start_ap and start_ap in self._elec_points:
+                        self._dragging_elec_cable_fixed_indices.add(0)
+                    if end_ap and end_ap in self._elec_points:
+                        self._dragging_elec_cable_fixed_indices.add(len(pts) - 1)
+                    self.setCursor(Qt.ClosedHandCursor)
+                    self.update()
+                    return
 
         # ── Referenzlinie ──
         if self._mode == ToolMode.DRAW_REF:
@@ -3752,6 +4415,7 @@ class CanvasWidget(QWidget):
                         mid_x = (self._measure_p1.x() + self._measure_p2.x()) / 2.0
                         mid_y = (self._measure_p1.y() + self._measure_p2.y()) / 2.0
                         self._measure_label_positions.append((float(mid_x), float(mid_y)))
+                        self.measure_changed.emit()
                     self._measure_p1 = None
                     self._measure_p2 = None
                 self.update()
@@ -3762,7 +4426,9 @@ class CanvasWidget(QWidget):
                     self.update()
                 else:
                     self._mode = ToolMode.NONE
+                    self._ghost_preview_pos = None
                     self.setCursor(Qt.ArrowCursor)
+                    self.mode_changed.emit()
                     self.update()
             return
 
@@ -3832,6 +4498,8 @@ class CanvasWidget(QWidget):
                         hid = self._next_helper_line_id()
                         self._floor_helper_lines.setdefault(fid, {})[hid] = [QPointF(start), final_end]
                         self._floor_helper_line_visible.setdefault(fid, {})[hid] = True
+                        self._floor_helper_line_length_mm.setdefault(fid, {})[hid] = float(target_length_mm)
+                        self._floor_helper_line_fixed.setdefault(fid, {})[hid] = False
                         self._helper_selected_id = hid
                         self._helper_selected_floor_id = fid
                         self.helper_lines_changed.emit()
@@ -3878,6 +4546,8 @@ class CanvasWidget(QWidget):
                 if line_hit:
                     self._floor_helper_lines.get(fid, {}).pop(line_hit, None)
                     self._floor_helper_line_visible.get(fid, {}).pop(line_hit, None)
+                    self._floor_helper_line_length_mm.get(fid, {}).pop(line_hit, None)
+                    self._floor_helper_line_fixed.get(fid, {}).pop(line_hit, None)
                     if self._helper_selected_id == line_hit:
                         self._helper_selected_id = None
                         self._helper_selected_floor_id = None
@@ -3944,7 +4614,9 @@ class CanvasWidget(QWidget):
                 self._mode = ToolMode.NONE
                 self._current_points = []
                 self._current_elec_room_id = None
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.update()
             return
 
@@ -3981,7 +4653,9 @@ class CanvasWidget(QWidget):
                 self._mode = ToolMode.NONE
                 self._current_furniture_id = None
                 self._current_points = []
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.update()
             return
 
@@ -4011,7 +4685,8 @@ class CanvasWidget(QWidget):
                     self.update()
             elif event.button() == Qt.RightButton and self._current_route_cid:
                 cid = self._current_route_cid
-                self._manual_routes[cid] = list(self._current_route_points)
+                if len(self._current_route_points) >= 2:
+                    self._manual_routes[cid] = list(self._current_route_points)
                 self._current_route_cid = None
                 self._current_route_points = []
                 self._current_route_preview_end = None
@@ -4019,8 +4694,11 @@ class CanvasWidget(QWidget):
                 self._constraint_violation_line = None
                 self._constraint_violation_reason = ""
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
-                self.route_changed.emit(cid)
+                self.mode_changed.emit()
+                if len(self._manual_routes.get(cid, [])) >= 2:
+                    self.route_changed.emit(cid)
                 self.update()
             return
 
@@ -4033,7 +4711,9 @@ class CanvasWidget(QWidget):
                 self._elec_points[pid] = pt
                 self._placing_elec_point_id = None
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.elec_point_placed.emit(pid)
                 self.update()
             return
@@ -4061,6 +4741,7 @@ class CanvasWidget(QWidget):
                 self.update()
             elif event.button() == Qt.RightButton and self._current_elec_cable_id:
                 cid = self._current_elec_cable_id
+                has_geometry = False
                 if len(self._current_elec_cable_points) >= 2:
                     # If we were drawing from the start, reverse the points back to normal order
                     if self._drawing_cable_from_start:
@@ -4086,6 +4767,7 @@ class CanvasWidget(QWidget):
                         self._cable_end_ap[cid] = ""
                     self._elec_cables[cid] = list(
                         self._current_elec_cable_points)
+                    has_geometry = True
                 else:
                     self._cable_start_ap.pop(cid, None)
                     self._cable_end_ap.pop(cid, None)
@@ -4094,8 +4776,11 @@ class CanvasWidget(QWidget):
                 self._drawing_cable_from_start = False
                 self._current_elec_cable_preview = None
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
-                self.elec_cable_changed.emit(cid)
+                self.mode_changed.emit()
+                if has_geometry:
+                    self.elec_cable_changed.emit(cid)
                 self.update()
             return
 
@@ -4117,31 +4802,12 @@ class CanvasWidget(QWidget):
                     self.object_switched_from_edit.emit(clicked_obj[0], clicked_obj[1])
                     return
                 return
-            elif event.button() == Qt.RightButton:
-                hit = self._hit_elec_cable_point(canvas_pt, cid)
-                if hit is not None:
-                    pts = self._elec_cables.get(cid, [])
-                    if len(pts) > 2:
-                        del pts[hit]
-                        self.elec_cable_changed.emit(cid)
-                        self.update()
-                    return
-                hit = self._hit_elec_cable_edge(canvas_pt, cid)
-                if hit is not None:
-                    idx1, idx2 = hit
-                    pts = self._elec_cables[cid]
-                    p1, p2 = pts[idx1], pts[idx2]
-                    mid = QPointF((p1.x() + p2.x()) * 0.5,
-                                  (p1.y() + p2.y()) * 0.5)
-                    pts.insert(idx2, mid)
-                    self.elec_cable_changed.emit(cid)
-                    self.update()
-                return
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_elec_cable_id = None
                 self._dragging_route_point = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.update()
                 return
             # Consume any other button event while in edit mode
@@ -4164,6 +4830,7 @@ class CanvasWidget(QWidget):
                 self.update()
             elif event.button() == Qt.RightButton and self._current_supply_cid:
                 cid = self._current_supply_cid
+                has_geometry = False
                 if len(self._current_supply_points) >= 2:
                     # Check last point for HKV snap
                     last_pt = self._current_supply_points[-1]
@@ -4175,12 +4842,16 @@ class CanvasWidget(QWidget):
                     else:
                         self._supply_hkv.pop(cid, None)
                     self._supply_lines[cid] = list(self._current_supply_points)
+                    has_geometry = True
                 self._current_supply_cid = None
                 self._current_supply_points = []
                 self._current_supply_preview = None
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
-                self.supply_line_changed.emit(cid)
+                self.mode_changed.emit()
+                if has_geometry:
+                    self.supply_line_changed.emit(cid)
                 self.update()
             return
 
@@ -4193,31 +4864,12 @@ class CanvasWidget(QWidget):
                     self._dragging_route_point = (cid, hit)
                     self.setCursor(Qt.ClosedHandCursor)
                 return
-            elif event.button() == Qt.RightButton:
-                hit = self._hit_supply_line_point(canvas_pt, cid)
-                if hit is not None:
-                    pts = self._supply_lines.get(cid, [])
-                    if len(pts) > 2:
-                        del pts[hit]
-                        self.supply_line_changed.emit(cid)
-                        self.update()
-                    return
-                hit = self._hit_supply_line_edge(canvas_pt, cid)
-                if hit is not None:
-                    idx1, idx2 = hit
-                    pts = self._supply_lines[cid]
-                    p1, p2 = pts[idx1], pts[idx2]
-                    mid = QPointF((p1.x() + p2.x()) * 0.5,
-                                  (p1.y() + p2.y()) * 0.5)
-                    pts.insert(idx2, mid)
-                    self.supply_line_changed.emit(cid)
-                    self.update()
-                return
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_supply_cid = None
                 self._dragging_route_point = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.update()
                 return
 
@@ -4230,7 +4882,9 @@ class CanvasWidget(QWidget):
                 self._hkv_points[hid] = pt
                 self._placing_hkv_id = None
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.hkv_placed.emit(hid)
                 self.update()
             return
@@ -4244,7 +4898,9 @@ class CanvasWidget(QWidget):
                 self._text_annotations[tid] = pt
                 self._placing_text_id = None
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.text_placed.emit(tid)
                 self.update()
             return
@@ -4267,6 +4923,7 @@ class CanvasWidget(QWidget):
                 self.update()
             elif event.button() == Qt.RightButton and self._current_hkv_line_id:
                 lid = self._current_hkv_line_id
+                has_geometry = False
                 if len(self._current_hkv_line_points) >= 2:
                     last_pt = self._current_hkv_line_points[-1]
                     hkv = self._find_nearest_hkv(last_pt)
@@ -4277,6 +4934,7 @@ class CanvasWidget(QWidget):
                     else:
                         self._hkv_line_end.pop(lid, None)
                     self._hkv_lines[lid] = list(self._current_hkv_line_points)
+                    has_geometry = True
                 else:
                     self._hkv_line_start.pop(lid, None)
                     self._hkv_line_end.pop(lid, None)
@@ -4284,8 +4942,11 @@ class CanvasWidget(QWidget):
                 self._current_hkv_line_points = []
                 self._current_hkv_line_preview = None
                 self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
                 self.setCursor(Qt.ArrowCursor)
-                self.hkv_line_changed.emit(lid)
+                self.mode_changed.emit()
+                if has_geometry:
+                    self.hkv_line_changed.emit(lid)
                 self.update()
             return
 
@@ -4298,31 +4959,12 @@ class CanvasWidget(QWidget):
                     self._dragging_route_point = (lid, hit)
                     self.setCursor(Qt.ClosedHandCursor)
                 return
-            elif event.button() == Qt.RightButton:
-                hit = self._hit_hkv_line_point(canvas_pt, lid)
-                if hit is not None:
-                    pts = self._hkv_lines.get(lid, [])
-                    if len(pts) > 2:
-                        del pts[hit]
-                        self.hkv_line_changed.emit(lid)
-                        self.update()
-                    return
-                hit = self._hit_hkv_line_edge(canvas_pt, lid)
-                if hit is not None:
-                    idx1, idx2 = hit
-                    pts = self._hkv_lines[lid]
-                    p1, p2 = pts[idx1], pts[idx2]
-                    mid = QPointF((p1.x() + p2.x()) * 0.5,
-                                  (p1.y() + p2.y()) * 0.5)
-                    pts.insert(idx2, mid)
-                    self.hkv_line_changed.emit(lid)
-                    self.update()
-                return
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_hkv_line_id = None
                 self._dragging_route_point = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.update()
                 return
 
@@ -4335,23 +4977,11 @@ class CanvasWidget(QWidget):
                     self._dragging_route_point = (cid, hit)
                     self.setCursor(Qt.ClosedHandCursor)
                 return
-            elif event.button() == Qt.RightButton:
-                hit = self._hit_polygon_point(canvas_pt, cid)
-                if hit is not None:
-                    self._delete_polygon_point(cid, hit)
-                    return
-                hit = self._hit_polygon_edge(canvas_pt, cid)
-                if hit is not None:
-                    idx1, idx2 = hit
-                    p1 = self._polygons[cid][idx1]
-                    p2 = self._polygons[cid][idx2]
-                    midpt = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
-                    self._insert_polygon_point(cid, idx1, idx2, midpt)
-                return
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_polygon_cid = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.update()
                 return
 
@@ -4363,23 +4993,11 @@ class CanvasWidget(QWidget):
                     self._dragging_route_point = (rid, hit)
                     self.setCursor(Qt.ClosedHandCursor)
                 return
-            elif event.button() == Qt.RightButton:
-                hit = self._hit_polygon_point(canvas_pt, rid)
-                if hit is not None:
-                    self._delete_polygon_point(rid, hit)
-                    return
-                hit = self._hit_polygon_edge(canvas_pt, rid)
-                if hit is not None:
-                    idx1, idx2 = hit
-                    p1 = self._elec_room_polygons[rid][idx1]
-                    p2 = self._elec_room_polygons[rid][idx2]
-                    midpt = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
-                    self._insert_polygon_point(rid, idx1, idx2, midpt)
-                return
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_elec_room_id = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.update()
                 return
 
@@ -4391,20 +5009,11 @@ class CanvasWidget(QWidget):
                     self._dragging_route_point = (fid, hit)
                     self.setCursor(Qt.ClosedHandCursor)
                 return
-            elif event.button() == Qt.RightButton:
-                hit = self._hit_floor_polygon_point(canvas_pt, fid)
-                if hit is not None:
-                    self._delete_floor_polygon_point(fid, hit)
-                    return
-                hit = self._hit_floor_polygon_edge(canvas_pt, fid)
-                if hit is not None:
-                    idx1, idx2 = hit
-                    self._insert_floor_polygon_point(fid, idx1, idx2, canvas_pt)
-                return
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_floor_polygon_id = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.update()
                 return
 
@@ -4417,24 +5026,11 @@ class CanvasWidget(QWidget):
                     self._dragging_route_point = (cid, hit)
                     self.setCursor(Qt.ClosedHandCursor)
                 return
-            elif event.button() == Qt.RightButton:
-                hit = self._hit_route_point_in_circuit(canvas_pt, cid)
-                if hit is not None:
-                    self._delete_route_point(cid, hit)
-                    return
-                hit = self._hit_route_edge(canvas_pt, cid)
-                if hit is not None:
-                    idx1, idx2 = hit
-                    pts = self._manual_routes[cid]
-                    p1 = pts[idx1]
-                    p2 = pts[idx2]
-                    midpt = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
-                    self._insert_route_point(cid, idx1, idx2, midpt)
-                return
             elif event.button() == Qt.MiddleButton:
                 self._mode = ToolMode.NONE
                 self._edit_route_cid = None
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
                 self.update()
                 return
 
@@ -4462,6 +5058,17 @@ class CanvasWidget(QWidget):
 
         # ── Startpunkt verschieben ──
         if event.button() == Qt.LeftButton:
+            if self._mode == ToolMode.NONE:
+                helper_ep_hit = self._hit_any_helper_line_endpoint(canvas_pt)
+                if helper_ep_hit:
+                    fid, hid, idx = helper_ep_hit
+                    self._helper_selected_floor_id = fid
+                    self._helper_selected_id = hid
+                    self._helper_dragging_endpoint = (hid, idx)
+                    self.setCursor(Qt.ClosedHandCursor)
+                    self.update()
+                    return
+
             route_hit = self._hit_route_point(canvas_pt)
             if route_hit:
                 self._dragging_route_point = route_hit
@@ -4504,13 +5111,123 @@ class CanvasWidget(QWidget):
     def mouseMoveEvent(self, event):
         pos       = QPointF(event.position())
         canvas_pt = self._to_canvas(pos)
+        if self._mode != ToolMode.NONE:
+            self._helper_hover_endpoint = None
         if self._mode == ToolMode.MEASURE_ANGLE:
             self._mouse_pos = self._snap_measure_point(canvas_pt)
         else:
             self._mouse_pos = canvas_pt
 
+        if self._mode in (ToolMode.PLACE_ELEC_POINT, ToolMode.PLACE_HKV, ToolMode.PLACE_TEXT):
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            self._ghost_preview_pos = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+            self.update()
+        elif self._ghost_preview_pos is not None:
+            self._ghost_preview_pos = None
+
+        if self._mode == ToolMode.NONE:
+            hover_obj = self._hit_any_object(canvas_pt)
+            if not hover_obj:
+                text_hit = self._hit_text_annotation(canvas_pt)
+                if text_hit:
+                    hover_obj = ("text", text_hit)
+            if not hover_obj:
+                label_hit = self._hit_label(canvas_pt)
+                if label_hit:
+                    hover_obj = ("label", label_hit)
+            if hover_obj != self._hover_object:
+                self._hover_object = hover_obj
+                self.update()
+        elif self._hover_object is not None:
+            self._hover_object = None
+            self.update()
+
+        # ── Handle box-selection drag (Ctrl+Drag) ──
+        # Note: cables are excluded from box-selection (only via Shift+Click)
+        if self._is_selecting_by_drag and self._selection_start:
+            self._selection_rect = QRectF(self._selection_start, canvas_pt).normalized()
+            # Update multi-selected to include all point-type objects in rect
+            # Keep any cables that were already selected via Shift+Click
+            cables_in_selection = {item for item in self._multi_selected if item[0] == "elec_cable"}
+            self._multi_selected.clear()
+            self._multi_selected.update(cables_in_selection)
+            for obj_type, obj_id in self._get_all_selectable_objects():
+                if obj_type == "elec_point":
+                    pt = self._elec_points.get(obj_id)
+                    if pt and self._selection_rect.contains(pt):
+                        self._multi_selected.add((obj_type, obj_id))
+                elif obj_type == "hkv":
+                    pt = self._hkv_points.get(obj_id)
+                    if pt and self._selection_rect.contains(pt):
+                        self._multi_selected.add((obj_type, obj_id))
+                elif obj_type == "text":
+                    pt = self._text_annotations.get(obj_id)
+                    if pt and self._selection_rect.contains(pt):
+                        self._multi_selected.add((obj_type, obj_id))
+            self.update()
+            return
+
+        # ── Handle multi-object drag (Alt+Drag) ──
+        if self._dragging_multi and self._drag_multi_anchor:
+            left_held = bool(event.buttons() & Qt.LeftButton)
+            alt_held = bool(QApplication.keyboardModifiers() & Qt.AltModifier)
+
+            # Multi-move is active only while Alt + Left Mouse are both held.
+            if not left_held or not alt_held:
+                self._finalize_multi_drag()
+                return
+
+            delta = canvas_pt - self._drag_multi_anchor
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            moved_ap_ids = set()
+            
+            for sel_type, sel_id in self._dragging_multi:
+                if sel_type == "elec_point" and sel_id in self._elec_points:
+                    start_pos = self._drag_multi_start_positions.get((sel_type, sel_id))
+                    if start_pos:
+                        new_pos = QPointF(start_pos.x() + delta.x(), start_pos.y() + delta.y())
+                        new_pos = new_pos if ctrl_held else self._snap_to_grid(new_pos)
+                        self._elec_points[sel_id] = new_pos
+                        moved_ap_ids.add(sel_id)
+                        
+                elif sel_type == "hkv" and sel_id in self._hkv_points:
+                    start_pos = self._drag_multi_start_positions.get((sel_type, sel_id))
+                    if start_pos:
+                        new_pos = QPointF(start_pos.x() + delta.x(), start_pos.y() + delta.y())
+                        new_pos = new_pos if ctrl_held else self._snap_to_grid(new_pos)
+                        self._hkv_points[sel_id] = new_pos
+                        
+                elif sel_type == "text" and sel_id in self._text_annotations:
+                    start_pos = self._drag_multi_start_positions.get((sel_type, sel_id))
+                    if start_pos:
+                        new_pos = QPointF(start_pos.x() + delta.x(), start_pos.y() + delta.y())
+                        new_pos = new_pos if ctrl_held else self._snap_to_grid(new_pos)
+                        self._text_annotations[sel_id] = new_pos
+                        
+                elif sel_type == "elec_cable" and sel_id in self._elec_cables:
+                    start_pts = self._drag_multi_start_positions.get((sel_type, sel_id))
+                    if start_pts:
+                        new_pts = []
+                        for start_pt in start_pts:
+                            new_pt = QPointF(start_pt.x() + delta.x(), start_pt.y() + delta.y())
+                            new_pt = new_pt if ctrl_held else self._snap_to_grid(new_pt)
+                            new_pts.append(new_pt)
+                        self._elec_cables[sel_id] = new_pts
+
+            if moved_ap_ids:
+                for cid, ap_id in self._cable_start_ap.items():
+                    if ap_id in moved_ap_ids and cid in self._elec_cables and self._elec_cables[cid]:
+                        self._elec_cables[cid][0] = QPointF(self._elec_points[ap_id])
+                for cid, ap_id in self._cable_end_ap.items():
+                    if ap_id in moved_ap_ids and cid in self._elec_cables and self._elec_cables[cid]:
+                        self._elec_cables[cid][-1] = QPointF(self._elec_points[ap_id])
+            
+            self.update()
+            return
+
+        # ── Handle panning ──
         if self._panning and self._pan_start:
-            delta        = pos - self._pan_start
+            delta = pos - self._pan_start
             self._offset += delta
             self._pan_start = pos
             self._current_route_preview_end = None
@@ -4552,19 +5269,29 @@ class CanvasWidget(QWidget):
             self.update()
             return
 
-        # ── Hover: show hand cursor when over a measurement label (NONE mode) ──
-        if self._mode == ToolMode.NONE and self._measure_label_positions:
-            thresh = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
-            for lp in self._measure_label_positions:
-                try:
-                    lab_pt = QPointF(lp[0], lp[1])
-                except Exception:
-                    continue
-                if _qdist(canvas_pt, lab_pt) < thresh:
-                    self.setCursor(Qt.OpenHandCursor)
-                    break
+        # ── Hover: hand cursor for helper endpoints / measurement labels (NONE mode) ──
+        if self._mode == ToolMode.NONE and not self._helper_dragging_endpoint:
+            helper_ep_hit = self._hit_any_helper_line_endpoint(canvas_pt)
+            if helper_ep_hit is not None:
+                self._helper_hover_endpoint = helper_ep_hit
+                self.setCursor(Qt.OpenHandCursor)
+                self.update()
             else:
-                self.setCursor(Qt.ArrowCursor)
+                self._helper_hover_endpoint = None
+                if self._measure_label_positions:
+                    thresh = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
+                    for lp in self._measure_label_positions:
+                        try:
+                            lab_pt = QPointF(lp[0], lp[1])
+                        except Exception:
+                            continue
+                        if _qdist(canvas_pt, lab_pt) < thresh:
+                            self.setCursor(Qt.OpenHandCursor)
+                            break
+                    else:
+                        self.setCursor(Qt.ArrowCursor)
+                else:
+                    self.setCursor(Qt.ArrowCursor)
 
         # ── Handle dragging of whole elec cable (NONE mode) ──
         if (
@@ -4681,8 +5408,69 @@ class CanvasWidget(QWidget):
 
         if self._mode == ToolMode.DRAW_HELPER_LINE and self._helper_draw_start is not None:
             ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
-            self._helper_draw_current = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+            snapped_pt = _snap_to_helper_line_points(self, canvas_pt, self._helper_active_floor_id, snap_radius_px=15.0)
+            current_pt = QPointF(snapped_pt) if snapped_pt else QPointF(canvas_pt)
+            if not ctrl_held:
+                angled_pt = self._apply_helper_construction_snap(
+                    self._helper_draw_start,
+                    current_pt,
+                    tolerance_deg=3.0,
+                    floor_id=self._helper_active_floor_id,
+                )
+                if _qdist(angled_pt, current_pt) > 1e-6:
+                    current_pt = angled_pt
+                elif snapped_pt is None:
+                    current_pt = self._snap_to_grid(current_pt)
+            self._helper_draw_current = current_pt
             self.update()
+            return
+
+        if self._mode == ToolMode.NONE and self._helper_dragging_endpoint and self._helper_selected_floor_id:
+            hid, idx = self._helper_dragging_endpoint
+            fid = self._helper_selected_floor_id
+            pts = self._floor_helper_lines.get(fid, {}).get(hid)
+            if pts and len(pts) == 2:
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                snapped_pt = _snap_to_helper_line_points(self, canvas_pt, fid, snap_radius_px=15.0, exclude_line_id=hid)
+                new_pt = QPointF(snapped_pt) if snapped_pt else QPointF(canvas_pt)
+                anchor_idx = 1 if idx == 0 else 0
+                if not ctrl_held:
+                    angled_pt = self._apply_helper_construction_snap(
+                        pts[anchor_idx],
+                        new_pt,
+                        tolerance_deg=3.0,
+                        floor_id=fid,
+                        exclude_line_id=hid,
+                    )
+                    if _qdist(angled_pt, new_pt) > 1e-6:
+                        new_pt = angled_pt
+                    elif snapped_pt is None:
+                        new_pt = self._snap_to_grid(new_pt)
+
+                # Bei fixierter Länge darf Richtung geändert werden, aber nicht die Länge.
+                if self._floor_helper_line_fixed.get(fid, {}).get(hid, False) and self._mm_per_px > 0:
+                    anchor_pt = pts[anchor_idx]
+                    dx = new_pt.x() - anchor_pt.x()
+                    dy = new_pt.y() - anchor_pt.y()
+                    direction_len = math.hypot(dx, dy)
+                    target_mm = self._floor_helper_line_length_mm.get(fid, {}).get(hid)
+                    if target_mm is None:
+                        target_mm = _qdist(pts[0], pts[1]) * self._mm_per_px
+                    target_px = max(1.0, float(target_mm)) / self._mm_per_px
+                    if direction_len < 1e-9:
+                        old_other = pts[idx]
+                        dx = old_other.x() - anchor_pt.x()
+                        dy = old_other.y() - anchor_pt.y()
+                        direction_len = math.hypot(dx, dy)
+                    if direction_len > 1e-9:
+                        ux = dx / direction_len
+                        uy = dy / direction_len
+                        new_pt = QPointF(anchor_pt.x() + ux * target_px,
+                                         anchor_pt.y() + uy * target_px)
+                pts[idx] = new_pt
+                if self._mm_per_px > 0:
+                    self._floor_helper_line_length_mm.setdefault(fid, {})[hid] = _qdist(pts[0], pts[1]) * self._mm_per_px
+                self.update()
             return
 
         if self._mode == ToolMode.EDIT_HELPER_LINE:
@@ -4694,7 +5482,44 @@ class CanvasWidget(QWidget):
                 pts = self._floor_helper_lines.get(fid, {}).get(hid)
                 if pts and len(pts) == 2:
                     ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
-                    pts[idx] = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                    snapped_pt = _snap_to_helper_line_points(self, canvas_pt, fid, snap_radius_px=15.0, exclude_line_id=hid)
+                    new_pt = QPointF(snapped_pt) if snapped_pt else QPointF(canvas_pt)
+                    anchor_idx = 1 if idx == 0 else 0
+                    if not ctrl_held:
+                        angled_pt = self._apply_helper_construction_snap(
+                            pts[anchor_idx],
+                            new_pt,
+                            tolerance_deg=3.0,
+                            floor_id=fid,
+                            exclude_line_id=hid,
+                        )
+                        if _qdist(angled_pt, new_pt) > 1e-6:
+                            new_pt = angled_pt
+                        elif snapped_pt is None:
+                            new_pt = self._snap_to_grid(new_pt)
+
+                    if self._floor_helper_line_fixed.get(fid, {}).get(hid, False) and self._mm_per_px > 0:
+                        anchor_pt = pts[anchor_idx]
+                        dx = new_pt.x() - anchor_pt.x()
+                        dy = new_pt.y() - anchor_pt.y()
+                        direction_len = math.hypot(dx, dy)
+                        target_mm = self._floor_helper_line_length_mm.get(fid, {}).get(hid)
+                        if target_mm is None:
+                            target_mm = _qdist(pts[0], pts[1]) * self._mm_per_px
+                        target_px = max(1.0, float(target_mm)) / self._mm_per_px
+                        if direction_len < 1e-9:
+                            old_other = pts[idx]
+                            dx = old_other.x() - anchor_pt.x()
+                            dy = old_other.y() - anchor_pt.y()
+                            direction_len = math.hypot(dx, dy)
+                        if direction_len > 1e-9:
+                            ux = dx / direction_len
+                            uy = dy / direction_len
+                            new_pt = QPointF(anchor_pt.x() + ux * target_px,
+                                             anchor_pt.y() + uy * target_px)
+                    pts[idx] = new_pt
+                    if self._mm_per_px > 0:
+                        self._floor_helper_line_length_mm.setdefault(fid, {})[hid] = _qdist(pts[0], pts[1]) * self._mm_per_px
                     self.update()
                 return
             if self._helper_dragging_whole_id and self._helper_drag_start:
@@ -4711,6 +5536,8 @@ class CanvasWidget(QWidget):
                     if not ctrl_held:
                         pts[0] = self._snap_to_grid(pts[0])
                         pts[1] = self._snap_to_grid(pts[1])
+                    if self._mm_per_px > 0:
+                        self._floor_helper_line_length_mm.setdefault(fid, {})[hid] = _qdist(pts[0], pts[1]) * self._mm_per_px
                     self.update()
                 return
 
@@ -4847,6 +5674,32 @@ class CanvasWidget(QWidget):
 
         if self._mode == ToolMode.MOVE_ELEC_POINT and self._dragging_elec_point:
             pid = self._dragging_elec_point
+
+            # If Alt is pressed while dragging a selected AP, switch to
+            # multi-object drag immediately.
+            alt_held = bool(QApplication.keyboardModifiers() & Qt.AltModifier)
+            left_held = bool(event.buttons() & Qt.LeftButton)
+            if alt_held and left_held and ("elec_point", pid) in self._multi_selected:
+                self._dragging_multi = self._multi_selected.copy()
+                self._drag_multi_anchor = canvas_pt
+                self._drag_multi_start_positions.clear()
+                for sel_type, sel_id in self._dragging_multi:
+                    if sel_type == "elec_point" and sel_id in self._elec_points:
+                        self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._elec_points[sel_id])
+                    elif sel_type == "hkv" and sel_id in self._hkv_points:
+                        self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._hkv_points[sel_id])
+                    elif sel_type == "text" and sel_id in self._text_annotations:
+                        self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._text_annotations[sel_id])
+                    elif sel_type == "elec_cable" and sel_id in self._elec_cables:
+                        self._drag_multi_start_positions[(sel_type, sel_id)] = [QPointF(p) for p in self._elec_cables[sel_id]]
+
+                self._dragging_elec_point = None
+                self._mode = ToolMode.NONE
+                self.will_move_multi_objects.emit()
+                self.setCursor(Qt.ClosedHandCursor)
+                self.update()
+                return
+
             ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
             pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
             self._elec_points[pid] = pt
@@ -5119,6 +5972,53 @@ class CanvasWidget(QWidget):
         else:
             QToolTip.hideText()
 
+    def _finalize_multi_drag(self):
+        """Finalize Alt+drag multi-move with the same semantics as mouse release."""
+        if not self._dragging_multi:
+            return
+
+        changed_cable_ids = set()
+        # Repair cable endpoints to nearest APs
+        for sel_type, sel_id in self._dragging_multi:
+            if sel_type == "elec_cable" and sel_id in self._elec_cables:
+                pts = self._elec_cables[sel_id]
+                if len(pts) >= 2:
+                    start_ap = self._find_nearest_ap(pts[0])
+                    if start_ap:
+                        self._cable_start_ap[sel_id] = start_ap
+                        pts[0] = QPointF(self._elec_points[start_ap])
+                    else:
+                        self._cable_start_ap.pop(sel_id, None)
+                    end_ap = self._find_nearest_ap(pts[-1])
+                    if end_ap:
+                        self._cable_end_ap[sel_id] = end_ap
+                        pts[-1] = QPointF(self._elec_points[end_ap])
+                    else:
+                        self._cable_end_ap.pop(sel_id, None)
+                    changed_cable_ids.add(sel_id)
+            elif sel_type == "elec_point":
+                self.elec_point_changed.emit(sel_id)
+                for cid, ap_id in self._cable_start_ap.items():
+                    if ap_id == sel_id:
+                        changed_cable_ids.add(cid)
+                for cid, ap_id in self._cable_end_ap.items():
+                    if ap_id == sel_id:
+                        changed_cable_ids.add(cid)
+            elif sel_type == "hkv":
+                self.hkv_placed.emit(sel_id)
+            elif sel_type == "text":
+                self.label_moved.emit(sel_id)
+
+        for cid in changed_cable_ids:
+            self.elec_cable_changed.emit(cid)
+
+        self._dragging_multi.clear()
+        self._drag_multi_start_positions.clear()
+        self._drag_multi_anchor = None
+        self.multi_objects_moved.emit()
+        self.setCursor(Qt.ArrowCursor)
+        self.update()
+
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MiddleButton:
             self._panning   = False
@@ -5126,11 +6026,28 @@ class CanvasWidget(QWidget):
             return
 
         if event.button() == Qt.LeftButton:
+            # Finalize box-selection drag (Ctrl+Drag)
+            if self._is_selecting_by_drag:
+                self._is_selecting_by_drag = False
+                self._selection_start = None
+                self._selection_rect = None
+                self.multi_selection_changed.emit(self._multi_selected.copy())
+                self.setCursor(Qt.ArrowCursor)
+                self.update()
+                return
+
+            # Finalize multi-object drag (Alt+Drag)
+            if self._dragging_multi:
+                self._finalize_multi_drag()
+                return
+
             # Finalize measurement label drag
             if self._mode == ToolMode.MOVE_MEASURE_LABEL and self._dragging_measure_label_idx is not None:
                 self._dragging_measure_label_idx = None
                 self._mode = ToolMode.NONE
                 self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                self.measure_changed.emit()
                 self.update()
                 return
             if self._mode == ToolMode.NONE and self._dragging_elec_cable_id:
@@ -5200,6 +6117,14 @@ class CanvasWidget(QWidget):
                     self.update()
                     return
 
+            if self._mode == ToolMode.NONE and self._helper_dragging_endpoint:
+                self._helper_dragging_endpoint = None
+                self._helper_hover_endpoint = None
+                self.setCursor(Qt.ArrowCursor)
+                self.helper_lines_changed.emit()
+                self.update()
+                return
+
             # ── Grundriss verschieben abschliessen ──
             if self._mode == ToolMode.MOVE_FLOOR_PLAN and self._active_floor_id:
                 layer = self._floor_plans.get(self._active_floor_id)
@@ -5221,6 +6146,7 @@ class CanvasWidget(QWidget):
                         layer.offset_x, layer.offset_y, layer.rotation)
                 self._floor_drag_start = None
                 # Stay in ROTATE mode; ESC to exit
+                self.setCursor(Qt.CrossCursor)
                 return
 
             if self._mode == ToolMode.MOVE_START and self._dragging_start:
@@ -5363,18 +6289,183 @@ class CanvasWidget(QWidget):
                 self.hkv_line_changed.emit(lid)
                 return
             if self._dragging_label:
+                moved_id = self._dragging_label
                 self._dragging_label = None
                 self._label_drag_offset = QPointF(0, 0)
                 self.setCursor(Qt.ArrowCursor)
+                self.label_moved.emit(moved_id)
                 return
             if self._dragging_text:
+                moved_text = self._dragging_text
                 self._dragging_text = None
                 self.setCursor(Qt.ArrowCursor)
+                self.text_placed.emit(moved_text)
                 return
             self._panning   = False
             self._pan_start = None
 
     def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if self._mode == ToolMode.DRAW_POLY:
+                if len(self._current_points) >= 3:
+                    pts = [(p.x(), p.y()) for p in self._current_points]
+                    if self._current_elec_room_id:
+                        rid = self._current_elec_room_id
+                        self._elec_room_polygons[rid] = list(self._current_points)
+                        self._elec_room_visible.setdefault(rid, True)
+                        self.elec_room_polygon_finished.emit(rid, pts)
+                    elif self._current_circuit_id:
+                        self._polygons[self._current_circuit_id] = list(self._current_points)
+                        self._start_points[self._current_circuit_id] = self._current_points[0]
+                        self.polygon_finished.emit(self._current_circuit_id, pts)
+                self._mode = ToolMode.NONE
+                self._current_points = []
+                self._current_elec_room_id = None
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                self.update()
+                return
+
+            if self._mode == ToolMode.DRAW_FURNITURE_POLY:
+                if len(self._current_points) >= 3 and self._current_furniture_id:
+                    layer = self._floor_plans.get(self._current_furniture_id)
+                    if layer:
+                        min_x = min(p.x() for p in self._current_points)
+                        min_y = min(p.y() for p in self._current_points)
+                        max_x = max(p.x() for p in self._current_points)
+                        max_y = max(p.y() for p in self._current_points)
+                        w = max(1.0, max_x - min_x)
+                        h = max(1.0, max_y - min_y)
+                        layer.size = (w, h)
+                        layer.offset_x = min_x
+                        layer.offset_y = min_y
+                        layer.rotation = 0.0
+                        layer.file_path = ""
+                        layer.renderer = None
+                        layer.pixmap = None
+                        layer.polygon = [QPointF(p.x() - min_x, p.y() - min_y) for p in self._current_points]
+                        pts = [(p.x(), p.y()) for p in self._current_points]
+                        self.floor_plan_polygon_finished.emit(self._current_furniture_id, pts)
+                self._mode = ToolMode.NONE
+                self._current_furniture_id = None
+                self._current_points = []
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                self.update()
+                return
+
+            if self._mode == ToolMode.DRAW_ROUTE and self._current_route_cid:
+                cid = self._current_route_cid
+                if len(self._current_route_points) >= 2:
+                    self._manual_routes[cid] = list(self._current_route_points)
+                self._current_route_cid = None
+                self._current_route_points = []
+                self._current_route_preview_end = None
+                self._constraint_violation_point = None
+                self._constraint_violation_line = None
+                self._constraint_violation_reason = ""
+                self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                if len(self._manual_routes.get(cid, [])) >= 2:
+                    self.route_changed.emit(cid)
+                self.update()
+                return
+
+            if self._mode == ToolMode.DRAW_ELEC_CABLE and self._current_elec_cable_id:
+                cid = self._current_elec_cable_id
+                has_geometry = False
+                if len(self._current_elec_cable_points) >= 2:
+                    if self._drawing_cable_from_start:
+                        self._current_elec_cable_points = list(reversed(self._current_elec_cable_points))
+                        first_pt = self._current_elec_cable_points[0]
+                        start_ap = self._find_nearest_ap(first_pt)
+                        if start_ap:
+                            self._current_elec_cable_points[0] = QPointF(self._elec_points[start_ap])
+                            self._cable_start_ap[cid] = start_ap
+                        else:
+                            self._cable_start_ap.pop(cid, None)
+                    last_pt = self._current_elec_cable_points[-1]
+                    end_ap = self._find_nearest_ap(last_pt)
+                    if end_ap:
+                        self._current_elec_cable_points[-1] = QPointF(self._elec_points[end_ap])
+                        self._cable_end_ap[cid] = end_ap
+                    else:
+                        self._cable_end_ap[cid] = ""
+                    self._elec_cables[cid] = list(self._current_elec_cable_points)
+                    has_geometry = True
+                else:
+                    self._cable_start_ap.pop(cid, None)
+                    self._cable_end_ap.pop(cid, None)
+                self._current_elec_cable_id = None
+                self._current_elec_cable_points = []
+                self._drawing_cable_from_start = False
+                self._current_elec_cable_preview = None
+                self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                if has_geometry:
+                    self.elec_cable_changed.emit(cid)
+                self.update()
+                return
+
+            if self._mode == ToolMode.DRAW_SUPPLY_LINE and self._current_supply_cid:
+                cid = self._current_supply_cid
+                has_geometry = False
+                if len(self._current_supply_points) >= 2:
+                    last_pt = self._current_supply_points[-1]
+                    hkv = self._find_nearest_hkv(last_pt)
+                    if hkv:
+                        self._current_supply_points[-1] = QPointF(self._hkv_points[hkv])
+                        self._supply_hkv[cid] = hkv
+                    else:
+                        self._supply_hkv.pop(cid, None)
+                    self._supply_lines[cid] = list(self._current_supply_points)
+                    has_geometry = True
+                self._current_supply_cid = None
+                self._current_supply_points = []
+                self._current_supply_preview = None
+                self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                if has_geometry:
+                    self.supply_line_changed.emit(cid)
+                self.update()
+                return
+
+            if self._mode == ToolMode.DRAW_HKV_LINE and self._current_hkv_line_id:
+                lid = self._current_hkv_line_id
+                has_geometry = False
+                if len(self._current_hkv_line_points) >= 2:
+                    last_pt = self._current_hkv_line_points[-1]
+                    hkv = self._find_nearest_hkv(last_pt)
+                    if hkv:
+                        self._current_hkv_line_points[-1] = QPointF(self._hkv_points[hkv])
+                        self._hkv_line_end[lid] = hkv
+                    else:
+                        self._hkv_line_end.pop(lid, None)
+                    self._hkv_lines[lid] = list(self._current_hkv_line_points)
+                    has_geometry = True
+                else:
+                    self._hkv_line_start.pop(lid, None)
+                    self._hkv_line_end.pop(lid, None)
+                self._current_hkv_line_id = None
+                self._current_hkv_line_points = []
+                self._current_hkv_line_preview = None
+                self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                if has_geometry:
+                    self.hkv_line_changed.emit(lid)
+                self.update()
+                return
+
         if event.key() == Qt.Key_Escape:
             self._mode           = ToolMode.NONE
             self._current_points = []
@@ -5443,6 +6534,17 @@ class CanvasWidget(QWidget):
             self._helper_selected_floor_id = None
             self._export_frame_start = None
             self._export_frame_current = None
+            self._ghost_preview_pos = None
+            # Multi-select
+            self._is_selecting_by_drag = False
+            self._selection_start = None
+            self._selection_rect = None
+            if self._dragging_multi:
+                self._dragging_multi.clear()
+                self._drag_multi_start_positions.clear()
+                self._drag_multi_anchor = None
+            self._multi_selected.clear()
+            self.multi_selection_changed.emit(set())
             self.setCursor(Qt.ArrowCursor)
             self.mode_changed.emit()
             self.update()
@@ -5832,6 +6934,8 @@ class CanvasWidget(QWidget):
         self._draw_measurements(painter)
         self._draw_angle_measurements(painter)
         self._draw_global_helper_lines(painter)
+        self._calculate_helper_line_intersections()
+        self._draw_helper_line_angles(painter)
 
         # ── Maße beim Verschieben anzeigen ────────────────────────
         self._draw_drag_distance_overlay(painter)
@@ -5839,9 +6943,88 @@ class CanvasWidget(QWidget):
         # ── Export-Rahmen ──────────────────────────────────────────
         self._draw_export_frame(painter)
 
+        # ── Ghost preview while placing objects ────────────────────
+        self._draw_placement_ghost(painter)
+
         # ── Selection highlight ────────────────────────────────────
         self._draw_selection_highlight(painter)
+        self._draw_hover_highlight(painter)
+        # Multi-selection must be drawn in the main paint path so it is
+        # always visible (not only in polygon edit overlays).
+        self._draw_multi_selection_highlights(painter)
 
+        painter.restore()
+
+    def _draw_placement_ghost(self, painter: QPainter):
+        if not self._ghost_preview_pos:
+            return
+        if self._mode not in (ToolMode.PLACE_ELEC_POINT, ToolMode.PLACE_HKV, ToolMode.PLACE_TEXT):
+            return
+        painter.save()
+        painter.setOpacity(0.5)
+        gp = self._ghost_preview_pos
+        r = self._px_to_canvas_units(8.0)
+        if self._mode == ToolMode.PLACE_ELEC_POINT and self._placing_elec_point_id:
+            pid = self._placing_elec_point_id
+            w, h = self._elec_point_size_px.get(pid, (30.0, 30.0))
+            painter.setPen(QPen(QColor("#4fc3f7"), 2.0 / self._scale, Qt.DashLine))
+            painter.setBrush(QBrush(QColor(79, 195, 247, 40)))
+            painter.drawRect(QRectF(gp.x() - w / 2, gp.y() - h / 2, w, h))
+        elif self._mode == ToolMode.PLACE_HKV and self._placing_hkv_id:
+            hid = self._placing_hkv_id
+            w, h = self._hkv_size_px.get(hid, (30.0, 30.0))
+            painter.setPen(QPen(QColor("#e53935"), 2.0 / self._scale, Qt.DashLine))
+            painter.setBrush(QBrush(QColor(229, 57, 53, 40)))
+            painter.drawRect(QRectF(gp.x() - w / 2, gp.y() - h / 2, w, h))
+        elif self._mode == ToolMode.PLACE_TEXT and self._placing_text_id:
+            painter.setPen(QPen(QColor("#ffffff"), 2.0 / self._scale, Qt.DashLine))
+            painter.setBrush(QBrush(QColor(255, 255, 255, 30)))
+            size = self._px_to_canvas_units(20.0)
+            painter.drawRect(QRectF(gp.x() - size, gp.y() - size * 0.7, size * 2, size * 1.4))
+            font = painter.font()
+            font.setPointSizeF(max(8.0 / self._scale, 6.0))
+            painter.setFont(font)
+            painter.drawText(QPointF(gp.x() - size * 0.2, gp.y() + size * 0.3), "T")
+        else:
+            painter.setPen(QPen(QColor("#ffffff"), 1.5 / self._scale, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(gp, r, r)
+        painter.restore()
+
+    def _draw_hover_highlight(self, painter: QPainter):
+        if not self._hover_object:
+            return
+        obj_type, obj_id = self._hover_object
+        painter.save()
+        pen = QPen(QColor(255, 255, 255, 220), 2.0 / self._scale, Qt.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        if obj_type == "polygon":
+            pts = self._polygons.get(obj_id, [])
+            if len(pts) >= 3:
+                painter.drawPolygon(QPolygonF(pts))
+        elif obj_type == "elec_room":
+            pts = self._elec_room_polygons.get(obj_id, [])
+            if len(pts) >= 3:
+                painter.drawPolygon(QPolygonF(pts))
+        elif obj_type == "elec_point":
+            pos = self._elec_points.get(obj_id)
+            if pos:
+                w, h = self._elec_point_size_px.get(obj_id, (30.0, 30.0))
+                painter.drawRect(QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h))
+        elif obj_type == "hkv":
+            pos = self._hkv_points.get(obj_id)
+            if pos:
+                w, h = self._hkv_size_px.get(obj_id, (30.0, 30.0))
+                painter.drawRect(QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h))
+        elif obj_type == "text":
+            rect = self._text_rects.get(obj_id)
+            if rect:
+                painter.drawRect(rect)
+        elif obj_type == "label":
+            rect = self._label_rects.get(obj_id)
+            if rect:
+                painter.drawRect(rect)
         painter.restore()
 
     # ── Measurement drawing ───────────────────────────────────────── #
@@ -6019,6 +7202,14 @@ class CanvasWidget(QWidget):
                 painter.drawLine(p1, p2)
                 painter.drawEllipse(p1, r, r)
                 painter.drawEllipse(p2, r, r)
+                if self._helper_hover_endpoint is not None:
+                    hf, hh, hi = self._helper_hover_endpoint
+                    if hf == fid and hh == hid:
+                        hover_pt = p1 if hi == 0 else p2
+                        hover_pen = QPen(QColor("#ffffff"), 2.2 / self._scale, Qt.SolidLine)
+                        painter.setPen(hover_pen)
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawEllipse(hover_pt, r * 1.8, r * 1.8)
                 px_len = _qdist(p1, p2)
                 mm_len = px_len * self._mm_per_px if self._mm_per_px > 0 else 0.0
                 helper_id = f"helper:{fid}:{hid}"
@@ -6055,6 +7246,167 @@ class CanvasWidget(QWidget):
             mm_len = px_len * self._mm_per_px if self._mm_per_px > 0 else 0.0
             mid = QPointF((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2 - 10 / self._scale)
             draw_text_with_background(mid, f"{mm_len / 1000:.3f} m", base_pen.color())
+
+    def _calculate_helper_line_intersections(self):
+        """Berechne Schnittpunkte und Winkel zwischen allen Hilfslinien auf aktiven Floors."""
+        self._helper_line_intersections.clear()
+        
+        for fid in self._floor_plan_order:
+            layer = self._floor_plans.get(fid)
+            if not layer or not layer.visible:
+                continue
+            
+            helper_lines = self._floor_helper_lines.get(fid, {})
+            hid_list = list(helper_lines.items())
+            
+            # Prüfe alle Paare von Hilfslinien
+            for i, (hid1, pts1) in enumerate(hid_list):
+                if len(pts1) < 2:
+                    continue
+                for j, (hid2, pts2) in enumerate(hid_list[i+1:], start=i+1):
+                    if len(pts2) < 2:
+                        continue
+                    
+                    # Berechne Schnittpunkt
+                    p1_start, p1_end = pts1[0], pts1[1]
+                    p2_start, p2_end = pts2[0], pts2[1]
+                    
+                    intersection_pt = _line_line_intersection(p1_start, p1_end, p2_start, p2_end)
+                    if intersection_pt is None:
+                        continue
+                    
+                    # Prüfe, ob der Schnittpunkt innerhalb beider Strecken liegt
+                    proj1 = _project_on_segment(intersection_pt, p1_start, p1_end)
+                    proj2 = _project_on_segment(intersection_pt, p2_start, p2_end)
+                    
+                    dist1 = _qdist(intersection_pt, proj1)
+                    dist2 = _qdist(intersection_pt, proj2)
+                    
+                    # Toleranz für Schnittpunkt-Position
+                    tol = 0.5 / self._scale if self._scale > 0 else 1.0
+                    if dist1 > tol or dist2 > tol:
+                        continue
+                    
+                    # Berechne Winkel zwischen den Linien
+                    v1x = p1_end.x() - p1_start.x()
+                    v1y = p1_end.y() - p1_start.y()
+                    v2x = p2_end.x() - p2_start.x()
+                    v2y = p2_end.y() - p2_start.y()
+                    
+                    len1 = math.hypot(v1x, v1y)
+                    len2 = math.hypot(v2x, v2y)
+                    
+                    if len1 > 1e-9 and len2 > 1e-9:
+                        dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (len1 * len2)))
+                        angle_rad = math.acos(dot)
+                        angle_deg = math.degrees(angle_rad)
+                        # Wähle den kleineren Winkel (akut oder recht)
+                        if angle_deg > 90:
+                            angle_deg = 180 - angle_deg
+                        
+                        self._helper_line_intersections.append((intersection_pt, angle_deg, hid1, hid2, fid))
+
+            # Live-Vorschau: während des Zeichnens die aktuelle Hilfslinie gegen bestehende prüfen
+            if (
+                self._mode == ToolMode.DRAW_HELPER_LINE
+                and self._helper_draw_start is not None
+                and self._helper_draw_current is not None
+                and fid == self._helper_active_floor_id
+            ):
+                preview_p1 = QPointF(self._helper_draw_start)
+                preview_p2 = QPointF(self._helper_draw_current)
+
+                dx = preview_p2.x() - preview_p1.x()
+                dy = preview_p2.y() - preview_p1.y()
+                direction_len = math.hypot(dx, dy)
+                if direction_len > 1e-9 and self._mm_per_px > 0:
+                    settings = self._helper_settings(fid)
+                    target_px = float(settings.get("target_length_mm", self._helper_target_length_mm)) / self._mm_per_px
+                    ux = dx / direction_len
+                    uy = dy / direction_len
+                    preview_p2 = QPointF(preview_p1.x() + ux * target_px, preview_p1.y() + uy * target_px)
+
+                visible_map = self._floor_helper_line_visible.get(fid, {})
+                for hid, pts in helper_lines.items():
+                    if len(pts) < 2 or not visible_map.get(hid, True):
+                        continue
+
+                    p2_start, p2_end = pts[0], pts[1]
+                    intersection_pt = _line_line_intersection(preview_p1, preview_p2, p2_start, p2_end)
+                    if intersection_pt is None:
+                        continue
+
+                    proj_preview = _project_on_segment(intersection_pt, preview_p1, preview_p2)
+                    proj_existing = _project_on_segment(intersection_pt, p2_start, p2_end)
+                    dist_preview = _qdist(intersection_pt, proj_preview)
+                    dist_existing = _qdist(intersection_pt, proj_existing)
+
+                    tol = 0.5 / self._scale if self._scale > 0 else 1.0
+                    if dist_preview > tol or dist_existing > tol:
+                        continue
+
+                    v1x = preview_p2.x() - preview_p1.x()
+                    v1y = preview_p2.y() - preview_p1.y()
+                    v2x = p2_end.x() - p2_start.x()
+                    v2y = p2_end.y() - p2_start.y()
+                    len1 = math.hypot(v1x, v1y)
+                    len2 = math.hypot(v2x, v2y)
+
+                    if len1 > 1e-9 and len2 > 1e-9:
+                        dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (len1 * len2)))
+                        angle_deg = math.degrees(math.acos(dot))
+                        if angle_deg > 90:
+                            angle_deg = 180 - angle_deg
+                        self._helper_line_intersections.append((intersection_pt, angle_deg, "__preview__", hid, fid))
+
+    def _draw_helper_line_angles(self, painter: QPainter):
+        """Zeichne Winkel-Markierungen an Hilfslinienschnittpunkten."""
+        if not self._helper_line_intersections:
+            return
+        
+        color = QColor("#ffeb3b")  # Gelb für Winkel-Markierungen
+        font = painter.font()
+        font.setPointSizeF(9.0 / self._scale)
+        r = 5.0 / self._scale
+        arc_radius = 15.0 / self._scale
+        
+        pen = QPen(color, 1.5 / self._scale)
+        pen.setDashPattern([4.0, 4.0])
+        
+        for intersection_pt, angle_deg, hid1, hid2, fid in self._helper_line_intersections:
+            painter.setPen(pen)
+            painter.setBrush(QBrush(color))
+            
+            # Zeichne Kreis am Schnittpunkt
+            painter.drawEllipse(intersection_pt, r, r)
+            
+            # Zeichne einen Winkelbogen (optional, je nach Anforderung)
+            # Für jetzt: einfach Text mit Winkel
+            
+            # Text mit Hintergrund
+            label_text = f"{angle_deg:.1f}°"
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            pad = 2.0 / self._scale
+            width = metrics.horizontalAdvance(label_text)
+            height = metrics.height()
+            ascent = metrics.ascent()
+            
+            text_pt = QPointF(
+                intersection_pt.x() + arc_radius + 3.0 / self._scale,
+                intersection_pt.y() - arc_radius - 3.0 / self._scale
+            )
+            
+            rect = QRectF(
+                text_pt.x() - pad,
+                text_pt.y() - ascent - pad,
+                width + 2 * pad,
+                height + 2 * pad,
+            )
+            
+            painter.fillRect(rect, QColor(0, 0, 0, 200))
+            painter.setPen(QPen(color))
+            painter.drawText(text_pt, label_text)
 
     def _draw_export_frame(self, painter: QPainter):
         """Draw persisted and in-progress export frame."""
@@ -7244,6 +8596,58 @@ class CanvasWidget(QWidget):
         for p in pts:
             painter.drawEllipse(p, r, r)
 
+    def _draw_multi_selection_highlights(self, painter):
+        """Draw highlights for multi-selected objects and active box-selection rect."""
+        # Draw box-selection rectangle
+        if self._selection_rect:
+            pen = QPen(QColor("#ffdd00"), 2.0 / self._scale, Qt.DashLine)
+            painter.setPen(pen)
+            brush = QBrush(QColor(255, 221, 0, 40))  # semi-transparent yellow
+            painter.setBrush(brush)
+            painter.drawRect(self._selection_rect)
+
+        # Draw highlights for multi-selected objects
+        if not self._multi_selected:
+            return
+        
+        pen = QPen(QColor("#ff9900"), 3.5 / self._scale, Qt.SolidLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        for obj_type, obj_id in self._multi_selected:
+            if obj_type == "elec_point":
+                pt = self._elec_points.get(obj_id)
+                if pt:
+                    w, h = self._elec_point_size_px.get(obj_id, (30.0, 30.0))
+                    rect = QRectF(pt.x() - w / 2 - 3, pt.y() - h / 2 - 3, w + 6, h + 6)
+                    painter.drawRect(rect)
+
+            elif obj_type == "hkv":
+                pt = self._hkv_points.get(obj_id)
+                if pt:
+                    w, h = self._hkv_size_px.get(obj_id, (40.0, 40.0))
+                    rect = QRectF(pt.x() - w / 2 - 3, pt.y() - h / 2 - 3, w + 6, h + 6)
+                    painter.drawRect(rect)
+
+            elif obj_type == "text":
+                rect = self._text_rects.get(obj_id)
+                if rect:
+                    painter.drawRect(rect.adjusted(-3, -3, 3, 3))
+
+            elif obj_type == "elec_cable":
+                pts = self._elec_cables.get(obj_id, [])
+                if len(pts) >= 2:
+                    dashed_pen = QPen(QColor("#ff9900"), 2.5 / self._scale, Qt.DashLine)
+                    painter.setPen(dashed_pen)
+                    for i in range(len(pts) - 1):
+                        painter.drawLine(pts[i], pts[i + 1])
+                    # Draw points
+                    solid_pen = QPen(QColor("#ff9900"), 3.5 / self._scale)
+                    painter.setPen(solid_pen)
+                    for pt in pts:
+                        r = 3.0 / self._scale
+                        painter.drawEllipse(pt, r, r)
+
     # ── Collision zone overlay ────────────────────────────────────────── #
 
     def _draw_collision_zones(self, painter, cid: str, dragged_idx: int):
@@ -7464,3 +8868,42 @@ def _segment_distance(a1: QPointF, a2: QPointF, b1: QPointF, b2: QPointF) -> flo
         _point_segment_distance(b1, a1, a2),
         _point_segment_distance(b2, a1, a2),
     )
+def _snap_to_helper_line_points(canvas_obj: 'CanvasWidget', 
+                                 pt: QPointF, 
+                                 current_floor_id: Optional[str],
+                                 snap_radius_px: float = 15.0,
+                                 exclude_line_id: str = "") -> Optional[QPointF]:
+    """
+    Snappet einen Punkt zu naheliegenden Endpunkten anderer Hilfslinien auf dem aktuellen Floor.
+    
+    Args:
+        canvas_obj: Das Canvas-Widget
+        pt: Der zu prüfende Punkt in Canvas-Pixeln
+        current_floor_id: Die aktuelle Floor-ID
+        snap_radius_px: Der Snap-Radius in Pixeln (default 15px)
+        exclude_line_id: Eine Hilfslinie-ID ausschließen (z.B. die aktuelle Linie)
+    
+    Returns:
+        Der gesnappte Punkt oder None, wenn kein Snap stattfand
+    """
+    if not current_floor_id or snap_radius_px <= 0:
+        return None
+    
+    # Hole alle Hilfslinien auf diesem Floor
+    helper_lines = canvas_obj._floor_helper_lines.get(current_floor_id, {})
+    
+    best_dist = snap_radius_px
+    snapped_pt = None
+    
+    for hid, pts in helper_lines.items():
+        if hid == exclude_line_id or len(pts) < 2:
+            continue
+        
+        # Prüfe beide Endpunkte
+        for endpoint in [pts[0], pts[1]]:
+            dist = _qdist(pt, endpoint)
+            if dist < best_dist:
+                best_dist = dist
+                snapped_pt = endpoint
+    
+    return snapped_pt
