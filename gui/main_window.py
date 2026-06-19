@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QComboBox, QLabel, QDialog, QTableWidget, QTableWidgetItem,
     QDialogButtonBox, QTabWidget, QPushButton, QHeaderView, QMenu,
     QApplication, QCheckBox, QSpinBox, QDoubleSpinBox, QInputDialog,
+    QSplitter,
     QProgressDialog,
 )
 from PySide6.QtGui import (
@@ -50,6 +51,7 @@ _LAST_PROJECT_KEY = "last_project_path"
 _RECENT_KEY = "recent_projects"
 _MAX_RECENT = 8
 _MAX_UNDO = 80
+_PARAMS_UI_STATE_KEY = "ui_state"
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -75,6 +77,7 @@ class MainWindow(QMainWindow):
         self._elec_schema_window: ElecSchemaWindow | None = None
         self._elec_schema_ap_positions: dict[str, list[float]] = {}
         self._elec_point_room_map: dict[str, str] = {}
+        self._project_ui_state: dict = {}
         self._suspend_schema_refresh = False
         self._dirty = False
         self._copy_buffer: dict | None = None
@@ -115,9 +118,15 @@ class MainWindow(QMainWindow):
 
         self.canvas      = CanvasWidget()
         self.param_panel = ParameterPanel()
+        self._main_splitter = QSplitter(Qt.Horizontal)
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.addWidget(self.canvas)
+        self._main_splitter.addWidget(self.param_panel)
+        self._main_splitter.setStretchFactor(0, 1)
+        self._main_splitter.setStretchFactor(1, 0)
+        self._main_splitter.setSizes([1100, 380])
 
-        layout.addWidget(self.canvas,      stretch=1)
-        layout.addWidget(self.param_panel, stretch=0)
+        layout.addWidget(self._main_splitter, stretch=1)
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
@@ -483,8 +492,101 @@ class MainWindow(QMainWindow):
             return True
         return False   # Cancel
 
+    @staticmethod
+    def _encode_qbytearray(value: QByteArray) -> str:
+        if not isinstance(value, QByteArray):
+            return ""
+        encoded = value.toBase64().data()
+        return encoded.decode("ascii") if encoded else ""
+
+    @staticmethod
+    def _decode_qbytearray(value: object) -> QByteArray:
+        if not isinstance(value, str) or not value:
+            return QByteArray()
+        try:
+            return QByteArray.fromBase64(value.encode("ascii"))
+        except Exception:
+            return QByteArray()
+
+    def _capture_window_state(self, window: QWidget | None) -> dict:
+        if window is None:
+            return {}
+        state = {
+            "geometry": self._encode_qbytearray(window.saveGeometry()),
+            "visible": bool(window.isVisible()),
+            "maximized": bool(window.isMaximized()),
+        }
+        if hasattr(window, "view") and getattr(window, "view", None) is not None:
+            try:
+                state["zoom"] = float(window.view.transform().m11())
+            except Exception:
+                pass
+        return state
+
+    def _restore_window_state(self, window: QWidget | None, state: dict):
+        if window is None or not isinstance(state, dict):
+            return
+        geometry = self._decode_qbytearray(state.get("geometry"))
+        if not geometry.isEmpty():
+            window.restoreGeometry(geometry)
+        if bool(state.get("maximized", False)):
+            window.showMaximized()
+        # Minimized state is intentionally not restored.
+        window.setWindowState(window.windowState() & ~Qt.WindowMinimized)
+
+        zoom = state.get("zoom")
+        if zoom is not None and hasattr(window, "view") and getattr(window, "view", None) is not None:
+            try:
+                zoom_value = float(zoom)
+            except (TypeError, ValueError):
+                zoom_value = 1.0
+            zoom_value = max(0.1, min(5.0, zoom_value))
+            try:
+                window.view.resetTransform()
+                window.view.scale(zoom_value, zoom_value)
+                if hasattr(window, "_update_zoom_label"):
+                    window._update_zoom_label()
+            except Exception:
+                pass
+
+    def _collect_project_ui_state(self) -> dict:
+        main_state = self._capture_window_state(self)
+        main_state["splitter_sizes"] = [int(v) for v in self._main_splitter.sizes()]
+        main_state["sidebar_width"] = int(self.param_panel.width())
+        return {
+            "main_window": main_state,
+            "elec_schema_window": self._capture_window_state(self._elec_schema_window),
+            "pdf_export_dialog": self._capture_window_state(self._pdf_export_dialog),
+        }
+
+    def _apply_project_ui_state(self, ui_state: dict):
+        self._project_ui_state = dict(ui_state) if isinstance(ui_state, dict) else {}
+        if not self._project_ui_state:
+            return
+
+        main_state = self._project_ui_state.get("main_window", {})
+        if isinstance(main_state, dict):
+            self._restore_window_state(self, main_state)
+            splitter_sizes = main_state.get("splitter_sizes")
+            if (
+                isinstance(splitter_sizes, list)
+                and len(splitter_sizes) == 2
+                and all(isinstance(v, (int, float)) and v > 0 for v in splitter_sizes)
+            ):
+                self._main_splitter.setSizes([int(splitter_sizes[0]), int(splitter_sizes[1])])
+
+        self._restore_window_state(
+            self._elec_schema_window,
+            self._project_ui_state.get("elec_schema_window", {}),
+        )
+        self._restore_window_state(
+            self._pdf_export_dialog,
+            self._project_ui_state.get("pdf_export_dialog", {}),
+        )
+
     def closeEvent(self, event):
         if self._maybe_save():
+            self._project_ui_state = self._collect_project_ui_state()
             event.accept()
         else:
             event.ignore()
@@ -943,7 +1045,9 @@ class MainWindow(QMainWindow):
         self.canvas.export_frame_drawn.connect(self._mark_dirty)
         self.canvas.multi_selection_changed.connect(self._on_multi_selection_changed)
         self.canvas.multi_objects_moved.connect(self._mark_dirty)
+        self.canvas.multi_objects_moved.connect(self._update_elec_point_room_assignments)
         self.param_panel.heating_global_changed.connect(self._mark_dirty)
+        self._main_splitter.splitterMoved.connect(self._mark_dirty_debounced)
 
         # Elektro-Strangschema live aktualisieren
         self.canvas.elec_point_placed.connect(self._refresh_elec_schema_window)
@@ -2419,8 +2523,10 @@ class MainWindow(QMainWindow):
     def _delete_elec_point(self, point_id: str):
         self.canvas.delete_elec_point(point_id)
         self.param_panel.remove_elec_point_panel(point_id)
+        self._elec_point_room_map.pop(point_id, None)
         self._elec_schema_ap_positions.pop(point_id, None)
         self._update_up_distribution_cable_choices_all()
+        self._update_elec_point_room_assignments()
         self._refresh_elec_schema_window()
         self.status.showMessage(f"🗑️ Anschlusspunkt {point_id} gelöscht.")
 
@@ -2487,18 +2593,24 @@ class MainWindow(QMainWindow):
 
     def _update_elec_point_room_assignments(self):
         room_ids = list(self.param_panel.elec_room_panels.keys())
+        self._elec_point_room_map.clear()
         if not room_ids:
-            for panel in self.param_panel.elec_point_panels.values():
+            for pid, panel in self.param_panel.elec_point_panels.items():
                 panel.set_room_name("")
+                self.param_panel.set_elec_point_room_assignment(pid, "", "")
+            self.param_panel.sort_elec_point_room_groups()
+            self._refresh_elec_schema_window()
             return
 
         for pid, panel in self.param_panel.elec_point_panels.items():
             pt = self.canvas._elec_points.get(pid)
             if pt is None:
                 panel.set_room_name("")
+                self.param_panel.set_elec_point_room_assignment(pid, "", "")
                 continue
             point_fp = self.param_panel._element_floorplan.get(pid, "")
             assigned_name = ""
+            assigned_room_id = ""
             for rid in room_ids:
                 if not self.canvas._elec_room_visible.get(rid, True):
                     continue
@@ -2510,8 +2622,13 @@ class MainWindow(QMainWindow):
                 if self.canvas._point_in_polygon(pt, poly):
                     room_panel = self.param_panel.elec_room_panels.get(rid)
                     assigned_name = room_panel.get_parameters().get("name", rid) if room_panel else rid
+                    assigned_room_id = rid
                     break
             panel.set_room_name(assigned_name)
+            if assigned_room_id:
+                self._elec_point_room_map[pid] = assigned_room_id
+            self.param_panel.set_elec_point_room_assignment(pid, assigned_room_id, assigned_name)
+        self.param_panel.sort_elec_point_room_groups()
         self._refresh_elec_schema_window()
 
     def _add_elec_cable(self, fp_id: str = ""):
@@ -2643,6 +2760,10 @@ class MainWindow(QMainWindow):
             self._elec_schema_window.edit_ap_requested.connect(self._on_schema_edit_ap)
             self._elec_schema_window.edit_cable_requested.connect(self._on_schema_edit_cable)
             self._elec_schema_window.duplicate_selection_requested.connect(self._on_schema_duplicate_selection)
+            self._restore_window_state(
+                self._elec_schema_window,
+                self._project_ui_state.get("elec_schema_window", {}),
+            )
         self._refresh_elec_schema_window()
         self._elec_schema_window.show()
         self._elec_schema_window.raise_()
@@ -3911,12 +4032,13 @@ class MainWindow(QMainWindow):
 
         self.canvas = CanvasWidget()
         self.param_panel = ParameterPanel()
-
-        layout = self.centralWidget().layout()
-        layout.replaceWidget(old_canvas, self.canvas)
-        layout.replaceWidget(old_panel, self.param_panel)
+        self._main_splitter.replaceWidget(0, self.canvas)
+        self._main_splitter.replaceWidget(1, self.param_panel)
+        self._main_splitter.setSizes([1100, 380])
         old_canvas.deleteLater()
         old_panel.deleteLater()
+
+        self._project_ui_state = {}
 
         self._connect_signals()
         self._dirty = False
@@ -4001,6 +4123,8 @@ class MainWindow(QMainWindow):
         # ── 2. JSON bauen – alle Pfade relativ zur Projektdatei ──────────
 
         params = self.param_panel.to_dict()
+        self._project_ui_state = self._collect_project_ui_state()
+        params[_PARAMS_UI_STATE_KEY] = dict(self._project_ui_state)
         params["elec_schema_ap_positions"] = self._sanitize_elec_schema_ap_positions(
             self._elec_schema_ap_positions
         )
@@ -4123,6 +4247,7 @@ class MainWindow(QMainWindow):
 
             # --- resolve floorplan file paths + load images -------------
             params = data.get("params", {})
+            self._project_ui_state = dict(params.get(_PARAMS_UI_STATE_KEY, {})) if isinstance(params.get(_PARAMS_UI_STATE_KEY, {}), dict) else {}
             self._elec_schema_ap_positions = self._sanitize_elec_schema_ap_positions(
                 params.get("elec_schema_ap_positions", {})
             )
@@ -4390,6 +4515,7 @@ class MainWindow(QMainWindow):
                 self._update_supply_hkv_label(cid)
 
             self._update_elec_point_room_assignments()
+            self._apply_project_ui_state(self._project_ui_state)
 
             # Text annotation panels
             for tid, panel in self.param_panel.text_panels.items():
@@ -4680,6 +4806,7 @@ class MainWindow(QMainWindow):
         )
         dialog.setModal(False)
         dialog.setWindowModality(Qt.NonModal)
+        self._restore_window_state(dialog, self._project_ui_state.get("pdf_export_dialog", {}))
         self._pdf_export_dialog = dialog
 
         def _cleanup():
@@ -4689,11 +4816,13 @@ class MainWindow(QMainWindow):
 
         def _accepted():
             pages = self._normalize_pdf_export_pages(dialog.get_pages())
+            self._project_ui_state["pdf_export_dialog"] = self._capture_window_state(dialog)
             _cleanup()
             if on_accept:
                 on_accept(pages)
 
         def _rejected():
+            self._project_ui_state["pdf_export_dialog"] = self._capture_window_state(dialog)
             _cleanup()
 
         dialog.accepted.connect(_accepted)

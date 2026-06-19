@@ -3929,7 +3929,9 @@ class ParameterPanel(QWidget):
         self._furniture_parent: dict[str, str] = {}  # furniture_id -> parent_fp_id
         self._tree_items: dict[str, QTreeWidgetItem] = {}
         self._fp_sub_items: dict[str, dict] = {}      # fp_id -> {hk, hkv, hkv_line, ap, room, kv, text}
+        self._ap_room_groups: dict[tuple[str, str], QTreeWidgetItem] = {}
         self._element_floorplan: dict[str, str] = {}  # element_id -> fp_id
+        self._tree_filter_text: str = ""
         self._loading = False
         self._active_panel: QWidget | None = None
         self._active_special: str | None = "empty"  # "empty", "heat", or None
@@ -4020,6 +4022,13 @@ class ParameterPanel(QWidget):
         self.btn_bom.clicked.connect(self._open_bom_editor)
         btn_row2.addWidget(self.btn_bom)
         layout.addLayout(btn_row2)
+
+        filter_row = QHBoxLayout()
+        self._tree_filter_input = QLineEdit()
+        self._tree_filter_input.setPlaceholderText("Filter (Name/ID)…")
+        self._tree_filter_input.textChanged.connect(self._on_tree_filter_text_changed)
+        filter_row.addWidget(self._tree_filter_input)
+        layout.addLayout(filter_row)
 
         # ── Splitter: TreeView + Eigenschaften ─────────────────────
         splitter = QSplitter(Qt.Vertical)
@@ -4118,8 +4127,8 @@ class ParameterPanel(QWidget):
         splitter.setStretchFactor(1, 2)   # properties
         layout.addWidget(splitter, stretch=1)
 
-        self.setMinimumWidth(340)
-        self.setMaximumWidth(420)
+        self.setMinimumWidth(280)
+        self.setMaximumWidth(900)
 
 
 
@@ -4138,6 +4147,7 @@ class ParameterPanel(QWidget):
         child.setCheckState(0, Qt.Checked)
         self._tree_items[item_id] = child
         parent_item.setExpanded(True)
+        self._apply_tree_filter()
         if not self._loading:
             self._tree.setCurrentItem(child)
         return child
@@ -4156,11 +4166,54 @@ class ParameterPanel(QWidget):
             except RuntimeError:
                 # C++ object already deleted (e.g. parent removed first)
                 pass
+        self._apply_tree_filter()
 
     def _update_tree_item_name(self, item_id: str, name: str):
         item = self._tree_items.get(item_id)
         if item:
             item.setText(0, name or item_id)
+        self._apply_tree_filter()
+
+    def _on_tree_filter_text_changed(self, text: str):
+        self._tree_filter_text = (text or "").strip().lower()
+        self._apply_tree_filter()
+
+    def _item_matches_filter(self, item: QTreeWidgetItem, needle: str) -> bool:
+        if not needle:
+            return True
+        item_text = (item.text(0) or "").lower()
+        if needle in item_text:
+            return True
+        item_id = item.data(0, Qt.UserRole)
+        if isinstance(item_id, str) and needle in item_id.lower():
+            return True
+        return False
+
+    def _filter_tree_item_recursive(self, item: QTreeWidgetItem, needle: str) -> bool:
+        child_matches = False
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if self._filter_tree_item_recursive(child, needle):
+                child_matches = True
+
+        own_match = self._item_matches_filter(item, needle)
+        visible = own_match or child_matches
+        item.setHidden(not visible)
+        if needle and child_matches:
+            item.setExpanded(True)
+        return visible
+
+    def _apply_tree_filter(self):
+        needle = self._tree_filter_text
+        root = self._tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            self._filter_tree_item_recursive(root.child(i), needle)
+
+        current = self._tree.currentItem()
+        if current is not None and current.isHidden():
+            self._tree.setCurrentItem(None)
+            self._set_active_special("empty")
+            self.item_selected.emit("")
 
     def _on_tree_selection(self, current: QTreeWidgetItem | None,
                            previous: QTreeWidgetItem | None):
@@ -4237,6 +4290,12 @@ class ParameterPanel(QWidget):
         if self._loading:
             return
 
+        def _set_descendants_state(root: QTreeWidgetItem, state: Qt.CheckState):
+            for idx in range(root.childCount()):
+                child = root.child(idx)
+                child.setCheckState(0, state)
+                _set_descendants_state(child, state)
+
         item_id = item.data(0, Qt.UserRole)
         checked = item.checkState(0) == Qt.Checked
         st = Qt.Checked if checked else Qt.Unchecked
@@ -4244,11 +4303,7 @@ class ParameterPanel(QWidget):
         # Floor plan item toggled → cascade to all sub-categories and elements
         if item_id and item_id in self.floorplan_panels:
             self._loading = True
-            for i in range(item.childCount()):
-                child = item.child(i)
-                child.setCheckState(0, st)
-                for j in range(child.childCount()):
-                    child.child(j).setCheckState(0, st)
+            _set_descendants_state(item, st)
             self._loading = False
             # Sync floor plan panel
             self.floorplan_panels[item_id].chk_visible.setChecked(checked)
@@ -4276,8 +4331,7 @@ class ParameterPanel(QWidget):
         for fp_id, subs in self._fp_sub_items.items():
             if item in subs.values():
                 self._loading = True
-                for i in range(item.childCount()):
-                    item.child(i).setCheckState(0, st)
+                _set_descendants_state(item, st)
                 self._loading = False
                 # Sync panels for elements under this specific sub-category
                 for eid, fid in self._element_floorplan.items():
@@ -4308,6 +4362,18 @@ class ParameterPanel(QWidget):
                         panel = self.furniture_panels.get(fur_id)
                         if panel:
                             panel.chk_visible.setChecked(checked)
+                return
+
+            ap_category = subs.get("ap")
+            if ap_category is not None and item.parent() is ap_category and not item_id:
+                self._loading = True
+                _set_descendants_state(item, st)
+                self._loading = False
+                for i in range(item.childCount()):
+                    child = item.child(i)
+                    child_id = child.data(0, Qt.UserRole)
+                    if child_id and child_id in self.elec_point_panels:
+                        self.elec_point_panels[child_id].chk_visible.setChecked(checked)
                 return
 
         # Individual leaf element (furniture or element) toggled
@@ -4384,6 +4450,101 @@ class ParameterPanel(QWidget):
             child = item.child(i)
             if child:
                 self._set_expanded_recursive(child, expanded)
+
+    @staticmethod
+    def _ap_group_key(room_id: str | None) -> str:
+        rid = (room_id or "").strip()
+        return rid if rid else "__unassigned__"
+
+    @staticmethod
+    def _ap_group_label(room_name: str | None) -> str:
+        name = (room_name or "").strip()
+        return f"🏠 {name}" if name else "⚠ Ohne Raum"
+
+    def _get_or_create_ap_room_group(
+        self,
+        fp_id: str,
+        room_id: str | None,
+        room_name: str | None,
+    ) -> QTreeWidgetItem | None:
+        ap_parent = self._fp_sub_items.get(fp_id, {}).get("ap")
+        if ap_parent is None:
+            return None
+
+        group_key = self._ap_group_key(room_id)
+        key = (fp_id, group_key)
+        group_item = self._ap_room_groups.get(key)
+        if group_item is None:
+            group_item = QTreeWidgetItem(ap_parent, [self._ap_group_label(room_name)])
+            group_item.setFlags(
+                (group_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled)
+                & ~Qt.ItemIsDragEnabled
+            )
+            group_item.setCheckState(0, ap_parent.checkState(0))
+            self._ap_room_groups[key] = group_item
+        else:
+            group_item.setText(0, self._ap_group_label(room_name))
+        group_item.setExpanded(True)
+        return group_item
+
+    def _prune_empty_ap_room_groups(self):
+        to_delete: list[tuple[str, str]] = []
+        for key, group_item in self._ap_room_groups.items():
+            if group_item.childCount() == 0:
+                parent = group_item.parent()
+                if parent is not None:
+                    parent.removeChild(group_item)
+                to_delete.append(key)
+        for key in to_delete:
+            self._ap_room_groups.pop(key, None)
+
+    def set_elec_point_room_assignment(self, point_id: str, room_id: str, room_name: str):
+        item = self._tree_items.get(point_id)
+        fp_id = self._element_floorplan.get(point_id, "")
+        if item is None or not fp_id:
+            return
+
+        target_group = self._get_or_create_ap_room_group(fp_id, room_id, room_name)
+        if target_group is None:
+            return
+
+        if item.parent() is not target_group:
+            old_parent = item.parent()
+            if old_parent is not None:
+                idx = old_parent.indexOfChild(item)
+                if idx >= 0:
+                    old_parent.takeChild(idx)
+            target_group.addChild(item)
+
+        self._prune_empty_ap_room_groups()
+        self._apply_tree_filter()
+
+    def sort_elec_point_room_groups(self, fp_id: str | None = None):
+        fp_ids = [fp_id] if fp_id else list(self.floorplan_panels.keys())
+        for current_fp in fp_ids:
+            ap_parent = self._fp_sub_items.get(current_fp, {}).get("ap")
+            if ap_parent is None:
+                continue
+
+            groups = [ap_parent.child(i) for i in range(ap_parent.childCount())]
+
+            for group in groups:
+                ap_children = [group.child(i) for i in range(group.childCount())]
+                ap_children.sort(key=lambda child: (child.text(0) or "").lower())
+                group.takeChildren()
+                for child in ap_children:
+                    group.addChild(child)
+
+            def _group_key(group_item: QTreeWidgetItem):
+                txt = (group_item.text(0) or "").strip().lower()
+                is_unassigned = 1 if "ohne raum" in txt else 0
+                return (is_unassigned, txt)
+
+            groups.sort(key=_group_key)
+            ap_parent.takeChildren()
+            for group in groups:
+                ap_parent.addChild(group)
+        self._apply_tree_filter()
 
     def select_item(self, item_id: str):
         """Programmatically select an item in the tree."""
@@ -4488,6 +4649,7 @@ class ParameterPanel(QWidget):
             self.floorplan_order_changed.emit()
         finally:
             self._loading = False
+        self._apply_tree_filter()
 
     # ──────────────────────────────────────────────────────────────── #
     #  Grundrisse (Floor Plans)                                         #
@@ -4502,6 +4664,7 @@ class ParameterPanel(QWidget):
             tree_item = self._tree_items.get(fp_id)
             if tree_item and name:
                 tree_item.setText(0, name)
+            self._apply_tree_filter()
             return existing
 
         panel = FloorPlanPanel(fp_id, name=name)
@@ -4583,6 +4746,7 @@ class ParameterPanel(QWidget):
             "furniture": furniture_item,
         }
         fp_item.setExpanded(True)
+        self._apply_tree_filter()
         if not self._loading:
             self._tree.setCurrentItem(fp_item)
         return panel
@@ -4632,12 +4796,15 @@ class ParameterPanel(QWidget):
         self._show_placeholder_if_empty()
 
     def remove_floorplan_panel(self, fp_id: str):
+        for key in [k for k in self._ap_room_groups.keys() if k[0] == fp_id]:
+            self._ap_room_groups.pop(key, None)
         self._fp_sub_items.pop(fp_id, None)
         self._remove_tree_item(fp_id)
         panel = self.floorplan_panels.pop(fp_id, None)
         if panel:
             self._prop_layout.removeWidget(panel)
             panel.deleteLater()
+        self._apply_tree_filter()
         self._show_placeholder_if_empty()
 
     def _move_floorplan_up(self, fp_id: str):
@@ -4826,6 +4993,7 @@ class ParameterPanel(QWidget):
         if panel:
             self._prop_layout.removeWidget(panel)
             panel.deleteLater()
+        self._prune_empty_ap_room_groups()
         self.update_all_elec_point_smarthome_choices()
         self.update_all_elec_point_smarthome_color_choices()
         self._show_placeholder_if_empty()
@@ -5245,6 +5413,7 @@ class ParameterPanel(QWidget):
 
         for i in reversed(remove_indices):
             self._tree.takeTopLevelItem(i)
+        self._apply_tree_filter()
 
     # ──────────────────────────────────────────────────────────────── #
     #  General heating params                                           #
@@ -5399,6 +5568,8 @@ class ParameterPanel(QWidget):
             self.remove_furniture_panel(fur_id)
         for fid in list(self.floorplan_panels):
             self.remove_floorplan_panel(fid)
+        self._ap_room_groups.clear()
+        self._apply_tree_filter()
 
     def to_dict(self) -> dict:
         return {
