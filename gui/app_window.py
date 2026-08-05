@@ -496,6 +496,18 @@ class AppWindow(QMainWindow):
         """
         current_scale = float(self.canvas._scale)
         current_offset = QPointF(self.canvas._offset)
+        # Anzeigeeinstellungen sichern: diese sind kein Teil der Projekthistorie
+        # und sollen beim Rückgängigmachen / Wiederherstellen nicht zurückspringen.
+        _view_keys_to_preserve = (
+            "bg_color",
+            "grid_visible",
+            "grid_spacing_mm",
+            "grid_color",
+            "snap_angle",
+        )
+        current_view = {k: self._document.view[k]
+                        for k in _view_keys_to_preserve
+                        if k in self._document.view}
         self._restoring_snapshot = True
         try:
             self._document.restore(snapshot)
@@ -509,6 +521,25 @@ class AppWindow(QMainWindow):
             self._document.view["view_offset"] = [
                 current_offset.x(), current_offset.y()
             ]
+            # Anzeigeeinstellungen zurückschreiben und im Canvas aktualisieren
+            self._document.view.update(current_view)
+            if "bg_color" in current_view:
+                self.canvas._bg_color = self.canvas._bg_color.__class__(current_view["bg_color"])
+            if "grid_visible" in current_view:
+                self.canvas._grid_visible = bool(current_view["grid_visible"])
+            if "grid_spacing_mm" in current_view:
+                self.canvas._grid_spacing_mm = float(current_view["grid_spacing_mm"])
+            if "grid_color" in current_view:
+                gc = current_view["grid_color"]
+                if isinstance(gc, (list, tuple)) and len(gc) == 4:
+                    from PySide6.QtGui import QColor as _QColor  # noqa: PLC0415
+                    self.canvas._grid_color = _QColor(gc[0], gc[1], gc[2], gc[3])
+                else:
+                    from PySide6.QtGui import QColor as _QColor  # noqa: PLC0415
+                    self.canvas._grid_color = _QColor(gc)
+            if "snap_angle" in current_view:
+                self.canvas._snap_angle = float(current_view["snap_angle"])
+            self._sync_grid_toolbar_from_canvas()
             self.canvas.update()
             self._load_floor_plan_images(self._document)
             # Eigenschaften-Dock: alle Editor-Caches invalidieren.
