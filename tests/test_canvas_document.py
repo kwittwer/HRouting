@@ -78,6 +78,215 @@ def test_visibility_maps_write_to_params(bound):
     assert document.to_dict()["params"]["circuits"]["HK-1"]["visible"] is False
 
 
+def test_inplace_point_assignment_lands_in_document(bound):
+    """In-Place-Mutation einer Punktliste muss ins Document zurückschreiben.
+
+    Regression: `DocumentMapView.__getitem__` lieferte eine frisch erzeugte
+    Wegwerf-Liste; `canvas._manual_routes[cid][idx] = pt` (so arbeitet der
+    Drag-Code in mouseMoveEvent) verpuffte damit wirkungslos.
+    """
+    canvas, document = bound
+    canvas._manual_routes["HK-1"] = [QPointF(0, 0), QPointF(10, 10), QPointF(20, 20)]
+
+    canvas._manual_routes["HK-1"][1] = QPointF(50, 60)
+
+    saved = document.to_dict()["canvas"]["manual_routes"]["HK-1"]
+    assert saved == [[0.0, 0.0], [50.0, 60.0], [20.0, 20.0]]
+
+
+def test_inplace_mutation_via_local_variable(bound):
+    """Auch über eine lokale Variable gehaltene Liste muss zurückschreiben."""
+    canvas, document = bound
+    canvas._polygons["HK-1"] = [QPointF(0, 0), QPointF(5, 0), QPointF(5, 5)]
+
+    pts = canvas._polygons["HK-1"]
+    pts[0] = QPointF(1, 2)
+    pts.insert(1, QPointF(3, 4))
+    pts.append(QPointF(9, 9))
+    del pts[-2]
+
+    saved = document.to_dict()["canvas"]["polygons"]["HK-1"]
+    assert saved == [[1.0, 2.0], [3.0, 4.0], [5.0, 0.0], [9.0, 9.0]]
+
+
+def test_inplace_mutation_fires_change_signal(bound):
+    canvas, _document = bound
+    canvas._manual_routes["HK-1"] = [QPointF(0, 0), QPointF(1, 1)]
+    seen: list[str] = []
+    canvas.document_data_changed.connect(seen.append)
+
+    canvas._manual_routes["HK-1"][0] = QPointF(7, 7)
+
+    assert seen == ["HK-1"]
+
+
+def test_inplace_mutation_works_for_all_point_maps(bound):
+    """Alle sechs POINT_LIST-gebundenen Maps müssen In-Place schreiben."""
+    canvas, document = bound
+    cases = [
+        (canvas._manual_routes, "HK-1", "manual_routes"),
+        (canvas._polygons, "HK-1", "polygons"),
+        (canvas._supply_lines, "HK-1", "supply_lines"),
+        (canvas._elec_cables, "EK-1", "elec_cables"),
+        (canvas._elec_room_polygons, "ER-1", "elec_rooms"),
+    ]
+    for view, key, _canvas_key in cases:
+        view[key] = [QPointF(0, 0), QPointF(10, 10)]
+
+    for view, key, _canvas_key in cases:
+        view[key][1] = QPointF(99, 88)
+
+    saved = document.to_dict()["canvas"]
+    for _view, key, canvas_key in cases:
+        assert saved[canvas_key][key][1] == [99.0, 88.0], canvas_key
+
+
+def _mouse(canvas, kind, canvas_pt, ctrl=False):
+    """Sendet ein echtes QMouseEvent an den Canvas (Canvas- statt Screen-Koordinaten)."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    btn = Qt.MouseButton.LeftButton
+    screen = QPointF(
+        canvas_pt.x() * canvas._scale + canvas._offset.x(),
+        canvas_pt.y() * canvas._scale + canvas._offset.y(),
+    )
+    types = {
+        "press": QEvent.Type.MouseButtonPress,
+        "move": QEvent.Type.MouseMove,
+        "release": QEvent.Type.MouseButtonRelease,
+    }
+    mods = (
+        Qt.KeyboardModifier.ControlModifier if ctrl
+        else Qt.KeyboardModifier.NoModifier
+    )
+    buttons = btn if kind == "move" else Qt.MouseButton.NoButton
+    event = QMouseEvent(types[kind], screen, screen, btn, buttons, mods)
+    getattr(canvas, {"press": "mousePressEvent",
+                     "move": "mouseMoveEvent",
+                     "release": "mouseReleaseEvent"}[kind])(event)
+
+
+def test_dragging_route_point_persists_to_document(bound):
+    """Laufzeitnachweis Bug B: ein echter Drag muss im Document ankommen.
+
+    Ctrl wird gedrückt gehalten, damit Grid-Snapping und die
+    Wandabstands-Constraints den Zielpunkt nicht verschieben.
+    """
+    canvas, document = bound
+    canvas._manual_routes["HK-1"] = [
+        QPointF(100, 100), QPointF(200, 100), QPointF(200, 200)
+    ]
+
+    _mouse(canvas, "press", QPointF(200, 100))
+    assert canvas._dragging_route_point == ("HK-1", 1), "Drag wurde nicht gestartet"
+
+    _mouse(canvas, "move", QPointF(260, 140), ctrl=True)
+    _mouse(canvas, "release", QPointF(260, 140), ctrl=True)
+
+    saved = document.to_dict()["canvas"]["manual_routes"]["HK-1"]
+    assert saved[1] == [260.0, 140.0], f"Punkt nicht verschoben: {saved}"
+
+
+# ---------------------------------------------------------------------------
+# Bug A: Workspace-Filter muss auch für den Direkt-Drag gelten
+# ---------------------------------------------------------------------------
+
+
+def test_elec_point_not_draggable_in_heating_workspace(bound):
+    """Ein AP darf im Heizung-Workspace nicht per Direktklick gezogen werden."""
+    from model.layers import LayerId
+    from gui.canvas_widget import ToolMode
+
+    canvas, _document = bound
+    canvas.set_selectable_layers({LayerId.HEATING})
+
+    _mouse(canvas, "press", QPointF(200, 250))  # Position von AP-1
+
+    assert canvas._dragging_elec_point is None
+    assert canvas._mode is not ToolMode.MOVE_ELEC_POINT
+
+
+def test_elec_point_draggable_in_electrical_workspace(bound):
+    from model.layers import LayerId
+
+    canvas, _document = bound
+    canvas.set_selectable_layers({LayerId.ELECTRICAL})
+
+    _mouse(canvas, "press", QPointF(200, 250))
+
+    assert canvas._dragging_elec_point == "AP-1"
+
+
+def test_route_point_not_draggable_in_electrical_workspace(bound):
+    from model.layers import LayerId
+
+    canvas, _document = bound
+    canvas._manual_routes["HK-1"] = [QPointF(100, 100), QPointF(200, 100)]
+    canvas.set_selectable_layers({LayerId.ELECTRICAL})
+
+    _mouse(canvas, "press", QPointF(200, 100))
+
+    assert canvas._dragging_route_point is None
+
+
+def test_route_point_draggable_in_heating_workspace(bound):
+    from model.layers import LayerId
+
+    canvas, _document = bound
+    canvas._manual_routes["HK-1"] = [QPointF(100, 100), QPointF(200, 100)]
+    canvas.set_selectable_layers({LayerId.HEATING})
+
+    _mouse(canvas, "press", QPointF(200, 100))
+
+    assert canvas._dragging_route_point == ("HK-1", 1)
+
+
+def test_start_point_not_draggable_in_electrical_workspace(bound):
+    from model.layers import LayerId
+
+    canvas, _document = bound
+    canvas._start_points["HK-1"] = QPointF(300, 300)
+    canvas.set_selectable_layers({LayerId.ELECTRICAL})
+
+    _mouse(canvas, "press", QPointF(300, 300))
+
+    assert canvas._dragging_start is None
+
+
+def test_locked_hit_falls_through_to_allowed_object(bound):
+    """Ein gesperrter Treffer darf einen dahinterliegenden erlaubten nicht blockieren."""
+    from model.layers import LayerId
+
+    canvas, _document = bound
+    # AP und Routenpunkt exakt übereinander legen.
+    canvas._elec_points["AP-1"] = QPointF(400, 400)
+    canvas._manual_routes["HK-1"] = [QPointF(100, 100), QPointF(400, 400)]
+    canvas.set_selectable_layers({LayerId.HEATING})
+
+    _mouse(canvas, "press", QPointF(400, 400))
+
+    assert canvas._dragging_elec_point is None
+    assert canvas._dragging_route_point == ("HK-1", 1)
+
+
+def test_workspace_switch_cancels_locked_route_drag(bound):
+    """Ein laufender Drag wird beim Workspace-Wechsel sauber abgebrochen."""
+    from model.layers import LayerId
+    from gui.canvas_widget import ToolMode
+
+    canvas, _document = bound
+    canvas._manual_routes["HK-1"] = [QPointF(100, 100), QPointF(200, 100)]
+    canvas.set_selectable_layers({LayerId.HEATING})
+    _mouse(canvas, "press", QPointF(200, 100))
+    assert canvas._dragging_route_point == ("HK-1", 1)
+
+    canvas.set_selectable_layers({LayerId.ELECTRICAL})
+
+    assert canvas._dragging_route_point is None
+    assert canvas._mode is ToolMode.NONE
+
+
 def test_read_only_access_does_not_modify_document(app):
     document = Document.from_dict(load_raw(EXAMPLE))
     before = json.dumps(document.to_dict(), sort_keys=True)

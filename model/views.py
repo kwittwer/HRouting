@@ -19,7 +19,7 @@ Listenformen des .hrp-Formats konvertiert.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterator, MutableMapping
+from typing import Any, Callable, Iterator, MutableMapping, MutableSequence
 
 from PySide6.QtCore import QPointF
 
@@ -115,6 +115,99 @@ RAW = (identity, identity)
 # ---------------------------------------------------------------------------
 
 
+class WritebackList(MutableSequence):
+    """Listen-Proxy, der jede Mutation in die besitzende View zurückschreibt.
+
+    Die Views konvertieren beim Lesen (z. B. ``[[x, y], ...]`` ->
+    ``[QPointF, ...]``) und erzeugen dabei zwangsläufig eine neue Liste. Ohne
+    diesen Proxy verpuffen alle In-Place-Änderungen::
+
+        canvas._manual_routes["HK-1"][2] = QPointF(5, 5)   # ginge verloren
+
+    Der Canvas arbeitet an rund sechzig Stellen genau so (Punkt verschieben,
+    einfügen, löschen). Der Proxy schreibt nach jeder mutierenden Operation die
+    komplette Liste über ``owner[key] = ...`` zurück, wodurch die Konvertierung
+    und die Change-Benachrichtigung der View greifen.
+
+    Lesende Zugriffe verhalten sich wie bei einer normalen ``list`` und lösen
+    keinen Schreibvorgang aus.
+    """
+
+    __slots__ = ("_items", "_owner", "_key")
+
+    def __init__(self, items: list, owner: MutableMapping, key: str) -> None:
+        self._items = items
+        self._owner = owner
+        self._key = key
+
+    # -- Rückschreiben ---------------------------------------------------
+    def _flush(self) -> None:
+        self._owner[self._key] = list(self._items)
+
+    # -- MutableSequence -------------------------------------------------
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return list(self._items[index])
+        return self._items[index]
+
+    def __setitem__(self, index, value) -> None:
+        self._items[index] = value
+        self._flush()
+
+    def __delitem__(self, index) -> None:
+        del self._items[index]
+        self._flush()
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def insert(self, index: int, value: Any) -> None:
+        self._items.insert(index, value)
+        self._flush()
+
+    # -- Verhalten wie eine echte Liste ----------------------------------
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, WritebackList):
+            return self._items == other._items
+        return self._items == other
+
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
+
+    __hash__ = None  # type: ignore[assignment]  # veränderlich wie list
+
+    def __repr__(self) -> str:
+        return repr(self._items)
+
+    def __add__(self, other: Any) -> list:
+        return self._items + list(other)
+
+    def __radd__(self, other: Any) -> list:
+        return list(other) + self._items
+
+    def copy(self) -> list:
+        return list(self._items)
+
+
+def _wrap_list(value: Any, owner: MutableMapping, key: str) -> Any:
+    """Listenwerte in einen schreibenden Proxy hüllen, alles andere durchreichen."""
+    if isinstance(value, list):
+        return WritebackList(value, owner, key)
+    return value
+
+
+class _AttrWriteTarget:
+    """Adapter, damit :class:`WritebackList` auch auf ein Attribut schreiben kann."""
+
+    __slots__ = ("_obj",)
+
+    def __init__(self, obj: Any) -> None:
+        self._obj = obj
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self._obj, key, value)
+
+
 class DocumentMapView(MutableMapping):
     """Bildet eine id-basierte ``canvas``-Map auf das ``Document`` ab.
 
@@ -175,8 +268,10 @@ class DocumentMapView(MutableMapping):
         if element is None:
             raise KeyError(key)
         if self._geom_key in element.geom:
-            return self._read(element.geom[self._geom_key])
+            return _wrap_list(self._read(element.geom[self._geom_key]), self, key)
         if self._has_default:
+            # Bewusst ungehüllt: ein Schreibvorgang auf dem Default würde sonst
+            # einen Eintrag anlegen, den es im Document gar nicht gibt.
             return self._default
         raise KeyError(key)
 
@@ -330,7 +425,7 @@ class NestedEntryView(MutableMapping):
         entry = self._entry(key)
         if entry is None:
             raise KeyError(key)
-        return self._read(entry.get(self._field, self._default))
+        return _wrap_list(self._read(entry.get(self._field, self._default)), self, key)
 
     def __setitem__(self, key: str, value: Any) -> None:
         entry = self._entry(key, create=True)
@@ -458,7 +553,7 @@ class ParamsMapView(MutableMapping):
         element = self._element(key)
         if element is None:
             raise KeyError(key)
-        return self._read(element.data.get(self._field, self._default))
+        return _wrap_list(self._read(element.data.get(self._field, self._default)), self, key)
 
     def __setitem__(self, key: str, value: Any) -> None:
         element = self._element(key)
@@ -496,7 +591,7 @@ class ParamsMapView(MutableMapping):
         if self._field not in element.data:
             element.data[self._field] = self._write(default)
             return default
-        return self._read(element.data[self._field])
+        return _wrap_list(self._read(element.data[self._field]), self, key)
 
     def pop(self, key: str, *args: Any) -> Any:
         try:
@@ -652,7 +747,7 @@ class _InnerViewMap(MutableMapping):
         return self._owner._root.setdefault(self._floor_id, {})
 
     def __getitem__(self, key: str) -> Any:
-        return self._read(self._data[key])
+        return _wrap_list(self._read(self._data[key]), self, key)
 
     def __setitem__(self, key: str, value: Any) -> None:
         self._data[key] = self._write(value)
@@ -770,7 +865,11 @@ class FloorPlanLayerView:
                 return None
             return to_point(ref_line[0 if name == "ref_p1" else 1])
         if name == "polygon":
-            return to_point_list(element.layer.get("polygon"))
+            return WritebackList(
+                to_point_list(element.layer.get("polygon")),
+                _AttrWriteTarget(self),
+                "polygon",
+            )
         if name in _LAYER_SCALARS:
             return element.layer.get(name, _LAYER_SCALARS[name])
         raise AttributeError(name)

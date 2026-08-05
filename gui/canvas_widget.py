@@ -2426,8 +2426,18 @@ class CanvasWidget(QWidget):
         # Laufende Drag-Operationen beenden, wenn ihr Layer nicht mehr aktiv ist.
         if self._dragging_route_point:
             owner_id, _idx = self._dragging_route_point
-            if not self._is_selectable("elec_cable", owner_id):
+            if not self._is_selectable(self._owner_obj_type(owner_id), owner_id):
                 self._dragging_route_point = None
+                if self._mode in (
+                    ToolMode.MOVE_ROUTE_POINT,
+                    ToolMode.EDIT_ROUTE,
+                    ToolMode.EDIT_POLYGON,
+                    ToolMode.EDIT_ELEC_CABLE,
+                    ToolMode.EDIT_SUPPLY_LINE,
+                    ToolMode.EDIT_HKV_LINE,
+                ):
+                    self._mode = ToolMode.NONE
+                    self.setCursor(Qt.ArrowCursor)
 
         if self._dragging_elec_cable_id and not self._is_selectable("elec_cable", self._dragging_elec_cable_id):
             self._dragging_elec_cable_id = None
@@ -2452,6 +2462,27 @@ class CanvasWidget(QWidget):
         if obj_type == "floor_polygon":
             return "furniture" if str(obj_id).startswith("einr") else "floorplan"
         return self._OBJECT_LAYERS.get(obj_type, "")
+
+    def _owner_obj_type(self, owner_id: str) -> str:
+        """Ermittelt den Objekttyp einer Punktlisten-ID für ``_is_selectable``.
+
+        ``_dragging_route_point`` speichert nur ``(owner_id, index)`` – der Typ
+        muss über die Zugehörigkeit zur jeweiligen Punktlisten-Map bestimmt
+        werden. Reihenfolge = Eindeutigkeit der ID-Präfixe.
+        """
+        if owner_id in self._elec_cables:
+            return "elec_cable"
+        if owner_id in self._hkv_lines:
+            return "hkv_line"
+        if owner_id in self._elec_room_polygons:
+            return "elec_room"
+        if owner_id in self._manual_routes or owner_id in self._polygons:
+            return "route"
+        if owner_id in self._supply_lines:
+            return "supply_line"
+        if owner_id in self._floor_plans:
+            return "floor_polygon"
+        return ""
 
     def _is_selectable(self, obj_type: str, obj_id: str) -> bool:
         allowed = getattr(self, "_selectable_layers", None)
@@ -5372,27 +5403,31 @@ class CanvasWidget(QWidget):
                     self.update()
                     return
 
+            # Treffer werden gegen die aktiven Workspace-Layer gefiltert.
+            # Bei gesperrtem Treffer NICHT abbrechen, sondern zum nächsten
+            # Hit-Test durchfallen – so bleibt ein dahinterliegendes, erlaubtes
+            # Objekt greifbar (gleiches Verhalten wie in _hit_any_object).
             route_hit = self._hit_route_point(canvas_pt)
-            if route_hit:
+            if route_hit and self._is_selectable("route", route_hit[0]):
                 self._dragging_route_point = route_hit
                 self._mode = ToolMode.MOVE_ROUTE_POINT
                 self.setCursor(Qt.ClosedHandCursor)
                 return
             hit = self._hit_start_point(canvas_pt)
-            if hit:
+            if hit and self._is_selectable("polygon", hit):
                 self._dragging_start = hit
                 self._mode = ToolMode.MOVE_START
                 self.setCursor(Qt.ClosedHandCursor)
                 return
             elec_hit = self._hit_elec_point(canvas_pt)
-            if elec_hit:
+            if elec_hit and self._is_selectable("elec_point", elec_hit):
                 self.object_clicked.emit("elec_point", elec_hit)
                 self._dragging_elec_point = elec_hit
                 self._mode = ToolMode.MOVE_ELEC_POINT
                 self.setCursor(Qt.ClosedHandCursor)
                 return
             hkv_hit = self._hit_hkv(canvas_pt)
-            if hkv_hit:
+            if hkv_hit and self._is_selectable("hkv", hkv_hit):
                 self.object_clicked.emit("hkv", hkv_hit)
                 self._dragging_hkv = hkv_hit
                 self._mode = ToolMode.MOVE_HKV
