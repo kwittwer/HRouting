@@ -239,3 +239,162 @@ def test_app_window_add_elements(app, tmp_path, monkeypatch):
     finally:
         window.deleteLater()
 
+
+def test_delete_elec_point_clears_cable_endpoints(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_points": {
+                    "AP-1": [10.0, 10.0],
+                    "AP-2": [20.0, 20.0],
+                },
+                "elec_cables": {"EK-1": [[10.0, 10.0], [20.0, 20.0]]},
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1"},
+                    "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1"},
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "start_ap": "AP-1",
+                        "end_ap": "AP-2",
+                    }
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        assert document.elements["elec_cables"]["EK-1"].start_ap == "AP-1"
+
+        window._delete_element("AP-1")
+
+        cable = document.elements["elec_cables"]["EK-1"]
+        assert cable.start_ap == ""
+        assert cable.geom.get("cable_start_ap", "") == ""
+        assert cable.end_ap == "AP-2"
+    finally:
+        window.deleteLater()
+
+
+def test_duplicate_cable_resets_endpoint_references(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_cables": {"EK-1": [[10.0, 10.0], [20.0, 20.0]]},
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "start_ap": "AP-1",
+                        "end_ap": "AP-2",
+                    }
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._copy_buffer = {"id": "EK-1", "type": "ElecCable"}
+        window._paste_copied()
+
+        ids = sorted(document.elements["elec_cables"].keys())
+        assert len(ids) == 2
+        new_id = next(eid for eid in ids if eid != "EK-1")
+        duplicate = document.elements["elec_cables"][new_id]
+        assert duplicate.start_ap == ""
+        assert duplicate.end_ap == ""
+        assert duplicate.geom.get("cable_start_ap", "") == ""
+        assert duplicate.geom.get("cable_end_ap", "") == ""
+    finally:
+        window.deleteLater()
+
+
+def test_renumber_elec_points(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_points": {
+                    "AP-1": [10.0, 10.0],
+                    "AP-2": [20.0, 20.0],
+                },
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Steckdose",
+                    },
+                    "AP-2": {
+                        "point_id": "AP-2",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Steckdose",
+                    },
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._renumber_elec_points()
+
+        names = {
+            document.elements["elec_points"]["AP-1"].name,
+            document.elements["elec_points"]["AP-2"].name,
+        }
+        assert names == {"Steckdose1", "Steckdose2"}
+    finally:
+        window.deleteLater()
+

@@ -29,6 +29,7 @@ class NavigatorDock(QDockWidget):
     element_selected = Signal(str)
     floorplan_activated = Signal(str)
     visibility_changed = Signal(str, bool)
+    context_requested = Signal(str, str, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigator", parent)
@@ -52,9 +53,11 @@ class NavigatorDock(QDockWidget):
         self._tree = QTreeWidget(container)
         self._tree.setHeaderHidden(True)
         self._tree.setUniformRowHeights(True)
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_double_clicked)
         self._tree.itemChanged.connect(self._on_item_changed)
+        self._tree.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self._tree, 1)
 
         self.setWidget(container)
@@ -264,6 +267,19 @@ class NavigatorDock(QDockWidget):
             fp_id = item.data(0, _ID_ROLE)
             if fp_id:
                 self.floorplan_activated.emit(fp_id)
+
+    def _on_context_menu(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        if item is None:
+            return
+        kind = item.data(0, _KIND_ROLE)
+        if kind not in ("element", "floorplan"):
+            return
+        element_id = item.data(0, _ID_ROLE)
+        if not element_id:
+            return
+        global_pos = self._tree.viewport().mapToGlobal(pos)
+        self.context_requested.emit(element_id, kind, global_pos)
 
     def select(self, element_id: str) -> None:
         item = self._items.get(element_id) or self._find_item_by_id(element_id)

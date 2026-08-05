@@ -10,6 +10,7 @@ Aufbau:
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QInputDialog,
+    QMenu,
     QTabBar,
     QVBoxLayout,
     QWidget,
@@ -57,6 +59,7 @@ class AppWindow(QMainWindow):
         self._project_path: Path | None = None
         self._dirty = False
         self._workspace: WorkspaceDefinition = workspace_by_id(DEFAULT_WORKSPACE_ID)
+        self._copy_buffer: dict | None = None
 
         self._build_central()
         self._build_docks()
@@ -127,6 +130,13 @@ class AppWindow(QMainWindow):
         edit_menu = bar.addMenu("&Bearbeiten")
         self._add_action(edit_menu, "Rückgängig", self._undo, QKeySequence.Undo)
         self._add_action(edit_menu, "Wiederherstellen", self._redo, QKeySequence.Redo)
+        edit_menu.addSeparator()
+        self._add_action(edit_menu, "Kopieren", self._copy_selected, QKeySequence.Copy)
+        self._add_action(edit_menu, "Einfügen", self._paste_copied, QKeySequence.Paste)
+        self._add_action(edit_menu, "Duplizieren", self._duplicate_selected, QKeySequence("Ctrl+D"))
+        self._add_action(edit_menu, "Löschen", self._delete_selected, QKeySequence.Delete)
+        edit_menu.addSeparator()
+        self._add_action(edit_menu, "Anschlusspunkte durchnummerieren", self._renumber_elec_points)
 
         add_menu = bar.addMenu("&Einfügen")
         self._add_action(add_menu, "Grundriss hinzufügen…", self._add_floorplan)
@@ -171,6 +181,7 @@ class AppWindow(QMainWindow):
         self.navigator.element_selected.connect(self._on_element_selected)
         self.navigator.floorplan_activated.connect(self._on_floorplan_activated)
         self.navigator.visibility_changed.connect(self._on_visibility_changed)
+        self.navigator.context_requested.connect(self._on_navigator_context)
         self.tools.tool_activated.connect(self._on_tool_activated)
         self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
         self.canvas.document_data_changed.connect(self._on_document_data_changed)
@@ -432,6 +443,68 @@ class AppWindow(QMainWindow):
             self.canvas.start_place_text(element_id, element.data.get("content", "Text"))
 
     def _action_delete(self, element_id: str) -> None:
+        self._delete_element_with_confirm(element_id)
+
+    def _copy_selected(self) -> None:
+        element_id = self._current_selection_id()
+        if not element_id:
+            self.statusBar().showMessage("Kein Element ausgewählt", 2000)
+            return
+        element = self._document.get(element_id)
+        if element is None:
+            self.statusBar().showMessage("Dieses Element kann nicht kopiert werden", 2500)
+            return
+        self._copy_buffer = {
+            "id": element_id,
+            "type": type(element).__name__,
+        }
+        self.statusBar().showMessage(f"Kopiert: {element_id}", 2000)
+
+    def _paste_copied(self) -> None:
+        if not self._copy_buffer:
+            self.statusBar().showMessage("Zwischenablage ist leer", 2000)
+            return
+        source_id = str(self._copy_buffer.get("id") or "")
+        if not source_id:
+            return
+        new_id = self._duplicate_element(source_id)
+        if not new_id:
+            self.statusBar().showMessage("Einfügen nicht möglich", 2500)
+            return
+        self.navigator.select(new_id)
+        self.properties.show_element(new_id)
+        self.canvas.set_selected_item(new_id)
+        self.statusBar().showMessage(f"Eingefügt: {new_id}", 2500)
+
+    def _duplicate_selected(self) -> None:
+        element_id = self._current_selection_id()
+        if not element_id:
+            self.statusBar().showMessage("Kein Element ausgewählt", 2000)
+            return
+        new_id = self._duplicate_element(element_id)
+        if not new_id:
+            self.statusBar().showMessage("Duplizieren nicht möglich", 2500)
+            return
+        self.navigator.select(new_id)
+        self.properties.show_element(new_id)
+        self.canvas.set_selected_item(new_id)
+        self.statusBar().showMessage(f"Dupliziert: {element_id} -> {new_id}", 2500)
+
+    def _delete_selected(self) -> None:
+        element_id = self._current_selection_id()
+        if not element_id:
+            self.statusBar().showMessage("Kein Element ausgewählt", 2000)
+            return
+        self._delete_element_with_confirm(element_id)
+
+    def _current_selection_id(self) -> str:
+        current_id = (self.properties._current_id or "").strip()
+        if current_id:
+            return current_id
+        selected_id = self.canvas._selected_item_id
+        return selected_id if selected_id else ""
+
+    def _delete_element_with_confirm(self, element_id: str) -> None:
         element = self._document.get(element_id)
         name = (element.name if element else "") or element_id
         answer = QMessageBox.question(
@@ -442,12 +515,294 @@ class AppWindow(QMainWindow):
         )
         if answer != QMessageBox.Yes:
             return
+        self._delete_element(element_id)
+
+    def _delete_element(self, element_id: str) -> bool:
+        element = self._document.get(element_id)
+        if element is None:
+            return False
+
+        self._cleanup_references_before_delete(element_id)
         self._document.remove(element_id)
+
+        # Wenn ein Grundriss entfernt wurde, verwaiste Auswahl bereinigen.
+        if element_id == self._document.active_floorplan_id:
+            self._document.active_floorplan_id = self._active_floorplan_id()
+
         self.properties.forget_element(element_id)
         self._emit_structure_changed()
         self.canvas.update()
         self._mark_dirty()
         self.log.info(f"Gelöscht: {element_id}")
+        return True
+
+    def _cleanup_references_before_delete(self, element_id: str) -> None:
+        document = self._document
+        element = document.get(element_id)
+        if element is None:
+            return
+
+        # Kaskadierendes Löschen eines Grundrisses inkl. untergeordneter Elemente.
+        if element_id in document.floorplans:
+            dependent_ids: list[str] = []
+            for candidate in document.all_elements():
+                if candidate.id == element_id:
+                    continue
+                if candidate.floor_plan_id == element_id:
+                    dependent_ids.append(candidate.id)
+            for dependent_id in dependent_ids:
+                self._cleanup_references_before_delete(dependent_id)
+                document.remove(dependent_id)
+                self.properties.forget_element(dependent_id)
+
+        # Elektropunkt entfernen: Kabelenden lösen.
+        if element_id in document.elements["elec_points"]:
+            for cable in document.elements["elec_cables"].values():
+                changed = False
+                if cable.start_ap == element_id:
+                    cable.start_ap = ""
+                    cable.geom["cable_start_ap"] = ""
+                    changed = True
+                if cable.end_ap == element_id:
+                    cable.end_ap = ""
+                    cable.geom["cable_end_ap"] = ""
+                    changed = True
+                if changed:
+                    document.element_changed.emit(cable.id)
+
+        # HKV entfernen: Heizkreiszuordnung und Leitungsknoten lösen.
+        if element_id in document.elements["hkv_points"]:
+            removed_hkv_name = (element.name or "").strip()
+            for circuit in document.elements["circuits"].values():
+                changed = False
+                if circuit.geom.get("supply_hkv") == element_id:
+                    circuit.geom["supply_hkv"] = ""
+                    changed = True
+                if removed_hkv_name and (circuit.distributor or "").strip() == removed_hkv_name:
+                    circuit.distributor = ""
+                    changed = True
+                if changed:
+                    document.element_changed.emit(circuit.id)
+
+            for line in document.elements["hkv_lines"].values():
+                changed = False
+                if line.start_hkv == element_id:
+                    line.start_hkv = ""
+                    line.geom["hkv_line_start"] = ""
+                    changed = True
+                if line.end_hkv == element_id:
+                    line.end_hkv = ""
+                    line.geom["hkv_line_end"] = ""
+                    changed = True
+                if changed:
+                    document.element_changed.emit(line.id)
+
+        # Kabel entfernen: Referenzen in AP-Konfigurationen bereinigen.
+        if element_id in document.elements["elec_cables"]:
+            for point in document.elements["elec_points"].values():
+                changed = False
+                uv = point.data.get("uv_config") or {}
+                if isinstance(uv, dict):
+                    slots = uv.get("slots") or []
+                    for slot in slots:
+                        if isinstance(slot, dict) and (slot.get("cable") or "") == element_id:
+                            slot["cable"] = ""
+                            changed = True
+
+                up = point.data.get("up_distribution_config") or {}
+                if isinstance(up, dict):
+                    mappings = up.get("mappings") or []
+                    for mapping in mappings:
+                        if isinstance(mapping, dict) and (mapping.get("cable_id") or "") == element_id:
+                            mapping["cable_id"] = ""
+                            changed = True
+                if changed:
+                    document.element_changed.emit(point.id)
+
+    def _duplicate_element(self, source_id: str) -> str | None:
+        source = self._document.get(source_id)
+        if source is None:
+            return None
+
+        cls = type(source)
+        new_id = self._document.new_id(cls)
+        data = copy.deepcopy(source.data)
+        geom = copy.deepcopy(source.geom)
+
+        if cls.ID_FIELD:
+            data[cls.ID_FIELD] = new_id
+        data.pop("uid", None)
+
+        # Referenzen bei Duplikaten lösen, damit kein implizites Linking entsteht.
+        if isinstance(source, Circuit):
+            data["distributor"] = ""
+            geom["supply_hkv"] = ""
+        if isinstance(source, ElecCable):
+            data["start_ap"] = ""
+            data["end_ap"] = ""
+            geom["cable_start_ap"] = ""
+            geom["cable_end_ap"] = ""
+        if isinstance(source, HkvLine):
+            data["start_hkv"] = ""
+            data["end_hkv"] = ""
+            geom["hkv_line_start"] = ""
+            geom["hkv_line_end"] = ""
+
+        self._offset_geometry_for_duplicate(type(source), geom)
+
+        if isinstance(source, FloorPlan):
+            layer = copy.deepcopy(source.layer)
+            layer["fp_id"] = new_id
+            layer["offset_x"] = float(layer.get("offset_x", 0.0)) + 20.0
+            layer["offset_y"] = float(layer.get("offset_y", 0.0)) + 20.0
+            layer["ref_line"] = self._offset_points(layer.get("ref_line"))
+            layer["polygon"] = self._offset_points(layer.get("polygon"))
+            clone = cls(new_id, data=data, geom=geom, layer=layer)
+            self._document.add(clone)
+            if isinstance(clone, FloorPlan):
+                self._document.floorplan_order.append(new_id)
+                if clone.file_path:
+                    self.canvas.load_floor_plan_image(new_id, str(clone.file_path))
+        else:
+            clone = cls(new_id, data=data, geom=geom)
+            self._document.add(clone)
+
+        self.canvas.register_element(new_id)
+        self._document.element_changed.emit(new_id)
+        self._emit_structure_changed()
+        self.canvas.update()
+        self._mark_dirty()
+        return new_id
+
+    @staticmethod
+    def _offset_point(point_like):
+        if (
+            isinstance(point_like, (list, tuple))
+            and len(point_like) == 2
+            and isinstance(point_like[0], (int, float))
+            and isinstance(point_like[1], (int, float))
+        ):
+            return [float(point_like[0]) + 20.0, float(point_like[1]) + 20.0]
+        return point_like
+
+    @classmethod
+    def _offset_points(cls, maybe_points):
+        if not isinstance(maybe_points, list):
+            return maybe_points
+        out = []
+        for entry in maybe_points:
+            if (
+                isinstance(entry, (list, tuple))
+                and len(entry) == 2
+                and isinstance(entry[0], (int, float))
+                and isinstance(entry[1], (int, float))
+            ):
+                out.append([float(entry[0]) + 20.0, float(entry[1]) + 20.0])
+            else:
+                out.append(entry)
+        return out
+
+    @classmethod
+    def _offset_geometry_for_duplicate(cls, element_cls: type, geom: dict) -> None:
+        offset_keys = {
+            "polygons",
+            "start_points",
+            "manual_routes",
+            "supply_lines",
+            "elec_points",
+            "elec_rooms",
+            "elec_room_polygons",
+            "elec_cables",
+            "hkv_points",
+            "hkv_lines",
+            "label_positions",
+        }
+        for key in offset_keys:
+            if key in geom:
+                value = geom[key]
+                if key == "start_points":
+                    geom[key] = cls._offset_point(value)
+                else:
+                    geom[key] = cls._offset_points(value)
+
+        text_entry = geom.get("text_annotations")
+        if isinstance(text_entry, dict) and "pos" in text_entry:
+            text_entry["pos"] = cls._offset_point(text_entry["pos"])
+
+    def _renumber_elec_points(self) -> None:
+        points = list(self._document.elements["elec_points"].values())
+        if not points:
+            self.statusBar().showMessage("Keine Anschlusspunkte vorhanden", 2500)
+            return
+
+        groups: dict[str, list[ElecPoint]] = {}
+        for point in points:
+            base = (point.name or point.id).strip() or point.id
+            groups.setdefault(base, []).append(point)
+
+        changed = 0
+        for base_name, grouped in groups.items():
+            if len(grouped) <= 1:
+                continue
+            grouped.sort(key=lambda p: p.id)
+            for index, point in enumerate(grouped, start=1):
+                new_name = f"{base_name}{index}"
+                if point.name != new_name:
+                    point.name = new_name
+                    self._document.element_changed.emit(point.id)
+                    changed += 1
+
+        if changed == 0:
+            self.statusBar().showMessage("Keine Umnummerierung nötig", 2500)
+            return
+
+        self.canvas.update()
+        self._mark_dirty()
+        self.statusBar().showMessage(f"{changed} Anschlusspunkte umnummeriert", 3000)
+
+    def _on_navigator_context(self, element_id: str, kind: str, global_pos) -> None:
+        menu = QMenu(self)
+        if kind == "floorplan":
+            activate_action = menu.addAction("Als aktiv setzen")
+            menu.addSeparator()
+        else:
+            activate_action = None
+
+        copy_action = menu.addAction("Kopieren")
+        paste_action = menu.addAction("Einfügen")
+        duplicate_action = menu.addAction("Duplizieren")
+        menu.addSeparator()
+        delete_action = menu.addAction("Löschen")
+
+        has_element = self._document.get(element_id) is not None
+        copy_action.setEnabled(has_element)
+        duplicate_action.setEnabled(has_element)
+        delete_action.setEnabled(has_element)
+        paste_action.setEnabled(self._copy_buffer is not None)
+
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        if activate_action is not None and chosen == activate_action:
+            self._on_floorplan_activated(element_id)
+            return
+        if chosen == copy_action:
+            self.navigator.select(element_id)
+            self.properties.show_element(element_id)
+            self.canvas.set_selected_item(element_id)
+            self._copy_selected()
+            return
+        if chosen == paste_action:
+            self._paste_copied()
+            return
+        if chosen == duplicate_action:
+            self.navigator.select(element_id)
+            self.properties.show_element(element_id)
+            self.canvas.set_selected_item(element_id)
+            self._duplicate_selected()
+            return
+        if chosen == delete_action:
+            self._delete_element_with_confirm(element_id)
 
     def _sync_canvas_to_document(self) -> None:
         """Überträgt die noch nicht gebundenen Canvas-Daten ins Dokument.
