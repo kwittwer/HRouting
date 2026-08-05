@@ -173,9 +173,46 @@ class AppWindow(QMainWindow):
         self.tools.tool_activated.connect(self._on_tool_activated)
         self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
         self.canvas.document_data_changed.connect(self._on_document_data_changed)
+        self.properties.field_changed.connect(self._on_property_changed)
+        self.properties.action_triggered.connect(self._on_property_action)
+        self.properties.setting_changed.connect(self._on_global_setting_changed)
 
-    def _on_document_data_changed(self, _element_id: str) -> None:
+    def _on_property_changed(self, element_id: str, key: str, _value) -> None:
+        """Ein Feld im Eigenschaften-Dock wurde geändert."""
+        self._apply_property_side_effects(element_id, key)
+        self._document.element_changed.emit(element_id)
+        self.canvas.update()
+        self._mark_dirty()
+
+    def _apply_property_side_effects(self, element_id: str, key: str) -> None:
+        """Sorgt dafür, dass Änderungen sofort im Canvas sichtbar werden."""
+        element = self._document.get(element_id)
+        if element is None:
+            return
+
+        if key == "visible":
+            self.canvas.set_element_visible(element_id, bool(element.visible))
+        elif key in ("width", "height") and element_id in self.canvas._elec_points:
+            self.canvas.update_elec_point_size(
+                element_id, float(element.data.get("width", 30.0)),
+                float(element.data.get("height", 30.0))
+            )
+        elif key == "file_path" and element_id in self._document.floorplans:
+            path = (element.data.get("file_path") or "").strip()
+            if path:
+                resolved = Path(path)
+                if not resolved.is_absolute() and self._project_path is not None:
+                    resolved = (self._project_path.parent / resolved).resolve()
+                if resolved.exists():
+                    self.canvas.load_floor_plan_image(element_id, str(resolved))
+
+    def _on_global_setting_changed(self, _key: str, _value) -> None:
+        self.properties.refresh_current()
+        self._mark_dirty()
+
+    def _on_document_data_changed(self, element_id: str) -> None:
         """Der Canvas hat Projektdaten geändert – Projekt gilt als bearbeitet."""
+        self.properties.refresh_element(element_id)
         if not self._dirty:
             self._dirty = True
             self._update_title()
@@ -236,7 +273,7 @@ class AppWindow(QMainWindow):
     def _set_document(self, document: Document) -> None:
         self._document = document
         self.navigator.set_document(document)
-        self.properties.clear()
+        self.properties.set_document(document)
 
         # Globale Ansichtsdaten (Zoom, Raster, Grundriss-Transformationen,
         # Hilfslinien, Messungen) in den Canvas übertragen …
@@ -249,6 +286,84 @@ class AppWindow(QMainWindow):
 
         self._load_floor_plan_images(document)
         self._update_title()
+
+    def _on_property_action(self, element_id: str, action_id: str) -> None:
+        """Führt eine Schaltflächen-Aktion aus dem Eigenschaften-Dock aus."""
+        element = self._document.get(element_id)
+        if element is None:
+            return
+
+        handlers = {
+            "draw_polygon": self._action_draw_polygon,
+            "edit_polygon": self._action_edit_polygon,
+            "draw_route": lambda eid: self.canvas.start_route_drawing(eid),
+            "edit_route": lambda eid: self.canvas.start_edit_route(eid),
+            "draw_supply": lambda eid: self.canvas.start_draw_supply_line(eid),
+            "edit_supply": lambda eid: self.canvas.start_edit_supply_line(eid),
+            "draw_cable": lambda eid: self.canvas.start_draw_elec_cable(eid),
+            "edit_cable": lambda eid: self.canvas.start_edit_elec_cable(eid),
+            "draw_line": lambda eid: self.canvas.start_draw_hkv_line(eid),
+            "edit_line": lambda eid: self.canvas.start_edit_hkv_line(eid),
+            "place": self._action_place,
+            "draw_ref_line": lambda eid: self.canvas.start_ref_line_for_floor(eid),
+            "delete": self._action_delete,
+        }
+
+        handler = handlers.get(action_id)
+        if handler is None:
+            self.statusBar().showMessage("Aktion noch nicht verfügbar", 3000)
+            return
+
+        try:
+            handler(element_id)
+        except Exception as exc:  # noqa: BLE001 - Aktion darf die UI nicht abbrechen
+            self.log.error(f"Aktion '{action_id}' fehlgeschlagen: {exc}")
+
+    def _action_draw_polygon(self, element_id: str) -> None:
+        if element_id in self._document.elements["elec_rooms"]:
+            self.canvas.start_draw_elec_room(element_id)
+        else:
+            self.canvas.start_drawing(element_id)
+
+    def _action_edit_polygon(self, element_id: str) -> None:
+        self.canvas.start_edit_polygon(element_id)
+
+    def _action_place(self, element_id: str) -> None:
+        element = self._document.get(element_id)
+        if element is None:
+            return
+        if element_id in self._document.elements["elec_points"]:
+            self.canvas.start_place_elec_point(
+                element_id,
+                float(element.data.get("width", 30.0)),
+                float(element.data.get("height", 30.0)),
+            )
+        elif element_id in self._document.elements["hkv_points"]:
+            self.canvas.start_place_hkv(
+                element_id,
+                float(element.data.get("width", 50.0)),
+                float(element.data.get("height", 50.0)),
+            )
+        elif element_id in self._document.elements["text_annotations"]:
+            self.canvas.start_place_text(element_id, element.data.get("content", "Text"))
+
+    def _action_delete(self, element_id: str) -> None:
+        element = self._document.get(element_id)
+        name = (element.name if element else "") or element_id
+        answer = QMessageBox.question(
+            self,
+            "Element löschen",
+            f"'{name}' wirklich löschen?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._document.remove(element_id)
+        self.properties.forget_element(element_id)
+        self._emit_structure_changed()
+        self.canvas.update()
+        self._mark_dirty()
+        self.log.info(f"Gelöscht: {element_id}")
 
     def _sync_canvas_to_document(self) -> None:
         """Überträgt die noch nicht gebundenen Canvas-Daten ins Dokument.
