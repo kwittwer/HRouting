@@ -183,6 +183,9 @@ def main():
     from gui.main_window import MainWindow
     import logging as _logging
 
+    # Umbauphase: neue Dock-/Workspace-Oberfläche testweise per --new-ui
+    _use_new_ui = "--new-ui" in sys.argv
+
     # --- MCP Log-Fenster (wird nur bei --mcp verwendet) ---
     class _McpLogHandler(_logging.Handler, QObject):
         log_signal = Signal(str, str)  # (nachricht, level)
@@ -258,14 +261,23 @@ def main():
             _logging.getLogger("hrouting.mcp").removeHandler(self._handler)
             super().closeEvent(event)
 
-    window = MainWindow()
+    if _use_new_ui:
+        from gui.app_window import AppWindow
+        window = AppWindow()
+    else:
+        window = MainWindow()
 
     # Open project file passed as command-line argument (file association)
     if len(sys.argv) > 1:
         project_file = Path(sys.argv[1])
         if project_file.exists() and project_file.suffix in ('.hrp', '.json'):
-            window._project_path = project_file
-            window._load_project(project_file)
+            if _use_new_ui:
+                from storage.hrp_io import load_document
+                window._project_path = project_file
+                window._set_document(load_document(project_file))
+            else:
+                window._project_path = project_file
+                window._load_project(project_file)
 
     if ico_path.exists():
         window.setWindowIcon(QIcon(str(ico_path)))

@@ -1,0 +1,226 @@
+"""Navigator: Baumansicht aller tatsächlich vorhandenen Projektelemente."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtWidgets import (
+    QDockWidget,
+    QLineEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from model.document import Document
+from model.elements import ELEMENT_TYPES, Element, Furniture
+from model.layers import LayerId
+
+_ID_ROLE = Qt.UserRole + 1
+_KIND_ROLE = Qt.UserRole + 2
+
+_ACTIVE_COLOR = QColor("#4fc3f7")
+
+
+class NavigatorDock(QDockWidget):
+    """Zeigt Grundrisse mit ihren Elementen; leere Kategorien entfallen."""
+
+    element_selected = Signal(str)
+    floorplan_activated = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("Navigator", parent)
+        self.setObjectName("dock_navigator")
+        self._document: Document | None = None
+        self._selectable_layers: set[LayerId] = set(LayerId)
+        self._items: dict[str, QTreeWidgetItem] = {}
+
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        self._filter = QLineEdit(container)
+        self._filter.setPlaceholderText("Filtern…")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.textChanged.connect(self._apply_filter)
+        layout.addWidget(self._filter)
+
+        self._tree = QTreeWidget(container)
+        self._tree.setHeaderHidden(True)
+        self._tree.setUniformRowHeights(True)
+        self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self._tree.itemDoubleClicked.connect(self._on_double_clicked)
+        layout.addWidget(self._tree, 1)
+
+        self.setWidget(container)
+
+    # ------------------------------------------------------------------
+    def set_document(self, document: Document | None) -> None:
+        if self._document is not None:
+            self._document.structure_changed.disconnect(self.rebuild)
+            self._document.element_added.disconnect(self._on_element_event)
+            self._document.element_removed.disconnect(self._on_element_event)
+            self._document.element_changed.disconnect(self._on_element_event)
+            self._document.active_floorplan_changed.disconnect(self._on_active_changed)
+        self._document = document
+        if document is not None:
+            document.structure_changed.connect(self.rebuild)
+            document.element_added.connect(self._on_element_event)
+            document.element_removed.connect(self._on_element_event)
+            document.element_changed.connect(self._on_element_event)
+            document.active_floorplan_changed.connect(self._on_active_changed)
+        self.rebuild()
+
+    def set_selectable_layers(self, layers: set[LayerId]) -> None:
+        """Setzt den Workspace-Filter; nicht aktive Layer werden abgeblendet."""
+        self._selectable_layers = set(layers)
+        self._apply_selectability()
+
+    # ------------------------------------------------------------------
+    def rebuild(self, *_args) -> None:
+        self._tree.clear()
+        self._items.clear()
+        document = self._document
+        if document is None:
+            return
+
+        for fp_id in document.floorplan_order:
+            floorplan = document.floorplans.get(fp_id)
+            if floorplan is None:
+                continue
+            fp_item = QTreeWidgetItem(self._tree, [floorplan.name or fp_id])
+            fp_item.setData(0, _ID_ROLE, fp_id)
+            fp_item.setData(0, _KIND_ROLE, "floorplan")
+            self._items[fp_id] = fp_item
+
+            for element_cls in ELEMENT_TYPES:
+                elements = document.elements_of(element_cls, fp_id)
+                if not elements:
+                    continue  # leere Kategorien werden gar nicht erzeugt
+                cat_item = QTreeWidgetItem(fp_item, [element_cls.CATEGORY_LABEL])
+                cat_item.setFlags(cat_item.flags() & ~Qt.ItemIsSelectable)
+                cat_item.setData(0, _KIND_ROLE, "category")
+                cat_item.setData(0, _ID_ROLE, element_cls.LAYER.value)
+                for element in sorted(elements, key=_sort_key):
+                    self._add_element_item(cat_item, element)
+
+            furniture = [f for f in document.furniture.values()
+                         if f.floor_plan_id in ("", fp_id)]
+            if furniture:
+                cat_item = QTreeWidgetItem(fp_item, [Furniture.CATEGORY_LABEL])
+                cat_item.setFlags(cat_item.flags() & ~Qt.ItemIsSelectable)
+                cat_item.setData(0, _KIND_ROLE, "category")
+                cat_item.setData(0, _ID_ROLE, LayerId.FURNITURE.value)
+                for element in sorted(furniture, key=_sort_key):
+                    self._add_element_item(cat_item, element)
+
+            fp_item.setExpanded(True)
+
+        self._apply_selectability()
+        self._highlight_active()
+        self._apply_filter(self._filter.text())
+
+    def _add_element_item(self, parent: QTreeWidgetItem, element: Element) -> None:
+        label = element.name or element.id
+        if element.name:
+            label = f"{element.id} · {element.name}"
+        item = QTreeWidgetItem(parent, [label])
+        item.setData(0, _ID_ROLE, element.id)
+        item.setData(0, _KIND_ROLE, "element")
+        item.setData(0, _KIND_ROLE + 1, type(element).LAYER.value)
+        color = element.color
+        if color:
+            item.setForeground(0, QBrush(QColor(color)))
+        self._items[element.id] = item
+
+    # ------------------------------------------------------------------
+    def _highlight_active(self) -> None:
+        document = self._document
+        if document is None:
+            return
+        active = document.active_floorplan_id
+        for fp_id in document.floorplans:
+            item = self._items.get(fp_id)
+            if item is None:
+                continue
+            font = item.font(0)
+            font.setBold(fp_id == active)
+            item.setFont(0, font)
+            item.setForeground(
+                0, QBrush(_ACTIVE_COLOR) if fp_id == active else QBrush()
+            )
+            if fp_id == active:
+                item.setToolTip(0, "Aktiver Grundriss")
+            else:
+                item.setToolTip(0, "Doppelklick: als aktiven Grundriss setzen")
+
+    def _apply_selectability(self) -> None:
+        root = self._tree.invisibleRootItem()
+        for index in range(root.childCount()):
+            self._apply_selectability_recursive(root.child(index))
+
+    def _apply_selectability_recursive(self, item: QTreeWidgetItem) -> None:
+        kind = item.data(0, _KIND_ROLE)
+        if kind == "element":
+            layer_value = item.data(0, _KIND_ROLE + 1)
+            enabled = layer_value in {layer.value for layer in self._selectable_layers}
+            item.setDisabled(not enabled)
+        for index in range(item.childCount()):
+            self._apply_selectability_recursive(item.child(index))
+
+    def _apply_filter(self, text: str) -> None:
+        needle = (text or "").strip().lower()
+        root = self._tree.invisibleRootItem()
+        for index in range(root.childCount()):
+            _filter_item(root.child(index), needle)
+
+    # ------------------------------------------------------------------
+    def _on_element_event(self, _element_id: str) -> None:
+        self.rebuild()
+
+    def _on_active_changed(self, _fp_id: str) -> None:
+        self._highlight_active()
+
+    def _on_selection_changed(self) -> None:
+        items = self._tree.selectedItems()
+        if not items:
+            return
+        element_id = items[0].data(0, _ID_ROLE)
+        if element_id:
+            self.element_selected.emit(element_id)
+
+    def _on_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        if item.data(0, _KIND_ROLE) == "floorplan":
+            fp_id = item.data(0, _ID_ROLE)
+            if fp_id:
+                self.floorplan_activated.emit(fp_id)
+
+    def select(self, element_id: str) -> None:
+        item = self._items.get(element_id)
+        if item is None:
+            return
+        self._tree.blockSignals(True)
+        self._tree.setCurrentItem(item)
+        self._tree.blockSignals(False)
+        self._tree.scrollToItem(item)
+
+
+def _sort_key(element: Element) -> tuple:
+    suffix = element.id.rsplit("-", 1)[-1]
+    return (0, int(suffix)) if suffix.isdigit() else (1, element.id)
+
+
+def _filter_item(item: QTreeWidgetItem, needle: str) -> bool:
+    """Blendet Items aus, die nicht passen. Gibt True zurück, wenn sichtbar."""
+    match = not needle or needle in item.text(0).lower()
+    child_match = False
+    for index in range(item.childCount()):
+        if _filter_item(item.child(index), needle):
+            child_match = True
+    visible = match or child_match
+    item.setHidden(not visible)
+    if needle and child_match:
+        item.setExpanded(True)
+    return visible

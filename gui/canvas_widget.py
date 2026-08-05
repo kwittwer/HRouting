@@ -282,6 +282,8 @@ class CanvasWidget(QWidget):
         self._dragging_elec_cable_fixed_indices: set[int] = set()
         self._last_clicked_object: Optional[Tuple[str, str]] = None  # (obj_type, obj_id)
         self._mode          = ToolMode.NONE
+        #: aktive Layer für die Selektion (None = keine Einschränkung)
+        self._selectable_layers: Optional[set[str]] = None
         self._mouse_pos:    Optional[QPointF] = None
         self._show_ref_line = True
         self._current_route_cid: Optional[str] = None
@@ -2178,24 +2180,78 @@ class CanvasWidget(QWidget):
             anchor.y() + math.sin(rad) * dist,
         )
 
+    # ------------------------------------------------------------------
+    # Layer-basierter Selektionsfilter (Workspace-Tabs)
+    # ------------------------------------------------------------------
+    #: Objekttyp aus _hit_any_object -> Layer-Wert (model.layers.LayerId)
+    _OBJECT_LAYERS = {
+        "elec_point": "electrical",
+        "elec_cable": "electrical",
+        "elec_room": "electrical",
+        "hkv": "heating",
+        "hkv_line": "heating",
+        "supply_line": "heating",
+        "route": "heating",
+        "polygon": "heating",
+        "text": "annotation",
+    }
+
+    def set_tool_mode(self, mode: "ToolMode") -> None:
+        """Setzt den Werkzeugmodus (wird von der Werkzeugpalette genutzt)."""
+        if mode is self._mode:
+            return
+        self._mode = mode
+        self.mode_changed.emit()
+        self.update()
+
+    def tool_mode(self) -> "ToolMode":
+        return self._mode
+
+    def set_selectable_layers(self, layers) -> None:
+        """Schränkt die Selektion auf bestimmte Layer ein.
+
+        ``layers`` ist eine Menge von ``LayerId`` oder deren String-Werten.
+        ``None`` hebt die Einschränkung auf. Die Sichtbarkeit bleibt
+        unverändert – nicht aktive Elemente werden nur nicht selektierbar.
+        """
+        if layers is None:
+            self._selectable_layers = None
+        else:
+            self._selectable_layers = {
+                getattr(layer, "value", layer) for layer in layers
+            }
+
+    def _object_layer(self, obj_type: str, obj_id: str) -> str:
+        if obj_type == "floor_polygon":
+            return "furniture" if str(obj_id).startswith("einrichtung") else "floorplan"
+        return self._OBJECT_LAYERS.get(obj_type, "")
+
+    def _is_selectable(self, obj_type: str, obj_id: str) -> bool:
+        allowed = getattr(self, "_selectable_layers", None)
+        if not allowed:
+            return True
+        return self._object_layer(obj_type, obj_id) in allowed
+
     def _hit_any_object(self, canvas_pt: QPointF) -> Optional[Tuple[str, str]]:
         """Try to hit any clickable object. Returns (object_type, object_id) or None.
-        Checks in this order: foreground objects first, floor plans last."""
+        Checks in this order: foreground objects first, floor plans last.
+        Objekte nicht aktiver Layer werden übersprungen (Workspace-Filter)."""
         threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
+        selectable = self._is_selectable
 
         # 1. Electrical points (highest priority)
         ap = self._hit_elec_point(canvas_pt)
-        if ap:
+        if ap and selectable("elec_point", ap):
             return ("elec_point", ap)
 
         # 2. HKV points
         hkv = self._hit_hkv(canvas_pt)
-        if hkv:
+        if hkv and selectable("hkv", hkv):
             return ("hkv", hkv)
 
         # 3. Electrical cables
         for kid, pts in self._elec_cables.items():
-            if not self._elec_visible.get(kid, True):
+            if not self._elec_visible.get(kid, True) or not selectable("elec_cable", kid):
                 continue
             if len(pts) >= 2:
                 for i in range(len(pts) - 1):
@@ -2205,7 +2261,7 @@ class CanvasWidget(QWidget):
 
         # 4. HKV lines
         for lid, pts in self._hkv_lines.items():
-            if not self._hkv_line_visible.get(lid, True):
+            if not self._hkv_line_visible.get(lid, True) or not selectable("hkv_line", lid):
                 continue
             if len(pts) >= 2:
                 for i in range(len(pts) - 1):
@@ -2215,7 +2271,7 @@ class CanvasWidget(QWidget):
 
         # 5. Supply lines
         for cid, pts in self._supply_lines.items():
-            if not self._circuit_visible.get(cid, True):
+            if not self._circuit_visible.get(cid, True) or not selectable("supply_line", cid):
                 continue
             if len(pts) >= 2:
                 for i in range(len(pts) - 1):
@@ -2225,7 +2281,7 @@ class CanvasWidget(QWidget):
 
         # 6. Routes (manual)
         for cid, pts in self._manual_routes.items():
-            if not self._circuit_visible.get(cid, True):
+            if not self._circuit_visible.get(cid, True) or not selectable("route", cid):
                 continue
             if len(pts) >= 2:
                 for i in range(len(pts) - 1):
@@ -2235,14 +2291,14 @@ class CanvasWidget(QWidget):
 
         # 7. Heating circuits polygons
         for cid, poly in self._polygons.items():
-            if not self._circuit_visible.get(cid, True):
+            if not self._circuit_visible.get(cid, True) or not selectable("polygon", cid):
                 continue
             if self._point_in_polygon(canvas_pt, poly):
                 return ("polygon", cid)
 
         # 7b. Electrical room polygons
         for rid, poly in self._elec_room_polygons.items():
-            if not self._elec_room_visible.get(rid, True):
+            if not self._elec_room_visible.get(rid, True) or not selectable("elec_room", rid):
                 continue
             if self._point_in_polygon(canvas_pt, poly):
                 return ("elec_room", rid)
@@ -2252,6 +2308,8 @@ class CanvasWidget(QWidget):
         for fid in reversed(self._floor_plan_order):
             layer = self._floor_plans.get(fid)
             if not layer or not layer.visible:
+                continue
+            if not selectable("floor_polygon", fid):
                 continue
             if layer.polygon:
                 poly = self._floor_polygon_world_polygon(fid)
