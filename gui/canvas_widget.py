@@ -2248,7 +2248,7 @@ class CanvasWidget(QWidget):
 
     def _object_layer(self, obj_type: str, obj_id: str) -> str:
         if obj_type == "floor_polygon":
-            return "furniture" if str(obj_id).startswith("einrichtung") else "floorplan"
+            return "furniture" if str(obj_id).startswith("einr") else "floorplan"
         return self._OBJECT_LAYERS.get(obj_type, "")
 
     def _is_selectable(self, obj_type: str, obj_id: str) -> bool:

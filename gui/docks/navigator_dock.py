@@ -65,14 +65,14 @@ class NavigatorDock(QDockWidget):
             self._document.structure_changed.disconnect(self.rebuild)
             self._document.element_added.disconnect(self._on_element_event)
             self._document.element_removed.disconnect(self._on_element_event)
-            self._document.element_changed.disconnect(self._on_element_event)
+            self._document.element_changed.disconnect(self._on_element_changed)
             self._document.active_floorplan_changed.disconnect(self._on_active_changed)
         self._document = document
         if document is not None:
             document.structure_changed.connect(self.rebuild)
             document.element_added.connect(self._on_element_event)
             document.element_removed.connect(self._on_element_event)
-            document.element_changed.connect(self._on_element_event)
+            document.element_changed.connect(self._on_element_changed)
             document.active_floorplan_changed.connect(self._on_active_changed)
         self.rebuild()
 
@@ -222,6 +222,29 @@ class NavigatorDock(QDockWidget):
     # ------------------------------------------------------------------
     def _on_element_event(self, _element_id: str) -> None:
         self.rebuild()
+
+    def _on_element_changed(self, element_id: str) -> None:
+        """Leichtgewichtiges Update: kein voller Rebuild, nur Checkbox/Label.
+
+        Wird u. a. durch Sichtbarkeitsänderungen ausgelöst. Ein voller
+        Rebuild pro Element wäre bei Ast-Umschaltungen zu langsam und würde
+        die gerade bearbeiteten Items invalidieren.
+        """
+        document = self._document
+        if document is None:
+            return
+        item = self._items.get(element_id) or self._find_item_by_id(element_id)
+        if item is None:
+            return
+        self._suspend_item_events = True
+        self._tree.blockSignals(True)
+        try:
+            item.setCheckState(0, self._to_state(document.is_visible(element_id)))
+        except RuntimeError:
+            pass
+        finally:
+            self._tree.blockSignals(False)
+            self._suspend_item_events = False
 
     def _on_active_changed(self, _fp_id: str) -> None:
         self._highlight_active()

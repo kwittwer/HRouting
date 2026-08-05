@@ -113,6 +113,61 @@ def test_canvas_selection_filter(app):
         canvas.deleteLater()
 
 
+def test_branch_visibility_toggle_no_rebuild(app, monkeypatch):
+    """Ast-Toggle darf keinen vollen Navigator-Rebuild pro Element auslösen."""
+    from PySide6.QtCore import QSettings, Qt  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        window._set_document(
+            __import__("model.document", fromlist=["Document"]).Document.from_dict(
+                {
+                    "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}]},
+                    "params": {
+                        "floorplans": {"grundriss-1": {"name": "EG"}},
+                        "elec_points": {
+                            f"AP-{i}": {
+                                "point_id": f"AP-{i}",
+                                "floor_plan_id": "grundriss-1",
+                                "visible": True,
+                            }
+                            for i in range(1, 6)
+                        },
+                    },
+                }
+            )
+        )
+        rebuilds = {"count": 0}
+        original = window.navigator.rebuild
+
+        def _counting_rebuild(*args, **kwargs):
+            rebuilds["count"] += 1
+            return original(*args, **kwargs)
+
+        window.navigator.rebuild = _counting_rebuild
+
+        root = window.navigator._tree.invisibleRootItem()
+        fp_item = root.child(0)
+        cat_item = fp_item.child(0)  # "Anschlusspunkte"
+        cat_item.setCheckState(0, Qt.Unchecked)
+
+        # Alle 5 APs müssen im Modell unsichtbar sein
+        for i in range(1, 6):
+            assert not window._document.is_visible(f"AP-{i}")
+        # Kein einziger voller Rebuild durch die Sichtbarkeitsänderung
+        assert rebuilds["count"] == 0
+    finally:
+        window.deleteLater()
+
+
+
 def test_app_window_add_elements(app, tmp_path, monkeypatch):
     """Test: Alle Add-Funktionen erzeugen gültige Elemente."""
     from PySide6.QtCore import QSettings  # noqa: PLC0415

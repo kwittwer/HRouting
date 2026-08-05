@@ -232,7 +232,29 @@ class AppWindow(QMainWindow):
         self.properties.clear()
         raw = document.to_dict()
         self.canvas.from_dict(raw.get("canvas", {}))
+        self._load_floor_plan_images(document)
         self._update_title()
+
+    def _load_floor_plan_images(self, document: Document) -> None:
+        """Lädt die Grundriss-/Einrichtungsbilder in den Canvas.
+
+        ``canvas.from_dict`` überträgt nur die Geometrie; Bilder müssen mit
+        gegen das Projektverzeichnis aufgelösten Pfaden nachgeladen werden.
+        """
+        base_dir = self._project_path.parent if self._project_path else None
+        for fp_id, floor in {**document.floorplans, **document.furniture}.items():
+            file_path = (floor.file_path or "").strip()
+            if not file_path:
+                continue
+            resolved = Path(file_path)
+            if not resolved.is_absolute() and base_dir is not None:
+                resolved = (base_dir / resolved).resolve()
+            if resolved.exists():
+                self.canvas.load_floor_plan_image(fp_id, str(resolved))
+            else:
+                self.log.warning(f"Bild nicht gefunden für {fp_id}: {file_path}")
+        self.canvas.update()
+
 
     def _on_element_selected(self, element_id: str) -> None:
         self.canvas.set_selected_item(element_id)
