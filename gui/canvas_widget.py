@@ -123,6 +123,7 @@ class CanvasWidget(QWidget):
     multi_selection_changed = Signal(set)  # emitted with set of (obj_type, obj_id) tuples
     will_move_multi_objects = Signal()  # emitted before multi-object move starts
     multi_objects_moved = Signal()  # emitted after multi-object move completes
+    document_data_changed = Signal(str)  # (element_id) – Projektdaten über eine View geändert
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -282,6 +283,8 @@ class CanvasWidget(QWidget):
         self._dragging_elec_cable_fixed_indices: set[int] = set()
         self._last_clicked_object: Optional[Tuple[str, str]] = None  # (obj_type, obj_id)
         self._mode          = ToolMode.NONE
+        #: gebundenes Projektdokument (Single Source of Truth, siehe set_document)
+        self._document = None
         #: aktive Layer für die Selektion (None = keine Einschränkung)
         self._selectable_layers: Optional[set[str]] = None
         self._mouse_pos:    Optional[QPointF] = None
@@ -2206,6 +2209,32 @@ class CanvasWidget(QWidget):
 
     def tool_mode(self) -> "ToolMode":
         return self._mode
+
+    # ------------------------------------------------------------------
+    # Dokument-Anbindung
+    # ------------------------------------------------------------------
+    def set_document(self, document, stages=None) -> None:
+        """Bindet den Canvas an ein ``Document``.
+
+        Die Projektdaten-Container werden durch dict-kompatible Views ersetzt,
+        die direkt auf das Dokument schreiben. Damit ist das Dokument die
+        einzige Datenquelle; Zeichnen im Canvas verändert sofort das Projekt.
+
+        Rein bildbezogene Daten (Pixmaps, SVG-Renderer) bleiben im Canvas.
+        """
+        from model.canvas_binding import bind_canvas  # lokal: Zyklus vermeiden
+
+        self._document = document
+        bind_canvas(self, document, stages, on_change=self._on_document_data_changed)
+        self.update()
+
+    def document(self):
+        """Das aktuell gebundene ``Document`` (oder ``None``)."""
+        return getattr(self, "_document", None)
+
+    def _on_document_data_changed(self, element_id: str) -> None:
+        """Wird von den Views bei jeder Datenänderung aufgerufen."""
+        self.document_data_changed.emit(element_id)
 
     def set_selectable_layers(self, layers) -> None:
         """Schränkt die Selektion auf bestimmte Layer ein.

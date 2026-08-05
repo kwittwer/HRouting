@@ -172,6 +172,13 @@ class AppWindow(QMainWindow):
         self.navigator.visibility_changed.connect(self._on_visibility_changed)
         self.tools.tool_activated.connect(self._on_tool_activated)
         self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
+        self.canvas.document_data_changed.connect(self._on_document_data_changed)
+
+    def _on_document_data_changed(self, _element_id: str) -> None:
+        """Der Canvas hat Projektdaten geändert – Projekt gilt als bearbeitet."""
+        if not self._dirty:
+            self._dirty = True
+            self._update_title()
 
     # ------------------------------------------------------------------
     # Workspaces
@@ -230,10 +237,52 @@ class AppWindow(QMainWindow):
         self._document = document
         self.navigator.set_document(document)
         self.properties.clear()
+
+        # Globale Ansichtsdaten (Zoom, Raster, Grundriss-Transformationen,
+        # Hilfslinien, Messungen) in den Canvas übertragen …
         raw = document.to_dict()
         self.canvas.from_dict(raw.get("canvas", {}))
+        # … und danach die Elementdaten an das Dokument binden. Ab hier ist
+        # das Dokument die einzige Datenquelle: Zeichnen im Canvas verändert
+        # unmittelbar das Projekt.
+        self.canvas.set_document(document)
+
         self._load_floor_plan_images(document)
         self._update_title()
+
+    def _sync_canvas_to_document(self) -> None:
+        """Überträgt die noch nicht gebundenen Canvas-Daten ins Dokument.
+
+        Elementdaten liegen dank :meth:`CanvasWidget.set_document` bereits im
+        Dokument. Globale Ansichtsdaten und die Grundriss-Layer werden weiterhin
+        im Canvas geführt und hier vor dem Speichern zurückgeschrieben.
+        """
+        document = self._document
+        if document is None:
+            return
+
+        canvas_state = self.canvas.to_dict()
+        bound_keys = self._bound_canvas_keys()
+
+        for key, value in canvas_state.items():
+            if key in bound_keys or key == "floor_plans":
+                continue
+            document.view[key] = value
+
+        for entry in canvas_state.get("floor_plans", []):
+            fp_id = entry.get("fp_id")
+            if not fp_id:
+                continue
+            floor = document.floorplans.get(fp_id) or document.furniture.get(fp_id)
+            if floor is not None:
+                floor.layer.update(entry)
+
+    @staticmethod
+    def _bound_canvas_keys() -> set[str]:
+        """canvas-Schlüssel, die bereits über Views im Dokument liegen."""
+        from model.canvas_binding import BINDINGS  # noqa: PLC0415
+
+        return {binding.geom_key for binding in BINDINGS if binding.geom_key}
 
     def _load_floor_plan_images(self, document: Document) -> None:
         """Lädt die Grundriss-/Einrichtungsbilder in den Canvas.
@@ -574,6 +623,7 @@ class AppWindow(QMainWindow):
     def _save_project(self) -> bool:
         if self._project_path is None:
             return self._save_project_as()
+        self._sync_canvas_to_document()
         try:
             save_document(self._document, self._project_path)
         except Exception as exc:  # noqa: BLE001
