@@ -10,7 +10,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from .elements import Element, FloorPlan, TextAnnotation
+from .elements import (
+    ElecCable,
+    ElecPoint,
+    ElecRoom,
+    Element,
+    FloorPlan,
+    Hkv,
+    HkvLine,
+    TextAnnotation,
+)
 from .schema import FieldSpec
 
 #: Felder von Grundrissen/Einrichtung, die im canvas-Layer liegen
@@ -37,6 +46,35 @@ _FLOORPLAN_GEOM_FIELDS = {
     "ref_line_color": "ref_line_colors",
 }
 
+#: Felder, die das Dateiformat doppelt führt: params-Feld -> canvas-Map.
+#: Der Canvas liest aus der canvas-Map, gespeichert wird beides – deshalb
+#: müssen Änderungen an beide Stellen geschrieben werden.
+_MIRRORED_GEOM_FIELDS: dict[type[Element], dict[str, str]] = {
+    ElecPoint: {
+        "visible": "elec_visible",
+        "position": "elec_point_position",
+        "height_from_floor": "elec_point_height",
+        "note": "elec_point_notes",
+        "smarthome_device": "elec_point_smarthome_device",
+        "smarthome_device_color": "elec_point_smarthome_device_color",
+    },
+    ElecCable: {
+        "visible": "elec_visible",
+        "comment": "elec_cable_notes",
+        "stroke_width": "elec_cable_stroke_width",
+        "type": "elec_cable_type_text",
+        "type_label_visible": "elec_cable_type_label_visible",
+    },
+    ElecRoom: {"visible": "elec_room_visible"},
+    Hkv: {"visible": "hkv_visible"},
+    HkvLine: {"visible": "hkv_line_visible"},
+}
+
+
+def _mirror_key(element: Element, key: str) -> str | None:
+    """canvas-Map, in der ein params-Feld zusätzlich geführt wird."""
+    return _MIRRORED_GEOM_FIELDS.get(type(element), {}).get(key)
+
 
 def get_field(element: Element, spec: FieldSpec) -> Any:
     """Liest den gespeicherten Wert eines Feldes."""
@@ -59,11 +97,19 @@ def get_field(element: Element, spec: FieldSpec) -> Any:
                 return element.geom[geom_key]
             return element.data.get(key, spec.default)
 
-    return element.data.get(key, spec.default)
+    if key in element.data:
+        return element.data[key]
+
+    # Manche Projekte führen den Wert nur in der canvas-Map.
+    mirror = _mirror_key(element, key)
+    if mirror is not None and mirror in element.geom:
+        return element.geom[mirror]
+
+    return spec.default
 
 
 def set_field(element: Element, spec: FieldSpec, value: Any) -> None:
-    """Schreibt einen Feldwert an die im Format vorgesehene Stelle."""
+    """Schreibt einen Feldwert an die im Format vorgesehene(n) Stelle(n)."""
     key = spec.key
 
     if isinstance(element, TextAnnotation) and key in _TEXT_ENTRY_FIELDS:
@@ -93,6 +139,10 @@ def set_field(element: Element, spec: FieldSpec, value: Any) -> None:
             return
 
     element.data[key] = value
+
+    mirror = _mirror_key(element, key)
+    if mirror is not None:
+        element.geom[mirror] = value
 
 
 def display_value(element: Element, spec: FieldSpec) -> Any:

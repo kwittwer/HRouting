@@ -71,7 +71,12 @@ class GenericElementEditor(QWidget):
         form.setContentsMargins(8, 8, 8, 8)
         form.setSpacing(6)
         for spec in specs:
-            widget = create_field_widget(spec, box)
+            options = (
+                spec.resolve_options(self._document)
+                if spec.document_options is not None
+                else None
+            )
+            widget = create_field_widget(spec, box, options)
             widget.value_changed.connect(self._on_field_changed)
             self._widgets[spec.key] = widget
             form.addRow(f"{spec.label}:", widget)
@@ -117,7 +122,7 @@ class GenericElementEditor(QWidget):
         return container
 
     def _update_action_visibility(self) -> None:
-        """Blendet Aktionen aus, die zum aktuellen Feldzustand nicht passen."""
+        """Blendet Aktionen aus bzw. sperrt sie, wenn sie nicht anwendbar sind."""
         buttons = getattr(self, "_action_buttons", None)
         if not buttons:
             return
@@ -126,8 +131,24 @@ class GenericElementEditor(QWidget):
         }
         for action in self._schema.actions:
             button = buttons.get(action.id)
-            if button is not None:
-                button.setVisible(action.is_visible_for(values))
+            if button is None:
+                continue
+            button.setVisible(action.is_visible_for(values))
+            enabled = action.is_enabled_for(self._element)
+            button.setEnabled(enabled)
+            if not enabled:
+                button.setToolTip("Noch keine Geometrie vorhanden")
+            elif action.tooltip:
+                button.setToolTip(action.tooltip)
+
+    def _refresh_dynamic_options(self) -> None:
+        """Aktualisiert Auswahllisten, die vom Projektinhalt abhängen."""
+        for spec in self._schema.fields:
+            if spec.document_options is None:
+                continue
+            widget = self._widgets.get(spec.key)
+            if widget is not None and hasattr(widget, "set_options"):
+                widget.set_options(spec.resolve_options(self._document))
 
     # ------------------------------------------------------------------
     def _on_field_changed(self, key: str, value: Any) -> None:
@@ -141,6 +162,7 @@ class GenericElementEditor(QWidget):
 
     def refresh(self) -> None:
         """Alle Feldwerte aus dem Element übernehmen."""
+        self._refresh_dynamic_options()
         for spec in self._schema.fields:
             widget = self._widgets.get(spec.key)
             if widget is not None:

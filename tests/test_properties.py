@@ -438,3 +438,175 @@ def test_cable_choice_helpers(app, tmp_path, monkeypatch):
         assert pairs[0][0] == "EK-1"
     finally:
         window.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# Vollständigkeit: Felder, Spiegelung, dynamische Auswahl
+# ---------------------------------------------------------------------------
+
+
+def test_cable_schema_has_all_panel_fields():
+    """Die Kabel-Felder der alten Oberfläche müssen vollständig sein."""
+    schema = schema_for(__import__("model.elements", fromlist=["ElecCable"]).ElecCable)
+    keys = {f.key for f in schema.fields}
+    expected = {
+        "name",
+        "color",
+        "visible",
+        "label_visible",
+        "label_size",
+        "type",
+        "type_label_visible",
+        "stroke_width",
+        "comment",
+    }
+    assert expected <= keys
+
+
+def test_mirrored_fields_write_to_canvas_map(document):
+    """Felder, die der Canvas aus canvas-Maps liest, müssen dort landen."""
+    cable = document.elements["elec_cables"]["EK-1"]
+    schema = schema_for(cable)
+
+    stroke = next(f for f in schema.fields if f.key == "stroke_width")
+    set_field(cable, stroke, 4.5)
+    label = next(f for f in schema.fields if f.key == "type_label_visible")
+    set_field(cable, label, True)
+
+    saved = document.to_dict()
+    assert saved["params"]["elec_cables"]["EK-1"]["stroke_width"] == 4.5
+    assert saved["canvas"]["elec_cable_stroke_width"]["EK-1"] == 4.5
+    assert saved["canvas"]["elec_cable_type_label_visible"]["EK-1"] is True
+
+
+def test_mirrored_fields_are_visible_in_canvas(app, document):
+    """Eine Änderung muss ohne Neuladen im Canvas ankommen."""
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas.set_document(document)
+        cable = document.elements["elec_cables"]["EK-1"]
+        schema = schema_for(cable)
+        set_field(cable, next(f for f in schema.fields if f.key == "stroke_width"), 6.0)
+        assert canvas._elec_cable_stroke_width["EK-1"] == 6.0
+    finally:
+        canvas.deleteLater()
+
+
+def test_mirrored_read_falls_back_to_canvas_map(document):
+    """Werte, die nur in der canvas-Map stehen, müssen gelesen werden."""
+    cable = document.elements["elec_cables"]["EK-1"]
+    cable.data.pop("stroke_width", None)
+    cable.geom["elec_cable_stroke_width"] = 3.5
+
+    spec = next(f for f in schema_for(cable).fields if f.key == "stroke_width")
+    assert get_field(cable, spec) == 3.5
+
+
+def test_elec_point_position_accepts_free_text(document):
+    """Beliebige Positionsangaben müssen möglich sein (früher 'Freitext')."""
+    point = document.elements["elec_points"]["AP-1"]
+    schema = schema_for(point)
+    spec = next(f for f in schema.fields if f.key == "position")
+    assert spec.kind is FieldKind.EDITABLE_CHOICE
+
+    set_field(point, spec, "Trockenbauwand")
+    saved = document.to_dict()
+    assert saved["params"]["elec_points"]["AP-1"]["position"] == "Trockenbauwand"
+    assert saved["canvas"]["elec_point_position"]["AP-1"] == "Trockenbauwand"
+
+
+def test_distributor_options_come_from_document(document):
+    """Die Verteilerauswahl muss die HKV des Projekts anbieten."""
+    circuit = document.elements["circuits"]["HK-1"]
+    spec = next(f for f in schema_for(circuit).fields if f.key == "distributor")
+    assert spec.document_options is not None
+
+    options = spec.resolve_options(document)
+    assert options[0] == ""  # leere Auswahl möglich
+    assert "Verteiler EG" in options
+
+
+def test_editor_refreshes_dynamic_options(app, document):
+    """Neue Verteiler müssen nach einem Refresh auswählbar sein."""
+    from gui.properties import GenericElementEditor  # noqa: PLC0415
+    from model.elements import Hkv  # noqa: PLC0415
+
+    circuit = document.elements["circuits"]["HK-1"]
+    editor = GenericElementEditor(document, circuit, schema_for(circuit))
+    try:
+        combo = editor._widgets["distributor"]._combo
+        before = combo.count()
+
+        document.add(Hkv.create("HKV-2", name="Verteiler OG"))
+        editor.refresh()
+
+        assert combo.count() == before + 1
+    finally:
+        editor.deleteLater()
+
+
+def test_action_disabled_without_geometry(app, document):
+    """Bearbeiten-Aktionen brauchen vorhandene Geometrie."""
+    from gui.properties import GenericElementEditor  # noqa: PLC0415
+
+    circuit = document.elements["circuits"]["HK-1"]
+    editor = GenericElementEditor(document, circuit, schema_for(circuit))
+    try:
+        # HK-1 hat ein Polygon, aber keinen Rohrverlauf
+        assert editor._action_buttons["edit_polygon"].isEnabled()
+        assert not editor._action_buttons["edit_route"].isEnabled()
+        # Zeichnen ist immer möglich
+        assert editor._action_buttons["draw_route"].isEnabled()
+    finally:
+        editor.deleteLater()
+
+
+def test_action_enabled_after_geometry_added(app, document):
+    from gui.properties import GenericElementEditor  # noqa: PLC0415
+
+    circuit = document.elements["circuits"]["HK-1"]
+    editor = GenericElementEditor(document, circuit, schema_for(circuit))
+    try:
+        assert not editor._action_buttons["edit_route"].isEnabled()
+        circuit.geom["manual_routes"] = [[0, 0], [10, 10]]
+        editor.refresh()
+        assert editor._action_buttons["edit_route"].isEnabled()
+    finally:
+        editor.deleteLater()
+
+
+def test_all_editable_fields_survive_roundtrip(app, document, tmp_path):
+    """Jedes Feld jedes Typs muss Speichern und Laden überstehen."""
+    from storage.hrp_io import load_document, save_document  # noqa: PLC0415
+
+    changed: dict[tuple[str, str], object] = {}
+    for element in list(document.all_elements()):
+        schema = schema_for(element)
+        if schema is None:
+            continue
+        for spec in schema.fields:
+            if spec.kind is FieldKind.BOOL:
+                value = not bool(get_field(element, spec))
+            elif spec.kind is FieldKind.NUMBER:
+                value = 7.0 * spec.scale
+            elif spec.kind in (FieldKind.COLOR,):
+                value = "#123456"
+            elif spec.kind is FieldKind.FILE:
+                continue  # Pfade werden beim Speichern umgeschrieben
+            else:
+                options = spec.resolve_options(document)
+                value = options[-1] if options else f"wert-{spec.key}"
+            set_field(element, spec, value)
+            changed[(element.id, spec.key)] = value
+
+    target = tmp_path / "all_fields.hrp"
+    save_document(document, target)
+    reloaded = load_document(target)
+
+    for (element_id, key), expected in changed.items():
+        element = reloaded.get(element_id)
+        assert element is not None, element_id
+        spec = next(f for f in schema_for(element).fields if f.key == key)
+        assert get_field(element, spec) == expected, f"{element_id}.{key}"

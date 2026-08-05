@@ -62,16 +62,19 @@ class FieldSpec:
 
     unit: str = ""
     default: Any = None
-    #: Auswahlmöglichkeiten; entweder Liste oder Callable für dynamische Werte
+    #: Feste Auswahlmöglichkeiten oder Callable ohne Argumente
     options: tuple[str, ...] | Callable[[], tuple[str, ...]] = ()
+    #: Auswahl, die vom Projektinhalt abhängt (z. B. Namen aller Verteiler)
+    document_options: Callable[[Any], tuple[str, ...]] | None = None
     tooltip: str = ""
-    #: Feld nur anzeigen, wenn ``depends_on`` diesen Wert hat: (key, wert)
-    depends_on: tuple[str, Any] | None = None
     #: Gruppenüberschrift im Formular
     group: str = ""
     file_filter: str = ""
 
-    def resolve_options(self) -> tuple[str, ...]:
+    def resolve_options(self, document: Any = None) -> tuple[str, ...]:
+        """Alle wählbaren Werte; ``document`` speist dynamische Listen."""
+        if self.document_options is not None and document is not None:
+            return tuple(self.document_options(document))
         if callable(self.options):
             return tuple(self.options())
         return tuple(self.options)
@@ -102,8 +105,9 @@ class ActionSpec:
     id: str
     label: str
     tooltip: str = ""
-    #: Aktion ist nur sinnvoll, wenn das Element Geometrie besitzt
-    requires_geometry: bool = False
+    #: canvas-Map, die Geometrie enthalten muss, damit die Aktion möglich ist
+    #: (z. B. ``"polygons"`` – ohne Polygon lässt sich keines bearbeiten)
+    requires_geom: str = ""
     destructive: bool = False
     #: Nur anzeigen, wenn das Feld ``key`` einen der Werte hat: (key, werte)
     depends_on: tuple[str, tuple[Any, ...]] | None = None
@@ -114,6 +118,12 @@ class ActionSpec:
             return True
         key, allowed = self.depends_on
         return values.get(key) in allowed
+
+    def is_enabled_for(self, element: Element) -> bool:
+        """Prüft, ob die nötige Geometrie vorhanden ist."""
+        if not self.requires_geom:
+            return True
+        return bool(element.geom.get(self.requires_geom))
 
 
 @dataclass(frozen=True)
@@ -148,7 +158,16 @@ def _builtin_symbol_options() -> tuple[str, ...]:
         return ("(kein Symbol)",)
 
 
-AP_POSITIONS = ("Wand", "Decke", "Boden", "Freitext")
+def _hkv_name_options(document: Any) -> tuple[str, ...]:
+    """Namen aller Heizkreisverteiler des Projekts (leere Auswahl zuerst)."""
+    names = sorted(
+        (hkv.name or hkv_id)
+        for hkv_id, hkv in document.elements.get("hkv_points", {}).items()
+    )
+    return ("", *names)
+
+
+AP_POSITIONS = ("Wand", "Decke", "Boden")
 AP_TYPES = ("standard", "uv", "up_distribution", "hak", "zaehler")
 SMARTHOME_DEVICES = ("", "Shelly", "Sonoff ZBMINIR2")
 SMARTHOME_COLORS = ("", "weiß", "schwarz")
@@ -203,21 +222,21 @@ CIRCUIT_SCHEMA = ElementSchema(
                   default=20.0, group="Auslegung"),
         FieldSpec("floor_covering", "Fußbodenbelag", FieldKind.CHOICE,
                   options=_floor_covering_options, group="Auslegung"),
-        FieldSpec("distributor", "Heizkreisverteiler", FieldKind.TEXT,
-                  group="Auslegung"),
+        FieldSpec("distributor", "Heizkreisverteiler", FieldKind.CHOICE,
+                  document_options=_hkv_name_options, group="Auslegung"),
         *_label_fields(),
     ),
     actions=(
         ActionSpec("draw_polygon", "Raum zeichnen",
                    "Raumpolygon neu zeichnen"),
         ActionSpec("edit_polygon", "Raum bearbeiten",
-                   "Polygonpunkte verschieben", requires_geometry=True),
+                   "Polygonpunkte verschieben", requires_geom="polygons"),
         ActionSpec("draw_route", "Rohrverlauf zeichnen"),
         ActionSpec("edit_route", "Rohrverlauf bearbeiten",
-                   requires_geometry=True),
+                   requires_geom="manual_routes"),
         ActionSpec("draw_supply", "Versorgungsleitung zeichnen"),
         ActionSpec("edit_supply", "Versorgungsleitung bearbeiten",
-                   requires_geometry=True),
+                   requires_geom="supply_lines"),
         ActionSpec("delete", "Löschen", destructive=True),
     ),
     computed=(
@@ -252,8 +271,9 @@ ELEC_POINT_SCHEMA = ElementSchema(
                   default=30.0, group="Darstellung"),
         FieldSpec("ap_type", "AP-Typ", FieldKind.CHOICE, options=AP_TYPES,
                   default="standard", group="Elektro"),
-        FieldSpec("position", "Position", FieldKind.CHOICE,
-                  options=AP_POSITIONS, default="Wand", group="Elektro"),
+        FieldSpec("position", "Position", FieldKind.EDITABLE_CHOICE,
+                  options=AP_POSITIONS, default="Wand", group="Elektro",
+                  tooltip="Vorgabe wählen oder eigenen Text eingeben"),
         FieldSpec("height_from_floor", "Höhe über Boden", FieldKind.NUMBER,
                   minimum=0.0, maximum=9999.0, step=1.0, decimals=1,
                   scale=10.0, unit="cm", default=0.0, group="Elektro"),
@@ -293,7 +313,7 @@ ELEC_ROOM_SCHEMA = ElementSchema(
     ),
     actions=(
         ActionSpec("draw_polygon", "Raum zeichnen"),
-        ActionSpec("edit_polygon", "Raum bearbeiten", requires_geometry=True),
+        ActionSpec("edit_polygon", "Raum bearbeiten", requires_geom="elec_rooms"),
         ActionSpec("delete", "Löschen", destructive=True),
     ),
     computed=(("area_m2", "Fläche"),),
@@ -307,6 +327,8 @@ ELEC_CABLE_SCHEMA = ElementSchema(
         *_common_fields("#ff9800"),
         FieldSpec("type", "Kabeltyp", FieldKind.EDITABLE_CHOICE,
                   options=CABLE_TYPES, default="5x1,5", group="Kabel"),
+        FieldSpec("type_label_visible", "Kabeltyp im Plan anzeigen",
+                  FieldKind.BOOL, default=False, group="Kabel"),
         FieldSpec("stroke_width", "Strichstärke", FieldKind.NUMBER,
                   minimum=0.5, maximum=10.0, step=0.5, decimals=1, unit="px",
                   default=2.0, group="Darstellung"),
@@ -315,7 +337,7 @@ ELEC_CABLE_SCHEMA = ElementSchema(
     ),
     actions=(
         ActionSpec("draw_cable", "Kabel zeichnen"),
-        ActionSpec("edit_cable", "Kabel bearbeiten", requires_geometry=True),
+        ActionSpec("edit_cable", "Kabel bearbeiten", requires_geom="elec_cables"),
         ActionSpec("duplicate", "Duplizieren"),
         ActionSpec("delete", "Löschen", destructive=True),
     ),
@@ -359,7 +381,7 @@ HKV_LINE_SCHEMA = ElementSchema(
     ),
     actions=(
         ActionSpec("draw_line", "Leitung zeichnen"),
-        ActionSpec("edit_line", "Leitung bearbeiten", requires_geometry=True),
+        ActionSpec("edit_line", "Leitung bearbeiten", requires_geom="hkv_lines"),
         ActionSpec("delete", "Löschen", destructive=True),
     ),
     computed=(("length_m", "Länge"),),

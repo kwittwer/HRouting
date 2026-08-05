@@ -185,18 +185,30 @@ class ChoiceFieldWidget(FieldWidget):
         spec: FieldSpec,
         editable: bool = False,
         parent: QWidget | None = None,
+        options: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__(spec, parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._combo = QComboBox(self)
         self._combo.setEditable(editable)
-        self._combo.addItems(list(spec.resolve_options()))
+        self._combo.addItems(list(options if options is not None else spec.resolve_options()))
         if editable:
             self._combo.editTextChanged.connect(self._emit)
         else:
             self._combo.currentTextChanged.connect(self._emit)
         layout.addWidget(self._combo)
+
+    def set_options(self, options: tuple[str, ...]) -> None:
+        """Tauscht die Auswahlliste aus und hält den aktuellen Wert."""
+        current = self.value()
+        self._updating = True
+        try:
+            self._combo.clear()
+            self._combo.addItems(list(options))
+            self.set_value(current)
+        finally:
+            self._updating = False
 
     def value(self) -> Any:
         return self._combo.currentText()
@@ -259,19 +271,31 @@ class ReadOnlyFieldWidget(FieldWidget):
 
 
 _FACTORY = {
-    FieldKind.TEXT: lambda spec, parent: TextFieldWidget(spec, parent),
-    FieldKind.MULTILINE: lambda spec, parent: MultilineFieldWidget(spec, parent),
-    FieldKind.NUMBER: lambda spec, parent: NumberFieldWidget(spec, parent),
-    FieldKind.BOOL: lambda spec, parent: BoolFieldWidget(spec, parent),
-    FieldKind.COLOR: lambda spec, parent: ColorFieldWidget(spec, parent),
-    FieldKind.CHOICE: lambda spec, parent: ChoiceFieldWidget(spec, False, parent),
-    FieldKind.EDITABLE_CHOICE: lambda spec, parent: ChoiceFieldWidget(spec, True, parent),
-    FieldKind.FILE: lambda spec, parent: FileFieldWidget(spec, parent),
-    FieldKind.READONLY: lambda spec, parent: ReadOnlyFieldWidget(spec, parent),
+    FieldKind.TEXT: lambda spec, parent, options: TextFieldWidget(spec, parent),
+    FieldKind.MULTILINE: lambda spec, parent, options: MultilineFieldWidget(spec, parent),
+    FieldKind.NUMBER: lambda spec, parent, options: NumberFieldWidget(spec, parent),
+    FieldKind.BOOL: lambda spec, parent, options: BoolFieldWidget(spec, parent),
+    FieldKind.COLOR: lambda spec, parent, options: ColorFieldWidget(spec, parent),
+    FieldKind.CHOICE: lambda spec, parent, options: ChoiceFieldWidget(
+        spec, False, parent, options
+    ),
+    FieldKind.EDITABLE_CHOICE: lambda spec, parent, options: ChoiceFieldWidget(
+        spec, True, parent, options
+    ),
+    FieldKind.FILE: lambda spec, parent, options: FileFieldWidget(spec, parent),
+    FieldKind.READONLY: lambda spec, parent, options: ReadOnlyFieldWidget(spec, parent),
 }
 
 
-def create_field_widget(spec: FieldSpec, parent: QWidget | None = None) -> FieldWidget:
-    """Erzeugt das zum Feldtyp passende Widget."""
+def create_field_widget(
+    spec: FieldSpec,
+    parent: QWidget | None = None,
+    options: tuple[str, ...] | None = None,
+) -> FieldWidget:
+    """Erzeugt das zum Feldtyp passende Widget.
+
+    ``options`` überschreibt die Auswahlliste des Schemas – nötig für Felder,
+    deren Werte vom Projektinhalt abhängen.
+    """
     factory = _FACTORY.get(spec.kind, _FACTORY[FieldKind.TEXT])
-    return factory(spec, parent)
+    return factory(spec, parent, options)
