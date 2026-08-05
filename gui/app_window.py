@@ -498,16 +498,18 @@ class AppWindow(QMainWindow):
         current_offset = QPointF(self.canvas._offset)
         # Anzeigeeinstellungen sichern: diese sind kein Teil der Projekthistorie
         # und sollen beim Rückgängigmachen / Wiederherstellen nicht zurückspringen.
-        _view_keys_to_preserve = (
-            "bg_color",
-            "grid_visible",
-            "grid_spacing_mm",
-            "grid_color",
-            "snap_angle",
-        )
-        current_view = {k: self._document.view[k]
-                        for k in _view_keys_to_preserve
-                        if k in self._document.view}
+        current_view = {
+            "bg_color": self.canvas._bg_color.name(),
+            "grid_visible": bool(self.canvas.grid_visible()),
+            "grid_spacing_mm": float(self.canvas.grid_spacing_mm()),
+            "grid_color": [
+                self.canvas.grid_color().red(),
+                self.canvas.grid_color().green(),
+                self.canvas.grid_color().blue(),
+                self.canvas.grid_color().alpha(),
+            ],
+            "snap_angle": float(self.canvas.snap_angle()),
+        }
         self._restoring_snapshot = True
         try:
             self._document.restore(snapshot)

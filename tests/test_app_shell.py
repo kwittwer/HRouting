@@ -995,6 +995,7 @@ def test_collect_project_dict_matches_document_shape(app):
 def test_undo_redo_after_canvas_mutation(app, monkeypatch):
     """Canvas-Änderungen müssen einen Undo-/Redo-Schritt erzeugen."""
     from PySide6.QtCore import QPointF  # noqa: PLC0415
+    from PySide6.QtGui import QColor  # noqa: PLC0415
 
     _settings_noop(monkeypatch)
     from gui.app_window import AppWindow  # noqa: PLC0415
@@ -1014,6 +1015,11 @@ def test_undo_redo_after_canvas_mutation(app, monkeypatch):
         window._redo_stack.clear()
         window.canvas._scale = 2.75
         window.canvas._offset = QPointF(-123.0, 87.0)
+        window.canvas._bg_color = QColor("#123456")
+        window.canvas.set_grid_visible(True)
+        window.canvas.set_grid_spacing_mm(333.0)
+        window.canvas.set_grid_color(QColor(11, 22, 33, 144))
+        window.canvas.set_snap_angle(17.0)
 
         window.canvas._manual_routes["HK-1"][1] = QPointF(260, 140)
         assert len(window._undo_stack) == 1
@@ -1027,6 +1033,11 @@ def test_undo_redo_after_canvas_mutation(app, monkeypatch):
         ]
         assert window.canvas._scale == 2.75
         assert window.canvas._offset == QPointF(-123.0, 87.0)
+        assert window.canvas.grid_visible() is True
+        assert window.canvas.grid_spacing_mm() == 333.0
+        assert window.canvas.grid_color() == QColor(11, 22, 33, 144)
+        assert window.canvas.snap_angle() == 17.0
+        assert window.canvas._bg_color.name() == QColor("#123456").name()
 
         window._redo()
         assert window._document.to_dict()["canvas"]["manual_routes"]["HK-1"][1] == [
@@ -1034,6 +1045,11 @@ def test_undo_redo_after_canvas_mutation(app, monkeypatch):
         ]
         assert window.canvas._scale == 2.75
         assert window.canvas._offset == QPointF(-123.0, 87.0)
+        assert window.canvas.grid_visible() is True
+        assert window.canvas.grid_spacing_mm() == 333.0
+        assert window.canvas.grid_color() == QColor(11, 22, 33, 144)
+        assert window.canvas.snap_angle() == 17.0
+        assert window.canvas._bg_color.name() == QColor("#123456").name()
     finally:
         window.deleteLater()
 
