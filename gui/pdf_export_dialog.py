@@ -48,6 +48,9 @@ class PdfExportConfigDialog(QDialog):
         "el_up_distribution": "Verteilung in Unterputzdose",
         "el_bom": "Stückliste (Elektro)",
         "el_uv_busbars": "UV-Phasenschienen",
+        "schaltplan_uv": "Schaltplan – UV-Innenschaltplan",
+        "schaltplan_stromkreise": "Schaltplan – Stromkreisplan",
+        "schaltplan_hierarchie": "Schaltplan – Hierarchieübersicht",
     }
 
     def __init__(
@@ -261,6 +264,7 @@ class PdfExportConfigDialog(QDialog):
             return [
                 "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
                 "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
+                "schaltplan_uv", "schaltplan_stromkreise", "schaltplan_hierarchie",
             ]
         return []
 
@@ -272,6 +276,7 @@ class PdfExportConfigDialog(QDialog):
             return {
                 "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
                 "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
+                "schaltplan_uv", "schaltplan_stromkreise", "schaltplan_hierarchie",
             }
         return set()
 

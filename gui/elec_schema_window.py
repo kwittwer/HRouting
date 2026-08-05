@@ -62,6 +62,8 @@ class ApNode:
     note: str = ""
     uv_config: dict | None = None
     up_distribution_config: dict | None = None
+    hak_config: dict | None = None
+    zaehler_config: dict | None = None
 
 
 @dataclass
@@ -111,6 +113,8 @@ class _AddApDialog(QDialog):
         self.cmb_ap_type.addItem("Standard", "standard")
         self.cmb_ap_type.addItem("Unterverteilung (UV)", "uv")
         self.cmb_ap_type.addItem("Verteilung in Unterputzdose", "up_distribution")
+        self.cmb_ap_type.addItem("Hausanschlusskasten (HAK)", "hak")
+        self.cmb_ap_type.addItem("Stromzähler", "zaehler")
         form.addRow("AP-Typ:", self.cmb_ap_type)
 
         self.cmb_room = QComboBox()
@@ -217,6 +221,8 @@ class _EditApDialog(QDialog):
         self._up_cable_choices = list(up_cable_choices or [])
         self._uv_config = dict(node.uv_config or {})
         self._up_distribution_config = dict(node.up_distribution_config or {})
+        self._hak_config = dict(node.hak_config or {})
+        self._zaehler_config = dict(node.zaehler_config or {})
         self._icon_path = str(node.icon_path or "")
 
         layout = QVBoxLayout(self)
@@ -275,7 +281,9 @@ class _EditApDialog(QDialog):
         self.cmb_ap_type.addItem("Standard", "standard")
         self.cmb_ap_type.addItem("Unterverteilung (UV)", "uv")
         self.cmb_ap_type.addItem("Verteilung in Unterputzdose", "up_distribution")
-        type_map = {"standard": 0, "uv": 1, "up_distribution": 2}
+        self.cmb_ap_type.addItem("Hausanschlusskasten (HAK)", "hak")
+        self.cmb_ap_type.addItem("Stromzähler", "zaehler")
+        type_map = {"standard": 0, "uv": 1, "up_distribution": 2, "hak": 3, "zaehler": 4}
         self.cmb_ap_type.setCurrentIndex(type_map.get(node.ap_type or "standard", 0))
         self.cmb_ap_type.currentIndexChanged.connect(self._on_ap_type_changed)
         form.addRow("AP-Typ:", self.cmb_ap_type)
@@ -287,6 +295,14 @@ class _EditApDialog(QDialog):
         self.btn_up_config = QPushButton("Verteilung in Unterputzdose…")
         self.btn_up_config.clicked.connect(self._open_up_dialog)
         form.addRow(self.btn_up_config)
+
+        self.btn_hak_config = QPushButton("🏠 HAK konfigurieren…")
+        self.btn_hak_config.clicked.connect(self._open_hak_dialog)
+        form.addRow(self.btn_hak_config)
+
+        self.btn_zaehler_config = QPushButton("🔢 Zähler konfigurieren…")
+        self.btn_zaehler_config.clicked.connect(self._open_zaehler_dialog)
+        form.addRow(self.btn_zaehler_config)
 
         self.sb_label_size = QDoubleSpinBox()
         self.sb_label_size.setRange(0.1, 999999.0)
@@ -401,6 +417,8 @@ class _EditApDialog(QDialog):
         ap_type = str(self.cmb_ap_type.currentData() or "standard")
         self.btn_uv_config.setVisible(ap_type == "uv")
         self.btn_up_config.setVisible(ap_type == "up_distribution")
+        self.btn_hak_config.setVisible(ap_type == "hak")
+        self.btn_zaehler_config.setVisible(ap_type == "zaehler")
 
     def _on_ap_type_changed(self):
         self._update_config_buttons_visibility()
@@ -423,6 +441,55 @@ class _EditApDialog(QDialog):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._up_distribution_config = dlg.get_config()
 
+    def _open_hak_dialog(self):
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QVBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("HAK konfigurieren")
+        dlg.resize(340, 160)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        le_voltage = QLineEdit(str(self._hak_config.get("incoming_voltage", "400V") or "400V"))
+        le_fuse = QLineEdit(str(self._hak_config.get("main_fuse_a", "63") or "63"))
+        form.addRow("Spannung:", le_voltage)
+        form.addRow("Hauptsicherung (A):", le_fuse)
+        layout.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        layout.addWidget(bb)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._hak_config = {
+                "incoming_voltage": le_voltage.text().strip() or "400V",
+                "main_fuse_a": le_fuse.text().strip() or "63",
+            }
+
+    def _open_zaehler_dialog(self):
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QVBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Zähler konfigurieren")
+        dlg.resize(340, 160)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        le_meter_id = QLineEdit(str(self._zaehler_config.get("meter_id", "") or ""))
+        cmb_phases = QComboBox()
+        cmb_phases.addItems(["3-phasig", "1-phasig"])
+        cur_phases = str(self._zaehler_config.get("phases", "3-phasig") or "3-phasig")
+        idx = cmb_phases.findText(cur_phases)
+        if idx >= 0:
+            cmb_phases.setCurrentIndex(idx)
+        form.addRow("Zählernummer:", le_meter_id)
+        form.addRow("Phasen:", cmb_phases)
+        layout.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        layout.addWidget(bb)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._zaehler_config = {
+                "meter_id": le_meter_id.text().strip(),
+                "phases": cmb_phases.currentText(),
+            }
+
     def get_payload(self) -> dict:
         ap_type = str(self.cmb_ap_type.currentData() or "standard")
         return {
@@ -443,6 +510,8 @@ class _EditApDialog(QDialog):
             "note": self.te_note.toPlainText(),
             "uv_config": self._uv_config if ap_type == "uv" else {},
             "up_distribution_config": self._up_distribution_config if ap_type == "up_distribution" else {},
+            "hak_config": self._hak_config if ap_type == "hak" else {},
+            "zaehler_config": self._zaehler_config if ap_type == "zaehler" else {},
         }
 
 

@@ -43,8 +43,12 @@ from gui.canvas_widget import CanvasWidget, COLORS, ToolMode
 from gui.parameter_panel import ParameterPanel, SafeDoubleSpinBox, SafeComboBox, BUILTIN_SYMBOLS
 from gui.pdf_export_dialog import PdfExportConfigDialog
 from gui.elec_schema_window import ElecSchemaWindow, ApNode, CableEdge
+from gui.schaltplan_window import SchaltplanWindow
+from logic.schaltplan_generator import build_uv_hierarchy, get_uv_circuits
+from logic.elec_schematic import sanitize_elec_schematic, infer_elec_schematic_from_legacy
 from logic.svg_parser import parse_svg_dimensions
 from logic.heating_calc import calc_circuit, calc_balancing, FLOOR_COVERINGS
+from logic.kicad_export import export_project_to_kicad
 
 _SETTINGS = QSettings("HRouting", "HRouting")
 _LAST_PROJECT_KEY = "last_project_path"
@@ -76,6 +80,7 @@ class MainWindow(QMainWindow):
         self._pdf_export_dialog = None
         self._elec_schema_window: ElecSchemaWindow | None = None
         self._elec_schema_ap_positions: dict[str, list[float]] = {}
+        self._schaltplan_window: SchaltplanWindow | None = None
         self._elec_point_room_map: dict[str, str] = {}
         self._project_ui_state: dict = {}
         self._suspend_schema_refresh = False
@@ -377,6 +382,9 @@ class MainWindow(QMainWindow):
         # ── Extras ──
         extras_menu = mb.addMenu("&Extras")
         extras_menu.addAction("🧠 Elektro-Strangschema…", self._open_elec_schema_window)
+        extras_menu.addAction("📐 Schaltplan…", self._open_schaltplan_window)
+        extras_menu.addSeparator()
+        extras_menu.addAction("📤 KiCad exportieren…", self._export_to_kicad)
 
         # ── Hilfe ──
         help_menu = mb.addMenu("&Hilfe")
@@ -556,6 +564,7 @@ class MainWindow(QMainWindow):
         return {
             "main_window": main_state,
             "elec_schema_window": self._capture_window_state(self._elec_schema_window),
+            "schaltplan_window": self._capture_window_state(self._schaltplan_window),
             "pdf_export_dialog": self._capture_window_state(self._pdf_export_dialog),
         }
 
@@ -578,6 +587,10 @@ class MainWindow(QMainWindow):
         self._restore_window_state(
             self._elec_schema_window,
             self._project_ui_state.get("elec_schema_window", {}),
+        )
+        self._restore_window_state(
+            self._schaltplan_window,
+            self._project_ui_state.get("schaltplan_window", {}),
         )
         self._restore_window_state(
             self._pdf_export_dialog,
@@ -741,6 +754,7 @@ class MainWindow(QMainWindow):
             self._suspend_schema_refresh = False
             self._refresh_elec_schema_window()
             # _undo_blocked stays True – caller or QTimer will reset it
+            self._refresh_schaltplan_window()
 
     def _reconnect_panels_after_restore(self):
         """Reconnect per-object panel signals after an undo/redo restore."""
@@ -1052,6 +1066,10 @@ class MainWindow(QMainWindow):
         # Elektro-Strangschema live aktualisieren
         self.canvas.elec_point_placed.connect(self._refresh_elec_schema_window)
         self.canvas.elec_cable_changed.connect(self._refresh_elec_schema_window)
+
+        # Schaltplan live aktualisieren
+        self.canvas.elec_point_placed.connect(self._refresh_schaltplan_window)
+        self.canvas.elec_cable_changed.connect(self._refresh_schaltplan_window)
 
     # ------------------------------------------------------------------ #
     #  Slots                                                               #
@@ -2928,23 +2946,46 @@ class MainWindow(QMainWindow):
             self._elec_schema_window.start_cable_pick_mode(cable_id)
 
     def _refresh_elec_schema_window(self, *_args):
-        if self._elec_schema_window is None:
+        if self._suspend_schema_refresh:
+            return
+        if self._elec_schema_window is not None:
+            valid_ids = set(self.param_panel.elec_point_panels.keys())
+            self._elec_schema_ap_positions = {
+                pid: pos
+                for pid, pos in self._elec_schema_ap_positions.items()
+                if pid in valid_ids
+            }
+            ap_nodes, cable_edges = self._build_elec_schema_data()
+            self._elec_schema_window.set_data(
+                ap_nodes,
+                cable_edges,
+                manual_positions=self._elec_schema_ap_positions,
+                room_choices=self._collect_elec_room_choices(),
+            )
+        self._refresh_schaltplan_window()
+
+    def _open_schaltplan_window(self):
+        if self._schaltplan_window is None:
+            self._schaltplan_window = SchaltplanWindow(self)
+            self._restore_window_state(
+                self._schaltplan_window,
+                self._project_ui_state.get("schaltplan_window", {}),
+            )
+        self._refresh_schaltplan_window()
+        self._schaltplan_window.show()
+        self._schaltplan_window.raise_()
+        self._schaltplan_window.activateWindow()
+
+    def _refresh_schaltplan_window(self, *_args):
+        if self._schaltplan_window is None:
             return
         if self._suspend_schema_refresh:
             return
-        valid_ids = set(self.param_panel.elec_point_panels.keys())
-        self._elec_schema_ap_positions = {
-            pid: pos
-            for pid, pos in self._elec_schema_ap_positions.items()
-            if pid in valid_ids
-        }
         ap_nodes, cable_edges = self._build_elec_schema_data()
-        self._elec_schema_window.set_data(
-            ap_nodes,
-            cable_edges,
-            manual_positions=self._elec_schema_ap_positions,
-            room_choices=self._collect_elec_room_choices(),
-        )
+        ap_nodes_dict = {n.point_id: n for n in ap_nodes}
+        cable_edges_dict = {e.cable_id: e for e in cable_edges}
+        room_map = self._collect_point_id_to_room_name()
+        self._schaltplan_window.set_data(ap_nodes_dict, cable_edges_dict, room_map)
 
     def _on_schema_ap_position_changed(self, point_id: str, x: float, y: float):
         self._elec_schema_ap_positions[point_id] = [float(x), float(y)]
@@ -3089,10 +3130,18 @@ class MainWindow(QMainWindow):
             up_config = payload.get("up_distribution_config")
             if up_config is not None:
                 panel.set_up_distribution_config(up_config)
+            hak_config = payload.get("hak_config")
+            if hak_config is not None:
+                panel._hak_config = dict(hak_config or {})
+            zaehler_config = payload.get("zaehler_config")
+            if zaehler_config is not None:
+                panel._zaehler_config = dict(zaehler_config or {})
         finally:
             panel.blockSignals(False)
         self._mark_dirty()
         self._refresh_elec_schema_window()
+        self._refresh_schaltplan_window()
+        self._refresh_schaltplan_window()
 
     def _on_schema_edit_cable(self, cable_id: str, payload: dict):
         """Übernimmt bearbeitete Kabel-Eigenschaften aus dem Schema-Fenster."""
@@ -3186,6 +3235,8 @@ class MainWindow(QMainWindow):
                     note=str(params.get("note", "") or ""),
                     uv_config=params.get("uv_config"),
                     up_distribution_config=params.get("up_distribution_config"),
+                    hak_config=params.get("hak_config"),
+                    zaehler_config=params.get("zaehler_config"),
                 )
             )
 
@@ -3349,6 +3400,50 @@ class MainWindow(QMainWindow):
             )
         else:
             self.status.showMessage("Alle Anschlusspunkte haben unterschiedliche Namen.", 2000)
+
+    def _export_to_kicad(self):
+        """Export current project to KiCad schematic (.kicad_sch) format."""
+        if not self._project_path:
+            QMessageBox.warning(
+                self, "Projekt nicht gespeichert",
+                "Bitte speichern Sie das Projekt zuerst bevor Sie es exportieren."
+            )
+            return
+        
+        # Suggest filename based on project name
+        base_name = self._project_path.stem
+        suggested_name = f"{base_name}_export.kicad_sch"
+        
+        export_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportieren zu KiCad",
+            str(self._project_path.parent / suggested_name),
+            "KiCad Schaltplan (*.kicad_sch);;Alle Dateien (*)"
+        )
+        
+        if not export_path:
+            return
+        
+        # Prepare project dict
+        project_dict = {
+            "canvas": copy.deepcopy(self.canvas._to_dict()),
+            "params": copy.deepcopy(self.param_panel.to_dict()),
+        }
+        
+        # Export
+        success, message = export_project_to_kicad(project_dict, export_path)
+        
+        if success:
+            QMessageBox.information(
+                self, "Export erfolgreich",
+                f"Projekt erfolgreich zu KiCad exportiert:\n{export_path}"
+            )
+            self.status.showMessage(message, 3000)
+        else:
+            QMessageBox.critical(
+                self, "Export fehlgeschlagen",
+                f"Fehler beim Exportieren:\n{message}"
+            )
 
     def _copy_selected_object(self):
         item_id = self.param_panel.get_selected_item_id()
@@ -4123,6 +4218,10 @@ class MainWindow(QMainWindow):
         # ── 2. JSON bauen – alle Pfade relativ zur Projektdatei ──────────
 
         params = self.param_panel.to_dict()
+        # Ensure the new schematic model exists; infer from legacy data if missing.
+        params["elec_schematic"] = sanitize_elec_schematic(
+            params.get("elec_schematic") or infer_elec_schematic_from_legacy(params)
+        )
         self._project_ui_state = self._collect_project_ui_state()
         params[_PARAMS_UI_STATE_KEY] = dict(self._project_ui_state)
         params["elec_schema_ap_positions"] = self._sanitize_elec_schema_ap_positions(
@@ -4247,6 +4346,10 @@ class MainWindow(QMainWindow):
 
             # --- resolve floorplan file paths + load images -------------
             params = data.get("params", {})
+            # Backward compatible migration into the new schematic model.
+            params["elec_schematic"] = sanitize_elec_schematic(
+                params.get("elec_schematic") or infer_elec_schematic_from_legacy(params)
+            )
             self._project_ui_state = dict(params.get(_PARAMS_UI_STATE_KEY, {})) if isinstance(params.get(_PARAMS_UI_STATE_KEY, {}), dict) else {}
             self._elec_schema_ap_positions = self._sanitize_elec_schema_ap_positions(
                 params.get("elec_schema_ap_positions", {})
@@ -4585,6 +4688,7 @@ class MainWindow(QMainWindow):
             return [
                 "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
                 "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
+                "schaltplan_uv", "schaltplan_stromkreise", "schaltplan_hierarchie",
             ]
         return []
 
@@ -7866,6 +7970,7 @@ class MainWindow(QMainWindow):
         sections = set(table_sections or [
             "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
             "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
+            "schaltplan_uv", "schaltplan_stromkreise", "schaltplan_hierarchie",
         ])
 
         title_h = ctx.mm(8)
@@ -7905,6 +8010,9 @@ class MainWindow(QMainWindow):
             or ("el_up_distribution" in sections and data.get("up_distribution_rows"))
             or ("el_bom" in sections and data.get("cable_bom_rows"))
             or ("el_uv_busbars" in sections and data.get("uv_busbar_bom_rows"))
+            or ("schaltplan_uv" in sections and data.get("uv_data"))
+            or ("schaltplan_stromkreise" in sections and data.get("uv_data"))
+            or ("schaltplan_hierarchie" in sections and self.param_panel.elec_point_panels)
         )
         if not table_available:
             return
@@ -8020,6 +8128,84 @@ class MainWindow(QMainWindow):
                 for r in uv_rows
             ]
             y_after = ctx.draw_table(page, y_after, headers, rows)
+
+        # Schaltplan-Seiten
+        if any(k in sections for k in {"schaltplan_uv", "schaltplan_stromkreise", "schaltplan_hierarchie"}):
+            sp_ap_nodes, sp_cable_edges = self._build_elec_schema_data()
+            sp_ap_nodes_dict = {n.point_id: n for n in sp_ap_nodes}
+            sp_cable_edges_dict = {e.cable_id: e for e in sp_cable_edges}
+            sp_room_map = self._collect_point_id_to_room_name()
+
+            if "schaltplan_uv" in sections:
+                for uv in uv_data:
+                    page = ctx.new_page(toc_title=f"Schaltplan UV: {uv.get('ap_name', '')}")
+                    y_after = ctx.title(page, f"Schaltplan – UV: {uv.get('ap_name', '')}")
+                    y_after = ctx.draw_uv_schematic(page, y_after, uv)
+
+            if "schaltplan_stromkreise" in sections:
+                for uv in uv_data:
+                    uv_id = str(uv.get("ap_id", "") or "")
+                    uv_name = str(uv.get("ap_name", uv_id) or uv_id)
+                    circuits = get_uv_circuits(
+                        uv_id,
+                        sp_ap_nodes_dict,
+                        sp_cable_edges_dict,
+                        sp_room_map,
+                    )
+                    if not circuits:
+                        continue
+                    page = ctx.new_page(toc_title=f"Stromkreise: {uv_name}")
+                    y_after = ctx.title(page, f"Schaltplan – Stromkreise: {uv_name}")
+                    y_after = ctx.section_heading(page, y_after, "Stromkreiszuordnung")
+                    headers = ["Reihe", "TE", "Gerät", "Kennz.", "Bezeichnung", "Kabel", "Verbraucher", "Raum", "Notiz"]
+                    rows = [
+                        [
+                            str(c.get("row", "")),
+                            str(c.get("slot", "")),
+                            str(c.get("device_type", "")),
+                            str(c.get("spec", "")),
+                            str(c.get("label", "")),
+                            str(c.get("cable_id", "")),
+                            str(c.get("end_ap_name", "")),
+                            str(c.get("end_ap_room", "")),
+                            str(c.get("note", "")),
+                        ]
+                        for c in circuits
+                    ]
+                    ctx.draw_table(page, y_after, headers, rows)
+
+            if "schaltplan_hierarchie" in sections:
+                hierarchy = build_uv_hierarchy(sp_ap_nodes_dict, sp_cable_edges_dict)
+
+                def _flatten_edges(nodes: list[dict], parent: dict | None = None, out: list[list[str]] | None = None) -> list[list[str]]:
+                    out = out if out is not None else []
+                    for n in nodes:
+                        if parent is not None:
+                            out.append([
+                                str(parent.get("ap_type", "")).upper(),
+                                str(parent.get("name", "")),
+                                str(n.get("ap_type", "")).upper(),
+                                str(n.get("name", "")),
+                            ])
+                        _flatten_edges(n.get("children", []), n, out)
+                    return out
+
+                rows = _flatten_edges(hierarchy)
+                if rows:
+                    page = ctx.new_page(toc_title="Schaltplan-Hierarchie")
+                    y_after = ctx.title(page, "Schaltplan – Hierarchie")
+                    y_after = ctx.section_heading(page, y_after, "Versorgungsstruktur")
+                    headers = ["Typ Quelle", "Quelle", "Typ Ziel", "Ziel"]
+                    ctx.draw_table(page, y_after, headers, rows)
+                else:
+                    page = ctx.new_page(toc_title="Schaltplan-Hierarchie")
+                    y_after = ctx.title(page, "Schaltplan – Hierarchie")
+                    y_after = ctx.section_heading(page, y_after, "Versorgungsstruktur")
+                    ctx.painter.drawText(
+                        QRectF(page.x(), y_after + ctx.mm(4), page.width(), ctx.mm(10)),
+                        Qt.AlignLeft | Qt.AlignTop,
+                        "Keine Hierarchie-Verbindungen vorhanden.",
+                    )
 
         up_distribution_rows = data.get("up_distribution_rows", [])
         if "el_up_distribution" in sections and up_distribution_rows:

@@ -30,6 +30,8 @@ from pathlib import Path
 from PySide6.QtGui import QColor, QPixmap, QPainter, QFont, QPen, QBrush, QFontMetrics
 from PySide6.QtCore import Signal, Qt
 
+from logic.elec_schematic import default_elec_schematic, sanitize_elec_schematic
+
 # ── Custom Spinbox: Completely disable mouse wheel ────────────── #
 class SafeDoubleSpinBox(QDoubleSpinBox):
     """QDoubleSpinBox that never responds to mouse wheel scrolling.
@@ -2074,6 +2076,8 @@ class ElektroPointPanel(QWidget):
         self._uv_cable_choices: list[str] = []
         self._up_distribution_config: dict = {}
         self._up_cable_choices: list[tuple[str, str]] = []
+        self._hak_config: dict = {}
+        self._zaehler_config: dict = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -2139,6 +2143,8 @@ class ElektroPointPanel(QWidget):
         self.cmb_ap_type.addItem("Standard", "standard")
         self.cmb_ap_type.addItem("Unterverteilung (UV)", "uv")
         self.cmb_ap_type.addItem("Verteilung in Unterputzdose", "up_distribution")
+        self.cmb_ap_type.addItem("Hausanschlusskasten (HAK)", "hak")
+        self.cmb_ap_type.addItem("Stromzähler", "zaehler")
         self.cmb_ap_type.currentIndexChanged.connect(self._on_ap_type_changed)
         form.addRow("AP-Typ:", self.cmb_ap_type)
 
@@ -2149,6 +2155,14 @@ class ElektroPointPanel(QWidget):
         self.btn_up_distribution = QPushButton("Verteilung in Unterputzdose…")
         self.btn_up_distribution.clicked.connect(self._open_up_distribution_dialog)
         form.addRow(self.btn_up_distribution)
+
+        self.btn_hak_config = QPushButton("🏠 HAK konfigurieren…")
+        self.btn_hak_config.clicked.connect(self._open_hak_dialog)
+        form.addRow(self.btn_hak_config)
+
+        self.btn_zaehler_config = QPushButton("🔢 Zähler konfigurieren…")
+        self.btn_zaehler_config.clicked.connect(self._open_zaehler_dialog)
+        form.addRow(self.btn_zaehler_config)
 
         self.sb_label_size = SafeDoubleSpinBox()
         self.sb_label_size.setRange(0.1, 999999.0)
@@ -2300,6 +2314,8 @@ class ElektroPointPanel(QWidget):
         ap_type = self.get_ap_type()
         self.btn_uv_plan.setVisible(ap_type == "uv")
         self.btn_up_distribution.setVisible(ap_type == "up_distribution")
+        self.btn_hak_config.setVisible(ap_type == "hak")
+        self.btn_zaehler_config.setVisible(ap_type == "zaehler")
 
     def get_ap_type(self) -> str:
         return self._ap_type or "standard"
@@ -2312,6 +2328,10 @@ class ElektroPointPanel(QWidget):
             value = "up_distribution"
         else:
             value = "standard"
+        if raw == "hak":
+            value = "hak"
+        elif raw == "zaehler":
+            value = "zaehler"
         self._ap_type = value
         if value == "uv":
             self._up_distribution_config = {}
@@ -2376,6 +2396,58 @@ class ElektroPointPanel(QWidget):
             self._up_distribution_config = dlg.get_config()
             self.up_distribution_changed.emit(self.point_id)
 
+    def _open_hak_dialog(self):
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QVBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("HAK konfigurieren")
+        dlg.resize(320, 140)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        le_voltage = QLineEdit(str(self._hak_config.get("incoming_voltage", "400V") or "400V"))
+        le_fuse = QLineEdit(str(self._hak_config.get("main_fuse_a", "63") or "63"))
+        form.addRow("Spannung:", le_voltage)
+        form.addRow("Hauptsicherung (A):", le_fuse)
+        layout.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        layout.addWidget(bb)
+        if dlg.exec() == QDialog.Accepted:
+            self._hak_config = {
+                "incoming_voltage": le_voltage.text().strip() or "400V",
+                "main_fuse_a": le_fuse.text().strip() or "63",
+            }
+            self.ap_type_changed.emit(self.point_id, self._ap_type)
+
+    def _open_zaehler_dialog(self):
+        from PySide6.QtWidgets import (QComboBox as _QCmb, QDialog, QDialogButtonBox,
+                                        QFormLayout, QLineEdit, QVBoxLayout)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Zähler konfigurieren")
+        dlg.resize(320, 140)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        le_meter_id = QLineEdit(str(self._zaehler_config.get("meter_id", "") or ""))
+        cmb_phases = _QCmb()
+        cmb_phases.addItems(["3-phasig", "1-phasig"])
+        cur = str(self._zaehler_config.get("phases", "3-phasig") or "3-phasig")
+        idx = cmb_phases.findText(cur)
+        if idx >= 0:
+            cmb_phases.setCurrentIndex(idx)
+        form.addRow("Zählernummer:", le_meter_id)
+        form.addRow("Phasen:", cmb_phases)
+        layout.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        layout.addWidget(bb)
+        if dlg.exec() == QDialog.Accepted:
+            self._zaehler_config = {
+                "meter_id": le_meter_id.text().strip(),
+                "phases": cmb_phases.currentText(),
+            }
+            self.ap_type_changed.emit(self.point_id, self._ap_type)
+
     def get_parameters(self) -> dict:
         # Wenn Freitext ausgewählt ist, speichere den benutzerdefinierten Text
         position = self.cmb_position.currentText()
@@ -2400,6 +2472,8 @@ class ElektroPointPanel(QWidget):
             "note": self.te_note.toPlainText(),
             "uv_config": copy.deepcopy(self._uv_config),
             "up_distribution_config": copy.deepcopy(self._up_distribution_config),
+            "hak_config": copy.deepcopy(self._hak_config),
+            "zaehler_config": copy.deepcopy(self._zaehler_config),
         }
 
     def get_smarthome_device_text(self) -> str:
@@ -2467,6 +2541,8 @@ class ElektroPointPanel(QWidget):
         self.set_ap_type(d.get("ap_type", "standard"))
         self.set_uv_config(d.get("uv_config"))
         self.set_up_distribution_config(d.get("up_distribution_config"))
+        self._hak_config = dict(d.get("hak_config", None) or {})
+        self._zaehler_config = dict(d.get("zaehler_config", None) or {})
         
         # Position und Höhe vom Boden
         position = d.get("position", "Wand")
@@ -3921,6 +3997,7 @@ class ParameterPanel(QWidget):
         self.elec_cable_panels: dict[str, ElektroCablePanel] = {}
         self._last_elec_cable_defaults: dict = self._default_elec_cable_defaults()
         self._bom_metadata: dict = self._default_bom_metadata()
+        self._elec_schematic: dict = default_elec_schematic()
         self.hkv_panels: dict[str, HkvPanel] = {}
         self.hkv_line_panels: dict[str, HkvLinePanel] = {}
         self.text_panels: dict[str, TextAnnotationPanel] = {}
@@ -5548,6 +5625,7 @@ class ParameterPanel(QWidget):
         """Remove all object panels (circuits, elec, HKV, floorplans) from the tree + layout."""
         self._last_elec_cable_defaults = self._default_elec_cable_defaults()
         self._bom_metadata = self._default_bom_metadata()
+        self._elec_schematic = default_elec_schematic()
         # Remove children first (they live under floorplan tree items)
         for tid in list(self.text_panels):
             self.remove_text_panel(tid)
@@ -5571,6 +5649,12 @@ class ParameterPanel(QWidget):
         self._ap_room_groups.clear()
         self._apply_tree_filter()
 
+    def get_elec_schematic(self) -> dict:
+        return copy.deepcopy(self._elec_schematic)
+
+    def set_elec_schematic(self, schematic: dict | None):
+        self._elec_schematic = sanitize_elec_schematic(schematic)
+
     def to_dict(self) -> dict:
         return {
             "t_supply": self.sb_vorlauf.value(),
@@ -5578,6 +5662,7 @@ class ParameterPanel(QWidget):
             "t_norm_outdoor": self.sb_norm_aussen.value(),
             "elec_cable_defaults": dict(self._last_elec_cable_defaults),
             "bom": copy.deepcopy(self._bom_metadata),
+            "elec_schematic": copy.deepcopy(self._elec_schematic),
             "floorplans_order": self.get_floorplan_order(),
             "floorplans": {
                 fid: p.to_dict() for fid, p in self.floorplan_panels.items()
@@ -5641,6 +5726,7 @@ class ParameterPanel(QWidget):
                 d.get("elec_cable_defaults")
             )
             self._bom_metadata = self._sanitize_bom_metadata(d.get("bom"))
+            self._elec_schematic = sanitize_elec_schematic(d.get("elec_schematic"))
 
             # ---- Floor plans (preserve tree order) ------------------
             fp_order_new = d.get("floorplans_order", [])
@@ -5783,6 +5869,7 @@ class ParameterPanel(QWidget):
             d.get("elec_cable_defaults")
         )
         self._bom_metadata = self._sanitize_bom_metadata(d.get("bom"))
+        self._elec_schematic = sanitize_elec_schematic(d.get("elec_schematic"))
 
         # Floorplans (in saved order)
         fp_order = d.get("floorplans_order", [])

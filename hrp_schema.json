@@ -138,9 +138,9 @@
 
     "ApType": {
       "type": "string",
-      "enum": ["standard", "uv", "up_distribution"],
+      "enum": ["standard", "uv", "up_distribution", "hak", "zaehler"],
       "default": "standard",
-      "description": "Semantischer AP-Typ: Standard-Anschlusspunkt, Unterverteilung oder Verteilung in Unterputzdose."
+      "description": "Semantischer AP-Typ: Standard-Anschlusspunkt, Unterverteilung, Verteilung in Unterputzdose, Hausanschlusskasten oder Stromzähler."
     },
 
     "UvSlotAssignment": {
@@ -722,6 +722,11 @@
           "$ref": "#/$defs/BomSettings",
           "description": "Persistierte Metadaten für Stücklisten-Export und MCP-Reports."
         },
+        "elec_schematic": {
+          "type": "object",
+          "default": {},
+          "description": "Modellbasierter Stromlaufplan: Geräte, Klemmen, Netze und Verbindungen."
+        },
         "floorplans_order": {
           "type": "array",
           "items": { "type": "string" },
@@ -874,7 +879,23 @@
         "smarthome_device_color": { "type": "string", "default": "" },
         "note": { "type": "string", "default": "" },
         "uv_config": { "$ref": "#/$defs/UvConfig" },
-        "up_distribution_config": { "$ref": "#/$defs/UpDistributionConfig" }
+        "up_distribution_config": { "$ref": "#/$defs/UpDistributionConfig" },
+        "hak_config": {
+          "type": "object",
+          "description": "Konfiguration des Hausanschlusskastens (nur wenn ap_type='hak').",
+          "properties": {
+            "incoming_voltage": { "type": "string", "default": "400V", "description": "Nennspannung, z.B. '400V'." },
+            "main_fuse_a": { "type": "string", "default": "63", "description": "Hauptsicherung in Ampere." }
+          }
+        },
+        "zaehler_config": {
+          "type": "object",
+          "description": "Konfiguration des Stromzählers (nur wenn ap_type='zaehler').",
+          "properties": {
+            "meter_id": { "type": "string", "default": "", "description": "Zählernummer." },
+            "phases": { "type": "string", "default": "3-phasig", "description": "Phasenzahl: '3-phasig' oder '1-phasig'." }
+          }
+        }
       }
     },
 
