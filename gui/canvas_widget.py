@@ -404,6 +404,34 @@ class CanvasWidget(QWidget):
         self._fit_to_window()
         self.update()
 
+    def set_grid_visible(self, visible: bool) -> None:
+        self._grid_visible = bool(visible)
+        self.update()
+
+    def set_grid_spacing_mm(self, spacing_mm: float) -> None:
+        self._grid_spacing_mm = max(1.0, float(spacing_mm))
+        self.update()
+
+    def set_grid_color(self, color) -> None:
+        self._grid_color = QColor(color)
+        self.update()
+
+    def set_snap_angle(self, angle_deg: float) -> None:
+        self._snap_angle = max(0.0, float(angle_deg))
+        self.update()
+
+    def grid_visible(self) -> bool:
+        return bool(self._grid_visible)
+
+    def grid_spacing_mm(self) -> float:
+        return float(self._grid_spacing_mm)
+
+    def grid_color(self) -> QColor:
+        return QColor(self._grid_color)
+
+    def snap_angle(self) -> float:
+        return float(self._snap_angle)
+
     # ── Floor plan layer management ────────────────────────────────
 
     def add_floor_plan(self, fp_id: str, filepath: str = "") -> FloorPlanLayer:
@@ -1212,6 +1240,54 @@ class CanvasWidget(QWidget):
 
     def grab_source_rect(self, rect: QRectF) -> QPixmap:
         """Render a specific rectangular region to a preview pixmap (capped at 2×)."""
+        if rect.width() <= 0 or rect.height() <= 0:
+            return QPixmap()
+
+        # Target pixmap size - aim for preview size
+        target_size = 400
+        scale_x = target_size / rect.width() if rect.width() > 0 else 1.0
+        scale_y = target_size / rect.height() if rect.height() > 0 else 1.0
+        scale = min(scale_x, scale_y, 2.0)  # Cap at 2x to avoid huge pixmaps
+
+        pm_width = max(1, int(rect.width() * scale))
+        pm_height = max(1, int(rect.height() * scale))
+
+        # Save current view state
+        old_scale = float(self._scale)
+        old_offset = QPointF(self._offset)
+
+        old_min_size = self.minimumSize()
+        old_parent = self.parentWidget()
+        try:
+            # Temporarily adjust scale/offset to show only the rect
+            self._scale = scale
+            self._offset = QPointF(-rect.x() * scale, -rect.y() * scale)
+
+            # Detach from the layout-managing parent (if any) so its layout
+            # doesn't override our explicit resize below, and bypass the
+            # minimum size constraint so requesting a pixmap smaller than the
+            # UI minimum works.
+            old_size = (self.width(), self.height())
+            if old_parent is not None:
+                self.setParent(None)
+            self.setMinimumSize(0, 0)
+            self.resize(pm_width, pm_height)
+
+            # Grab the visible area
+            pm = self.grab()
+
+            # Restore widget size
+            self.resize(old_size[0], old_size[1])
+
+            return pm
+        finally:
+            # Always restore original view state
+            self._scale = old_scale
+            self._offset = old_offset
+            self.setMinimumSize(old_min_size)
+            if old_parent is not None:
+                self.setParent(old_parent)
+            self.update()
 
     def get_default_source_rect(self) -> QRectF:
         """Return the default source rect for export (export frame or SVG size)."""
@@ -1256,57 +1332,31 @@ class CanvasWidget(QWidget):
         old_offset = QPointF(self._offset)
         old_w = self.width()
         old_h = self.height()
+        old_min_size = self.minimumSize()
+        old_parent = self.parentWidget()
 
         try:
             self._scale = s
             self._offset = off
+            # Detach from the layout-managing parent (if any) so its layout
+            # doesn't reassert the widget's old geometry before/while we grab,
+            # and bypass the UI minimum size so small export resolutions
+            # aren't silently clamped up (e.g. 400x300 becoming 400x400).
+            if old_parent is not None:
+                self.setParent(None)
+            self.setMinimumSize(0, 0)
             self.resize(output_w, output_h)
             pixmap = self.grab()
         finally:
             self._scale = old_scale
             self._offset = old_offset
             self.resize(old_w, old_h)
+            self.setMinimumSize(old_min_size)
+            if old_parent is not None:
+                self.setParent(old_parent)
             self.update()
 
         return pixmap.toImage()
-
-        if rect.width() <= 0 or rect.height() <= 0:
-            return QPixmap()
-        
-        # Target pixmap size - aim for preview size
-        target_size = 400
-        scale_x = target_size / rect.width() if rect.width() > 0 else 1.0
-        scale_y = target_size / rect.height() if rect.height() > 0 else 1.0
-        scale = min(scale_x, scale_y, 2.0)  # Cap at 2x to avoid huge pixmaps
-        
-        pm_width = max(1, int(rect.width() * scale))
-        pm_height = max(1, int(rect.height() * scale))
-        
-        # Save current view state
-        old_scale = float(self._scale)
-        old_offset = QPointF(self._offset)
-        
-        try:
-            # Temporarily adjust scale/offset to show only the rect
-            self._scale = scale
-            self._offset = QPointF(-rect.x() * scale, -rect.y() * scale)
-            
-            # Resize widget temporarily to match pixmap size
-            old_size = (self.width(), self.height())
-            self.resize(pm_width, pm_height)
-            
-            # Grab the visible area
-            pm = self.grab()
-            
-            # Restore widget size
-            self.resize(old_size[0], old_size[1])
-            
-            return pm
-        finally:
-            # Always restore original view state
-            self._scale = old_scale
-            self._offset = old_offset
-            self.update()
 
     def start_move_floor_plan(self, fp_id: str):
         """Enter mode to drag-move a floor plan with the mouse."""

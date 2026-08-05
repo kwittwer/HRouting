@@ -98,7 +98,11 @@ class QETExporter:
         except Exception as e:
             print(f"QET Export Fehler: {e}")
             return False
-    
+
+    def export_to_file(self, output_path: str) -> bool:
+        """Alias für :meth:`export_to_qet` (Namenskonvention wie ``KiCadExporter``)."""
+        return self.export_to_qet(output_path)
+
     def _collect_elements(self):
         """Sammelt HRouting-Elemente (APs, UVs, Geräte) für QET."""
         elec_points = self.params.get("elec_points", {})
