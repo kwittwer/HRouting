@@ -280,9 +280,10 @@ class AppWindow(QMainWindow):
     @staticmethod
     def _bound_canvas_keys() -> set[str]:
         """canvas-Schlüssel, die bereits über Views im Dokument liegen."""
-        from model.canvas_binding import BINDINGS  # noqa: PLC0415
+        from model.canvas_binding import BINDINGS, BOUND_VIEW_KEYS  # noqa: PLC0415
 
-        return {binding.geom_key for binding in BINDINGS if binding.geom_key}
+        keys = {binding.geom_key for binding in BINDINGS if binding.geom_key}
+        return keys | set(BOUND_VIEW_KEYS)
 
     def _load_floor_plan_images(self, document: Document) -> None:
         """Lädt die Grundriss-/Einrichtungsbilder in den Canvas.
@@ -328,25 +329,14 @@ class AppWindow(QMainWindow):
         self._update_title()
 
     def _apply_canvas_visibility(self, element_id: str, visible: bool) -> None:
-        if element_id in self._document.floorplans:
-            self.canvas.set_floor_plan_visible(element_id, visible)
-            self.canvas.set_ref_line_visible(element_id, visible)
-            self.canvas.set_helper_line_visible(element_id, visible)
-            return
+        """Spiegelt die Sichtbarkeit in den Canvas.
 
-        if element_id in self.canvas._circuit_visible:
-            self.canvas._circuit_visible[element_id] = bool(visible)
-        if element_id in self.canvas._elec_visible:
-            self.canvas._elec_visible[element_id] = bool(visible)
-        if element_id in self.canvas._elec_room_visible:
-            self.canvas._elec_room_visible[element_id] = bool(visible)
-        if element_id in self.canvas._hkv_visible:
-            self.canvas._hkv_visible[element_id] = bool(visible)
-        if element_id in self.canvas._hkv_line_visible:
-            self.canvas._hkv_line_visible[element_id] = bool(visible)
-        if element_id in self.canvas._text_visible:
-            self.canvas.set_text_visible(element_id, bool(visible))
-        self.canvas.update()
+        Element- und Grundrissdaten liegen dank der Dokumentbindung bereits
+        im selben Speicher; der Aufruf sorgt zusätzlich dafür, dass abhängige
+        Darstellungen (Referenzlinie, Hilfslinien) mitgeschaltet und der
+        Canvas neu gezeichnet wird.
+        """
+        self.canvas.set_element_visible(element_id, visible)
 
     def _active_floorplan_id(self) -> str:
         fp_id = self._document.active_floorplan_id
@@ -443,7 +433,7 @@ class AppWindow(QMainWindow):
             distributor="",
         )
         self._document.add(circuit)
-        self.canvas._circuit_visible[cid] = True
+        self.canvas.register_element(cid)
         self._emit_structure_changed()
         self.navigator.select(cid)
         self.canvas.start_drawing(cid)
@@ -493,7 +483,7 @@ class AppWindow(QMainWindow):
             label_size=12.0,
         )
         self._document.add(room)
-        self.canvas._elec_room_visible[rid] = True
+        self.canvas.register_element(rid)
         self._emit_structure_changed()
         self.navigator.select(rid)
         self.canvas.start_draw_elec_room(rid)
@@ -511,7 +501,7 @@ class AppWindow(QMainWindow):
             visible=True,
         )
         self._document.add(text)
-        self.canvas._text_visible[tid] = True
+        self.canvas.register_element(tid)
         self._emit_structure_changed()
         self.navigator.select(tid)
         self.canvas.start_place_text(tid, "Text")
@@ -536,7 +526,7 @@ class AppWindow(QMainWindow):
             end_ap="",
         )
         self._document.add(cable)
-        self.canvas._elec_visible[eid] = True
+        self.canvas.register_element(eid)
         self._emit_structure_changed()
         self.navigator.select(eid)
         self.canvas.start_draw_elec_cable(eid)
@@ -560,7 +550,7 @@ class AppWindow(QMainWindow):
             icon_path="",
         )
         self._document.add(hkv)
-        self.canvas._hkv_visible[hid] = True
+        self.canvas.register_element(hid)
         self._emit_structure_changed()
         self.navigator.select(hid)
         self.canvas.start_place_hkv(hid, 50.0, 50.0)
@@ -583,7 +573,7 @@ class AppWindow(QMainWindow):
             end_hkv="",
         )
         self._document.add(line)
-        self.canvas._hkv_line_visible[lid] = True
+        self.canvas.register_element(lid)
         self._emit_structure_changed()
         self.navigator.select(lid)
         self.canvas.start_draw_hkv_line(lid)

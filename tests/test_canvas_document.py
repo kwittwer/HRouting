@@ -163,3 +163,182 @@ def test_app_window_preserves_view_settings(app, tmp_path, monkeypatch):
         assert reloaded.to_dict()["params"]["floorplans"]
     finally:
         window.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A4.6 – Grundriss-Layer
+# ---------------------------------------------------------------------------
+
+
+def test_floor_plan_layer_is_document_backed(bound):
+    canvas, document = bound
+    fp_id = document.floorplan_order[0]
+    layer = canvas._floor_plans[fp_id]
+
+    assert type(layer).__name__ == "FloorPlanLayerView"
+    assert layer.fp_id == fp_id
+    assert layer.mm_per_px == 25.0
+
+
+def test_floor_plan_transform_writes_to_document(bound):
+    canvas, document = bound
+    fp_id = document.floorplan_order[0]
+    layer = canvas._floor_plans[fp_id]
+
+    layer.offset_x = 123.0
+    layer.offset_y = -45.0
+    layer.rotation = 30.0
+
+    entry = next(
+        e for e in document.to_dict()["canvas"]["floor_plans"] if e["fp_id"] == fp_id
+    )
+    assert entry["offset_x"] == 123.0
+    assert entry["offset_y"] == -45.0
+    assert entry["rotation"] == 30.0
+
+
+def test_floor_plan_mirrors_fields_into_params(bound):
+    """Redundante Felder müssen in canvas und params konsistent bleiben."""
+    canvas, document = bound
+    fp_id = document.floorplan_order[0]
+    canvas._floor_plans[fp_id].rotation = 15.0
+
+    saved = document.to_dict()
+    entry = next(e for e in saved["canvas"]["floor_plans"] if e["fp_id"] == fp_id)
+    assert entry["rotation"] == 15.0
+    assert saved["params"]["floorplans"][fp_id]["rotation"] == 15.0
+
+
+def test_floor_plan_ref_line_roundtrip(bound):
+    canvas, document = bound
+    fp_id = document.floorplan_order[0]
+    layer = canvas._floor_plans[fp_id]
+
+    layer.ref_p1 = QPointF(10.0, 20.0)
+    layer.ref_p2 = QPointF(30.0, 40.0)
+
+    entry = next(
+        e for e in document.to_dict()["canvas"]["floor_plans"] if e["fp_id"] == fp_id
+    )
+    assert entry["ref_line"] == [[10.0, 20.0], [30.0, 40.0]]
+    assert layer.ref_p1 == QPointF(10.0, 20.0)
+
+
+def test_floor_plan_image_data_stays_local(bound):
+    """Renderer und Pixmap gehören nicht ins Projektformat."""
+    canvas, document = bound
+    fp_id = document.floorplan_order[0]
+    layer = canvas._floor_plans[fp_id]
+
+    layer.size = (640.0, 480.0)
+    assert layer.size == (640.0, 480.0)
+
+    entry = next(
+        e for e in document.to_dict()["canvas"]["floor_plans"] if e["fp_id"] == fp_id
+    )
+    assert "size" not in entry
+    assert "renderer" not in entry
+
+
+# ---------------------------------------------------------------------------
+# A4.7 – Hilfslinien
+# ---------------------------------------------------------------------------
+
+
+def _helper_document() -> Document:
+    return Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "mm_per_px": 25.0}],
+                "floor_helper_lines": {"grundriss-1": {"HL-1": [[0, 0], [100, 100]]}},
+                "floor_helper_line_visible": {"grundriss-1": {"HL-1": True}},
+            },
+            "params": {"floorplans": {"grundriss-1": {"name": "EG"}}},
+        }
+    )
+
+
+def test_helper_lines_read_as_points(app):
+    canvas = CanvasWidget()
+    try:
+        canvas.set_document(_helper_document())
+        points = canvas._floor_helper_lines["grundriss-1"]["HL-1"]
+        assert [(p.x(), p.y()) for p in points] == [(0.0, 0.0), (100.0, 100.0)]
+        assert canvas._floor_helper_line_visible["grundriss-1"]["HL-1"] is True
+    finally:
+        canvas.deleteLater()
+
+
+def test_helper_lines_write_to_document(app):
+    document = _helper_document()
+    canvas = CanvasWidget()
+    try:
+        canvas.set_document(document)
+        canvas._floor_helper_lines["grundriss-1"]["HL-1"] = [
+            QPointF(7, 8),
+            QPointF(9, 10),
+        ]
+        canvas._floor_helper_line_visible["grundriss-1"]["HL-1"] = False
+
+        saved = document.to_dict()["canvas"]
+        assert saved["floor_helper_lines"]["grundriss-1"]["HL-1"] == [
+            [7.0, 8.0],
+            [9.0, 10.0],
+        ]
+        assert saved["floor_helper_line_visible"]["grundriss-1"]["HL-1"] is False
+    finally:
+        canvas.deleteLater()
+
+
+def test_helper_lines_setdefault_creates_entry(app):
+    """Der Canvas nutzt setdefault beim Anlegen neuer Hilfslinien."""
+    document = _helper_document()
+    canvas = CanvasWidget()
+    try:
+        canvas.set_document(document)
+        canvas._floor_helper_lines.setdefault("grundriss-1", {})["HL-2"] = [
+            QPointF(1, 1),
+            QPointF(2, 2),
+        ]
+        stored = document.to_dict()["canvas"]["floor_helper_lines"]["grundriss-1"]
+        assert stored["HL-2"] == [[1.0, 1.0], [2.0, 2.0]]
+        assert "HL-1" in stored  # bestehender Eintrag bleibt
+    finally:
+        canvas.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A5 – Canvas-API statt direkter Dict-Zugriffe
+# ---------------------------------------------------------------------------
+
+
+def test_set_element_visible_covers_all_types(bound):
+    canvas, document = bound
+
+    canvas.set_element_visible("HK-1", False)
+    canvas.set_element_visible("AP-1", False)
+
+    saved = document.to_dict()["params"]
+    assert saved["circuits"]["HK-1"]["visible"] is False
+    assert saved["elec_points"]["AP-1"]["visible"] is False
+
+    assert canvas.get_element_visible("HK-1") is False
+    assert canvas.get_element_visible("AP-1") is False
+
+
+def test_set_element_visible_handles_floor_plans(bound):
+    canvas, document = bound
+    fp_id = document.floorplan_order[0]
+
+    canvas.set_element_visible(fp_id, False)
+
+    assert canvas.get_element_visible(fp_id) is False
+    entry = next(
+        e for e in document.to_dict()["canvas"]["floor_plans"] if e["fp_id"] == fp_id
+    )
+    assert entry["visible"] is False
+
+
+def test_get_element_visible_defaults_to_true(bound):
+    canvas, _document = bound
+    assert canvas.get_element_visible("gibt-es-nicht") is True

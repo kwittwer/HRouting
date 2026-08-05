@@ -529,3 +529,294 @@ class ParamsMapView(MutableMapping):
 
     def __repr__(self) -> str:  # pragma: no cover - Debughilfe
         return f"<ParamsMapView {self._field} n={len(self)}>"
+
+
+# ---------------------------------------------------------------------------
+# Verschachtelte Ansichtsdaten (Hilfslinien je Grundriss)
+# ---------------------------------------------------------------------------
+
+
+class NestedViewMapView(MutableMapping):
+    """Zweistufige View auf ``document.view[view_key]``.
+
+    Hilfslinien und ihre Metadaten sind je Grundriss gruppiert::
+
+        canvas._floor_helper_lines[fp_id][helper_id] = [QPointF, QPointF]
+
+    Diese View bildet die äußere Ebene ab und liefert für jeden Grundriss eine
+    :class:`_InnerViewMap`, die die Werte konvertiert.
+    """
+
+    __slots__ = ("_document", "_view_key", "_converters", "_on_change")
+
+    def __init__(
+        self,
+        document: Document,
+        view_key: str,
+        converters: tuple[Callable[[Any], Any], Callable[[Any], Any]] = RAW,
+        on_change: Callable[[str], None] | None = None,
+    ) -> None:
+        self._document = document
+        self._view_key = view_key
+        self._converters = converters
+        self._on_change = on_change
+
+    @property
+    def _root(self) -> dict:
+        root = self._document.view.get(self._view_key)
+        if not isinstance(root, dict):
+            root = {}
+            self._document.view[self._view_key] = root
+        return root
+
+    def __getitem__(self, key: str) -> "_InnerViewMap":
+        if key not in self._root:
+            raise KeyError(key)
+        return _InnerViewMap(self, key, self._converters, self._on_change)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        inner = self._root.setdefault(key, {})
+        inner.clear()
+        write = self._converters[1]
+        if hasattr(value, "items"):
+            for sub_key, sub_value in value.items():
+                inner[sub_key] = write(sub_value)
+        if self._on_change is not None:
+            self._on_change(key)
+
+    def __delitem__(self, key: str) -> None:
+        del self._root[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(list(self._root.keys()))
+
+    def __len__(self) -> int:
+        return len(self._root)
+
+    def __contains__(self, key: object) -> bool:
+        return str(key) in self._root
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if key not in self._root:
+            self._root[key] = {}
+            if default:
+                self[key] = default
+        return _InnerViewMap(self, key, self._converters, self._on_change)
+
+    def pop(self, key: str, *args: Any) -> Any:
+        if key not in self._root:
+            if args:
+                return args[0]
+            raise KeyError(key)
+        value = dict(self[key].items())
+        del self._root[key]
+        return value
+
+    def clear(self) -> None:
+        self._root.clear()
+
+    def update(self, other=(), /, **kwargs: Any) -> None:  # type: ignore[override]
+        if hasattr(other, "items"):
+            other = other.items()
+        for key, value in other:
+            self[key] = value
+        for key, value in kwargs.items():
+            self[key] = value
+
+    def copy(self) -> dict[str, Any]:
+        return {key: dict(self[key].items()) for key in self}
+
+    def __repr__(self) -> str:  # pragma: no cover - Debughilfe
+        return f"<NestedViewMapView {self._view_key} n={len(self)}>"
+
+
+class _InnerViewMap(MutableMapping):
+    """Innere Ebene von :class:`NestedViewMapView` (helper_id -> Wert)."""
+
+    __slots__ = ("_owner", "_floor_id", "_read", "_write", "_on_change")
+
+    def __init__(self, owner: NestedViewMapView, floor_id: str, converters, on_change):
+        self._owner = owner
+        self._floor_id = floor_id
+        self._read, self._write = converters
+        self._on_change = on_change
+
+    @property
+    def _data(self) -> dict:
+        return self._owner._root.setdefault(self._floor_id, {})
+
+    def __getitem__(self, key: str) -> Any:
+        return self._read(self._data[key])
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._data[key] = self._write(value)
+        if self._on_change is not None:
+            self._on_change(self._floor_id)
+
+    def __delitem__(self, key: str) -> None:
+        del self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(list(self._data.keys()))
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __contains__(self, key: object) -> bool:
+        return str(key) in self._data
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if key not in self._data:
+            self[key] = default
+            return default
+        return self[key]
+
+    def pop(self, key: str, *args: Any) -> Any:
+        try:
+            value = self[key]
+        except KeyError:
+            if args:
+                return args[0]
+            raise
+        del self._data[key]
+        return value
+
+    def clear(self) -> None:
+        self._data.clear()
+
+    def update(self, other=(), /, **kwargs: Any) -> None:  # type: ignore[override]
+        if hasattr(other, "items"):
+            other = other.items()
+        for key, value in other:
+            self[key] = value
+        for key, value in kwargs.items():
+            self[key] = value
+
+    def copy(self) -> dict[str, Any]:
+        return dict(self.items())
+
+    def __repr__(self) -> str:  # pragma: no cover - Debughilfe
+        return f"<_InnerViewMap {self._floor_id} n={len(self)}>"
+
+
+# ---------------------------------------------------------------------------
+# Grundriss-Layer
+# ---------------------------------------------------------------------------
+
+#: Felder, die ausschließlich im Canvas leben (Bilddaten, Laufzeitobjekte)
+_LAYER_LOCAL_FIELDS = frozenset({"fp_id", "renderer", "pixmap", "size"})
+
+#: Skalare Layerfelder mit Standardwert, die im Dokument liegen
+_LAYER_SCALARS: dict[str, Any] = {
+    "offset_x": 0.0,
+    "offset_y": 0.0,
+    "rotation": 0.0,
+    "opacity": 1.0,
+    "visible": True,
+    "mm_per_px": 1.0,
+    "ref_length_mm": 1000.0,
+    "fixed_width_mm": 0.0,
+    "fixed_height_mm": 0.0,
+    "polygon_color": "#8d99ae",
+}
+
+#: Felder, die zusätzlich in ``params.floorplans`` gespiegelt werden
+_LAYER_MIRRORED = frozenset(
+    {"offset_x", "offset_y", "rotation", "opacity", "visible",
+     "ref_length_mm", "fixed_width_mm", "fixed_height_mm", "polygon_color"}
+)
+
+
+class FloorPlanLayerView:
+    """Proxy auf einen Grundriss-Layer, dessen Geometrie im Dokument liegt.
+
+    Der Canvas greift weiterhin wie gewohnt zu (``layer.offset_x``,
+    ``layer.polygon``); die Werte landen aber im ``Document``. Bilddaten
+    (``renderer``, ``pixmap``, ``size``) bleiben lokal im Canvas, da sie nicht
+    Teil des Projektformats sind.
+    """
+
+    __slots__ = ("fp_id", "renderer", "pixmap", "size", "_element", "_on_change")
+
+    def __init__(self, element, on_change: Callable[[str], None] | None = None) -> None:
+        object.__setattr__(self, "_element", element)
+        object.__setattr__(self, "_on_change", on_change)
+        object.__setattr__(self, "fp_id", element.id)
+        object.__setattr__(self, "renderer", None)
+        object.__setattr__(self, "pixmap", None)
+        object.__setattr__(self, "size", (100.0, 100.0))
+
+    # -- Zugriff ---------------------------------------------------------
+    def __getattr__(self, name: str) -> Any:
+        element = object.__getattribute__(self, "_element")
+
+        if name == "file_path":
+            return element.data.get("file_path", "")
+        if name in ("ref_p1", "ref_p2"):
+            ref_line = element.layer.get("ref_line")
+            if not ref_line or len(ref_line) < 2:
+                return None
+            return to_point(ref_line[0 if name == "ref_p1" else 1])
+        if name == "polygon":
+            return to_point_list(element.layer.get("polygon"))
+        if name in _LAYER_SCALARS:
+            return element.layer.get(name, _LAYER_SCALARS[name])
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in _LAYER_LOCAL_FIELDS:
+            object.__setattr__(self, name, value)
+            return
+
+        element = object.__getattribute__(self, "_element")
+
+        if name == "file_path":
+            element.data["file_path"] = value or ""
+        elif name in ("ref_p1", "ref_p2"):
+            self._set_ref_point(element, name, value)
+        elif name == "polygon":
+            points = from_point_list(value)
+            if points:
+                element.layer["polygon"] = points
+            else:
+                element.layer.pop("polygon", None)
+        elif name in _LAYER_SCALARS:
+            element.layer[name] = value
+            if name in _LAYER_MIRRORED:
+                element.data[name] = value
+        else:
+            object.__setattr__(self, name, value)
+            return
+
+        on_change = object.__getattribute__(self, "_on_change")
+        if on_change is not None:
+            on_change(element.id)
+
+    @staticmethod
+    def _set_ref_point(element, name: str, value: Any) -> None:
+        ref_line = element.layer.get("ref_line")
+        if not isinstance(ref_line, list) or len(ref_line) < 2:
+            ref_line = [None, None]
+        else:
+            ref_line = list(ref_line)
+        ref_line[0 if name == "ref_p1" else 1] = from_point(value)
+        if ref_line[0] is None and ref_line[1] is None:
+            element.layer.pop("ref_line", None)
+        else:
+            element.layer["ref_line"] = ref_line
+
+    def __repr__(self) -> str:  # pragma: no cover - Debughilfe
+        return f"<FloorPlanLayerView {self.fp_id}>"
+

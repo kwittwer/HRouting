@@ -407,7 +407,7 @@ class CanvasWidget(QWidget):
     # ── Floor plan layer management ────────────────────────────────
 
     def add_floor_plan(self, fp_id: str, filepath: str = "") -> FloorPlanLayer:
-        layer = FloorPlanLayer(fp_id=fp_id)
+        layer = self._create_floor_plan_layer(fp_id)
         self._floor_plans[fp_id] = layer
         if fp_id not in self._floor_plan_order:
             self._floor_plan_order.append(fp_id)
@@ -417,6 +417,17 @@ class CanvasWidget(QWidget):
         if filepath:
             self.load_floor_plan_image(fp_id, filepath)
         return layer
+
+    def _create_floor_plan_layer(self, fp_id: str):
+        """Erzeugt einen Layer – dokumentgebunden, sobald ein Dokument gesetzt ist."""
+        document = getattr(self, "_document", None)
+        if document is not None:
+            element = document.floorplans.get(fp_id) or document.furniture.get(fp_id)
+            if element is not None:
+                from model.views import FloorPlanLayerView  # noqa: PLC0415
+
+                return FloorPlanLayerView(element, self._on_document_data_changed)
+        return FloorPlanLayer(fp_id=fp_id)
 
     def remove_floor_plan(self, fp_id: str):
         self._floor_plans.pop(fp_id, None)
@@ -2231,6 +2242,60 @@ class CanvasWidget(QWidget):
     def document(self):
         """Das aktuell gebundene ``Document`` (oder ``None``)."""
         return getattr(self, "_document", None)
+
+    def set_element_visible(self, element_id: str, visible: bool) -> None:
+        """Setzt die Sichtbarkeit eines Elements unabhängig von seinem Typ.
+
+        Ersetzt direkte Zugriffe auf die internen Sichtbarkeits-Maps von außen.
+        Grundrisse und Einrichtungsobjekte werden inklusive Referenzlinie und
+        Hilfslinien geschaltet.
+        """
+        visible = bool(visible)
+
+        if element_id in self._floor_plans:
+            self.set_floor_plan_visible(element_id, visible)
+            self.set_ref_line_visible(element_id, visible)
+            self.set_helper_line_visible(element_id, visible)
+            return
+
+        for mapping in (
+            self._circuit_visible,
+            self._elec_visible,
+            self._elec_room_visible,
+            self._hkv_visible,
+            self._hkv_line_visible,
+            self._text_visible,
+        ):
+            if element_id in mapping:
+                mapping[element_id] = visible
+
+        self.update()
+
+    def get_element_visible(self, element_id: str) -> bool:
+        """Liest die Sichtbarkeit eines Elements unabhängig von seinem Typ."""
+        if element_id in self._floor_plans:
+            layer = self._floor_plans.get(element_id)
+            return bool(getattr(layer, "visible", True))
+
+        for mapping in (
+            self._circuit_visible,
+            self._elec_visible,
+            self._elec_room_visible,
+            self._hkv_visible,
+            self._hkv_line_visible,
+            self._text_visible,
+        ):
+            if element_id in mapping:
+                return bool(mapping.get(element_id, True))
+        return True
+
+    def register_element(self, element_id: str, visible: bool = True) -> None:
+        """Meldet ein neu angelegtes Element beim Canvas an.
+
+        Ersetzt direkte Schreibzugriffe auf die Sichtbarkeits-Maps beim
+        Anlegen neuer Elemente.
+        """
+        self.set_element_visible(element_id, visible)
 
     def _on_document_data_changed(self, element_id: str) -> None:
         """Wird von den Views bei jeder Datenänderung aufgerufen."""

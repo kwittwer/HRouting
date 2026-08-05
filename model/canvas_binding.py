@@ -22,6 +22,7 @@ from .elements import (
     ElecPoint,
     ElecRoom,
     Element,
+    FloorPlan,
     Hkv,
     HkvLine,
     TextAnnotation,
@@ -32,7 +33,9 @@ from .views import (
     RAW,
     SIZE,
     DocumentMapView,
+    FloorPlanLayerView,
     NestedEntryView,
+    NestedViewMapView,
     ParamsMapView,
 )
 
@@ -161,10 +164,29 @@ BINDINGS: tuple[Binding, ...] = (
             element_cls=Circuit, default=0.0, has_default=True),
     Binding("_elec_room_polygons", "A4.5", "geom", "elec_rooms",
             element_cls=ElecRoom, converters=POINT_LIST),
+
+    # -- A4.6  Referenzlinien je Grundriss ---------------------------------
+    Binding("_ref_line_visible", "A4.6", "geom", "ref_line_visible",
+            element_cls=FloorPlan, default=True, has_default=True),
+    Binding("_ref_line_colors", "A4.6", "geom", "ref_line_colors",
+            element_cls=FloorPlan, default="#ffdd00", has_default=True),
+
+    # -- A4.7  Hilfslinien je Grundriss -----------------------------------
+    Binding("_floor_helper_lines", "A4.7", "nested_view",
+            geom_key="floor_helper_lines", converters=POINT_LIST),
+    Binding("_floor_helper_line_visible", "A4.7", "nested_view",
+            geom_key="floor_helper_line_visible", converters=RAW),
+    Binding("_helper_label_positions", "A4.7", "nested_view",
+            geom_key="helper_label_positions", converters=RAW),
 )
 
 #: Reihenfolge der Umstellungsstufen
-STAGES: tuple[str, ...] = ("A4.1", "A4.2", "A4.3", "A4.4", "A4.5")
+STAGES: tuple[str, ...] = ("A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6", "A4.7")
+
+#: ``document.view``-Schlüssel, die bereits über Views gebunden sind
+BOUND_VIEW_KEYS: frozenset[str] = frozenset(
+    binding.geom_key for binding in BINDINGS if binding.kind == "nested_view"
+)
 
 
 def bindings_for(stages: tuple[str, ...] | None = None) -> list[Binding]:
@@ -181,6 +203,10 @@ def build_view(
     on_change: Callable[[str], None] | None = None,
 ):
     """Erzeugt die zur Bindung passende Proxy-View."""
+    if binding.kind == "nested_view":
+        return NestedViewMapView(
+            document, binding.geom_key, binding.converters, on_change
+        )
     if binding.kind == "params":
         return ParamsMapView(
             document,
@@ -213,6 +239,35 @@ def build_view(
     )
 
 
+def bind_floor_plans(
+    canvas: Any,
+    document: Document,
+    on_change: Callable[[str], None] | None = None,
+) -> None:
+    """Ersetzt die Grundriss-Layer durch dokumentgebundene Proxies (A4.6).
+
+    Bilddaten (``renderer``, ``pixmap``, ``size``) werden aus den bisherigen
+    Layern übernommen, da sie nicht Teil des Projektformats sind.
+    """
+    existing = getattr(canvas, "_floor_plans", {}) or {}
+    bound: dict[str, FloorPlanLayerView] = {}
+
+    for fp_id, element in {**document.floorplans, **document.furniture}.items():
+        view = FloorPlanLayerView(element, on_change)
+        previous = existing.get(fp_id)
+        if previous is not None:
+            view.renderer = getattr(previous, "renderer", None)
+            view.pixmap = getattr(previous, "pixmap", None)
+            view.size = getattr(previous, "size", (100.0, 100.0))
+        bound[fp_id] = view
+
+    canvas._floor_plans = bound
+
+    order = [fid for fid in document.floorplan_order if fid in bound]
+    order += [fid for fid in bound if fid not in order]
+    canvas._floor_plan_order = order
+
+
 def bind_canvas(
     canvas: Any,
     document: Document,
@@ -230,6 +285,9 @@ def bind_canvas(
         else:
             view = build_view(document, binding, on_change)
         setattr(canvas, binding.attr, view)
+
+    if stages is None or "A4.6" in stages:
+        bind_floor_plans(canvas, document, on_change)
 
 
 class _MultiTypeGeomView(DocumentMapView):
