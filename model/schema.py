@@ -105,6 +105,15 @@ class ActionSpec:
     #: Aktion ist nur sinnvoll, wenn das Element Geometrie besitzt
     requires_geometry: bool = False
     destructive: bool = False
+    #: Nur anzeigen, wenn das Feld ``key`` einen der Werte hat: (key, werte)
+    depends_on: tuple[str, tuple[Any, ...]] | None = None
+
+    def is_visible_for(self, values: dict[str, Any]) -> bool:
+        """Prüft, ob die Aktion beim aktuellen Feldzustand angezeigt wird."""
+        if self.depends_on is None:
+            return True
+        key, allowed = self.depends_on
+        return values.get(key) in allowed
 
 
 @dataclass(frozen=True)
@@ -260,6 +269,16 @@ ELEC_POINT_SCHEMA = ElementSchema(
     actions=(
         ActionSpec("place", "Neu platzieren"),
         ActionSpec("duplicate", "Duplizieren"),
+        ActionSpec("configure_uv", "Unterverteilung planen…",
+                   "Reihen, Module und Phasenschienen konfigurieren",
+                   depends_on=("ap_type", ("uv",))),
+        ActionSpec("configure_up", "Verteilung in Dose…",
+                   "Aderzuordnung in der Unterputzdose",
+                   depends_on=("ap_type", ("up_distribution",))),
+        ActionSpec("configure_hak", "HAK konfigurieren…",
+                   depends_on=("ap_type", ("hak",))),
+        ActionSpec("configure_zaehler", "Zähler konfigurieren…",
+                   depends_on=("ap_type", ("zaehler",))),
         ActionSpec("delete", "Löschen", destructive=True),
     ),
 )

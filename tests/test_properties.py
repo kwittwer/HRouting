@@ -284,3 +284,157 @@ def test_properties_dock_handles_unknown_element(app, document):
         assert dock._current_id == ""
     finally:
         dock.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# AP-Typ-Konfiguration (B9)
+# ---------------------------------------------------------------------------
+
+
+def test_action_visibility_depends_on_ap_type():
+    from model.schema import ELEC_POINT_SCHEMA  # noqa: PLC0415
+
+    uv_action = next(a for a in ELEC_POINT_SCHEMA.actions if a.id == "configure_uv")
+    assert uv_action.is_visible_for({"ap_type": "uv"})
+    assert not uv_action.is_visible_for({"ap_type": "standard"})
+
+    place_action = next(a for a in ELEC_POINT_SCHEMA.actions if a.id == "place")
+    assert place_action.is_visible_for({})  # ohne Bedingung immer sichtbar
+
+
+def test_editor_toggles_config_buttons(app, document):
+    from gui.properties import GenericElementEditor  # noqa: PLC0415
+
+    point = document.elements["elec_points"]["AP-1"]
+    editor = GenericElementEditor(document, point, schema_for(point))
+    try:
+        def visible(action_id: str) -> bool:
+            button = editor._action_buttons[action_id]
+            return button.isVisibleTo(button.parentWidget())
+
+        editor._on_field_changed("ap_type", "uv")
+        assert visible("configure_uv")
+        assert not visible("configure_hak")
+
+        editor._on_field_changed("ap_type", "zaehler")
+        assert visible("configure_zaehler")
+        assert not visible("configure_uv")
+    finally:
+        editor.deleteLater()
+
+
+def test_hak_dialog_roundtrip(app):
+    from gui.properties.config_dialogs import HakConfigDialog  # noqa: PLC0415
+
+    dialog = HakConfigDialog({"incoming_voltage": "230V", "main_fuse_a": "35"})
+    try:
+        config = dialog.get_config()
+        assert config == {"incoming_voltage": "230V", "main_fuse_a": "35"}
+    finally:
+        dialog.deleteLater()
+
+
+def test_hak_dialog_uses_defaults(app):
+    from gui.properties.config_dialogs import HakConfigDialog  # noqa: PLC0415
+
+    dialog = HakConfigDialog(None)
+    try:
+        assert dialog.get_config() == {"incoming_voltage": "400V", "main_fuse_a": "63"}
+    finally:
+        dialog.deleteLater()
+
+
+def test_zaehler_dialog_roundtrip(app):
+    from gui.properties.config_dialogs import ZaehlerConfigDialog  # noqa: PLC0415
+
+    dialog = ZaehlerConfigDialog({"meter_id": "12345", "phases": "1-phasig"})
+    try:
+        assert dialog.get_config() == {"meter_id": "12345", "phases": "1-phasig"}
+    finally:
+        dialog.deleteLater()
+
+
+def test_uv_and_up_dialogs_are_constructible(app, document):
+    """Die großen Dialoge werden aus parameter_panel.py wiederverwendet."""
+    from gui.parameter_panel import UpDistributionDialog, UvConfigDialog  # noqa: PLC0415
+
+    uv = UvConfigDialog(config={}, cable_choices=["Kabel A", "Kabel B"])
+    try:
+        config = uv.get_config()
+        assert "slots" in config and "busbars" in config
+    finally:
+        uv.deleteLater()
+
+    up = UpDistributionDialog(config={}, cable_choices=[("EK-1", "Kabel A")])
+    try:
+        config = up.get_config()
+        assert "mappings" in config
+    finally:
+        up.deleteLater()
+
+
+def test_configs_persist_in_document(app, document, tmp_path):
+    """AP-Konfigurationen müssen Speichern und Laden überstehen."""
+    from storage.hrp_io import load_document, save_document  # noqa: PLC0415
+
+    point = document.elements["elec_points"]["AP-1"]
+    point.data["ap_type"] = "uv"
+    point.data["uv_config"] = {
+        "rows": 2,
+        "modules_per_row": 12,
+        "slots": [{"row": 1, "slot": 1, "device_type": "FI", "te_size": 4}],
+        "busbars": [{"phase": "L1", "color": "#e53935", "te_start": 1, "te_end": 4}],
+    }
+    point.data["hak_config"] = {"incoming_voltage": "400V", "main_fuse_a": "63"}
+
+    target = tmp_path / "configs.hrp"
+    save_document(document, target)
+    reloaded = load_document(target)
+
+    stored = reloaded.to_dict()["params"]["elec_points"]["AP-1"]
+    assert stored["ap_type"] == "uv"
+    assert stored["uv_config"]["rows"] == 2
+    assert stored["uv_config"]["busbars"][0]["phase"] == "L1"
+    assert stored["hak_config"]["main_fuse_a"] == "63"
+
+
+def test_app_window_stores_config(app, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(EXAMPLE)
+        window._store_config("AP-1", "zaehler_config", {"meter_id": "X1"})
+        stored = window._document.to_dict()["params"]["elec_points"]["AP-1"]
+        assert stored["zaehler_config"] == {"meter_id": "X1"}
+        assert window._dirty is True
+    finally:
+        window.deleteLater()
+
+
+def test_cable_choice_helpers(app, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(EXAMPLE)
+        names = window._cable_names()
+        pairs = window._cable_id_name_pairs()
+        assert names  # Beispielprojekt hat ein Kabel
+        assert pairs[0][0] == "EK-1"
+    finally:
+        window.deleteLater()

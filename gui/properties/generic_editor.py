@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from model.computed import computed_values
 from model.document import Document
 from model.elements import Element
-from model.field_access import apply_display_value, display_value
+from model.field_access import apply_display_value, display_value, get_field
 from model.schema import ElementSchema, FieldSpec, GLOBAL_FIELDS, groups_of
 
 from .field_widgets import FieldWidget, create_field_widget
@@ -94,6 +94,7 @@ class GenericElementEditor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
+        self._action_buttons: dict[str, QPushButton] = {}
         row: QHBoxLayout | None = None
         for index, action in enumerate(self._schema.actions):
             if index % 2 == 0:
@@ -112,7 +113,21 @@ class GenericElementEditor(QWidget):
             )
             assert row is not None
             row.addWidget(button)
+            self._action_buttons[action.id] = button
         return container
+
+    def _update_action_visibility(self) -> None:
+        """Blendet Aktionen aus, die zum aktuellen Feldzustand nicht passen."""
+        buttons = getattr(self, "_action_buttons", None)
+        if not buttons:
+            return
+        values = {
+            spec.key: get_field(self._element, spec) for spec in self._schema.fields
+        }
+        for action in self._schema.actions:
+            button = buttons.get(action.id)
+            if button is not None:
+                button.setVisible(action.is_visible_for(values))
 
     # ------------------------------------------------------------------
     def _on_field_changed(self, key: str, value: Any) -> None:
@@ -122,6 +137,7 @@ class GenericElementEditor(QWidget):
         apply_display_value(self._element, spec, value)
         self.field_changed.emit(self._element.id, key, value)
         self.refresh_computed()
+        self._update_action_visibility()
 
     def refresh(self) -> None:
         """Alle Feldwerte aus dem Element übernehmen."""
@@ -130,6 +146,7 @@ class GenericElementEditor(QWidget):
             if widget is not None:
                 widget.update_silently(display_value(self._element, spec))
         self.refresh_computed()
+        self._update_action_visibility()
 
     def refresh_computed(self) -> None:
         if not self._computed_labels:

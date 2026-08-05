@@ -15,6 +15,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QMainWindow,
     QMessageBox,
@@ -306,6 +307,10 @@ class AppWindow(QMainWindow):
             "edit_line": lambda eid: self.canvas.start_edit_hkv_line(eid),
             "place": self._action_place,
             "draw_ref_line": lambda eid: self.canvas.start_ref_line_for_floor(eid),
+            "configure_uv": self._action_configure_uv,
+            "configure_up": self._action_configure_up,
+            "configure_hak": self._action_configure_hak,
+            "configure_zaehler": self._action_configure_zaehler,
             "delete": self._action_delete,
         }
 
@@ -318,6 +323,85 @@ class AppWindow(QMainWindow):
             handler(element_id)
         except Exception as exc:  # noqa: BLE001 - Aktion darf die UI nicht abbrechen
             self.log.error(f"Aktion '{action_id}' fehlgeschlagen: {exc}")
+
+    # ------------------------------------------------------------------
+    # Konfigurationsdialoge für spezielle Anschlusspunkt-Typen
+    # ------------------------------------------------------------------
+    def _cable_names(self) -> list[str]:
+        """Anzeigenamen aller Kabel – für die Zuordnung in der Unterverteilung."""
+        names: list[str] = []
+        for cable_id, cable in self._document.elements["elec_cables"].items():
+            names.append(cable.name or cable_id)
+        return sorted(set(names))
+
+    def _cable_id_name_pairs(self) -> list[tuple[str, str]]:
+        """(id, name)-Paare aller Kabel – für die Unterputz-Verteilung."""
+        pairs = [
+            (cable_id, cable.name or cable_id)
+            for cable_id, cable in self._document.elements["elec_cables"].items()
+        ]
+        return sorted(pairs, key=lambda entry: entry[1].lower())
+
+    def _store_config(self, element_id: str, key: str, config: dict) -> None:
+        element = self._document.get(element_id)
+        if element is None:
+            return
+        element.data[key] = config
+        self._document.element_changed.emit(element_id)
+        self.properties.refresh_element(element_id)
+        self._mark_dirty()
+
+    def _action_configure_uv(self, element_id: str) -> None:
+        from gui.parameter_panel import UvConfigDialog  # noqa: PLC0415
+
+        element = self._document.get(element_id)
+        if element is None:
+            return
+        dialog = UvConfigDialog(
+            config=element.data.get("uv_config") or {},
+            cable_choices=self._cable_names(),
+            parent=self,
+        )
+        if dialog.exec() == QDialog.Accepted:
+            self._store_config(element_id, "uv_config", dialog.get_config())
+            self.log.info(f"Unterverteilung aktualisiert: {element_id}")
+
+    def _action_configure_up(self, element_id: str) -> None:
+        from gui.parameter_panel import UpDistributionDialog  # noqa: PLC0415
+
+        element = self._document.get(element_id)
+        if element is None:
+            return
+        dialog = UpDistributionDialog(
+            config=element.data.get("up_distribution_config") or {},
+            cable_choices=self._cable_id_name_pairs(),
+            parent=self,
+        )
+        if dialog.exec() == QDialog.Accepted:
+            self._store_config(
+                element_id, "up_distribution_config", dialog.get_config()
+            )
+            self.log.info(f"Unterputz-Verteilung aktualisiert: {element_id}")
+
+    def _action_configure_hak(self, element_id: str) -> None:
+        from gui.properties.config_dialogs import HakConfigDialog  # noqa: PLC0415
+
+        element = self._document.get(element_id)
+        if element is None:
+            return
+        dialog = HakConfigDialog(element.data.get("hak_config") or {}, self)
+        if dialog.exec() == QDialog.Accepted:
+            self._store_config(element_id, "hak_config", dialog.get_config())
+
+    def _action_configure_zaehler(self, element_id: str) -> None:
+        from gui.properties.config_dialogs import ZaehlerConfigDialog  # noqa: PLC0415
+
+        element = self._document.get(element_id)
+        if element is None:
+            return
+        dialog = ZaehlerConfigDialog(element.data.get("zaehler_config") or {}, self)
+        if dialog.exec() == QDialog.Accepted:
+            self._store_config(element_id, "zaehler_config", dialog.get_config())
 
     def _action_draw_polygon(self, element_id: str) -> None:
         if element_id in self._document.elements["elec_rooms"]:
