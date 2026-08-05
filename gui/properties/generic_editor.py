@@ -29,6 +29,7 @@ class GenericElementEditor(QWidget):
 
     field_changed = Signal(str, str, object)  # (element_id, key, wert)
     action_triggered = Signal(str, str)       # (element_id, action_id)
+    pre_change = Signal()                     # fires BEFORE the field write (for undo)
 
     def __init__(
         self,
@@ -155,6 +156,7 @@ class GenericElementEditor(QWidget):
         spec = next((s for s in self._schema.fields if s.key == key), None)
         if spec is None:
             return
+        self.pre_change.emit()  # snapshot BEFORE the write
         apply_display_value(self._element, spec, value)
         self.field_changed.emit(self._element.id, key, value)
         self.refresh_computed()
@@ -186,6 +188,7 @@ class GlobalSettingsEditor(QWidget):
     """Formular für die globalen Projektparameter."""
 
     setting_changed = Signal(str, object)
+    pre_change = Signal()  # fires BEFORE the settings write (for undo)
 
     def __init__(self, document: Document, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -212,6 +215,7 @@ class GlobalSettingsEditor(QWidget):
         self.refresh()
 
     def _on_changed(self, key: str, value: Any) -> None:
+        self.pre_change.emit()  # snapshot BEFORE the write
         self._document.settings[key] = value
         self.setting_changed.emit(key, value)
 

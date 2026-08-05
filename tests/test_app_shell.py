@@ -398,3 +398,117 @@ def test_renumber_elec_points(app, monkeypatch):
     finally:
         window.deleteLater()
 
+
+def test_undo_redo_add_circuit(app, monkeypatch):
+    """Undo nach add_circuit stellt den Zustand ohne den Heizkreis wieder her."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", ""))
+    )
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(lambda *a, **k: ("EG", True)),
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        window._add_floorplan()
+        assert len(window._document.floorplans) == 1
+
+        # Stack leer nach Grundriss hinzufügen? Nein – floorplan selber hat push.
+        # Stacks zurücksetzen um einen sauberen Ausgangspunkt zu haben.
+        window._undo_stack.clear()
+        window._redo_stack.clear()
+
+        window._add_circuit()
+        assert len(window._document.elements["circuits"]) == 1
+        assert len(window._undo_stack) == 1  # Snapshot vor add_circuit
+
+        # Undo – Heizkreis muss wieder weg sein.
+        window._undo()
+        assert len(window._document.elements["circuits"]) == 0
+        assert len(window._undo_stack) == 0
+        assert len(window._redo_stack) == 1
+
+        # Redo – Heizkreis erscheint wieder.
+        window._redo()
+        assert len(window._document.elements["circuits"]) == 1
+        assert len(window._redo_stack) == 0
+    finally:
+        window.deleteLater()
+
+
+def test_undo_redo_delete(app, monkeypatch):
+    """Undo nach delete_element stellt das Element wieder her."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}]},
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "circuits": {
+                    "HK-1": {"circuit_id": "HK-1", "floor_plan_id": "grundriss-1"}
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        assert "HK-1" in window._document.elements["circuits"]
+
+        window._delete_element("HK-1")
+        assert "HK-1" not in window._document.elements["circuits"]
+        assert len(window._undo_stack) == 1
+
+        window._undo()
+        assert "HK-1" in window._document.elements["circuits"]
+    finally:
+        window.deleteLater()
+
+
+def test_undo_stack_clears_on_new_project(app, monkeypatch):
+    """Beim Öffnen eines neuen Projekts werden Undo/Redo-Stacks geleert."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        # Manuell etwas auf den Stack legen.
+        window._undo_stack.append(Document().snapshot())
+        window._redo_stack.append(Document().snapshot())
+        assert window._undo_stack
+
+        # Neues Dokument setzen → Stacks müssen leer sein.
+        window._set_document(Document())
+        assert len(window._undo_stack) == 0
+        assert len(window._redo_stack) == 0
+    finally:
+        window.deleteLater()
+

@@ -13,7 +13,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
@@ -42,6 +42,8 @@ from .workspaces import (
     workspace as workspace_by_id,
 )
 
+_MAX_UNDO_STEPS = 80
+
 _FILE_FILTER = "HRouting-Projekt (*.hrp);;Alle Dateien (*)"
 _IMAGE_FILTER = "Bilder (*.png *.jpg *.jpeg *.svg);;Alle Dateien (*)"
 
@@ -60,6 +62,10 @@ class AppWindow(QMainWindow):
         self._dirty = False
         self._workspace: WorkspaceDefinition = workspace_by_id(DEFAULT_WORKSPACE_ID)
         self._copy_buffer: dict | None = None
+        self._undo_stack: list[dict] = []
+        self._redo_stack: list[dict] = []
+        self._undo_action: QAction | None = None
+        self._redo_action: QAction | None = None
 
         self._build_central()
         self._build_docks()
@@ -128,8 +134,8 @@ class AppWindow(QMainWindow):
         self._add_action(file_menu, "Beenden", self.close, QKeySequence.Quit)
 
         edit_menu = bar.addMenu("&Bearbeiten")
-        self._add_action(edit_menu, "Rückgängig", self._undo, QKeySequence.Undo)
-        self._add_action(edit_menu, "Wiederherstellen", self._redo, QKeySequence.Redo)
+        self._undo_action = self._add_action(edit_menu, "Rückgängig", self._undo, QKeySequence.Undo)
+        self._redo_action = self._add_action(edit_menu, "Wiederherstellen", self._redo, QKeySequence.Redo)
         edit_menu.addSeparator()
         self._add_action(edit_menu, "Kopieren", self._copy_selected, QKeySequence.Copy)
         self._add_action(edit_menu, "Einfügen", self._paste_copied, QKeySequence.Paste)
@@ -188,6 +194,7 @@ class AppWindow(QMainWindow):
         self.properties.field_changed.connect(self._on_property_changed)
         self.properties.action_triggered.connect(self._on_property_action)
         self.properties.setting_changed.connect(self._on_global_setting_changed)
+        self.properties.pre_change.connect(self._push_undo)
 
     def _on_property_changed(self, element_id: str, key: str, _value) -> None:
         """Ein Feld im Eigenschaften-Dock wurde geändert."""
@@ -228,6 +235,77 @@ class AppWindow(QMainWindow):
         if not self._dirty:
             self._dirty = True
             self._update_title()
+
+    # ------------------------------------------------------------------
+    # Undo / Redo
+    # ------------------------------------------------------------------
+    def _push_undo(self) -> None:
+        """Nimmt einen Snapshot des aktuellen Zustands auf den Undo-Stack."""
+        snapshot = self._document.snapshot()
+        self._undo_stack.append(snapshot)
+        if len(self._undo_stack) > _MAX_UNDO_STEPS:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        self._update_undo_redo_state()
+
+    def _undo(self) -> None:
+        if not self._undo_stack:
+            self.statusBar().showMessage("Nichts zum Rückgängigmachen", 2000)
+            return
+        self._redo_stack.append(self._document.snapshot())
+        snapshot = self._undo_stack.pop()
+        self._resync_after_restore(snapshot)
+        self._update_undo_redo_state()
+        self._dirty = True
+        self._update_title()
+        remaining = len(self._undo_stack)
+        self.statusBar().showMessage(f"Rückgängig  ({remaining} verbleibend)", 2500)
+        self.log.info(f"Undo (Stack: {remaining})")
+
+    def _redo(self) -> None:
+        if not self._redo_stack:
+            self.statusBar().showMessage("Nichts zum Wiederherstellen", 2000)
+            return
+        self._undo_stack.append(self._document.snapshot())
+        snapshot = self._redo_stack.pop()
+        self._resync_after_restore(snapshot)
+        self._update_undo_redo_state()
+        self._dirty = True
+        self._update_title()
+        remaining = len(self._redo_stack)
+        self.statusBar().showMessage(f"Wiederhergestellt  ({remaining} verbleibend)", 2500)
+        self.log.info(f"Redo (Stack: {remaining})")
+
+    def _resync_after_restore(self, snapshot: dict) -> None:
+        """Synchronisiert Canvas und alle Docks nach einem Undo/Redo-Restore.
+
+        ``Document.restore`` ersetzt alle Felder des Dokuments in-place.
+        Danach müssen Canvas-Views neu gebunden und Editoren verworfen werden.
+        """
+        self._document.restore(snapshot)
+        # Canvas: erst rohe Ansichtsdaten übertragen, dann Views neu binden.
+        raw_canvas = snapshot.get("canvas", {})
+        self.canvas.from_dict(raw_canvas)
+        self.canvas.set_document(self._document)
+        self._load_floor_plan_images(self._document)
+        # Eigenschaften-Dock: alle Editor-Caches invalidieren.
+        current_id = self.properties._current_id
+        self.properties.set_document(self._document)
+        if current_id and self._document.get(current_id):
+            self.properties.show_element(current_id)
+
+    def _update_undo_redo_state(self) -> None:
+        """Passt den aktivierten Zustand und die Menü-Beschriftung an."""
+        undo_count = len(self._undo_stack)
+        redo_count = len(self._redo_stack)
+        if self._undo_action is not None:
+            self._undo_action.setEnabled(undo_count > 0)
+            label = f"Rückgängig ({undo_count})" if undo_count else "Rückgängig"
+            self._undo_action.setText(label)
+        if self._redo_action is not None:
+            self._redo_action.setEnabled(redo_count > 0)
+            label = f"Wiederherstellen ({redo_count})" if redo_count else "Wiederherstellen"
+            self._redo_action.setText(label)
 
     # ------------------------------------------------------------------
     # Workspaces
@@ -284,6 +362,11 @@ class AppWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _set_document(self, document: Document) -> None:
         self._document = document
+        # Neues Dokument = frische Undo/Redo-Stacks.
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._update_undo_redo_state()
+
         self.navigator.set_document(document)
         self.properties.set_document(document)
 
@@ -329,6 +412,16 @@ class AppWindow(QMainWindow):
         if handler is None:
             self.statusBar().showMessage("Aktion noch nicht verfügbar", 3000)
             return
+
+        # Vor Geometrie- und Konfigurations-Aktionen Undo-Snapshot aufnehmen.
+        _UNDO_BEFORE = {
+            "draw_polygon", "edit_polygon", "draw_route", "edit_route",
+            "draw_supply", "edit_supply", "draw_cable", "edit_cable",
+            "draw_line", "edit_line", "place", "draw_ref_line",
+            "configure_uv", "configure_up", "configure_hak", "configure_zaehler",
+        }
+        if action_id in _UNDO_BEFORE:
+            self._push_undo()
 
         try:
             handler(element_id)
@@ -522,6 +615,7 @@ class AppWindow(QMainWindow):
         if element is None:
             return False
 
+        self._push_undo()
         self._cleanup_references_before_delete(element_id)
         self._document.remove(element_id)
 
@@ -624,6 +718,7 @@ class AppWindow(QMainWindow):
         if source is None:
             return None
 
+        self._push_undo()
         cls = type(source)
         new_id = self._document.new_id(cls)
         data = copy.deepcopy(source.data)
@@ -735,6 +830,7 @@ class AppWindow(QMainWindow):
             self.statusBar().showMessage("Keine Anschlusspunkte vorhanden", 2500)
             return
 
+        self._push_undo()
         groups: dict[str, list[ElecPoint]] = {}
         for point in points:
             base = (point.name or point.id).strip() or point.id
@@ -922,6 +1018,7 @@ class AppWindow(QMainWindow):
         if not ok:
             return
         name = (name or "").strip() or default_name
+        self._push_undo()
 
         layer = {
             "fp_id": fp_id,
@@ -969,6 +1066,7 @@ class AppWindow(QMainWindow):
         fp_id = self._require_floorplan()
         if not fp_id:
             return
+        self._push_undo()
         cid = self._document.new_id(Circuit)
         suffix = cid.rsplit("-", 1)[-1]
         circuit = Circuit.create(
@@ -997,6 +1095,7 @@ class AppWindow(QMainWindow):
         fp_id = self._require_floorplan()
         if not fp_id:
             return
+        self._push_undo()
         pid = self._document.new_id(ElecPoint)
         point = ElecPoint.create(
             pid,
@@ -1026,6 +1125,7 @@ class AppWindow(QMainWindow):
         fp_id = self._require_floorplan()
         if not fp_id:
             return
+        self._push_undo()
         rid = self._document.new_id(ElecRoom)
         room = ElecRoom.create(
             rid,
@@ -1047,6 +1147,7 @@ class AppWindow(QMainWindow):
         fp_id = self._require_floorplan()
         if not fp_id:
             return
+        self._push_undo()
         tid = self._document.new_id(TextAnnotation)
         text = TextAnnotation.create(
             tid,
@@ -1065,6 +1166,7 @@ class AppWindow(QMainWindow):
         fp_id = self._require_floorplan()
         if not fp_id:
             return
+        self._push_undo()
         eid = self._document.new_id(ElecCable)
         cable = ElecCable.create(
             eid,
@@ -1090,6 +1192,7 @@ class AppWindow(QMainWindow):
         fp_id = self._require_floorplan()
         if not fp_id:
             return
+        self._push_undo()
         hid = self._document.new_id(Hkv)
         hkv = Hkv.create(
             hid,
@@ -1114,6 +1217,7 @@ class AppWindow(QMainWindow):
         fp_id = self._require_floorplan()
         if not fp_id:
             return
+        self._push_undo()
         lid = self._document.new_id(HkvLine)
         line = HkvLine.create(
             lid,
@@ -1205,11 +1309,10 @@ class AppWindow(QMainWindow):
         self.setWindowTitle(f"HRouting – {name}{marker}")
 
     # ------------------------------------------------------------------
-    def _undo(self) -> None:
-        self._not_implemented()
-
-    def _redo(self) -> None:
-        self._not_implemented()
+    # Die eigentlichen _undo/_redo-Implementierungen befinden sich im
+    # Abschnitt "Undo / Redo" weiter oben. Diese Stubs werden durch die
+    # Methoden in diesem Block ersetzt, sobald das UI gebaut ist.
+    # (Keine leeren Stubs mehr nötig – Methoden sind bereits definiert.)
 
     def _not_implemented(self) -> None:
         self.statusBar().showMessage("Noch nicht portiert", 3000)

@@ -26,6 +26,7 @@ class PropertiesDock(QDockWidget):
     field_changed = Signal(str, str, object)   # (element_id, key, wert)
     action_triggered = Signal(str, str)        # (element_id, action_id)
     setting_changed = Signal(str, object)      # (key, wert)
+    pre_change = Signal()                      # fires before any write (for undo)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Eigenschaften", parent)
@@ -81,6 +82,7 @@ class PropertiesDock(QDockWidget):
             editor = GenericElementEditor(document, element, schema, self._stack)
             editor.field_changed.connect(self.field_changed)
             editor.action_triggered.connect(self.action_triggered)
+            editor.pre_change.connect(self.pre_change)
             self._editors[element_id] = editor
             self._stack.addWidget(editor)
         else:
@@ -98,6 +100,7 @@ class PropertiesDock(QDockWidget):
         if self._global_editor is None:
             self._global_editor = GlobalSettingsEditor(document, self._stack)
             self._global_editor.setting_changed.connect(self.setting_changed)
+            self._global_editor.pre_change.connect(self.pre_change)
             self._stack.addWidget(self._global_editor)
         else:
             self._global_editor.refresh()
