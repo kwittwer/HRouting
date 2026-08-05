@@ -240,16 +240,21 @@ class AppWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Projekt öffnen", "", _FILE_FILTER)
         if not path:
             return
+        self.open_project_file(Path(path))
+
+    def open_project_file(self, path: Path) -> bool:
+        """Öffnet ein Projekt ohne Dialog (z. B. per Kommandozeile)."""
         try:
             document = load_document(path)
         except Exception as exc:  # noqa: BLE001 - Nutzerfeedback statt Absturz
             QMessageBox.critical(self, "Fehler", f"Projekt konnte nicht geladen werden:\n{exc}")
             self.log.error(f"Laden fehlgeschlagen: {exc}")
-            return
+            return False
         self._project_path = Path(path)
         self._dirty = False
         self._set_document(document)
         self.log.success(f"Projekt geladen: {path}")
+        return True
 
     def _save_project(self) -> bool:
         if self._project_path is None:

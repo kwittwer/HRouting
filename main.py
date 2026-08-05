@@ -143,12 +143,17 @@ def main():
     # Parameter-Parsing: --mcp (HTTP) und --mcpstdio (Stdio)
     _enable_mcp_http = "--mcp" in sys.argv
     _enable_mcp_stdio = "--mcpstdio" in sys.argv
-    
+    # Oberfläche: neue Dock-/Workspace-UI ist Standard, --legacy startet die alte
+    _use_legacy_ui = "--legacy" in sys.argv
+
     # Argumente vor QApplication herausfiltern
     if _enable_mcp_http:
         sys.argv.remove("--mcp")
     if _enable_mcp_stdio:
         sys.argv.remove("--mcpstdio")
+    for _flag in ("--legacy", "--new-ui"):
+        while _flag in sys.argv:
+            sys.argv.remove(_flag)
 
     # --- Schnellstart: nur minimale Qt-Imports für Splash ---
     from PySide6.QtWidgets import QApplication, QSplashScreen
@@ -182,9 +187,6 @@ def main():
     from PySide6.QtCore import Signal, QObject
     from gui.main_window import MainWindow
     import logging as _logging
-
-    # Umbauphase: neue Dock-/Workspace-Oberfläche testweise per --new-ui
-    _use_new_ui = "--new-ui" in sys.argv
 
     # --- MCP Log-Fenster (wird nur bei --mcp verwendet) ---
     class _McpLogHandler(_logging.Handler, QObject):
@@ -261,23 +263,27 @@ def main():
             _logging.getLogger("hrouting.mcp").removeHandler(self._handler)
             super().closeEvent(event)
 
-    if _use_new_ui:
+    if _use_legacy_ui:
+        window = MainWindow()
+    else:
         from gui.app_window import AppWindow
         window = AppWindow()
-    else:
-        window = MainWindow()
 
     # Open project file passed as command-line argument (file association)
-    if len(sys.argv) > 1:
-        project_file = Path(sys.argv[1])
-        if project_file.exists() and project_file.suffix in ('.hrp', '.json'):
-            if _use_new_ui:
-                from storage.hrp_io import load_document
-                window._project_path = project_file
-                window._set_document(load_document(project_file))
-            else:
-                window._project_path = project_file
-                window._load_project(project_file)
+    project_file = next(
+        (
+            Path(arg)
+            for arg in sys.argv[1:]
+            if not arg.startswith("-") and Path(arg).suffix.lower() in (".hrp", ".json")
+        ),
+        None,
+    )
+    if project_file is not None and project_file.exists():
+        if _use_legacy_ui:
+            window._project_path = project_file
+            window._load_project(project_file)
+        else:
+            window.open_project_file(project_file)
 
     if ico_path.exists():
         window.setWindowIcon(QIcon(str(ico_path)))
@@ -308,7 +314,6 @@ def main():
         _mcp_log_window.show()
         try:
             import subprocess
-            from pathlib import Path
             server_path = BASE_DIR / "mcp_server_stdio.py"
             _mcp_stdio_process = subprocess.Popen(
                 [str(Path(sys.executable)), str(server_path)],
