@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from model.document import Document
-from model.elements import Circuit, ElecPoint, ElecRoom, FloorPlan, TextAnnotation
+from model.elements import Circuit, ElecPoint, ElecRoom, ElecCable, FloorPlan, Hkv, HkvLine, TextAnnotation
 from storage.hrp_io import load_document, save_document
 
 from . import layout_store
@@ -133,6 +133,9 @@ class AppWindow(QMainWindow):
         self._add_action(add_menu, "Heizkreis hinzufügen", self._add_circuit)
         self._add_action(add_menu, "Elektro-Punkt hinzufügen", self._add_elec_point)
         self._add_action(add_menu, "Elektro-Raum hinzufügen", self._add_elec_room)
+        self._add_action(add_menu, "Elektro-Kabel hinzufügen", self._add_elec_cable)
+        self._add_action(add_menu, "HKV hinzufügen", self._add_hkv)
+        self._add_action(add_menu, "HKV-Leitung hinzufügen", self._add_hkv_line)
         self._add_action(add_menu, "Text hinzufügen", self._add_text)
 
         view_menu = bar.addMenu("&Ansicht")
@@ -442,6 +445,79 @@ class AppWindow(QMainWindow):
         self.navigator.select(tid)
         self.canvas.start_place_text(tid, "Text")
         self._mark_dirty()
+
+    def _add_elec_cable(self) -> None:
+        fp_id = self._require_floorplan()
+        if not fp_id:
+            return
+        eid = self._document.new_id(ElecCable)
+        cable = ElecCable.create(
+            eid,
+            floor_plan_id=fp_id,
+            name=f"Kabel {eid.rsplit('-', 1)[-1]}",
+            color="#ffb300",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            type="",
+            comment="",
+            start_ap="",
+            end_ap="",
+        )
+        self._document.add(cable)
+        self.canvas._elec_visible[eid] = True
+        self._emit_structure_changed()
+        self.navigator.select(eid)
+        self.canvas.start_draw_elec_cable(eid)
+        self._mark_dirty()
+
+    def _add_hkv(self) -> None:
+        fp_id = self._require_floorplan()
+        if not fp_id:
+            return
+        hid = self._document.new_id(Hkv)
+        hkv = Hkv.create(
+            hid,
+            floor_plan_id=fp_id,
+            name=f"HKV {hid.rsplit('-', 1)[-1]}",
+            color="#e91e63",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            width=50.0,
+            height=50.0,
+            icon_path="",
+        )
+        self._document.add(hkv)
+        self.canvas._hkv_visible[hid] = True
+        self._emit_structure_changed()
+        self.navigator.select(hid)
+        self.canvas.start_place_hkv(hid, 50.0, 50.0)
+        self._mark_dirty()
+
+    def _add_hkv_line(self) -> None:
+        fp_id = self._require_floorplan()
+        if not fp_id:
+            return
+        lid = self._document.new_id(HkvLine)
+        line = HkvLine.create(
+            lid,
+            floor_plan_id=fp_id,
+            name=f"HKV-Leitung {lid.rsplit('-', 1)[-1]}",
+            color="#9c27b0",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            start_hkv="",
+            end_hkv="",
+        )
+        self._document.add(line)
+        self.canvas._hkv_line_visible[lid] = True
+        self._emit_structure_changed()
+        self.navigator.select(lid)
+        self.canvas.start_draw_hkv_line(lid)
+        self._mark_dirty()
+
 
     def _new_project(self) -> None:
         if not self._confirm_discard():

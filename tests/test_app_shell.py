@@ -111,3 +111,76 @@ def test_canvas_selection_filter(app):
         assert canvas._is_selectable("elec_cable", "EK-1")
     finally:
         canvas.deleteLater()
+
+
+def test_app_window_add_elements(app, tmp_path, monkeypatch):
+    """Test: Alle Add-Funktionen erzeugen gültige Elemente."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", ""))
+    )
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(lambda *a, **k: ("Test Element", True)),
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        # Grundriss hinzufügen, damit andere Elemente einen FP haben
+        window._add_floorplan()
+        fp_id = list(window._document.floorplans.keys())[0]
+        assert fp_id, "Kein Grundriss erzeugt"
+
+        # Heizkreis
+        before_circuits = len(window._document.elements["circuits"])
+        window._add_circuit()
+        after_circuits = len(window._document.elements["circuits"])
+        assert after_circuits == before_circuits + 1
+
+        # Elektro-Punkt
+        before_elec_points = len(window._document.elements["elec_points"])
+        window._add_elec_point()
+        after_elec_points = len(window._document.elements["elec_points"])
+        assert after_elec_points == before_elec_points + 1
+
+        # Elektro-Raum
+        before_elec_rooms = len(window._document.elements["elec_rooms"])
+        window._add_elec_room()
+        after_elec_rooms = len(window._document.elements["elec_rooms"])
+        assert after_elec_rooms == before_elec_rooms + 1
+
+        # Elektro-Kabel
+        before_elec_cables = len(window._document.elements["elec_cables"])
+        window._add_elec_cable()
+        after_elec_cables = len(window._document.elements["elec_cables"])
+        assert after_elec_cables == before_elec_cables + 1
+
+        # HKV
+        before_hkvs = len(window._document.elements["hkv_points"])
+        window._add_hkv()
+        after_hkvs = len(window._document.elements["hkv_points"])
+        assert after_hkvs == before_hkvs + 1
+
+        # HKV-Leitung
+        before_hkv_lines = len(window._document.elements["hkv_lines"])
+        window._add_hkv_line()
+        after_hkv_lines = len(window._document.elements["hkv_lines"])
+        assert after_hkv_lines == before_hkv_lines + 1
+
+        # Text
+        before_texts = len(window._document.elements["text_annotations"])
+        window._add_text()
+        after_texts = len(window._document.elements["text_annotations"])
+        assert after_texts == before_texts + 1
+    finally:
+        window.deleteLater()
+
