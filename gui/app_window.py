@@ -490,7 +490,12 @@ class AppWindow(QMainWindow):
 
         ``Document.restore`` ersetzt alle Felder des Dokuments in-place.
         Danach müssen Canvas-Views neu gebunden und Editoren verworfen werden.
+        Der aktuell angezeigte Ausschnitt bleibt dabei unverändert; Zoom und
+        Pan sind Ansichtszustand und sollen nicht mit der Projekthistorie
+        zurückspringen.
         """
+        current_scale = float(self.canvas._scale)
+        current_offset = QPointF(self.canvas._offset)
         self._restoring_snapshot = True
         try:
             self._document.restore(snapshot)
@@ -498,6 +503,13 @@ class AppWindow(QMainWindow):
             raw_canvas = snapshot.get("canvas", {})
             self.canvas.from_dict(raw_canvas)
             self.canvas.set_document(self._document)
+            self.canvas._scale = current_scale
+            self.canvas._offset = QPointF(current_offset)
+            self._document.view["view_scale"] = current_scale
+            self._document.view["view_offset"] = [
+                current_offset.x(), current_offset.y()
+            ]
+            self.canvas.update()
             self._load_floor_plan_images(self._document)
             # Eigenschaften-Dock: alle Editor-Caches invalidieren.
             current_id = self.properties._current_id

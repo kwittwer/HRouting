@@ -1012,6 +1012,8 @@ def test_undo_redo_after_canvas_mutation(app, monkeypatch):
         window._finish_undo_group()
         window._undo_stack.clear()
         window._redo_stack.clear()
+        window.canvas._scale = 2.75
+        window.canvas._offset = QPointF(-123.0, 87.0)
 
         window.canvas._manual_routes["HK-1"][1] = QPointF(260, 140)
         assert len(window._undo_stack) == 1
@@ -1023,11 +1025,15 @@ def test_undo_redo_after_canvas_mutation(app, monkeypatch):
         assert window._document.to_dict()["canvas"]["manual_routes"]["HK-1"][1] == [
             200.0, 100.0
         ]
+        assert window.canvas._scale == 2.75
+        assert window.canvas._offset == QPointF(-123.0, 87.0)
 
         window._redo()
         assert window._document.to_dict()["canvas"]["manual_routes"]["HK-1"][1] == [
             260.0, 140.0
         ]
+        assert window.canvas._scale == 2.75
+        assert window.canvas._offset == QPointF(-123.0, 87.0)
     finally:
         window.deleteLater()
 
