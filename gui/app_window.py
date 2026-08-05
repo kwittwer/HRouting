@@ -18,12 +18,14 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMainWindow,
     QMessageBox,
+    QInputDialog,
     QTabBar,
     QVBoxLayout,
     QWidget,
 )
 
 from model.document import Document
+from model.elements import Circuit, ElecPoint, ElecRoom, FloorPlan, TextAnnotation
 from storage.hrp_io import load_document, save_document
 
 from . import layout_store
@@ -38,6 +40,7 @@ from .workspaces import (
 )
 
 _FILE_FILTER = "HRouting-Projekt (*.hrp);;Alle Dateien (*)"
+_IMAGE_FILTER = "Bilder (*.png *.jpg *.jpeg *.svg);;Alle Dateien (*)"
 
 
 class AppWindow(QMainWindow):
@@ -124,6 +127,14 @@ class AppWindow(QMainWindow):
         self._add_action(edit_menu, "Rückgängig", self._undo, QKeySequence.Undo)
         self._add_action(edit_menu, "Wiederherstellen", self._redo, QKeySequence.Redo)
 
+        add_menu = bar.addMenu("&Einfügen")
+        self._add_action(add_menu, "Grundriss hinzufügen…", self._add_floorplan)
+        add_menu.addSeparator()
+        self._add_action(add_menu, "Heizkreis hinzufügen", self._add_circuit)
+        self._add_action(add_menu, "Elektro-Punkt hinzufügen", self._add_elec_point)
+        self._add_action(add_menu, "Elektro-Raum hinzufügen", self._add_elec_room)
+        self._add_action(add_menu, "Text hinzufügen", self._add_text)
+
         view_menu = bar.addMenu("&Ansicht")
         for dock_id, dock in self._docks.items():
             action = dock.toggleViewAction()
@@ -155,7 +166,9 @@ class AppWindow(QMainWindow):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self.navigator.element_selected.connect(self._on_element_selected)
         self.navigator.floorplan_activated.connect(self._on_floorplan_activated)
+        self.navigator.visibility_changed.connect(self._on_visibility_changed)
         self.tools.tool_activated.connect(self._on_tool_activated)
+        self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
 
     # ------------------------------------------------------------------
     # Workspaces
@@ -183,6 +196,7 @@ class AppWindow(QMainWindow):
 
         # Werkzeuge
         self.tools.set_tools(definition.tools)
+        self.canvas.set_tool_mode(ToolMode.NONE)
 
         # Selektionsfilter: nur Elemente des Workspaces sind anklickbar
         self.canvas.set_selectable_layers(definition.selectable_layers)
@@ -218,13 +232,216 @@ class AppWindow(QMainWindow):
         self._update_title()
 
     def _on_element_selected(self, element_id: str) -> None:
-        if hasattr(self.canvas, "set_selected_item"):
-            self.canvas.set_selected_item(element_id)
+        self.canvas.set_selected_item(element_id)
         self.properties.show_element(element_id)
+
+    def _on_canvas_object_clicked(self, _obj_type: str, obj_id: str) -> None:
+        if not obj_id:
+            return
+        self.navigator.select(obj_id)
+        self.properties.show_element(obj_id)
 
     def _on_floorplan_activated(self, fp_id: str) -> None:
         self._document.active_floorplan_id = fp_id
+        self.canvas.set_active_helper_floor(fp_id)
         self.log.info(f"Aktiver Grundriss: {fp_id}")
+
+    def _on_visibility_changed(self, element_id: str, visible: bool) -> None:
+        if not self._document.set_visible(element_id, visible):
+            return
+        self._apply_canvas_visibility(element_id, visible)
+        self._dirty = True
+        self._update_title()
+
+    def _apply_canvas_visibility(self, element_id: str, visible: bool) -> None:
+        if element_id in self._document.floorplans:
+            self.canvas.set_floor_plan_visible(element_id, visible)
+            self.canvas.set_ref_line_visible(element_id, visible)
+            self.canvas.set_helper_line_visible(element_id, visible)
+            return
+
+        if element_id in self.canvas._circuit_visible:
+            self.canvas._circuit_visible[element_id] = bool(visible)
+        if element_id in self.canvas._elec_visible:
+            self.canvas._elec_visible[element_id] = bool(visible)
+        if element_id in self.canvas._elec_room_visible:
+            self.canvas._elec_room_visible[element_id] = bool(visible)
+        if element_id in self.canvas._hkv_visible:
+            self.canvas._hkv_visible[element_id] = bool(visible)
+        if element_id in self.canvas._hkv_line_visible:
+            self.canvas._hkv_line_visible[element_id] = bool(visible)
+        if element_id in self.canvas._text_visible:
+            self.canvas.set_text_visible(element_id, bool(visible))
+        self.canvas.update()
+
+    def _active_floorplan_id(self) -> str:
+        fp_id = self._document.active_floorplan_id
+        if fp_id:
+            return fp_id
+        if self._document.floorplan_order:
+            return self._document.floorplan_order[0]
+        return ""
+
+    def _require_floorplan(self) -> str:
+        fp_id = self._active_floorplan_id()
+        if fp_id:
+            return fp_id
+        QMessageBox.information(self, "Kein Grundriss", "Bitte zuerst einen Grundriss hinzufügen.")
+        return ""
+
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+        self._update_title()
+
+    def _emit_structure_changed(self) -> None:
+        self._document.structure_changed.emit()
+
+    def _add_floorplan(self) -> None:
+        image_path, _ = QFileDialog.getOpenFileName(self, "Grundrissbild wählen", "", _IMAGE_FILTER)
+        fp_id = self._document.new_id(FloorPlan)
+        default_name = f"Grundriss {len(self._document.floorplans) + 1}"
+        name, ok = QInputDialog.getText(self, "Grundriss", "Name:", text=default_name)
+        if not ok:
+            return
+        name = (name or "").strip() or default_name
+
+        layer = {
+            "fp_id": fp_id,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+            "rotation": 0.0,
+            "opacity": 1.0,
+            "visible": True,
+            "mm_per_px": 1.0,
+            "ref_length_mm": 5000.0,
+            "fixed_width_mm": 0.0,
+            "fixed_height_mm": 0.0,
+            "polygon_color": "#8d99ae",
+            "polygon": [],
+        }
+        data = {
+            "name": name,
+            "visible": True,
+            "file_path": image_path or "",
+            "polygon_color": "#8d99ae",
+            "ref_line_visible": True,
+            "ref_line_color": "#ffdd00",
+            "opacity": 1.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+            "rotation": 0.0,
+            "ref_length_mm": 5000.0,
+            "fixed_width_mm": 0.0,
+            "fixed_height_mm": 0.0,
+        }
+        floor = FloorPlan(fp_id, data=data, layer=layer)
+        self._document.add(floor)
+        self._document.floorplan_order.append(fp_id)
+        self._document.active_floorplan_id = fp_id
+
+        self.canvas.add_floor_plan(fp_id, image_path or "")
+        self.canvas.set_floor_plan_visible(fp_id, True)
+        self.canvas.set_active_helper_floor(fp_id)
+
+        self._emit_structure_changed()
+        self._mark_dirty()
+        self.log.success(f"Grundriss hinzugefügt: {fp_id}")
+
+    def _add_circuit(self) -> None:
+        fp_id = self._require_floorplan()
+        if not fp_id:
+            return
+        cid = self._document.new_id(Circuit)
+        suffix = cid.rsplit("-", 1)[-1]
+        circuit = Circuit.create(
+            cid,
+            floor_plan_id=fp_id,
+            name=f"Heizkreis {suffix}",
+            color="#2a9d8f",
+            diameter=16.0,
+            spacing=150.0,
+            wall_dist=200.0,
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            room_temp=20.0,
+            floor_covering="Fliesen / Keramik",
+            distributor="",
+        )
+        self._document.add(circuit)
+        self.canvas._circuit_visible[cid] = True
+        self._emit_structure_changed()
+        self.navigator.select(cid)
+        self.canvas.start_drawing(cid)
+        self._mark_dirty()
+
+    def _add_elec_point(self) -> None:
+        fp_id = self._require_floorplan()
+        if not fp_id:
+            return
+        pid = self._document.new_id(ElecPoint)
+        point = ElecPoint.create(
+            pid,
+            floor_plan_id=fp_id,
+            name=f"Anschlusspunkt {pid.rsplit('-', 1)[-1]}",
+            color="#4fc3f7",
+            width=30.0,
+            height=30.0,
+            icon_path="",
+            builtin_symbol="Steckdose",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            position="Wand",
+            height_from_floor=30.0,
+            smarthome_device="",
+            smarthome_device_color="",
+            note="",
+        )
+        self._document.add(point)
+        self._emit_structure_changed()
+        self.navigator.select(pid)
+        self.canvas.start_place_elec_point(pid, 30.0, 30.0)
+        self._mark_dirty()
+
+    def _add_elec_room(self) -> None:
+        fp_id = self._require_floorplan()
+        if not fp_id:
+            return
+        rid = self._document.new_id(ElecRoom)
+        room = ElecRoom.create(
+            rid,
+            floor_plan_id=fp_id,
+            name=f"Raum {rid.rsplit('-', 1)[-1]}",
+            color="#43aa8b",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+        )
+        self._document.add(room)
+        self.canvas._elec_room_visible[rid] = True
+        self._emit_structure_changed()
+        self.navigator.select(rid)
+        self.canvas.start_draw_elec_room(rid)
+        self._mark_dirty()
+
+    def _add_text(self) -> None:
+        fp_id = self._require_floorplan()
+        if not fp_id:
+            return
+        tid = self._document.new_id(TextAnnotation)
+        text = TextAnnotation.create(
+            tid,
+            floor_plan_id=fp_id,
+            name=f"Text {tid.rsplit('-', 1)[-1]}",
+            visible=True,
+        )
+        self._document.add(text)
+        self.canvas._text_visible[tid] = True
+        self._emit_structure_changed()
+        self.navigator.select(tid)
+        self.canvas.start_place_text(tid, "Text")
+        self._mark_dirty()
 
     def _new_project(self) -> None:
         if not self._confirm_discard():

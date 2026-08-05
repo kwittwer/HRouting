@@ -173,6 +173,52 @@ class Document:
     def new_id(self, cls: type[Element]) -> str:
         return self.ids.next_id(cls.PREFIX)
 
+    def is_visible(self, element_id: str) -> bool:
+        """Liest die Sichtbarkeit eines Elements oder Grundrisses."""
+        if element_id in self.floorplans:
+            floor = self.floorplans[element_id]
+            layer_visible = floor.layer.get("visible")
+            if layer_visible is not None:
+                return bool(layer_visible)
+            return bool(floor.data.get("visible", True))
+
+        element = self.get(element_id)
+        if element is None:
+            return True
+        if element.visible is not None:
+            return bool(element.visible)
+        return True
+
+    def set_visible(self, element_id: str, visible: bool) -> bool:
+        """Setzt die Sichtbarkeit eines Elements und synchronisiert Geometriemaps."""
+        visible = bool(visible)
+        if element_id in self.floorplans:
+            floor = self.floorplans[element_id]
+            floor.data["visible"] = visible
+            floor.layer["visible"] = visible
+            self.element_changed.emit(element_id)
+            return True
+
+        element = self.get(element_id)
+        if element is None:
+            return False
+
+        element.visible = visible
+        geom = element.geom
+        if "elec_visible" in geom:
+            geom["elec_visible"] = visible
+        if "hkv_visible" in geom:
+            geom["hkv_visible"] = visible
+        if "hkv_line_visible" in geom:
+            geom["hkv_line_visible"] = visible
+        if "elec_room_visible" in geom:
+            geom["elec_room_visible"] = visible
+        if "text_annotations" in geom and isinstance(geom["text_annotations"], dict):
+            geom["text_annotations"]["visible"] = visible
+
+        self.element_changed.emit(element_id)
+        return True
+
     # ------------------------------------------------------------------
     # Serialisierung
     # ------------------------------------------------------------------

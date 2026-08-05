@@ -2221,6 +2221,31 @@ class CanvasWidget(QWidget):
                 getattr(layer, "value", layer) for layer in layers
             }
 
+        # Laufende Drag-Operationen beenden, wenn ihr Layer nicht mehr aktiv ist.
+        if self._dragging_route_point:
+            owner_id, _idx = self._dragging_route_point
+            if not self._is_selectable("elec_cable", owner_id):
+                self._dragging_route_point = None
+
+        if self._dragging_elec_cable_id and not self._is_selectable("elec_cable", self._dragging_elec_cable_id):
+            self._dragging_elec_cable_id = None
+            self._dragging_elec_cable_start = None
+            self._dragging_elec_cable_origin = []
+            self._dragging_elec_cable_fixed_indices = set()
+
+        self._dragging_multi = {
+            item for item in self._dragging_multi if self._is_selectable(item[0], item[1])
+        }
+        self._multi_selected = {
+            item for item in self._multi_selected if self._is_selectable(item[0], item[1])
+        }
+
+        if self._selected_item_id and self._selected_item_type:
+            if not self._is_selectable(self._selected_item_type, self._selected_item_id):
+                self._selected_item_id = None
+                self._selected_item_type = None
+        self.update()
+
     def _object_layer(self, obj_type: str, obj_id: str) -> str:
         if obj_type == "floor_polygon":
             return "furniture" if str(obj_id).startswith("einrichtung") else "floorplan"
@@ -2390,7 +2415,7 @@ class CanvasWidget(QWidget):
         elif obj_type == "hkv_line":
             return self._hkv_line_visible.get(obj_id, True)
         elif obj_type == "text":
-            return True  # Text annotations always visible
+            return self._text_visible.get(obj_id, True)
         return True
 
     def _is_multi_selectable_type(self, obj_type: str) -> bool:
@@ -2402,19 +2427,19 @@ class CanvasWidget(QWidget):
         result = []
         # Electrical points
         for ap_id in self._elec_points.keys():
-            if self._is_object_visible("elec_point", ap_id):
+            if self._is_object_visible("elec_point", ap_id) and self._is_selectable("elec_point", ap_id):
                 result.append(("elec_point", ap_id))
         # HKV points
         for hkv_id in self._hkv_points.keys():
-            if self._is_object_visible("hkv", hkv_id):
+            if self._is_object_visible("hkv", hkv_id) and self._is_selectable("hkv", hkv_id):
                 result.append(("hkv", hkv_id))
         # Text annotations
         for text_id in self._text_annotations.keys():
-            if self._is_object_visible("text", text_id):
+            if self._is_object_visible("text", text_id) and self._is_selectable("text", text_id):
                 result.append(("text", text_id))
         # Electrical cables
         for cable_id in self._elec_cables.keys():
-            if self._is_object_visible("elec_cable", cable_id):
+            if self._is_object_visible("elec_cable", cable_id) and self._is_selectable("elec_cable", cable_id):
                 result.append(("elec_cable", cable_id))
         return result
 
@@ -2892,6 +2917,10 @@ class CanvasWidget(QWidget):
                 self._selected_item_type = None
         else:
             self._selected_item_type = None
+        if self._selected_item_id and self._selected_item_type:
+            if not self._is_selectable(self._selected_item_type, self._selected_item_id):
+                self._selected_item_id = None
+                self._selected_item_type = None
         self.update()
 
     def to_dict(self) -> dict:
@@ -4314,7 +4343,11 @@ class CanvasWidget(QWidget):
                         obj = ("text", text_hit)
             if obj:
                 obj_type, obj_id = obj
-                if self._is_multi_selectable_type(obj_type) and self._is_object_visible(obj_type, obj_id):
+                if (
+                    self._is_multi_selectable_type(obj_type)
+                    and self._is_object_visible(obj_type, obj_id)
+                    and self._is_selectable(obj_type, obj_id)
+                ):
                     item = (obj_type, obj_id)
                     if item in self._multi_selected:
                         self._multi_selected.discard(item)
@@ -4349,7 +4382,10 @@ class CanvasWidget(QWidget):
                             obj = ("text", text_hit)
                 if obj:
                     obj_type, obj_id = obj
-                    if not self._is_multi_selectable_type(obj_type):
+                    if (
+                        not self._is_multi_selectable_type(obj_type)
+                        or not self._is_selectable(obj_type, obj_id)
+                    ):
                         return
                     item = (obj_type, obj_id)
                     # If clicked object is in multi-selection, move all selected
@@ -4387,14 +4423,17 @@ class CanvasWidget(QWidget):
         if event.button() == Qt.LeftButton and self._mode == ToolMode.NONE:
             # APs have priority over overlapping cable geometry.
             # If an AP is hit, let the AP handling below take over.
-            prioritize_ap = self._hit_elec_point(canvas_pt) is not None
+            prioritize_ap = False
+            ap_hit = self._hit_elec_point(canvas_pt)
+            if ap_hit and self._is_selectable("elec_point", ap_hit):
+                prioritize_ap = True
 
             # Check all cables for a point hit.
             # Skip endpoints that are anchored to an AP – those positions are
             # "owned" by the AP and should be handled by the AP drag logic below.
             if not prioritize_ap:
                 for cid, pts in self._elec_cables.items():
-                    if not self._elec_visible.get(cid, True):
+                    if not self._elec_visible.get(cid, True) or not self._is_selectable("elec_cable", cid):
                         continue
                     threshold = self._px_to_canvas_units(HIT_CABLE_POINT_RADIUS_PX)
                     start_ap = self._cable_start_ap.get(cid, "")
@@ -4416,7 +4455,11 @@ class CanvasWidget(QWidget):
             # Check cable edges for whole-cable drag
             if not prioritize_ap:
                 for cid, pts in self._elec_cables.items():
-                    if not self._elec_visible.get(cid, True) or len(pts) < 2:
+                    if (
+                        not self._elec_visible.get(cid, True)
+                        or len(pts) < 2
+                        or not self._is_selectable("elec_cable", cid)
+                    ):
                         continue
                     if self._hit_elec_cable_edge(canvas_pt, cid) is None:
                         continue
@@ -5227,6 +5270,13 @@ class CanvasWidget(QWidget):
 
         # ── Handle multi-object drag (Alt+Drag) ──
         if self._dragging_multi and self._drag_multi_anchor:
+            self._dragging_multi = {
+                item for item in self._dragging_multi
+                if self._is_selectable(item[0], item[1])
+            }
+            if not self._dragging_multi:
+                self._finalize_multi_drag()
+                return
             left_held = bool(event.buttons() & Qt.LeftButton)
             alt_held = bool(QApplication.keyboardModifiers() & Qt.AltModifier)
 
@@ -5358,6 +5408,12 @@ class CanvasWidget(QWidget):
             and self._dragging_elec_cable_start
         ):
             cid = self._dragging_elec_cable_id
+            if not self._is_selectable("elec_cable", cid):
+                self._dragging_elec_cable_id = None
+                self._dragging_elec_cable_start = None
+                self._dragging_elec_cable_origin = []
+                self._dragging_elec_cable_fixed_indices = set()
+                return
             pts = self._elec_cables.get(cid)
             origin = self._dragging_elec_cable_origin
             if pts and len(pts) == len(origin):
@@ -5384,6 +5440,9 @@ class CanvasWidget(QWidget):
         # ── Handle dragging of elec cable points (at any time, not just in edit mode) ──
         if self._dragging_route_point and self._mode == ToolMode.NONE:
             cid, idx = self._dragging_route_point
+            if not self._is_selectable("elec_cable", cid):
+                self._dragging_route_point = None
+                return
             if cid in self._elec_cables:
                 pts = self._elec_cables[cid]
                 ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
