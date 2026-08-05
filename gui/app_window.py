@@ -52,6 +52,7 @@ from .workspaces import (
 )
 
 _MAX_UNDO_STEPS = 80
+_UNDO_GROUP_IDLE_MS = 250
 _LAST_PROJECT_KEY = "last_project_path"
 _RECENT_KEY = "recent_projects"
 _MAX_RECENT = 8
@@ -76,6 +77,12 @@ class AppWindow(QMainWindow):
         self._copy_buffer: dict | None = None
         self._undo_stack: list[dict] = []
         self._redo_stack: list[dict] = []
+        self._undo_group_open = False
+        self._last_document_snapshot: dict | None = None
+        self._restoring_snapshot = False
+        self._undo_group_timer = QTimer(self)
+        self._undo_group_timer.setSingleShot(True)
+        self._undo_group_timer.timeout.connect(self._finish_undo_group)
         self._undo_action: QAction | None = None
         self._redo_action: QAction | None = None
         self._recent_menu: QMenu | None = None
@@ -268,6 +275,26 @@ class AppWindow(QMainWindow):
         self.tools.tool_activated.connect(self._on_tool_activated)
         self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
         self.canvas.document_data_changed.connect(self._on_document_data_changed)
+        self.canvas.polygon_finished.connect(self._on_canvas_mutation_signal)
+        self.canvas.elec_room_polygon_finished.connect(self._on_canvas_mutation_signal)
+        self.canvas.ref_line_set.connect(self._on_canvas_mutation_signal)
+        self.canvas.start_point_moved.connect(self._on_canvas_mutation_signal)
+        self.canvas.route_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.polygon_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.elec_room_polygon_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.elec_point_placed.connect(self._on_canvas_mutation_signal)
+        self.canvas.elec_cable_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.hkv_placed.connect(self._on_canvas_mutation_signal)
+        self.canvas.hkv_line_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.text_placed.connect(self._on_canvas_mutation_signal)
+        self.canvas.floor_plan_transform_updated.connect(self._on_canvas_mutation_signal)
+        self.canvas.floor_plan_polygon_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.export_frame_drawn.connect(self._on_canvas_mutation_signal)
+        self.canvas.helper_lines_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.label_moved.connect(self._on_canvas_mutation_signal)
+        self.canvas.measure_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.multi_objects_moved.connect(self._on_canvas_mutation_signal)
+        self.canvas.will_move_multi_objects.connect(self._push_undo)
         self.canvas.route_changed.connect(self._on_route_changed)
         self.canvas.supply_line_changed.connect(self._on_supply_line_changed)
         self.canvas.hkv_line_changed.connect(self._on_hkv_line_changed)
@@ -343,11 +370,46 @@ class AppWindow(QMainWindow):
 
     def _on_document_data_changed(self, element_id: str) -> None:
         """Der Canvas hat Projektdaten geändert – Projekt gilt als bearbeitet."""
+        self._record_canvas_change()
         self.properties.refresh_element(element_id)
         self._refresh_schema_windows()
         if not self._dirty:
             self._dirty = True
             self._update_title()
+
+    def _on_canvas_mutation_signal(self, *_args) -> None:
+        """Erfasst Canvas-Mutationen, die nicht über DocumentMapView laufen."""
+        self._record_canvas_change()
+
+    def _append_undo_snapshot(self, snapshot: dict) -> None:
+        self._undo_stack.append(snapshot)
+        if len(self._undo_stack) > _MAX_UNDO_STEPS:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        self._update_undo_redo_state()
+
+    def _record_canvas_change(self) -> None:
+        """Beginnt eine Undo-Gruppe für eine Canvas-Änderung.
+
+        ``document_data_changed`` kann bei jedem Mausbewegungs-Event feuern.
+        Deshalb wird nur der Zustand vor dem ersten Event gespeichert; ein
+        kurzer Idle-Timer schließt die Gruppe nach dem Ende des Drags.
+        """
+        if self._restoring_snapshot or self._undo_group_open:
+            if self._undo_group_open:
+                self._undo_group_timer.start(_UNDO_GROUP_IDLE_MS)
+            return
+        if self._last_document_snapshot is None:
+            self._last_document_snapshot = self._document.snapshot()
+        self._append_undo_snapshot(copy.deepcopy(self._last_document_snapshot))
+        self._undo_group_open = True
+        self._undo_group_timer.start(_UNDO_GROUP_IDLE_MS)
+
+    def _finish_undo_group(self) -> None:
+        """Schließt die aktuelle Änderungsgruppe und aktualisiert die Baseline."""
+        self._undo_group_open = False
+        if not self._restoring_snapshot:
+            self._last_document_snapshot = self._document.snapshot()
 
     def _on_route_changed(self, circuit_id: str) -> None:
         route_px = self.canvas.get_manual_route_length_px(circuit_id)
@@ -381,17 +443,22 @@ class AppWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _push_undo(self) -> None:
         """Nimmt einen Snapshot des aktuellen Zustands auf den Undo-Stack."""
+        self._undo_group_timer.stop()
+        self._finish_undo_group()
         snapshot = self._document.snapshot()
-        self._undo_stack.append(snapshot)
-        if len(self._undo_stack) > _MAX_UNDO_STEPS:
-            self._undo_stack.pop(0)
-        self._redo_stack.clear()
-        self._update_undo_redo_state()
+        self._append_undo_snapshot(snapshot)
+        # Der explizite Aufrufer mutiert unmittelbar nach diesem Aufruf. Die
+        # Gruppe verhindert, dass das nachfolgende Canvas-Signal doppelt zählt.
+        self._last_document_snapshot = snapshot
+        self._undo_group_open = True
+        self._undo_group_timer.start(_UNDO_GROUP_IDLE_MS)
 
     def _undo(self) -> None:
         if not self._undo_stack:
             self.statusBar().showMessage("Nichts zum Rückgängigmachen", 2000)
             return
+        self._undo_group_timer.stop()
+        self._undo_group_open = False
         self._redo_stack.append(self._document.snapshot())
         snapshot = self._undo_stack.pop()
         self._resync_after_restore(snapshot)
@@ -406,6 +473,8 @@ class AppWindow(QMainWindow):
         if not self._redo_stack:
             self.statusBar().showMessage("Nichts zum Wiederherstellen", 2000)
             return
+        self._undo_group_timer.stop()
+        self._undo_group_open = False
         self._undo_stack.append(self._document.snapshot())
         snapshot = self._redo_stack.pop()
         self._resync_after_restore(snapshot)
@@ -422,17 +491,23 @@ class AppWindow(QMainWindow):
         ``Document.restore`` ersetzt alle Felder des Dokuments in-place.
         Danach müssen Canvas-Views neu gebunden und Editoren verworfen werden.
         """
-        self._document.restore(snapshot)
-        # Canvas: erst rohe Ansichtsdaten übertragen, dann Views neu binden.
-        raw_canvas = snapshot.get("canvas", {})
-        self.canvas.from_dict(raw_canvas)
-        self.canvas.set_document(self._document)
-        self._load_floor_plan_images(self._document)
-        # Eigenschaften-Dock: alle Editor-Caches invalidieren.
-        current_id = self.properties._current_id
-        self.properties.set_document(self._document)
-        if current_id and self._document.get(current_id):
-            self.properties.show_element(current_id)
+        self._restoring_snapshot = True
+        try:
+            self._document.restore(snapshot)
+            # Canvas: erst rohe Ansichtsdaten übertragen, dann Views neu binden.
+            raw_canvas = snapshot.get("canvas", {})
+            self.canvas.from_dict(raw_canvas)
+            self.canvas.set_document(self._document)
+            self._load_floor_plan_images(self._document)
+            # Eigenschaften-Dock: alle Editor-Caches invalidieren.
+            current_id = self.properties._current_id
+            self.properties.set_document(self._document)
+            if current_id and self._document.get(current_id):
+                self.properties.show_element(current_id)
+        finally:
+            self._restoring_snapshot = False
+            self._undo_group_open = False
+            self._last_document_snapshot = self._document.snapshot()
 
     def _update_undo_redo_state(self) -> None:
         """Passt den aktivierten Zustand und die Menü-Beschriftung an."""
@@ -503,6 +578,8 @@ class AppWindow(QMainWindow):
     def _set_document(self, document: Document) -> None:
         self._document = document
         # Neues Dokument = frische Undo/Redo-Stacks.
+        self._undo_group_timer.stop()
+        self._undo_group_open = False
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._update_undo_redo_state()
@@ -523,6 +600,7 @@ class AppWindow(QMainWindow):
         self._sync_grid_toolbar_from_canvas()
         self._refresh_schema_windows()
         self._update_title()
+        self._last_document_snapshot = self._document.snapshot()
 
     def _on_property_action(self, element_id: str, action_id: str) -> None:
         """Führt eine Schaltflächen-Aktion aus dem Eigenschaften-Dock aus."""

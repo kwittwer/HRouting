@@ -991,3 +991,43 @@ def test_collect_project_dict_matches_document_shape(app):
     finally:
         window.deleteLater()
 
+
+def test_undo_redo_after_canvas_mutation(app, monkeypatch):
+    """Canvas-Änderungen müssen einen Undo-/Redo-Schritt erzeugen."""
+    from PySide6.QtCore import QPointF  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(EXAMPLE)
+
+        # Ausgangsroute setzen und diesen Setup-Schritt aus der Historie
+        # entfernen, damit der Test genau die folgende Änderung prüft.
+        window.canvas._manual_routes["HK-1"] = [
+            QPointF(100, 100), QPointF(200, 100), QPointF(200, 200)
+        ]
+        window._undo_group_timer.stop()
+        window._finish_undo_group()
+        window._undo_stack.clear()
+        window._redo_stack.clear()
+
+        window.canvas._manual_routes["HK-1"][1] = QPointF(260, 140)
+        assert len(window._undo_stack) == 1
+        assert window._document.to_dict()["canvas"]["manual_routes"]["HK-1"][1] == [
+            260.0, 140.0
+        ]
+
+        window._undo()
+        assert window._document.to_dict()["canvas"]["manual_routes"]["HK-1"][1] == [
+            200.0, 100.0
+        ]
+
+        window._redo()
+        assert window._document.to_dict()["canvas"]["manual_routes"]["HK-1"][1] == [
+            260.0, 140.0
+        ]
+    finally:
+        window.deleteLater()
+
