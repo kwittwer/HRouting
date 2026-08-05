@@ -18,6 +18,7 @@ import sys
 import ctypes
 import re
 from pathlib import Path
+from typing import Any, cast
 
 VERSION = "0.1.49"
 
@@ -48,7 +49,11 @@ def _parse_hrouting_version_from_name(exe_name: str) -> tuple[int, int, int] | N
     match = re.fullmatch(r"HRouting_(\d+)\.(\d+)\.(\d+)\.exe", exe_name, re.IGNORECASE)
     if not match:
         return None
-    return tuple(int(part) for part in match.groups())
+    return (
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3)),
+    )
 
 
 def _should_update_association(current_exe: Path, registered_exe: Path | None) -> bool:
@@ -143,8 +148,10 @@ def main():
     # Parameter-Parsing: --mcp (HTTP) und --mcpstdio (Stdio)
     _enable_mcp_http = "--mcp" in sys.argv
     _enable_mcp_stdio = "--mcpstdio" in sys.argv
-    # Oberfläche: neue Dock-/Workspace-UI ist Standard, --legacy startet die alte
+    # Oberfläche: neue Dock-/Workspace-UI ist Standard.
     _use_legacy_ui = "--legacy" in sys.argv
+    if _use_legacy_ui:
+        print("WARNUNG: --legacy ist entfernt. Starte neue UI.")
 
     # Argumente vor QApplication herausfiltern
     if _enable_mcp_http:
@@ -177,7 +184,7 @@ def main():
     splash = None
     if splash_path.exists():
         pixmap = QPixmap(str(splash_path))
-        splash = QSplashScreen(pixmap, Qt.WindowStaysOnTopHint)
+        splash = QSplashScreen(pixmap, Qt.WindowType.WindowStaysOnTopHint)
         splash.show()
         app.processEvents()
 
@@ -185,7 +192,6 @@ def main():
     from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLabel
     from PySide6.QtGui import QFont, QColor
     from PySide6.QtCore import Signal, QObject
-    from gui.main_window import MainWindow
     import logging as _logging
 
     # --- MCP Log-Fenster (wird nur bei --mcp verwendet) ---
@@ -263,11 +269,8 @@ def main():
             _logging.getLogger("hrouting.mcp").removeHandler(self._handler)
             super().closeEvent(event)
 
-    if _use_legacy_ui:
-        window = MainWindow()
-    else:
-        from gui.app_window import AppWindow
-        window = AppWindow()
+    from gui.app_window import AppWindow
+    window = AppWindow()
 
     # Open project file passed as command-line argument (file association)
     project_file = next(
@@ -279,11 +282,7 @@ def main():
         None,
     )
     if project_file is not None and project_file.exists():
-        if _use_legacy_ui:
-            window._project_path = project_file
-            window._load_project(project_file)
-        else:
-            window.open_project_file(project_file)
+        window.open_project_file(project_file)
 
     if ico_path.exists():
         window.setWindowIcon(QIcon(str(ico_path)))
@@ -299,7 +298,7 @@ def main():
         _mcp_log_window.show()
         try:
             from mcp_server import start_mcp_server
-            start_mcp_server(window)
+            start_mcp_server(cast(Any, window))
         except Exception as e:
             import traceback
             _mcp_log_window._append(
