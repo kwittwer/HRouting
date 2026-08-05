@@ -164,12 +164,12 @@ class AppWindow(QMainWindow):
         self._add_action(view_menu, "Layout zurücksetzen", self._reset_layout)
 
         self.export_menu = bar.addMenu("&Export")
-        self._add_action(self.export_menu, "PDF exportieren…", self._not_implemented)
-        self._add_action(self.export_menu, "SVG exportieren…", self._not_implemented)
-        self._add_action(self.export_menu, "KiCad exportieren…", self._not_implemented)
-        self._add_action(self.export_menu, "QElectroTech exportieren…", self._not_implemented)
+        self._add_action(self.export_menu, "PDF exportieren…", self._export_pdf)
+        self._add_action(self.export_menu, "SVG exportieren…", self._export_svg)
+        self._add_action(self.export_menu, "KiCad exportieren…", self._export_kicad)
+        self._add_action(self.export_menu, "QElectroTech exportieren…", self._export_qet)
         self.export_menu.addSeparator()
-        self._add_action(self.export_menu, "Längen & Stückliste…", self._not_implemented)
+        self._add_action(self.export_menu, "Längen & Stückliste…", self._export_lengths)
 
         help_menu = bar.addMenu("&Hilfe")
         self._add_action(help_menu, "Über HRouting…", self._show_about)
@@ -1316,6 +1316,279 @@ class AppWindow(QMainWindow):
 
     def _not_implemented(self) -> None:
         self.statusBar().showMessage("Noch nicht portiert", 3000)
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+    def _collect_project_dict(self) -> dict:
+        """Erstellt das legacy-kompatible canvas+params-Dict aus dem Dokument.
+
+        Synchronisiert den Canvas zuerst, damit auch Geometrieänderungen
+        (Polygon-Editierung etc.) im Ergebnis enthalten sind.
+        """
+        self._sync_canvas_to_document()
+        return self._document.to_dict()
+
+    def _export_svg(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Als SVG exportieren", "heizplan.svg", "SVG (*.svg)"
+        )
+        if not path:
+            return
+        self._write_plan_svg(path)
+        self.log.success(f"SVG exportiert: {path}")
+        self.statusBar().showMessage(f"SVG exportiert: {path}", 4000)
+
+    def _write_plan_svg(self, path: str, source_rect=None) -> None:
+        """Rendert den aktuellen Plan als PNG-in-SVG."""
+        import base64  # noqa: PLC0415
+
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice  # noqa: PLC0415
+
+        img = self.canvas.render_for_export(source_rect, output_w=2480, output_h=1754)
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.WriteOnly)
+        img.save(buf, "PNG")
+        png_b64 = base64.b64encode(bytes(ba)).decode("ascii")
+        w = img.width()
+        h = img.height()
+        lines = [
+            '<?xml version="1.0" encoding="utf-8"?>',
+            f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"'
+            f' width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
+            f'  <image href="data:image/png;base64,{png_b64}"'
+            f' x="0" y="0" width="{w}" height="{h}"/>',
+            "</svg>",
+        ]
+        import pathlib  # noqa: PLC0415
+        pathlib.Path(path).write_text("\n".join(lines), encoding="utf-8")
+
+    def _export_pdf(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Als PDF exportieren", "projektbericht.pdf", "PDF (*.pdf)"
+        )
+        if not path:
+            return
+
+        from PySide6.QtGui import QImage  # noqa: PLC0415
+        from PySide6.QtPrintSupport import QPrinter  # noqa: PLC0415
+        from PySide6.QtGui import QPainter  # noqa: PLC0415
+        from PySide6.QtCore import QRectF  # noqa: PLC0415
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setOutputFormat(QPrinter.PdfFormat)
+        printer.setOutputFileName(path)
+        printer.setPageOrientation(
+            __import__("PySide6.QtGui", fromlist=["QPageLayout"]).QPageLayout.Landscape
+        )
+        printer.setPageSize(
+            __import__("PySide6.QtGui", fromlist=["QPageSize"]).QPageSize(
+                __import__("PySide6.QtGui", fromlist=["QPageSize"]).QPageSize.A4
+            )
+        )
+
+        painter = QPainter()
+        if not painter.begin(printer):
+            QMessageBox.critical(self, "PDF-Export", "PDF konnte nicht erstellt werden.")
+            return
+
+        try:
+            page_rect = QRectF(printer.pageRect(QPrinter.DevicePixel))
+            img = self.canvas.render_for_export(
+                output_w=int(page_rect.width()),
+                output_h=int(page_rect.height()),
+            )
+            painter.drawImage(page_rect, img)
+        finally:
+            painter.end()
+
+        self.log.success(f"PDF exportiert: {path}")
+        self.statusBar().showMessage(f"PDF exportiert: {path}", 4000)
+
+    def _export_kicad(self) -> None:
+        if self._project_path is None:
+            QMessageBox.warning(
+                self,
+                "Projekt nicht gespeichert",
+                "Bitte speichern Sie das Projekt zuerst.",
+            )
+            return
+
+        suggested = self._project_path.with_suffix(".kicad_sch").name
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "KiCad-Export",
+            str(self._project_path.parent / suggested),
+            "KiCad Schaltplan (*.kicad_sch);;Alle Dateien (*)",
+        )
+        if not path:
+            return
+
+        try:
+            from logic.kicad_export import export_project_to_kicad  # noqa: PLC0415
+        except ImportError as exc:
+            QMessageBox.critical(self, "KiCad-Export", f"Modul nicht gefunden: {exc}")
+            return
+
+        project_dict = self._collect_project_dict()
+        success, message = export_project_to_kicad(project_dict, path)
+        if success:
+            self.log.success(f"KiCad exportiert: {path}")
+            self.statusBar().showMessage(f"KiCad exportiert: {path}", 4000)
+        else:
+            QMessageBox.critical(self, "KiCad-Export fehlgeschlagen", message)
+            self.log.error(message)
+
+    def _export_qet(self) -> None:
+        if self._project_path is None:
+            QMessageBox.warning(
+                self,
+                "Projekt nicht gespeichert",
+                "Bitte speichern Sie das Projekt zuerst.",
+            )
+            return
+
+        suggested = self._project_path.with_suffix(".qet").name
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "QElectroTech-Export",
+            str(self._project_path.parent / suggested),
+            "QElectroTech (*.qet);;Alle Dateien (*)",
+        )
+        if not path:
+            return
+
+        try:
+            from logic.qet_export import QETExporter  # noqa: PLC0415
+        except ImportError as exc:
+            QMessageBox.critical(self, "QET-Export", f"Modul nicht gefunden: {exc}")
+            return
+
+        project_dict = self._collect_project_dict()
+        try:
+            exporter = QETExporter(project_dict)
+            exporter.export_to_file(path)
+            self.log.success(f"QET exportiert: {path}")
+            self.statusBar().showMessage(f"QET exportiert: {path}", 4000)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "QET-Export fehlgeschlagen", str(exc))
+            self.log.error(str(exc))
+
+    def _export_lengths(self) -> None:
+        """Längen- und Hydraulik-Übersicht für alle Heizkreise."""
+        from PySide6.QtWidgets import (  # noqa: PLC0415
+            QDialog, QLabel, QScrollArea, QVBoxLayout, QDialogButtonBox,
+        )
+
+        try:
+            from logic.heating_calc import calc_circuit, FLOOR_COVERINGS  # noqa: PLC0415
+        except ImportError as exc:
+            QMessageBox.warning(self, "Längenexport", f"Modul nicht verfügbar: {exc}")
+            return
+
+        circuits = self._document.elements.get("circuits", {})
+        if not circuits:
+            QMessageBox.information(self, "Längenexport", "Keine Heizkreise im Projekt.")
+            return
+
+        t_supply = float(self._document.settings.get("t_supply", 35.0))
+        t_return = float(self._document.settings.get("t_return", 30.0))
+
+        # Find a representative mm_per_px from the first floor plan
+        mm_per_px = 1.0
+        for fp in self._document.floorplans.values():
+            mpp = float(fp.mm_per_px)
+            if mpp > 0:
+                mm_per_px = mpp
+                break
+
+        rows: list[str] = [
+            "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse'>",
+            "<tr><th>ID</th><th>Name</th><th>Fläche m²</th>"
+            "<th>Rohrlänge m</th><th>Leistung W</th>"
+            "<th>Volumenstrom l/min</th><th>Druckverlust mbar</th></tr>",
+        ]
+        total_power = 0.0
+        for cid, circuit in sorted(circuits.items()):
+            polygon = circuit.geom.get("polygons")
+            route = circuit.geom.get("manual_routes")
+
+            area_m2 = 0.0
+            if polygon and len(polygon) >= 3:
+                # Shoelace formula (polygon in canvas pixels → mm²)
+                pts = polygon
+                n = len(pts)
+                area_px2 = abs(
+                    sum(
+                        pts[i][0] * pts[(i + 1) % n][1]
+                        - pts[(i + 1) % n][0] * pts[i][1]
+                        for i in range(n)
+                    )
+                ) / 2.0
+                area_m2 = area_px2 * (mm_per_px ** 2) / 1_000_000.0
+
+            pipe_length_m = 0.0
+            if route and len(route) >= 2:
+                length_px = sum(
+                    ((route[i + 1][0] - route[i][0]) ** 2
+                     + (route[i + 1][1] - route[i][1]) ** 2) ** 0.5
+                    for i in range(len(route) - 1)
+                )
+                pipe_length_m = length_px * mm_per_px / 1000.0
+
+            floor_name = circuit.data.get("floor_covering", "Fliesen / Keramik")
+            r_lambda = FLOOR_COVERINGS.get(floor_name, 0.01)
+            spacing_cm = float(circuit.data.get("spacing", 150.0)) / 10.0
+            room_temp = float(circuit.data.get("room_temp", 20.0))
+            diameter_mm = float(circuit.data.get("diameter", 16.0))
+            try:
+                hc = calc_circuit(
+                    t_supply=t_supply,
+                    t_return=t_return,
+                    t_room=room_temp,
+                    spacing_cm=spacing_cm,
+                    r_lambda_b=r_lambda,
+                    area_m2=area_m2,
+                    pipe_length_m=pipe_length_m,
+                    outer_diameter_mm=diameter_mm,
+                    total_pipe_length_m=pipe_length_m,
+                )
+                power = hc.get("power_w", 0.0)
+                vol = hc.get("volume_flow_lmin", 0.0)
+                dp = hc.get("pressure_drop_mbar", 0.0)
+            except Exception:  # noqa: BLE001
+                power = vol = dp = 0.0
+            total_power += power
+            name = circuit.name or cid
+            rows.append(
+                f"<tr><td>{cid}</td><td>{name}</td>"
+                f"<td>{area_m2:.2f}</td><td>{pipe_length_m:.1f}</td>"
+                f"<td>{power:.0f}</td><td>{vol:.2f}</td><td>{dp:.0f}</td></tr>"
+            )
+
+        rows.append(
+            f"<tr><td colspan='4'><b>Gesamt</b></td>"
+            f"<td><b>{total_power:.0f}</b></td><td></td><td></td></tr>"
+        )
+        rows.append("</table>")
+        html = "\n".join(rows)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Längen & Hydraulik")
+        dialog.resize(800, 500)
+        layout = QVBoxLayout(dialog)
+        label = QLabel()
+        label.setWordWrap(True)
+        label.setText(html)
+        scroll = QScrollArea()
+        scroll.setWidget(label)
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(dialog.reject)
+        layout.addWidget(bb)
+        dialog.exec()
 
     def _show_about(self) -> None:
         QMessageBox.about(self, "Über HRouting", "HRouting – Fußbodenheizung und Kabel Planer")

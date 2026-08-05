@@ -1211,7 +1211,65 @@ class CanvasWidget(QWidget):
         return QRectF(self._export_frame.normalized())
 
     def grab_source_rect(self, rect: QRectF) -> QPixmap:
-        """Render only a specific rectangular region to a pixmap."""
+        """Render a specific rectangular region to a preview pixmap (capped at 2×)."""
+
+    def get_default_source_rect(self) -> QRectF:
+        """Return the default source rect for export (export frame or SVG size)."""
+        if self._export_frame:
+            return QRectF(self._export_frame.normalized())
+        w, h = self._svg_size
+        if w > 0 and h > 0:
+            return QRectF(0, 0, w, h)
+        return QRectF(0, 0, 800, 600)
+
+    def render_for_export(
+        self,
+        source_rect: "Optional[QRectF]" = None,
+        output_w: int = 2480,
+        output_h: int = 1754,
+    ) -> "QImage":
+        """Render canvas content to a high-resolution QImage for export.
+
+        Uses the same paint path as the regular view but at the requested output
+        resolution.  The canvas is temporarily resized and the view transform
+        adjusted so *source_rect* fills the output.  ``grab()`` triggers a
+        synchronous ``paintEvent`` without an event-loop round-trip.
+        """
+        from PySide6.QtGui import QImage  # noqa: PLC0415
+
+        if source_rect is None:
+            source_rect = self.get_default_source_rect()
+        if source_rect.isEmpty():
+            source_rect = QRectF(0, 0, 800, 600)
+
+        sx = output_w / max(source_rect.width(), 1)
+        sy = output_h / max(source_rect.height(), 1)
+        s = min(sx, sy)
+        sw = source_rect.width() * s
+        sh = source_rect.height() * s
+        off = QPointF(
+            (output_w - sw) / 2.0 - source_rect.x() * s,
+            (output_h - sh) / 2.0 - source_rect.y() * s,
+        )
+
+        old_scale = float(self._scale)
+        old_offset = QPointF(self._offset)
+        old_w = self.width()
+        old_h = self.height()
+
+        try:
+            self._scale = s
+            self._offset = off
+            self.resize(output_w, output_h)
+            pixmap = self.grab()
+        finally:
+            self._scale = old_scale
+            self._offset = old_offset
+            self.resize(old_w, old_h)
+            self.update()
+
+        return pixmap.toImage()
+
         if rect.width() <= 0 or rect.height() <= 0:
             return QPixmap()
         
