@@ -289,6 +289,421 @@ def test_route_changed_updates_lengths(app, monkeypatch):
         window.deleteLater()
 
 
+def test_floorplan_property_actions_are_wired(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    img_path = tmp_path / "floor.png"
+    img_path.write_bytes(b"not-a-real-image")
+
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *a, **k: (str(img_path), "")),
+    )
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                        }
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_element("grundriss-1")
+
+        calls = {"move": [], "rotate": [], "image": []}
+
+        monkeypatch.setattr(
+            window.canvas,
+            "start_move_floor_plan",
+            lambda fp_id: calls["move"].append(fp_id),
+        )
+        monkeypatch.setattr(
+            window.canvas,
+            "start_rotate_floor_plan",
+            lambda fp_id: calls["rotate"].append(fp_id),
+        )
+        monkeypatch.setattr(
+            window.canvas,
+            "load_floor_plan_image",
+            lambda fp_id, path: calls["image"].append((fp_id, path)),
+        )
+
+        window._on_property_action("grundriss-1", "move")
+        window._on_property_action("grundriss-1", "rotate")
+        window._on_property_action("grundriss-1", "choose_image")
+
+        assert calls["move"] == ["grundriss-1"]
+        assert calls["rotate"] == ["grundriss-1"]
+        assert calls["image"] == [("grundriss-1", str(img_path))]
+        assert window._document.floorplans["grundriss-1"].file_path == str(img_path)
+    finally:
+        window.deleteLater()
+
+
+def test_floorplan_tools_use_active_floorplan(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                        }
+                    }
+                },
+            }
+        )
+        document.active_floorplan_id = "grundriss-1"
+        window._set_document(document)
+
+        calls = {"move": [], "rotate": [], "ref": [], "polygon": []}
+        monkeypatch.setattr(
+            window.canvas,
+            "start_move_floor_plan",
+            lambda fp_id: calls["move"].append(fp_id),
+        )
+        monkeypatch.setattr(
+            window.canvas,
+            "start_rotate_floor_plan",
+            lambda fp_id: calls["rotate"].append(fp_id),
+        )
+        monkeypatch.setattr(
+            window.canvas,
+            "start_ref_line_for_floor",
+            lambda fp_id: calls["ref"].append(fp_id),
+        )
+        monkeypatch.setattr(
+            window.canvas,
+            "start_draw_floor_plan_polygon",
+            lambda fp_id: calls["polygon"].append(fp_id),
+        )
+
+        window._on_tool_activated("fp.move")
+        window._on_tool_activated("fp.rotate")
+        window._on_tool_activated("fp.ref_line")
+        window._on_tool_activated("fp.polygon")
+
+        assert calls["move"] == ["grundriss-1"]
+        assert calls["rotate"] == ["grundriss-1"]
+        assert calls["ref"] == ["grundriss-1"]
+        assert calls["polygon"] == ["grundriss-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_floorplan_draw_polygon_property_action_uses_floorplan_polygon_mode(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                        }
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+
+        calls = {"polygon": [], "circuit": []}
+        monkeypatch.setattr(
+            window.canvas,
+            "start_draw_floor_plan_polygon",
+            lambda fp_id: calls["polygon"].append(fp_id),
+        )
+        monkeypatch.setattr(
+            window.canvas,
+            "start_drawing",
+            lambda element_id: calls["circuit"].append(element_id),
+        )
+
+        window._on_property_action("grundriss-1", "draw_polygon")
+
+        assert calls["polygon"] == ["grundriss-1"]
+        assert calls["circuit"] == []
+    finally:
+        window.deleteLater()
+
+
+def test_selecting_floorplan_updates_properties_dock(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True},
+                        {"fp_id": "grundriss-2", "visible": True},
+                    ],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                        "grundriss-2": {"name": "OG", "visible": True, "file_path": ""},
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+
+        item = window.navigator._find_item_by_id("grundriss-2")
+        assert item is not None
+        window.navigator._tree.setCurrentItem(item)
+        window.navigator._on_selection_changed()
+
+        assert window.properties._current_id == "grundriss-2"
+    finally:
+        window.deleteLater()
+
+
+def test_ref_line_and_ref_length_recompute_floorplan_scale(app, monkeypatch):
+    from PySide6.QtCore import QPointF, QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "mm_per_px": 1.0,
+                    "floor_plans": [
+                        {
+                            "fp_id": "grundriss-1",
+                            "visible": True,
+                            "mm_per_px": 1.0,
+                            "ref_length_mm": 5000.0,
+                        }
+                    ],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                            "ref_length_mm": 5000.0,
+                            "mm_per_px": 1.0,
+                        }
+                    }
+                },
+            }
+        )
+        document.active_floorplan_id = "grundriss-1"
+        window._set_document(document)
+
+        layer = window.canvas._floor_plans["grundriss-1"]
+        layer.ref_p1 = QPointF(0.0, 0.0)
+        layer.ref_p2 = QPointF(100.0, 0.0)
+        layer.ref_length_mm = 5000.0
+        window.canvas._ref_floor_id = "grundriss-1"
+
+        # Nach dem Zeichnen der Referenzlinie: NOCH KEINE automatische Skalierung
+        assert abs(layer.mm_per_px - 1.0) < 1e-9
+        assert abs(window._document.floorplans["grundriss-1"].layer["mm_per_px"] - 1.0) < 1e-9
+        assert abs(window.canvas.get_mm_per_px() - 1.0) < 1e-9
+
+        # Referenzlänge ändern (Input im UI)
+        window._document.floorplans["grundriss-1"].data["ref_length_mm"] = 5000.0
+        window._on_property_changed("grundriss-1", "ref_length_mm", 5000.0)
+        # Immer noch keine Skalierung
+        assert abs(layer.mm_per_px - 1.0) < 1e-9
+
+        # Nur wenn der User "Aktualisieren" Button klickt, wird neu berechnet
+        window._on_property_action("grundriss-1", "recompute_scale")
+
+        assert abs(window.canvas._floor_plans["grundriss-1"].mm_per_px - 50.0) < 1e-9
+        assert abs(window._document.floorplans["grundriss-1"].layer["mm_per_px"] - 50.0) < 1e-9
+        assert abs(window.canvas.get_mm_per_px() - 1.0) < 1e-9
+    finally:
+        window.deleteLater()
+
+
+def test_floorplan_editor_has_recompute_button(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QComboBox, QPushButton  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                            "ref_length_mm": 5000.0,
+                        }
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_element("grundriss-1")
+
+        editor = window.properties._editors.get("grundriss-1")
+        assert editor is not None
+        buttons = [
+            btn for btn in editor.findChildren(QPushButton)
+            if btn.text() == "Aktualisieren"
+        ]
+        assert buttons, "Aktualisieren-Button neben Referenzlänge fehlt"
+
+        draw_buttons = [
+            btn for btn in editor.findChildren(QPushButton)
+            if btn.text() == "Referenzlinie zeichnen"
+        ]
+        assert draw_buttons, "Referenzlinie-Button unter Aktualisieren fehlt"
+
+        unit_combos = [
+            combo for combo in editor.findChildren(QComboBox)
+            if {combo.itemText(i) for i in range(combo.count())} >= {"mm", "cm", "m"}
+        ]
+        assert unit_combos, "Einheitenwahl mm/cm/m für Referenzmaß fehlt"
+    finally:
+        window.deleteLater()
+
+
+def test_recompute_scale_on_active_floorplan_keeps_global_mpp(app, monkeypatch):
+    """Beim Recompute: Layer skaliert, Ref-Linie mit dem Bild mit, Global bleibt konstant."""
+    from PySide6.QtCore import QPointF, QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "mm_per_px": 50.0,
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True, "mm_per_px": 50.0, "ref_length_mm": 5000.0},
+                        {"fp_id": "grundriss-2", "visible": True, "mm_per_px": 50.0, "ref_length_mm": 3000.0},
+                    ],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": "", "mm_per_px": 50.0, "ref_length_mm": 5000.0},
+                        "grundriss-2": {"name": "OG", "visible": True, "file_path": "", "mm_per_px": 50.0, "ref_length_mm": 3000.0},
+                    }
+                },
+            }
+        )
+        document.active_floorplan_id = "grundriss-1"
+        window._set_document(document)
+
+        # Referenzlinie mit 100 px = 5000 mm → 50 mm/px
+        layer1 = window.canvas._floor_plans["grundriss-1"]
+        layer1.ref_p1 = QPointF(0.0, 0.0)
+        layer1.ref_p2 = QPointF(100.0, 0.0)  # 100 px
+        layer1.ref_length_mm = 5000.0        # 5000 mm / 100 px = 50 mm/px
+
+        # Änderung: neue Referenzlinie mit kürzerer Länge
+        layer1.ref_length_mm = 10000.0       # 10000 mm → sollte zu 100 mm/px werden
+
+        # Nur bei Button-Click skaliert
+        window._on_property_action("grundriss-1", "recompute_scale")
+
+        # Globaler Canvas-Maßstab bleibt unverändert
+        assert abs(window.canvas.get_mm_per_px() - 50.0) < 1e-9, "Global mm_per_px darf sich nicht ändern"
+        # Aktiver Grundriss wurde neu skaliert (100 px * 50 (global) = 5000 px Screen; 10000 mm / 5000 px = 2 mm/px... nein warte)
+        # Die Formel ist: new_mpp = ref_length_mm / px_len
+        # Ref_length_mm = 10000, px_len = 100 px → new_mpp = 100.0
+        assert abs(window.canvas._floor_plans["grundriss-1"].mm_per_px - 100.0) < 1e-9
+        # Anderer Grundriss bleibt unverändert
+        assert abs(window.canvas._floor_plans["grundriss-2"].mm_per_px - 50.0) < 1e-9
+    finally:
+        window.deleteLater()
+
+
 def test_delete_elec_point_clears_cable_endpoints(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 

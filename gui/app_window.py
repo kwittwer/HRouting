@@ -277,7 +277,6 @@ class AppWindow(QMainWindow):
         self.canvas.document_data_changed.connect(self._on_document_data_changed)
         self.canvas.polygon_finished.connect(self._on_canvas_mutation_signal)
         self.canvas.elec_room_polygon_finished.connect(self._on_canvas_mutation_signal)
-        self.canvas.ref_line_set.connect(self._on_canvas_mutation_signal)
         self.canvas.start_point_moved.connect(self._on_canvas_mutation_signal)
         self.canvas.route_changed.connect(self._on_canvas_mutation_signal)
         self.canvas.polygon_changed.connect(self._on_canvas_mutation_signal)
@@ -287,7 +286,7 @@ class AppWindow(QMainWindow):
         self.canvas.hkv_placed.connect(self._on_canvas_mutation_signal)
         self.canvas.hkv_line_changed.connect(self._on_canvas_mutation_signal)
         self.canvas.text_placed.connect(self._on_canvas_mutation_signal)
-        self.canvas.floor_plan_transform_updated.connect(self._on_canvas_mutation_signal)
+        self.canvas.floor_plan_transform_updated.connect(self._on_floor_plan_transform_updated)
         self.canvas.floor_plan_polygon_changed.connect(self._on_canvas_mutation_signal)
         self.canvas.export_frame_drawn.connect(self._on_canvas_mutation_signal)
         self.canvas.helper_lines_changed.connect(self._on_canvas_mutation_signal)
@@ -295,6 +294,7 @@ class AppWindow(QMainWindow):
         self.canvas.measure_changed.connect(self._on_canvas_mutation_signal)
         self.canvas.multi_objects_moved.connect(self._on_canvas_mutation_signal)
         self.canvas.will_move_multi_objects.connect(self._push_undo)
+        self.canvas.ref_line_set.connect(self._on_ref_line_set)
         self.canvas.route_changed.connect(self._on_route_changed)
         self.canvas.supply_line_changed.connect(self._on_supply_line_changed)
         self.canvas.hkv_line_changed.connect(self._on_hkv_line_changed)
@@ -363,6 +363,35 @@ class AppWindow(QMainWindow):
                     resolved = (self._project_path.parent / resolved).resolve()
                 if resolved.exists():
                     self.canvas.load_floor_plan_image(element_id, str(resolved))
+        elif element_id in self._document.floorplans:
+            if key == "opacity":
+                self.canvas.set_floor_plan_opacity(
+                    element_id, float(element.data.get("opacity", 1.0))
+                )
+            elif key in ("offset_x", "offset_y", "rotation"):
+                self.canvas.set_floor_plan_transform(
+                    element_id,
+                    float(element.data.get("offset_x", 0.0)),
+                    float(element.data.get("offset_y", 0.0)),
+                    float(element.data.get("rotation", 0.0)),
+                )
+            elif key == "polygon_color":
+                self.canvas.set_floor_plan_polygon_color(
+                    element_id, str(element.data.get("polygon_color", "#8d99ae"))
+                )
+            elif key == "ref_line_visible":
+                self.canvas.set_ref_line_visible(
+                    element_id, bool(element.data.get("ref_line_visible", True))
+                )
+            elif key == "ref_line_color":
+                self.canvas.set_ref_line_color(
+                    element_id, str(element.data.get("ref_line_color", "#ffdd00"))
+                )
+            elif key == "ref_length_mm":
+                layer = self.canvas._floor_plans.get(element_id)
+                if layer is not None:
+                    layer.ref_length_mm = float(element.data.get("ref_length_mm", 0.0) or 0.0)
+                # Neuberechnung nur beim expliziten 'Aktualisieren'-Button, nicht automatisch
 
     def _on_global_setting_changed(self, _key: str, _value) -> None:
         self.properties.refresh_current()
@@ -380,6 +409,68 @@ class AppWindow(QMainWindow):
     def _on_canvas_mutation_signal(self, *_args) -> None:
         """Erfasst Canvas-Mutationen, die nicht über DocumentMapView laufen."""
         self._record_canvas_change()
+
+    def _on_floor_plan_transform_updated(self, fp_id: str, _ox: float, _oy: float, _rot: float) -> None:
+        """Synchronisiert Property-Ansicht und Undo bei Drag-Transformationen."""
+        self._record_canvas_change()
+        self.properties.refresh_element(fp_id)
+        self._refresh_schema_windows()
+        if not self._dirty:
+            self._dirty = True
+            self._update_title()
+
+    def _on_ref_line_set(self) -> None:
+        """Nach Referenzlinie: Nutzer zur Längeneingabe auffordern."""
+        self.statusBar().showMessage(
+            "✏️ Referenzlinie gezeichnet!  "
+            "Jetzt die reale Länge eingeben und 'Aktualisieren' klicken."
+        )
+
+    def _recompute_floorplan_scale_from_reference(self, fp_id: str) -> bool:
+        """Berechnet ``mm_per_px`` aus Referenzlinie und Referenzlänge."""
+        layer = self.canvas._floor_plans.get(fp_id)
+        floor = self._document.floorplans.get(fp_id)
+        if layer is None or floor is None:
+            return False
+        if layer.ref_p1 is None or layer.ref_p2 is None:
+            return False
+
+        px_len = math.hypot(layer.ref_p2.x() - layer.ref_p1.x(), layer.ref_p2.y() - layer.ref_p1.y())
+        if px_len <= 1e-9:
+            return False
+
+        ref_length_mm = float(layer.ref_length_mm or floor.data.get("ref_length_mm", 0.0) or 0.0)
+        if ref_length_mm <= 0.0:
+            return False
+
+        old_global_mpp = float(self.canvas._mm_per_px or 1.0)
+        old_layer_mpp = float(layer.mm_per_px or old_global_mpp)
+        old_render_size = self.canvas._layer_render_size_for_scale(
+            layer,
+            old_global_mpp,
+            layer_mm_per_px=old_layer_mpp,
+        )
+        new_mpp = ref_length_mm / px_len
+
+        # Globaler Bildschirmmaßstab bleibt konstant – nur Layer skaliert.
+        # Die Referenzlinie wird mit dem Bild mit-skaliert (remap).
+        new_render_size = self.canvas._layer_render_size_for_scale(
+            layer,
+            old_global_mpp,
+            layer_mm_per_px=new_mpp,
+        )
+
+        # Referenzlinie mit dem Bild mitumrechnen: von alter zu neuer Render-Größe
+        self.canvas.remap_layer_ref_points(fp_id, old_render_size, new_render_size)
+
+        layer.mm_per_px = new_mpp
+        floor.layer["mm_per_px"] = new_mpp
+        floor.layer["ref_length_mm"] = ref_length_mm
+        floor.data["mm_per_px"] = new_mpp
+        floor.data["ref_length_mm"] = ref_length_mm
+
+        self.canvas.update()
+        return True
 
     def _append_undo_snapshot(self, snapshot: dict) -> None:
         self._undo_stack.append(snapshot)
@@ -613,6 +704,50 @@ class AppWindow(QMainWindow):
         tool = TOOLS_BY_ID.get(tool_id)
         if tool is None:
             return
+
+        # Werkzeuge mit Zielobjekt direkt starten, statt nur den Modus zu setzen.
+        if tool_id == "fp.move":
+            target_id = self._selected_floor_like_id()
+            if not target_id:
+                self.statusBar().showMessage("Kein Grundriss ausgewählt", 2500)
+                return
+            self.canvas.start_move_floor_plan(target_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
+        if tool_id == "fp.rotate":
+            target_id = self._selected_floorplan_id()
+            if not target_id:
+                self.statusBar().showMessage("Kein Grundriss ausgewählt", 2500)
+                return
+            self.canvas.start_rotate_floor_plan(target_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
+        if tool_id == "fp.ref_line":
+            target_id = self._selected_floorplan_id()
+            if not target_id:
+                self.statusBar().showMessage("Kein Grundriss ausgewählt", 2500)
+                return
+            self._push_undo()
+            self.canvas.start_ref_line_for_floor(target_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
+        if tool_id == "fp.polygon":
+            target_id = self._selected_floorplan_id()
+            if not target_id:
+                self.statusBar().showMessage("Kein Grundriss ausgewählt", 2500)
+                return
+            self.canvas.start_draw_floor_plan_polygon(target_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
+        if tool_id == "furn.polygon":
+            target_id = self._selected_floor_like_id()
+            if not target_id:
+                self.statusBar().showMessage("Kein Einrichtungselement ausgewählt", 2500)
+                return
+            self.canvas.start_draw_floor_plan_polygon(target_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
+
         mode = getattr(ToolMode, tool.tool_mode, ToolMode.NONE)
         self.canvas.set_tool_mode(mode)
         self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
@@ -666,6 +801,11 @@ class AppWindow(QMainWindow):
             "edit_line": lambda eid: self.canvas.start_edit_hkv_line(eid),
             "place": self._action_place,
             "draw_ref_line": lambda eid: self.canvas.start_ref_line_for_floor(eid),
+            "move": self._action_move,
+            "rotate": self._action_rotate,
+            "choose_image": self._action_choose_image,
+            "recompute_scale": self._action_recompute_scale,
+            "duplicate": lambda _eid: self._duplicate_selected(),
             "configure_uv": self._action_configure_uv,
             "configure_up": self._action_configure_up,
             "configure_hak": self._action_configure_hak,
@@ -684,6 +824,7 @@ class AppWindow(QMainWindow):
             "draw_supply", "edit_supply", "draw_cable", "edit_cable",
             "draw_line", "edit_line", "place", "draw_ref_line",
             "configure_uv", "configure_up", "configure_hak", "configure_zaehler",
+            "move", "rotate", "choose_image", "recompute_scale",
         }
         if action_id in _UNDO_BEFORE:
             self._push_undo()
@@ -775,6 +916,8 @@ class AppWindow(QMainWindow):
     def _action_draw_polygon(self, element_id: str) -> None:
         if element_id in self._document.elements["elec_rooms"]:
             self.canvas.start_draw_elec_room(element_id)
+        elif element_id in self._document.floorplans or element_id in self._document.furniture:
+            self.canvas.start_draw_floor_plan_polygon(element_id)
         else:
             self.canvas.start_drawing(element_id)
 
@@ -799,6 +942,48 @@ class AppWindow(QMainWindow):
             )
         elif element_id in self._document.elements["text_annotations"]:
             self.canvas.start_place_text(element_id, element.data.get("content", "Text"))
+
+    def _action_move(self, element_id: str) -> None:
+        if element_id in self._document.floorplans or element_id in self._document.furniture:
+            self.canvas.start_move_floor_plan(element_id)
+
+    def _action_rotate(self, element_id: str) -> None:
+        if element_id in self._document.floorplans:
+            self.canvas.start_rotate_floor_plan(element_id)
+
+    def _action_choose_image(self, element_id: str) -> None:
+        element = self._document.get(element_id)
+        if element is None:
+            return
+        current = (element.data.get("file_path") or "").strip()
+        image_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Bild wählen",
+            current,
+            _IMAGE_FILTER,
+        )
+        if not image_path:
+            return
+        element.data["file_path"] = image_path
+        self._apply_property_side_effects(element_id, "file_path")
+        self._document.element_changed.emit(element_id)
+        self.properties.refresh_element(element_id)
+        self._mark_dirty()
+
+    def _action_recompute_scale(self, element_id: str) -> None:
+        if element_id not in self._document.floorplans:
+            return
+        if self._recompute_floorplan_scale_from_reference(element_id):
+            self._document.element_changed.emit(element_id)
+            self.properties.refresh_element(element_id)
+            self._refresh_schema_windows()
+            self._mark_dirty()
+            self.statusBar().showMessage(f"Maßstab neu berechnet: {element_id}", 2500)
+        else:
+            self.statusBar().showMessage(
+                "Maßstab konnte nicht neu berechnet werden (Referenzlinie/Länge fehlt)",
+                3000,
+            )
 
     def _action_delete(self, element_id: str) -> None:
         self._delete_element_with_confirm(element_id)
@@ -1234,7 +1419,24 @@ class AppWindow(QMainWindow):
     def _on_floorplan_activated(self, fp_id: str) -> None:
         self._document.active_floorplan_id = fp_id
         self.canvas.set_active_helper_floor(fp_id)
+        self.navigator.select(fp_id)
+        self.properties.show_element(fp_id)
+        self.canvas.set_selected_item(fp_id)
         self.log.info(f"Aktiver Grundriss: {fp_id}")
+
+    def _selected_floorplan_id(self) -> str:
+        selected = self._current_selection_id()
+        if selected and selected in self._document.floorplans:
+            return selected
+        return self._active_floorplan_id()
+
+    def _selected_floor_like_id(self) -> str:
+        selected = self._current_selection_id()
+        if selected and (
+            selected in self._document.floorplans or selected in self._document.furniture
+        ):
+            return selected
+        return self._active_floorplan_id()
 
     def _on_visibility_changed(self, element_id: str, visible: bool) -> None:
         if not self._document.set_visible(element_id, visible):

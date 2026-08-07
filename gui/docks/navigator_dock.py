@@ -256,7 +256,8 @@ class NavigatorDock(QDockWidget):
         items = self._tree.selectedItems()
         if not items:
             return
-        if items[0].data(0, _KIND_ROLE) != "element":
+        kind = items[0].data(0, _KIND_ROLE)
+        if kind not in ("element", "floorplan"):
             return
         element_id = items[0].data(0, _ID_ROLE)
         if element_id:

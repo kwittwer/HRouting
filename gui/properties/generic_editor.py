@@ -6,6 +6,8 @@ from typing import Any
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -17,11 +19,71 @@ from PySide6.QtWidgets import (
 
 from model.computed import computed_values
 from model.document import Document
-from model.elements import Element
+from model.elements import Element, FloorPlan
 from model.field_access import apply_display_value, display_value, get_field
 from model.schema import ElementSchema, FieldSpec, GLOBAL_FIELDS, groups_of
 
 from .field_widgets import FieldWidget, create_field_widget
+
+
+class _RefLengthFieldWidget(FieldWidget):
+    """Editor for reference length with selectable input unit.
+
+    Stored value remains in mm. Display unit can be mm / cm / m.
+    """
+
+    _UNIT_FACTORS = {
+        "mm": 1.0,
+        "cm": 10.0,
+        "m": 1000.0,
+    }
+
+    def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
+        super().__init__(spec, parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._spin = QDoubleSpinBox(self)
+        self._spin.setRange(0.001, max(spec.maximum, 999_999_999.0))
+        self._spin.setDecimals(3)
+        self._spin.setSingleStep(1.0)
+        self._spin.setKeyboardTracking(False)
+        self._spin.valueChanged.connect(self._on_value_changed)
+
+        self._unit = QComboBox(self)
+        self._unit.addItems(["mm", "cm", "m"])
+        self._unit.currentTextChanged.connect(self._on_unit_changed)
+
+        layout.addWidget(self._spin, 1)
+        layout.addWidget(self._unit)
+
+        self._stored_mm = float(spec.default or 0.0)
+
+    def _current_factor(self) -> float:
+        return self._UNIT_FACTORS.get(self._unit.currentText(), 1.0)
+
+    def _on_value_changed(self, display_value: float) -> None:
+        self._stored_mm = float(display_value) * self._current_factor()
+        self._emit(self._stored_mm)
+
+    def _on_unit_changed(self, _unit: str) -> None:
+        # Keep the same physical length, only change the representation.
+        factor = self._current_factor()
+        self._spin.blockSignals(True)
+        self._spin.setValue(self._stored_mm / factor if factor else self._stored_mm)
+        self._spin.blockSignals(False)
+
+    def value(self) -> object:
+        return self._stored_mm
+
+    def set_value(self, value: object) -> None:
+        try:
+            self._stored_mm = float(value)
+        except (TypeError, ValueError):
+            self._stored_mm = float(self.spec.default or 0.0)
+        factor = self._current_factor()
+        self._spin.setValue(self._stored_mm / factor if factor else self._stored_mm)
 
 
 class GenericElementEditor(QWidget):
@@ -72,15 +134,58 @@ class GenericElementEditor(QWidget):
         form.setContentsMargins(8, 8, 8, 8)
         form.setSpacing(6)
         for spec in specs:
-            options = (
-                spec.resolve_options(self._document)
-                if spec.document_options is not None
-                else None
-            )
-            widget = create_field_widget(spec, box, options)
+            if isinstance(self._element, FloorPlan) and spec.key == "ref_length_mm":
+                widget = _RefLengthFieldWidget(spec, box)
+            else:
+                options = (
+                    spec.resolve_options(self._document)
+                    if spec.document_options is not None
+                    else None
+                )
+                widget = create_field_widget(spec, box, options)
             widget.value_changed.connect(self._on_field_changed)
             self._widgets[spec.key] = widget
-            form.addRow(f"{spec.label}:", widget)
+            field_widget: QWidget = widget
+
+            # Beim Grundriss steht neben der Referenzlänge ein expliziter
+            # Aktualisieren-Button, der den Maßstab neu aus der Referenzlinie
+            # berechnet.
+            if isinstance(self._element, FloorPlan) and spec.key == "ref_length_mm":
+                container = QWidget(box)
+                row = QHBoxLayout(container)
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(4)
+                row.addWidget(widget, 1)
+
+                refresh_btn = QPushButton("Aktualisieren", container)
+                refresh_btn.setToolTip(
+                    "Maßstab aus Referenzlinie und Referenzlänge neu berechnen"
+                )
+                refresh_btn.clicked.connect(
+                    lambda _checked=False: self.action_triggered.emit(
+                        self._element.id, "recompute_scale"
+                    )
+                )
+                side_actions = QWidget(container)
+                side_layout = QVBoxLayout(side_actions)
+                side_layout.setContentsMargins(0, 0, 0, 0)
+                side_layout.setSpacing(4)
+                side_layout.addWidget(refresh_btn)
+
+                draw_ref_btn = QPushButton("Referenzlinie zeichnen", side_actions)
+                draw_ref_btn.setToolTip("Neue Referenzlinie im Grundriss zeichnen")
+                draw_ref_btn.clicked.connect(
+                    lambda _checked=False: self.action_triggered.emit(
+                        self._element.id, "draw_ref_line"
+                    )
+                )
+                side_layout.addWidget(draw_ref_btn)
+                side_layout.addStretch(1)
+
+                row.addWidget(side_actions)
+                field_widget = container
+
+            form.addRow(f"{spec.label}:", field_widget)
         return box
 
     def _build_computed_group(self) -> QGroupBox:
@@ -102,7 +207,12 @@ class GenericElementEditor(QWidget):
 
         self._action_buttons: dict[str, QPushButton] = {}
         row: QHBoxLayout | None = None
-        for index, action in enumerate(self._schema.actions):
+        visible_actions = list(self._schema.actions)
+        if isinstance(self._element, FloorPlan):
+            # This action is presented next to reference length for floor plans.
+            visible_actions = [a for a in visible_actions if a.id != "draw_ref_line"]
+
+        for index, action in enumerate(visible_actions):
             if index % 2 == 0:
                 row = QHBoxLayout()
                 row.setSpacing(4)
