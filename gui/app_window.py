@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from model.document import Document
 from model.elements import Circuit, ElecPoint, ElecRoom, ElecCable, FloorPlan, Hkv, HkvLine, TextAnnotation
+from model.schema import schema_for
 from storage.hrp_io import load_document, save_document
 from .elec_schema_window import ApNode, CableEdge, ElecSchemaWindow
 from .schaltplan_window import SchaltplanWindow
@@ -165,6 +166,7 @@ class AppWindow(QMainWindow):
         self._undo_action = self._add_action(edit_menu, "Rückgängig", self._undo, QKeySequence.Undo)
         self._redo_action = self._add_action(edit_menu, "Wiederherstellen", self._redo, QKeySequence.Redo)
         edit_menu.addSeparator()
+        self._add_action(edit_menu, "Ausschneiden", self._cut_selected, QKeySequence.Cut)
         self._add_action(edit_menu, "Kopieren", self._copy_selected, QKeySequence.Copy)
         self._add_action(edit_menu, "Einfügen", self._paste_copied, QKeySequence.Paste)
         self._add_action(edit_menu, "Duplizieren", self._duplicate_selected, QKeySequence("Ctrl+D"))
@@ -174,6 +176,7 @@ class AppWindow(QMainWindow):
 
         add_menu = bar.addMenu("&Einfügen")
         self._add_action(add_menu, "Grundriss hinzufügen…", self._add_floorplan)
+        self._add_action(add_menu, "Einrichtung hinzufügen…", self._add_furniture)
         add_menu.addSeparator()
         self._add_action(add_menu, "Heizkreis hinzufügen", self._add_circuit)
         self._add_action(add_menu, "Elektro-Punkt hinzufügen", self._add_elec_point)
@@ -274,6 +277,7 @@ class AppWindow(QMainWindow):
         self.navigator.context_requested.connect(self._on_navigator_context)
         self.tools.tool_activated.connect(self._on_tool_activated)
         self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
+        self.canvas.context_menu_requested.connect(self._on_canvas_context_requested)
         self.canvas.document_data_changed.connect(self._on_document_data_changed)
         self.canvas.polygon_finished.connect(self._on_canvas_mutation_signal)
         self.canvas.elec_room_polygon_finished.connect(self._on_canvas_mutation_signal)
@@ -414,6 +418,9 @@ class AppWindow(QMainWindow):
     def _on_canvas_mutation_signal(self, *_args) -> None:
         """Erfasst Canvas-Mutationen, die nicht über DocumentMapView laufen."""
         self._record_canvas_change()
+        if not self._dirty:
+            self._dirty = True
+            self._update_title()
 
     def _on_floor_plan_transform_updated(self, fp_id: str, _ox: float, _oy: float, _rot: float) -> None:
         """Synchronisiert Property-Ansicht und Undo bei Drag-Transformationen."""
@@ -796,7 +803,8 @@ class AppWindow(QMainWindow):
         handlers = {
             "draw_polygon": self._action_draw_polygon,
             "edit_polygon": self._action_edit_polygon,
-            "draw_route": lambda eid: self.canvas.start_route_drawing(eid),
+            "remove_polygon": self._action_remove_polygon,
+            "draw_route": self._action_draw_route,
             "edit_route": lambda eid: self.canvas.start_edit_route(eid),
             "draw_supply": lambda eid: self.canvas.start_draw_supply_line(eid),
             "edit_supply": lambda eid: self.canvas.start_edit_supply_line(eid),
@@ -825,7 +833,7 @@ class AppWindow(QMainWindow):
 
         # Vor Geometrie- und Konfigurations-Aktionen Undo-Snapshot aufnehmen.
         _UNDO_BEFORE = {
-            "draw_polygon", "edit_polygon", "draw_route", "edit_route",
+            "draw_polygon", "edit_polygon", "remove_polygon", "draw_route", "edit_route",
             "draw_supply", "edit_supply", "draw_cable", "edit_cable",
             "draw_line", "edit_line", "place", "draw_ref_line",
             "configure_uv", "configure_up", "configure_hak", "configure_zaehler",
@@ -918,6 +926,14 @@ class AppWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self._store_config(element_id, "zaehler_config", dialog.get_config())
 
+    def _action_draw_route(self, element_id: str) -> None:
+        element = self._document.get(element_id)
+        if element is None:
+            return
+        wall_dist_mm = float(element.data.get("wall_dist", 200.0))
+        spacing_mm = float(element.data.get("spacing", 150.0))
+        self.canvas.start_route_drawing(element_id, wall_dist_mm, spacing_mm)
+
     def _action_draw_polygon(self, element_id: str) -> None:
         if element_id in self._document.elements["elec_rooms"]:
             self.canvas.start_draw_elec_room(element_id)
@@ -928,6 +944,18 @@ class AppWindow(QMainWindow):
 
     def _action_edit_polygon(self, element_id: str) -> None:
         self.canvas.start_edit_polygon(element_id)
+
+    def _action_remove_polygon(self, element_id: str) -> None:
+        floor = self._document.floorplans.get(element_id) or self._document.furniture.get(element_id)
+        if floor is None:
+            return
+        if not floor.layer.get("polygon"):
+            return
+        floor.layer["polygon"] = []
+        self._document.element_changed.emit(element_id)
+        self.properties.refresh_element(element_id)
+        self.canvas.update()
+        self._mark_dirty()
 
     def _action_place(self, element_id: str) -> None:
         element = self._document.get(element_id)
@@ -992,6 +1020,15 @@ class AppWindow(QMainWindow):
 
     def _action_delete(self, element_id: str) -> None:
         self._delete_element_with_confirm(element_id)
+
+    def _cut_selected(self) -> None:
+        element_id = self._current_selection_id()
+        if not element_id:
+            self.statusBar().showMessage("Kein Element ausgewählt", 2000)
+            return
+        self._copy_selected()
+        if self._copy_buffer is not None:
+            self._delete_selected()
 
     def _copy_selected(self) -> None:
         element_id = self._current_selection_id()
@@ -1160,20 +1197,41 @@ class AppWindow(QMainWindow):
 
                 up = point.data.get("up_distribution_config") or {}
                 if isinstance(up, dict):
+                    if str(up.get("incoming_cable_id", "") or "").strip() == element_id:
+                        up["incoming_cable_id"] = ""
+                        changed = True
+
+                    outgoing_ids = up.get("outgoing_cable_ids") or []
+                    if isinstance(outgoing_ids, list):
+                        filtered = [
+                            str(cable_id or "").strip()
+                            for cable_id in outgoing_ids
+                            if str(cable_id or "").strip() and str(cable_id or "").strip() != element_id
+                        ]
+                        if filtered != outgoing_ids:
+                            up["outgoing_cable_ids"] = filtered
+                            changed = True
+
                     mappings = up.get("mappings") or []
                     for mapping in mappings:
-                        if isinstance(mapping, dict) and (mapping.get("cable_id") or "") == element_id:
+                        if not isinstance(mapping, dict):
+                            continue
+                        if str(mapping.get("cable_id", "") or "").strip() == element_id:
                             mapping["cable_id"] = ""
+                            changed = True
+                        if str(mapping.get("to_cable_id", "") or "").strip() == element_id:
+                            mapping["to_cable_id"] = ""
                             changed = True
                 if changed:
                     document.element_changed.emit(point.id)
 
-    def _duplicate_element(self, source_id: str) -> str | None:
+    def _duplicate_element(self, source_id: str, *, record_undo: bool = True) -> str | None:
         source = self._document.get(source_id)
         if source is None:
             return None
 
-        self._push_undo()
+        if record_undo:
+            self._push_undo()
         cls = type(source)
         new_id = self._document.new_id(cls)
         data = copy.deepcopy(source.data)
@@ -1267,10 +1325,11 @@ class AppWindow(QMainWindow):
             "hkv_lines",
             "label_positions",
         }
+        single_point_keys = {"start_points", "elec_points", "hkv_points", "label_positions"}
         for key in offset_keys:
             if key in geom:
                 value = geom[key]
-                if key == "start_points":
+                if key in single_point_keys:
                     geom[key] = cls._offset_point(value)
                 else:
                     geom[key] = cls._offset_points(value)
@@ -1311,49 +1370,111 @@ class AppWindow(QMainWindow):
         self._mark_dirty()
         self.statusBar().showMessage(f"{changed} Anschlusspunkte umnummeriert", 3000)
 
-    def _on_navigator_context(self, element_id: str, kind: str, global_pos) -> None:
-        menu = QMenu(self)
-        if kind == "floorplan":
-            activate_action = menu.addAction("Als aktiv setzen")
-            menu.addSeparator()
-        else:
-            activate_action = None
+    def _workspace_context_action_specs(self, element_id: str, kind: str) -> list[tuple[str, str, bool]]:
+        specs: list[tuple[str, str, bool]] = []
+        element = self._document.get(element_id) if element_id else None
 
-        copy_action = menu.addAction("Kopieren")
-        paste_action = menu.addAction("Einfügen")
-        duplicate_action = menu.addAction("Duplizieren")
-        menu.addSeparator()
-        delete_action = menu.addAction("Löschen")
+        if kind == "floorplan" and element_id in self._document.floorplans:
+            specs.append(("activate", "Als aktiv setzen", True))
 
-        has_element = self._document.get(element_id) is not None
-        copy_action.setEnabled(has_element)
-        duplicate_action.setEnabled(has_element)
-        delete_action.setEnabled(has_element)
-        paste_action.setEnabled(self._copy_buffer is not None)
+        if element is not None:
+            schema = schema_for(element)
+            same_workspace = getattr(type(element), "LAYER", None) is self._workspace.layer
+            if schema is not None and same_workspace:
+                values = {spec.key: spec.default for spec in schema.fields}
+                for spec in schema.fields:
+                    values[spec.key] = element.data.get(spec.key, values[spec.key])
+                    if element_id in self._document.floorplans or element_id in self._document.furniture:
+                        values[spec.key] = getattr(element, "layer", {}).get(spec.key, values[spec.key])
+                for action in schema.actions:
+                    if action.id in {"delete", "duplicate"}:
+                        continue
+                    if not action.is_visible_for(values):
+                        continue
+                    specs.append((action.id, action.label, action.is_enabled_for(element)))
 
-        chosen = menu.exec(global_pos)
-        if chosen is None:
-            return
-        if activate_action is not None and chosen == activate_action:
+        return specs
+
+    def _generic_context_action_specs(self, element_id: str) -> list[tuple[str, str, bool]]:
+        has_element = self._document.get(element_id) is not None if element_id else False
+        return [
+            ("undo", "Rückgängig", bool(self._undo_stack)),
+            ("redo", "Wiederherstellen", bool(self._redo_stack)),
+            ("cut", "Ausschneiden", has_element),
+            ("copy", "Kopieren", has_element),
+            ("paste", "Einfügen", self._copy_buffer is not None),
+            ("duplicate", "Duplizieren", has_element),
+            ("delete", "Löschen", has_element),
+        ]
+
+    def _run_context_action(self, action_id: str, element_id: str, kind: str) -> None:
+        if element_id:
+            self.navigator.select(element_id)
+            self.canvas.set_selected_item(element_id)
+            if self._document.get(element_id) is not None:
+                self.properties.show_element(element_id)
+
+        if action_id == "activate":
             self._on_floorplan_activated(element_id)
             return
-        if chosen == copy_action:
-            self.navigator.select(element_id)
-            self.properties.show_element(element_id)
-            self.canvas.set_selected_item(element_id)
+        if action_id == "undo":
+            self._undo()
+            return
+        if action_id == "redo":
+            self._redo()
+            return
+        if action_id == "cut":
+            self._cut_selected()
+            return
+        if action_id == "copy":
             self._copy_selected()
             return
-        if chosen == paste_action:
+        if action_id == "paste":
             self._paste_copied()
             return
-        if chosen == duplicate_action:
-            self.navigator.select(element_id)
-            self.properties.show_element(element_id)
-            self.canvas.set_selected_item(element_id)
+        if action_id == "duplicate":
             self._duplicate_selected()
             return
-        if chosen == delete_action:
-            self._delete_element_with_confirm(element_id)
+        if action_id == "delete":
+            self._delete_selected()
+            return
+        if element_id:
+            self._on_property_action(element_id, action_id)
+
+    def _open_context_menu(self, element_id: str, kind: str, global_pos) -> None:
+        from PySide6.QtCore import QPoint  # noqa: PLC0415
+
+        menu = QMenu(self)
+        action_map: dict[QAction, str] = {}
+
+        for action_id, label, enabled in self._workspace_context_action_specs(element_id, kind):
+            action = menu.addAction(label)
+            action.setEnabled(enabled)
+            action_map[action] = action_id
+
+        if action_map:
+            menu.addSeparator()
+
+        for action_id, label, enabled in self._generic_context_action_specs(element_id):
+            action = menu.addAction(label)
+            action.setEnabled(enabled)
+            action_map[action] = action_id
+
+        # QMenu.exec erwartet QPoint (int), nicht QPointF
+        pos_for_exec = global_pos.toPoint() if hasattr(global_pos, "toPoint") else QPoint(global_pos)
+        chosen = menu.exec(pos_for_exec)
+        if chosen is None:
+            return
+        action_id = action_map.get(chosen)
+        if action_id:
+            self._run_context_action(action_id, element_id, kind)
+
+    def _on_navigator_context(self, element_id: str, kind: str, global_pos) -> None:
+        self._open_context_menu(element_id, kind, global_pos)
+
+    def _on_canvas_context_requested(self, obj_type: str, obj_id: str, _canvas_pt, global_pos) -> None:
+        kind = "floorplan" if obj_id in self._document.floorplans else "element"
+        self._open_context_menu(obj_id, kind, global_pos)
 
     def _sync_canvas_to_document(self) -> None:
         """Überträgt die noch nicht gebundenen Canvas-Daten ins Dokument.
@@ -1558,6 +1679,54 @@ class AppWindow(QMainWindow):
         self._emit_structure_changed()
         self._mark_dirty()
         self.log.success(f"Grundriss hinzugefügt: {fp_id}")
+
+    def _add_furniture(self) -> None:
+        from model.elements import Furniture  # noqa: PLC0415
+
+        name, ok = QInputDialog.getText(self, "Einrichtung", "Name:", text="Möbel")
+        if not ok:
+            return
+        name = (name or "").strip() or "Möbel"
+        fp_id = self._active_floorplan_id()
+        self._push_undo()
+        eid = self._document.new_id(Furniture)
+        layer = {
+            "fp_id": eid,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+            "rotation": 0.0,
+            "opacity": 1.0,
+            "visible": True,
+            "mm_per_px": self.canvas.get_mm_per_px() or 1.0,
+            "ref_length_mm": 1000.0,
+            "fixed_width_mm": 0.0,
+            "fixed_height_mm": 0.0,
+            "polygon_color": "#8d99ae",
+            "polygon": [],
+        }
+        data = {
+            "name": name,
+            "visible": True,
+            "file_path": "",
+            "polygon_color": "#8d99ae",
+            "opacity": 1.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+            "rotation": 0.0,
+            "fixed_width_mm": 0.0,
+            "fixed_height_mm": 0.0,
+            "floor_plan_id": fp_id,
+        }
+        furniture = Furniture(eid, data=data, layer=layer)
+        self._document.add(furniture)
+        self._document.floorplan_order.append(eid)
+        self.canvas.add_floor_plan(eid)
+        self.canvas.set_floor_plan_visible(eid, True)
+        self._emit_structure_changed()
+        self.navigator.select(eid)
+        self.canvas.start_draw_floor_plan_polygon(eid)
+        self._mark_dirty()
+        self.log.success(f"Einrichtung hinzugefügt: {eid}")
 
     def _add_circuit(self) -> None:
         fp_id = self._require_floorplan()
@@ -2391,11 +2560,13 @@ class AppWindow(QMainWindow):
         if not selected_ap_ids and not selected_cable_ids:
             return
 
+        self._push_undo()
+
         id_map: dict[str, str] = {}
         new_ids: list[str] = []
 
         for source_ap_id in selected_ap_ids:
-            new_ap_id = self._duplicate_element(source_ap_id)
+            new_ap_id = self._duplicate_element(source_ap_id, record_undo=False)
             if not new_ap_id:
                 continue
             id_map[source_ap_id] = new_ap_id
@@ -2411,7 +2582,7 @@ class AppWindow(QMainWindow):
             new_ids.append(new_ap_id)
 
         for source_cable_id in selected_cable_ids:
-            new_cable_id = self._duplicate_element(source_cable_id)
+            new_cable_id = self._duplicate_element(source_cable_id, record_undo=False)
             if not new_cable_id:
                 continue
             new_cable = self._document.elements["elec_cables"].get(new_cable_id)
@@ -2638,103 +2809,57 @@ class AppWindow(QMainWindow):
             QMessageBox.critical(self, "QET-Export fehlgeschlagen", str(exc))
             self.log.error(str(exc))
 
+    def _collect_length_overview_rows(self) -> tuple[list[dict], float, float]:
+        """Collect heating rows for the length / hydraulics overview."""
+        from model.computed import heating_length_overview  # noqa: PLC0415
+
+        return heating_length_overview(self._document)
+
     def _export_lengths(self) -> None:
         """Längen- und Hydraulik-Übersicht für alle Heizkreise."""
         from PySide6.QtWidgets import (  # noqa: PLC0415
             QDialog, QLabel, QScrollArea, QVBoxLayout, QDialogButtonBox,
         )
 
-        try:
-            from logic.heating_calc import calc_circuit, FLOOR_COVERINGS  # noqa: PLC0415
-        except ImportError as exc:
-            QMessageBox.warning(self, "Längenexport", f"Modul nicht verfügbar: {exc}")
-            return
-
-        circuits = self._document.elements.get("circuits", {})
-        if not circuits:
+        hk_rows, t_supply, t_return = self._collect_length_overview_rows()
+        if not hk_rows:
             QMessageBox.information(self, "Längenexport", "Keine Heizkreise im Projekt.")
             return
-
-        t_supply = float(self._document.settings.get("t_supply", 35.0))
-        t_return = float(self._document.settings.get("t_return", 30.0))
-
-        # Find a representative mm_per_px from the first floor plan
-        mm_per_px = 1.0
-        for fp in self._document.floorplans.values():
-            mpp = float(fp.mm_per_px)
-            if mpp > 0:
-                mm_per_px = mpp
-                break
 
         rows: list[str] = [
             "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse'>",
             "<tr><th>ID</th><th>Name</th><th>Fläche m²</th>"
-            "<th>Rohrlänge m</th><th>Leistung W</th>"
-            "<th>Volumenstrom l/min</th><th>Druckverlust mbar</th></tr>",
+            "<th>Rohrlänge m</th><th>Zuleitung m</th><th>Gesamt m</th>"
+            "<th>Leistung W</th><th>Volumenstrom l/min</th><th>Druckverlust mbar</th></tr>",
         ]
         total_power = 0.0
-        for cid, circuit in sorted(circuits.items()):
-            polygon = circuit.geom.get("polygons")
-            route = circuit.geom.get("manual_routes")
-
-            area_m2 = 0.0
-            if polygon and len(polygon) >= 3:
-                # Shoelace formula (polygon in canvas pixels → mm²)
-                pts = polygon
-                n = len(pts)
-                area_px2 = abs(
-                    sum(
-                        pts[i][0] * pts[(i + 1) % n][1]
-                        - pts[(i + 1) % n][0] * pts[i][1]
-                        for i in range(n)
-                    )
-                ) / 2.0
-                area_m2 = area_px2 * (mm_per_px ** 2) / 1_000_000.0
-
-            pipe_length_m = 0.0
-            if route and len(route) >= 2:
-                length_px = sum(
-                    ((route[i + 1][0] - route[i][0]) ** 2
-                     + (route[i + 1][1] - route[i][1]) ** 2) ** 0.5
-                    for i in range(len(route) - 1)
-                )
-                pipe_length_m = length_px * mm_per_px / 1000.0
-
-            floor_name = circuit.data.get("floor_covering", "Fliesen / Keramik")
-            r_lambda = FLOOR_COVERINGS.get(floor_name, 0.01)
-            spacing_cm = float(circuit.data.get("spacing", 150.0)) / 10.0
-            room_temp = float(circuit.data.get("room_temp", 20.0))
-            diameter_mm = float(circuit.data.get("diameter", 16.0))
-            try:
-                hc = calc_circuit(
-                    t_supply=t_supply,
-                    t_return=t_return,
-                    t_room=room_temp,
-                    spacing_cm=spacing_cm,
-                    r_lambda_b=r_lambda,
-                    area_m2=area_m2,
-                    pipe_length_m=pipe_length_m,
-                    outer_diameter_mm=diameter_mm,
-                    total_pipe_length_m=pipe_length_m,
-                )
-                power = hc.get("power_w", 0.0)
-                vol = hc.get("volume_flow_lmin", 0.0)
-                dp = hc.get("pressure_drop_mbar", 0.0)
-            except Exception:  # noqa: BLE001
-                power = vol = dp = 0.0
-            total_power += power
-            name = circuit.name or cid
+        total_route = 0.0
+        total_supply = 0.0
+        total_length = 0.0
+        for row in hk_rows:
+            total_power += row["power_w"]
+            total_route += row["route_m"]
+            total_supply += row["supply_m"]
+            total_length += row["total_m"]
             rows.append(
-                f"<tr><td>{cid}</td><td>{name}</td>"
-                f"<td>{area_m2:.2f}</td><td>{pipe_length_m:.1f}</td>"
-                f"<td>{power:.0f}</td><td>{vol:.2f}</td><td>{dp:.0f}</td></tr>"
+                f"<tr><td>{row['id']}</td><td>{row['name']}</td>"
+                f"<td>{row['area_m2']:.2f}</td><td>{row['route_m']:.2f}</td>"
+                f"<td>{row['supply_m']:.2f}</td><td>{row['total_m']:.2f}</td>"
+                f"<td>{row['power_w']:.0f}</td><td>{row['volume_flow_lmin']:.2f}</td><td>{row['pressure_drop_mbar']:.0f}</td></tr>"
             )
 
         rows.append(
-            f"<tr><td colspan='4'><b>Gesamt</b></td>"
+            f"<tr><td colspan='3'><b>Gesamt</b></td>"
+            f"<td><b>{total_route:.2f}</b></td>"
+            f"<td><b>{total_supply:.2f}</b></td>"
+            f"<td><b>{total_length:.2f}</b></td>"
             f"<td><b>{total_power:.0f}</b></td><td></td><td></td></tr>"
         )
         rows.append("</table>")
+        rows.append(
+            "<p><i>Die Gesamtlänge berücksichtigt die Zuleitung doppelt, "
+            "passend zur Druckverlustberechnung.</i></p>"
+        )
         html = "\n".join(rows)
 
         dialog = QDialog(self)

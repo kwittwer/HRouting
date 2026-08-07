@@ -373,6 +373,74 @@ def test_uv_and_up_dialogs_are_constructible(app, document):
         up.deleteLater()
 
 
+def test_uv_dialog_clamps_busbars_after_dimension_change(app):
+    from gui.parameter_panel import UvConfigDialog  # noqa: PLC0415
+
+    uv = UvConfigDialog(
+        config={
+            "rows": 3,
+            "modules_per_row": 24,
+            "slots": [],
+            "busbars": [{"phase": "L1", "color": "#e53935", "te_start": 50, "te_end": 70}],
+        },
+        cable_choices=[],
+    )
+    try:
+        uv.sb_rows.setValue(1)
+        uv.sb_modules.setValue(12)
+        config = uv.get_config()
+        assert config["rows"] == 1
+        assert config["modules_per_row"] == 12
+        assert config["busbars"]
+        busbar = config["busbars"][0]
+        assert 1 <= int(busbar["te_start"]) <= 12
+        assert 1 <= int(busbar["te_end"]) <= 12
+        assert int(busbar["te_end"]) >= int(busbar["te_start"])
+    finally:
+        uv.deleteLater()
+
+
+def test_up_distribution_dialog_roundtrip_and_outgoing_dedup(app):
+    from gui.parameter_panel import UpDistributionDialog  # noqa: PLC0415
+
+    up = UpDistributionDialog(
+        config={
+            "incoming_cable_id": "EK-1",
+            "mappings": [
+                {
+                    "from_conductor": "L1",
+                    "to_cable_id": "EK-2",
+                    "to_conductor": "L1",
+                    "note": "Abgang 1",
+                },
+                {
+                    "from_conductor": "N",
+                    "to_cable_id": "EK-2",
+                    "to_conductor": "N",
+                    "note": "Abgang 1 N",
+                },
+                {
+                    "from_conductor": "PE",
+                    "to_cable_id": "EK-3",
+                    "to_conductor": "PE",
+                    "note": "Abgang 2 PE",
+                },
+            ],
+            "note": "UP-Verteilung Wohnzimmer",
+        },
+        cable_choices=[("EK-1", "Zuleitung"), ("EK-2", "Abgang A"), ("EK-3", "Abgang B")],
+    )
+    try:
+        config = up.get_config()
+        assert config["incoming_cable_id"] == "EK-1"
+        assert config["note"] == "UP-Verteilung Wohnzimmer"
+        assert len(config["mappings"]) == 3
+        # The outgoing list must be unique while preserving first-seen order.
+        assert config["outgoing_cable_ids"] == ["EK-2", "EK-3"]
+    finally:
+        up.deleteLater()
+
+
 def test_configs_persist_in_document(app, document, tmp_path):
     """AP-Konfigurationen müssen Speichern und Laden überstehen."""
     from storage.hrp_io import load_document, save_document  # noqa: PLC0415

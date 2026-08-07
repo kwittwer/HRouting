@@ -1451,8 +1451,10 @@ class UvConfigDialog(QDialog):
         )
         self._building = False
         self._rebuild_table(slots)
+        self._normalize_busbars_for_dimensions()
 
     def get_config(self) -> dict:
+        self._normalize_busbars_for_dimensions()
         rows = self.sb_rows.value()
         modules_per_row = self.sb_modules.value()
         slots: list[dict] = []
@@ -1480,6 +1482,31 @@ class UvConfigDialog(QDialog):
         )
 
     # ── Busbar (Phasenschienen) helpers ──────────────────────── #
+
+    def _normalize_busbars_for_dimensions(self) -> None:
+        """Clamp all busbar TE ranges to the current UV dimensions."""
+        total_te = max(1, self.sb_rows.value() * self.sb_modules.value())
+        for row_idx in range(self.tbl_busbars.rowCount()):
+            sb_start = self.tbl_busbars.cellWidget(row_idx, 2)
+            sb_end = self.tbl_busbars.cellWidget(row_idx, 3)
+            if not isinstance(sb_start, QSpinBox) or not isinstance(sb_end, QSpinBox):
+                continue
+
+            sb_start.setRange(1, total_te)
+            sb_end.setRange(1, total_te)
+
+            start = max(1, min(total_te, int(sb_start.value() or 1)))
+            end = max(1, min(total_te, int(sb_end.value() or 1)))
+            if end < start:
+                end = start
+
+            sb_start.blockSignals(True)
+            sb_end.blockSignals(True)
+            sb_start.setValue(start)
+            sb_end.setValue(end)
+            sb_start.blockSignals(False)
+            sb_end.blockSignals(False)
+        self._refresh_visual()
 
     def _capture_current_busbars(self) -> list[dict]:
         """Read all rows from tbl_busbars into a list of busbar dicts."""

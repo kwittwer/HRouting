@@ -535,6 +535,110 @@ def test_selecting_floorplan_updates_properties_dock(app, monkeypatch):
         window.deleteLater()
 
 
+def test_context_menu_shows_workspace_actions_for_selected_element(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "manual_routes": {"HK-1": [[0.0, 0.0], [50.0, 0.0]]},
+                    "supply_lines": {"HK-1": [[0.0, 0.0], [0.0, 50.0]]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        window._apply_workspace("heating")
+        heating_actions = [entry[0] for entry in window._workspace_context_action_specs("HK-1", "element")]
+        assert "draw_polygon" in heating_actions
+        assert "edit_route" in heating_actions
+        assert "draw_supply" in heating_actions
+
+        window._apply_workspace("floorplan")
+        floorplan_actions = [entry[0] for entry in window._workspace_context_action_specs("HK-1", "element")]
+        assert "draw_polygon" not in floorplan_actions
+        assert "edit_route" not in floorplan_actions
+    finally:
+        window.deleteLater()
+
+
+def test_context_menu_includes_generic_actions(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [100.0, 100.0]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window._copy_buffer = {"id": "AP-1", "type": "ElecPoint"}
+        window._undo_stack.append({"dummy": True})
+        window._redo_stack.append({"dummy": True})
+
+        generic = {entry[0]: entry[2] for entry in window._generic_context_action_specs("AP-1")}
+        assert generic == {
+            "undo": True,
+            "redo": True,
+            "cut": True,
+            "copy": True,
+            "paste": True,
+            "duplicate": True,
+            "delete": True,
+        }
+    finally:
+        window.deleteLater()
+
+
 def test_selecting_element_syncs_active_floorplan(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -732,6 +836,401 @@ def test_property_color_change_updates_canvas_color(app, monkeypatch):
         assert window.canvas._color_map["HK-1"].name().lower() == "#ff0000"
     finally:
         window.deleteLater()
+
+
+def test_floorplan_remove_polygon_action_clears_outline(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {
+                            "fp_id": "grundriss-1",
+                            "visible": True,
+                            "polygon": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]],
+                        }
+                    ],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                        }
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+
+        assert window._document.floorplans["grundriss-1"].layer.get("polygon")
+
+        window._on_property_action("grundriss-1", "remove_polygon")
+
+        assert window._document.floorplans["grundriss-1"].layer.get("polygon") == []
+    finally:
+        window.deleteLater()
+
+
+def test_floorplan_property_changes_update_canvas_layer(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+    from model.field_access import set_field  # noqa: PLC0415
+    from model.schema import FLOOR_PLAN_SCHEMA  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                            "opacity": 1.0,
+                            "offset_x": 0.0,
+                            "offset_y": 0.0,
+                            "rotation": 0.0,
+                        }
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+
+        floor = window._document.floorplans["grundriss-1"]
+        schema_fields = {spec.key: spec for spec in FLOOR_PLAN_SCHEMA.fields}
+        set_field(floor, schema_fields["opacity"], 0.35)
+        set_field(floor, schema_fields["offset_x"], 12.0)
+        set_field(floor, schema_fields["offset_y"], 24.0)
+        set_field(floor, schema_fields["rotation"], 33.0)
+
+        window._on_property_changed("grundriss-1", "opacity", 0.35)
+        window._on_property_changed("grundriss-1", "offset_x", 12.0)
+        window._on_property_changed("grundriss-1", "offset_y", 24.0)
+        window._on_property_changed("grundriss-1", "rotation", 33.0)
+
+        layer = window.canvas._floor_plans["grundriss-1"]
+        assert abs(layer.opacity - 0.35) < 1e-9
+        assert abs(layer.offset_x - 12.0) < 1e-9
+        assert abs(layer.offset_y - 24.0) < 1e-9
+        assert abs(layer.rotation - 33.0) < 1e-9
+    finally:
+        window.deleteLater()
+
+
+def test_floorplan_ref_line_visibility_property_updates_canvas(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "ref_line_visible": {"grundriss-1": True},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                            "ref_line_visible": True,
+                        }
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+        window._document.floorplans["grundriss-1"].data["ref_line_visible"] = False
+
+        window._on_property_changed("grundriss-1", "ref_line_visible", False)
+
+        assert not window.canvas.get_ref_line_visible("grundriss-1")
+    finally:
+        window.deleteLater()
+
+
+def test_add_floorplan_loads_selected_image(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    img_path = tmp_path / "floor.png"
+    img_path.write_bytes(b"fake-image")
+
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *a, **k: (str(img_path), "")),
+    )
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        staticmethod(lambda *a, **k: ("EG", True)),
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        calls: list[tuple[str, str]] = []
+        original_add_floor_plan = window.canvas.add_floor_plan
+
+        def record_add_floor_plan(fp_id: str, path: str = ""):
+            calls.append((fp_id, path))
+            return original_add_floor_plan(fp_id, path)
+
+        monkeypatch.setattr(window.canvas, "add_floor_plan", record_add_floor_plan)
+
+        window._add_floorplan()
+
+        fp_id = window._document.floorplan_order[0]
+        assert calls == [(fp_id, str(img_path))]
+        assert window._document.floorplans[fp_id].file_path == str(img_path)
+        assert window._document.active_floorplan_id == fp_id
+    finally:
+        window.deleteLater()
+
+
+class _MouseEventStub:
+    def __init__(self, position, *, button, buttons=None, modifiers=0):
+        from PySide6.QtCore import Qt  # noqa: PLC0415
+
+        self._position = position
+        self._button = button
+        self._buttons = button if buttons is None else buttons
+        self._modifiers = Qt.NoModifier if modifiers == 0 else modifiers
+
+    def position(self):
+        return self._position
+
+    def button(self):
+        return self._button
+
+    def buttons(self):
+        return self._buttons
+
+    def modifiers(self):
+        return self._modifiers
+
+    def globalPosition(self):
+        return self._position
+
+
+def test_canvas_move_floorplan_updates_transform_and_ref_line(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        layer = canvas.add_floor_plan("grundriss-1")
+        layer.ref_p1 = QPointF(10.0, 10.0)
+        layer.ref_p2 = QPointF(20.0, 10.0)
+        canvas._ref_floor_id = "grundriss-1"
+
+        emitted: list[tuple[str, float, float, float]] = []
+        canvas.floor_plan_transform_updated.connect(
+            lambda fp_id, ox, oy, rot: emitted.append((fp_id, ox, oy, rot))
+        )
+
+        canvas.start_move_floor_plan("grundriss-1")
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(5.0, 5.0), button=Qt.LeftButton)
+        )
+        canvas.mouseMoveEvent(
+            _MouseEventStub(
+                QPointF(25.0, 35.0),
+                button=Qt.NoButton,
+                buttons=Qt.LeftButton,
+            )
+        )
+        canvas.mouseReleaseEvent(
+            _MouseEventStub(QPointF(25.0, 35.0), button=Qt.LeftButton)
+        )
+
+        assert abs(layer.offset_x - 20.0) < 1e-9
+        assert abs(layer.offset_y - 30.0) < 1e-9
+        assert layer.ref_p1 == QPointF(30.0, 40.0)
+        assert layer.ref_p2 == QPointF(40.0, 40.0)
+        assert canvas._ref_p1 == QPointF(30.0, 40.0)
+        assert canvas._ref_p2 == QPointF(40.0, 40.0)
+        assert emitted == [("grundriss-1", 20.0, 30.0, 0.0)]
+    finally:
+        canvas.deleteLater()
+
+
+def test_canvas_rotate_floorplan_updates_rotation_and_ref_line(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        layer = canvas.add_floor_plan("grundriss-1")
+        layer.size = (100.0, 100.0)
+        layer.ref_p1 = QPointF(60.0, 50.0)
+        layer.ref_p2 = QPointF(70.0, 50.0)
+        canvas._ref_floor_id = "grundriss-1"
+
+        emitted: list[tuple[str, float, float, float]] = []
+        canvas.floor_plan_transform_updated.connect(
+            lambda fp_id, ox, oy, rot: emitted.append((fp_id, ox, oy, rot))
+        )
+
+        canvas.start_rotate_floor_plan("grundriss-1")
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(100.0, 50.0), button=Qt.LeftButton)
+        )
+        canvas.mouseMoveEvent(
+            _MouseEventStub(
+                QPointF(50.0, 100.0),
+                button=Qt.NoButton,
+                buttons=Qt.LeftButton,
+            )
+        )
+        canvas.mouseReleaseEvent(
+            _MouseEventStub(QPointF(50.0, 100.0), button=Qt.LeftButton)
+        )
+
+        assert abs(layer.rotation - 90.0) < 1e-9
+        assert abs(layer.ref_p1.x() - 50.0) < 1e-9
+        assert abs(layer.ref_p1.y() - 60.0) < 1e-9
+        assert abs(layer.ref_p2.x() - 50.0) < 1e-9
+        assert abs(layer.ref_p2.y() - 70.0) < 1e-9
+        assert emitted == [("grundriss-1", 0.0, 0.0, 90.0)]
+    finally:
+        canvas.deleteLater()
+
+
+def test_canvas_draw_ref_line_stores_points_on_floorplan(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget, ToolMode  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        layer = canvas.add_floor_plan("grundriss-1")
+        emitted: list[bool] = []
+        canvas.ref_line_set.connect(lambda: emitted.append(True))
+
+        canvas.start_ref_line_for_floor("grundriss-1")
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(10.0, 20.0), button=Qt.LeftButton)
+        )
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(110.0, 20.0), button=Qt.LeftButton)
+        )
+
+        assert canvas.tool_mode() == ToolMode.NONE
+        assert canvas._ref_p1 == QPointF(10.0, 20.0)
+        assert canvas._ref_p2 == QPointF(110.0, 20.0)
+        assert layer.ref_p1 == QPointF(10.0, 20.0)
+        assert layer.ref_p2 == QPointF(110.0, 20.0)
+        assert emitted == [True]
+    finally:
+        canvas.deleteLater()
+
+
+def test_canvas_helper_lines_are_scoped_per_floorplan(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas.add_floor_plan("grundriss-1")
+        canvas.add_floor_plan("grundriss-2")
+        canvas.set_mm_per_px(1.0)
+        canvas.set_helper_line_target_length_mm(100.0, "grundriss-1")
+        canvas.set_helper_line_target_length_mm(200.0, "grundriss-2")
+
+        emitted: list[bool] = []
+        canvas.helper_lines_changed.connect(lambda: emitted.append(True))
+
+        canvas.start_draw_helper_line("grundriss-1")
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(0.0, 0.0), button=Qt.LeftButton)
+        )
+        canvas.mouseMoveEvent(
+            _MouseEventStub(
+                QPointF(10.0, 0.0),
+                button=Qt.NoButton,
+                buttons=Qt.NoButton,
+            )
+        )
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(10.0, 0.0), button=Qt.LeftButton)
+        )
+
+        canvas.start_draw_helper_line("grundriss-2")
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(0.0, 10.0), button=Qt.LeftButton)
+        )
+        canvas.mouseMoveEvent(
+            _MouseEventStub(
+                QPointF(0.0, 20.0),
+                button=Qt.NoButton,
+                buttons=Qt.NoButton,
+            )
+        )
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(0.0, 20.0), button=Qt.LeftButton)
+        )
+
+        floor1_lines = canvas._floor_helper_lines["grundriss-1"]
+        floor2_lines = canvas._floor_helper_lines["grundriss-2"]
+
+        assert len(floor1_lines) == 1
+        assert len(floor2_lines) == 1
+
+        floor1_pts = next(iter(floor1_lines.values()))
+        floor2_pts = next(iter(floor2_lines.values()))
+
+        assert floor1_pts[0] == QPointF(0.0, 0.0)
+        assert floor1_pts[1] == QPointF(100.0, 0.0)
+        assert floor2_pts[0] == QPointF(0.0, 10.0)
+        assert floor2_pts[1] == QPointF(0.0, 210.0)
+        assert len(emitted) == 2
+    finally:
+        canvas.deleteLater()
 
 
 def test_ref_line_and_ref_length_recompute_floorplan_scale(app, monkeypatch):
@@ -1021,6 +1520,53 @@ def test_duplicate_cable_resets_endpoint_references(app, monkeypatch):
         assert duplicate.end_ap == ""
         assert duplicate.geom.get("cable_start_ap", "") == ""
         assert duplicate.geom.get("cable_end_ap", "") == ""
+    finally:
+        window.deleteLater()
+
+
+def test_paste_copied_ap_creates_offset_duplicate(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_points": {"AP-1": [10.0, 10.0]},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Steckdose",
+                    }
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._copy_buffer = {"id": "AP-1", "type": "ElecPoint"}
+        window._paste_copied()
+
+        ids = sorted(document.elements["elec_points"].keys())
+        assert len(ids) == 2
+        new_id = next(eid for eid in ids if eid != "AP-1")
+        duplicate = document.elements["elec_points"][new_id]
+        assert duplicate.floor_plan_id == "grundriss-1"
+        assert duplicate.name == "Steckdose"
+        assert duplicate.geom.get("elec_points") == [30.0, 30.0]
     finally:
         window.deleteLater()
 
@@ -1379,6 +1925,248 @@ def test_schema_edit_cable_writes_document(app, monkeypatch):
         window.deleteLater()
 
 
+def test_e3_configure_uv_action_persists_config(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui import parameter_panel  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    class _FakeUvDialog:
+        def __init__(self, config, cable_choices, parent=None):
+            self._config = dict(config or {})
+            self._choices = list(cable_choices or [])
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def get_config(self):
+            return {
+                "rows": 2,
+                "modules_per_row": 12,
+                "slots": [{"row": 1, "slot": 1, "device_type": "FI", "te_size": 4}],
+                "busbars": [{"phase": "L1", "color": "#e53935", "te_start": 1, "te_end": 4}],
+            }
+
+    monkeypatch.setattr(parameter_panel, "UvConfigDialog", _FakeUvDialog)
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_cables": {"EK-1": [[0.0, 0.0], [10.0, 0.0]]},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "UV EG",
+                        "ap_type": "uv",
+                        "uv_config": {},
+                    }
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Zuleitung",
+                        "type": "NYM-J 5x2,5",
+                    }
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._action_configure_uv("AP-1")
+
+        point = document.elements["elec_points"]["AP-1"]
+        assert point.data["uv_config"]["rows"] == 2
+        assert point.data["uv_config"]["slots"][0]["device_type"] == "FI"
+        assert point.data["uv_config"]["busbars"][0]["phase"] == "L1"
+        assert window._dirty is True
+    finally:
+        window.deleteLater()
+
+
+def test_e4_configure_up_action_persists_config(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui import parameter_panel  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    class _FakeUpDialog:
+        def __init__(self, config, cable_choices, parent=None):
+            self._config = dict(config or {})
+            self._choices = list(cable_choices or [])
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def get_config(self):
+            return {
+                "incoming_cable_id": "EK-1",
+                "outgoing_cable_ids": ["EK-2"],
+                "mappings": [
+                    {
+                        "from_conductor": "L1",
+                        "to_cable_id": "EK-2",
+                        "to_conductor": "L1",
+                        "note": "Abgang Phase",
+                    }
+                ],
+                "note": "UP im Flur",
+            }
+
+    monkeypatch.setattr(parameter_panel, "UpDistributionDialog", _FakeUpDialog)
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_cables": {
+                    "EK-1": [[0.0, 0.0], [10.0, 0.0]],
+                    "EK-2": [[10.0, 0.0], [20.0, 0.0]],
+                },
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "UP Flur",
+                        "ap_type": "up_distribution",
+                        "up_distribution_config": {},
+                    }
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Zuleitung",
+                        "type": "NYM-J 5x2,5",
+                    },
+                    "EK-2": {
+                        "cable_id": "EK-2",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Abgang",
+                        "type": "NYM-J 3x1,5",
+                    },
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._action_configure_up("AP-1")
+
+        point = document.elements["elec_points"]["AP-1"]
+        cfg = point.data["up_distribution_config"]
+        assert cfg["incoming_cable_id"] == "EK-1"
+        assert cfg["outgoing_cable_ids"] == ["EK-2"]
+        assert cfg["mappings"][0]["from_conductor"] == "L1"
+        assert cfg["note"] == "UP im Flur"
+        assert window._dirty is True
+    finally:
+        window.deleteLater()
+
+
+def test_e7_schema_with_planung_linda_has_uv_and_cables(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
+    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(planning_linda)
+
+        ap_nodes, cable_edges, room_map = window._build_schema_data()
+        assert ap_nodes, "Keine AP-Knoten aus Planung_Linda gelesen"
+        assert cable_edges, "Keine Kabelkanten aus Planung_Linda gelesen"
+        assert room_map
+        assert any(node.ap_type == "uv" for node in ap_nodes)
+        assert any(edge.length_m >= 0.0 for edge in cable_edges)
+
+        window._open_elec_schema_window()
+        assert window._elec_schema_window is not None
+        window._refresh_schema_windows()
+
+        schema_nodes = window._elec_schema_window._ap_nodes
+        schema_edges = window._elec_schema_window._cable_edges
+        assert len(schema_nodes) == len(ap_nodes)
+        assert len(schema_edges) == len(cable_edges)
+    finally:
+        window.deleteLater()
+
+
+def test_e8_export_data_with_planung_linda_preserves_bom_and_configs(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
+    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(planning_linda)
+
+        project_dict = window._collect_project_dict()
+        params = project_dict.get("params") or {}
+        canvas = project_dict.get("canvas") or {}
+
+        assert isinstance(params.get("bom"), dict)
+
+        ap_params = params.get("elec_points") or {}
+        cable_params = params.get("elec_cables") or {}
+        assert ap_params
+        assert cable_params
+
+        assert any("uv_config" in ap for ap in ap_params.values())
+        assert any("up_distribution_config" in ap for ap in ap_params.values())
+        assert any(bool(ap.get("up_distribution_config")) for ap in ap_params.values())
+
+        elec_points_geom = canvas.get("elec_points") or {}
+        elec_cables_geom = canvas.get("elec_cables") or {}
+        assert len(elec_points_geom) >= len(ap_params)
+        assert len(elec_cables_geom) >= len(cable_params)
+    finally:
+        window.deleteLater()
+
+
 def test_grid_settings_survive_workspace_switch(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -1457,6 +2245,65 @@ def test_render_for_export_returns_image(app):
         window.deleteLater()
 
 
+def test_x1_draw_export_frame_persists_in_project_dict(app, monkeypatch):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
+    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(planning_linda)
+        window.canvas.clear_export_frame()
+        window._dirty = False
+
+        window._on_tool_activated("exp.frame")
+        assert window.canvas.tool_mode() == ToolMode.DRAW_EXPORT_FRAME
+
+        expected_start = window.canvas._to_canvas(QPointF(10.0, 20.0))
+        expected_end = window.canvas._to_canvas(QPointF(110.0, 70.0))
+        expected_frame = (
+            min(expected_start.x(), expected_end.x()),
+            min(expected_start.y(), expected_end.y()),
+            abs(expected_end.x() - expected_start.x()),
+            abs(expected_end.y() - expected_start.y()),
+        )
+
+        window.canvas.mousePressEvent(
+            _MouseEventStub(QPointF(10.0, 20.0), button=Qt.LeftButton)
+        )
+        window.canvas.mouseMoveEvent(
+            _MouseEventStub(
+                QPointF(110.0, 70.0),
+                button=Qt.NoButton,
+                buttons=Qt.LeftButton,
+            )
+        )
+        window.canvas.mouseReleaseEvent(
+            _MouseEventStub(QPointF(110.0, 70.0), button=Qt.LeftButton)
+        )
+
+        frame = window.canvas.get_export_frame()
+        assert frame is not None
+        assert frame.x() == pytest.approx(expected_frame[0])
+        assert frame.y() == pytest.approx(expected_frame[1])
+        assert frame.width() == pytest.approx(expected_frame[2])
+        assert frame.height() == pytest.approx(expected_frame[3])
+        assert window.canvas.tool_mode() == ToolMode.NONE
+        assert window._dirty is True
+
+        project_dict = window._collect_project_dict()
+        export_frame = project_dict["canvas"]["export_frame"]
+        assert export_frame == pytest.approx(list(expected_frame))
+    finally:
+        window.deleteLater()
+
+
 def test_export_svg_creates_file(app, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
 
@@ -1493,6 +2340,30 @@ def test_export_pdf_creates_file(app, tmp_path, monkeypatch):
     window = AppWindow()
     try:
         assert window.open_project_file(EXAMPLE)
+        window._export_pdf()
+        assert target.exists()
+        assert target.stat().st_size > 0
+    finally:
+        window.deleteLater()
+
+
+def test_x2_export_pdf_with_planung_linda_creates_file(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+    target = tmp_path / "planung_linda_bericht.pdf"
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), ""))
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
+    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(planning_linda)
         window._export_pdf()
         assert target.exists()
         assert target.stat().st_size > 0
@@ -1569,6 +2440,84 @@ def test_export_qet_creates_file(app, tmp_path, monkeypatch):
         window.deleteLater()
 
 
+def test_x3_export_svg_with_planung_linda_creates_file(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+    target = tmp_path / "planung_linda.svg"
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), ""))
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
+    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(planning_linda)
+        window._export_svg()
+        assert target.exists()
+        content = target.read_text(encoding="utf-8")
+        assert "<svg" in content
+    finally:
+        window.deleteLater()
+
+
+def test_x3_export_kicad_with_planung_linda_creates_file(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+    target = tmp_path / "planung_linda.kicad_sch"
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), ""))
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
+    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(planning_linda)
+        window._project_path = tmp_path / "planung_linda.hrp"
+        window._export_kicad()
+        assert target.exists()
+        content = target.read_text(encoding="utf-8")
+        assert "kicad_sch" in content
+    finally:
+        window.deleteLater()
+
+
+def test_x3_export_qet_with_planung_linda_creates_file(app, tmp_path, monkeypatch):
+    import zipfile  # noqa: PLC0415
+
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+    target = tmp_path / "planung_linda.qet"
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), ""))
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
+    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(planning_linda)
+        window._project_path = tmp_path / "planung_linda.hrp"
+        window._export_qet()
+        assert target.exists()
+        assert zipfile.is_zipfile(target)
+    finally:
+        window.deleteLater()
+
+
 def test_export_lengths_computes_totals(app, monkeypatch):
     from PySide6.QtWidgets import QDialog  # noqa: PLC0415
 
@@ -1585,6 +2534,22 @@ def test_export_lengths_computes_totals(app, monkeypatch):
         window._export_lengths()
     finally:
         window.deleteLater()
+
+
+def test_export_lengths_includes_supply_length():
+    from model.document import Document  # noqa: PLC0415
+    from model.computed import heating_length_overview  # noqa: PLC0415
+    from storage.hrp_io import load_raw  # noqa: PLC0415
+
+    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
+    document = Document.from_dict(load_raw(planning_linda))
+    rows, _t_supply, _t_return = heating_length_overview(document)
+    assert rows
+    assert any(row["supply_m"] > 0 for row in rows)
+    assert all(
+        row["total_m"] == pytest.approx(row["route_m"] + row["supply_m"] * 2.0)
+        for row in rows
+    )
 
 
 def test_export_lengths_without_circuits_shows_info(app, monkeypatch):
@@ -1628,16 +2593,34 @@ def test_undo_redo_after_canvas_mutation(app, monkeypatch):
 
     _settings_noop(monkeypatch)
     from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
 
     window = AppWindow()
     try:
-        assert window.open_project_file(EXAMPLE)
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1"}],
+                    "manual_routes": {
+                        "HK-1": [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0]]
+                    },
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "HK 1",
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
 
         # Ausgangsroute setzen und diesen Setup-Schritt aus der Historie
         # entfernen, damit der Test genau die folgende Änderung prüft.
-        window.canvas._manual_routes["HK-1"] = [
-            QPointF(100, 100), QPointF(200, 100), QPointF(200, 200)
-        ]
         window._undo_group_timer.stop()
         window._finish_undo_group()
         window._undo_stack.clear()
@@ -1682,3 +2665,1089 @@ def test_undo_redo_after_canvas_mutation(app, monkeypatch):
     finally:
         window.deleteLater()
 
+
+def test_all1_undo_redo_export_frame_canvas_mutation(app, monkeypatch):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
+    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(planning_linda)
+
+        baseline_frame = window._collect_project_dict()["canvas"].get("export_frame")
+
+        window.canvas.clear_export_frame()
+        window._undo_group_timer.stop()
+        window._finish_undo_group()
+        window._undo_stack.clear()
+        window._redo_stack.clear()
+
+        window._on_tool_activated("exp.frame")
+        window.canvas.mousePressEvent(
+            _MouseEventStub(QPointF(20.0, 30.0), button=Qt.LeftButton)
+        )
+        window.canvas.mouseMoveEvent(
+            _MouseEventStub(
+                QPointF(220.0, 130.0),
+                button=Qt.NoButton,
+                buttons=Qt.LeftButton,
+            )
+        )
+        window.canvas.mouseReleaseEvent(
+            _MouseEventStub(QPointF(220.0, 130.0), button=Qt.LeftButton)
+        )
+
+        frame_after_draw = window._collect_project_dict()["canvas"]["export_frame"]
+        assert frame_after_draw is not None
+        assert len(window._undo_stack) == 1
+
+        window._undo()
+        assert window._collect_project_dict()["canvas"].get("export_frame") == pytest.approx(baseline_frame)
+        assert len(window._redo_stack) == 1
+
+        window._redo()
+        assert window._collect_project_dict()["canvas"]["export_frame"] == pytest.approx(frame_after_draw)
+    finally:
+        window.deleteLater()
+
+
+def test_all1_undo_redo_uv_config_action(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    import gui.parameter_panel as parameter_panel  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    class _FakeUvDialog:
+        def __init__(self, config, cable_choices, parent=None):
+            self._config = config
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def get_config(self):
+            return {
+                "name": "UV EG",
+                "rows": 2,
+                "modules_per_row": 12,
+                "incoming_device": "SLS",
+                "devices": [{"name": "FI A", "quantity": 1, "te": 4}],
+            }
+
+    monkeypatch.setattr(parameter_panel, "UvConfigDialog", _FakeUvDialog)
+
+    document = Document.from_dict(
+        {
+            "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}]},
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "UV EG",
+                        "ap_type": "uv",
+                        "uv_config": {},
+                    }
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._on_property_action("AP-1", "configure_uv")
+
+        point = document.elements["elec_points"]["AP-1"]
+        applied_config = point.data["uv_config"]
+        assert applied_config["name"] == "UV EG"
+        assert len(window._undo_stack) == 1
+
+        window._undo()
+        assert document.elements["elec_points"]["AP-1"].data["uv_config"] == {}
+
+        window._redo()
+        assert document.elements["elec_points"]["AP-1"].data["uv_config"] == applied_config
+    finally:
+        window.deleteLater()
+
+
+def test_all1_undo_redo_up_config_action(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    import gui.parameter_panel as parameter_panel  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    class _FakeUpDialog:
+        def __init__(self, config, cable_choices, parent=None):
+            self._config = config
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def get_config(self):
+            return {
+                "incoming_cable_id": "EK-1",
+                "outgoing_cable_ids": ["EK-2"],
+                "mappings": [
+                    {
+                        "from_conductor": "L1",
+                        "to_cable_id": "EK-2",
+                        "to_conductor": "L1",
+                        "note": "Abgang Phase",
+                    }
+                ],
+                "note": "UP Flur",
+            }
+
+    monkeypatch.setattr(parameter_panel, "UpDistributionDialog", _FakeUpDialog)
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_cables": {
+                    "EK-1": [[0.0, 0.0], [10.0, 0.0]],
+                    "EK-2": [[10.0, 0.0], [20.0, 0.0]],
+                },
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "UP Flur",
+                        "ap_type": "up_distribution",
+                        "up_distribution_config": {},
+                    }
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Zuleitung",
+                        "type": "NYM-J 5x2,5",
+                    },
+                    "EK-2": {
+                        "cable_id": "EK-2",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Abgang",
+                        "type": "NYM-J 3x1,5",
+                    },
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._on_property_action("AP-1", "configure_up")
+
+        point = document.elements["elec_points"]["AP-1"]
+        applied_config = point.data["up_distribution_config"]
+        assert applied_config["incoming_cable_id"] == "EK-1"
+        assert len(window._undo_stack) == 1
+
+        window._undo()
+        assert document.elements["elec_points"]["AP-1"].data["up_distribution_config"] == {}
+
+        window._redo()
+        assert document.elements["elec_points"]["AP-1"].data["up_distribution_config"] == applied_config
+    finally:
+        window.deleteLater()
+
+
+def test_all2_schema_duplicate_selection_remaps_and_undoes_as_single_step(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_points": {
+                    "AP-1": [10.0, 10.0],
+                    "AP-2": [110.0, 10.0],
+                },
+                "elec_cables": {"EK-1": [[10.0, 10.0], [110.0, 10.0]]},
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Dose 1",
+                    },
+                    "AP-2": {
+                        "point_id": "AP-2",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Dose 2",
+                    },
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Kabel 1",
+                        "start_ap": "AP-1",
+                        "end_ap": "AP-2",
+                    }
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._undo_group_timer.stop()
+        window._finish_undo_group()
+        window._undo_stack.clear()
+        window._redo_stack.clear()
+
+        window._on_schema_duplicate_selection(["AP-1", "AP-2"], ["EK-1"])
+
+        ap_ids = sorted(document.elements["elec_points"].keys())
+        cable_ids = sorted(document.elements["elec_cables"].keys())
+        assert len(ap_ids) == 4
+        assert len(cable_ids) == 2
+
+        new_cable_id = next(cid for cid in cable_ids if cid != "EK-1")
+        new_cable = document.elements["elec_cables"][new_cable_id]
+        assert new_cable.start_ap in ap_ids and new_cable.start_ap != "AP-1"
+        assert new_cable.end_ap in ap_ids and new_cable.end_ap != "AP-2"
+        assert len(window._undo_stack) == 1
+
+        window._undo()
+        assert sorted(document.elements["elec_points"].keys()) == ["AP-1", "AP-2"]
+        assert sorted(document.elements["elec_cables"].keys()) == ["EK-1"]
+
+        window._redo()
+        assert len(document.elements["elec_points"]) == 4
+        assert len(document.elements["elec_cables"]) == 2
+    finally:
+        window.deleteLater()
+
+
+def test_all3_delete_cable_clears_uv_and_up_references(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_cables": {
+                    "EK-1": [[0.0, 0.0], [10.0, 0.0]],
+                    "EK-2": [[10.0, 0.0], [20.0, 0.0]],
+                },
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "UV",
+                        "ap_type": "uv",
+                        "uv_config": {
+                            "slots": [
+                                {"row": 1, "slot": 1, "label": "FI", "cable": "EK-1"},
+                                {"row": 1, "slot": 2, "label": "LS", "cable": "EK-2"},
+                            ]
+                        },
+                    },
+                    "AP-2": {
+                        "point_id": "AP-2",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "UP",
+                        "ap_type": "up_distribution",
+                        "up_distribution_config": {
+                            "incoming_cable_id": "EK-1",
+                            "outgoing_cable_ids": ["EK-1", "EK-2"],
+                            "mappings": [
+                                {
+                                    "from_conductor": "L1",
+                                    "to_cable_id": "EK-1",
+                                    "to_conductor": "L1",
+                                    "note": "Abgang 1",
+                                },
+                                {
+                                    "from_conductor": "L2",
+                                    "to_cable_id": "EK-2",
+                                    "to_conductor": "L2",
+                                    "note": "Abgang 2",
+                                },
+                            ],
+                        },
+                    },
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Kabel 1",
+                    },
+                    "EK-2": {
+                        "cable_id": "EK-2",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Kabel 2",
+                    },
+                },
+            },
+        }
+    )
+
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._delete_element("EK-1")
+
+        assert "EK-1" not in document.elements["elec_cables"]
+
+        uv_config = document.elements["elec_points"]["AP-1"].data["uv_config"]
+        assert uv_config["slots"][0]["cable"] == ""
+        assert uv_config["slots"][1]["cable"] == "EK-2"
+
+        up_config = document.elements["elec_points"]["AP-2"].data["up_distribution_config"]
+        assert up_config["incoming_cable_id"] == ""
+        assert up_config["outgoing_cable_ids"] == ["EK-2"]
+        assert up_config["mappings"][0]["to_cable_id"] == ""
+        assert up_config["mappings"][1]["to_cable_id"] == "EK-2"
+    finally:
+        window.deleteLater()
+
+
+def test_all4_confirm_discard_cancel_save_discard(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        window._dirty = True
+
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            staticmethod(lambda *a, **k: QMessageBox.Cancel),
+        )
+        assert window._confirm_discard() is False
+
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            staticmethod(lambda *a, **k: QMessageBox.Discard),
+        )
+        assert window._confirm_discard() is True
+
+        save_calls: list[bool] = []
+
+        def _save_project_stub():
+            save_calls.append(True)
+            return True
+
+        monkeypatch.setattr(window, "_save_project", _save_project_stub)
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            staticmethod(lambda *a, **k: QMessageBox.Save),
+        )
+        assert window._confirm_discard() is True
+        assert save_calls == [True]
+    finally:
+        window.deleteLater()
+
+
+def test_all4_open_recent_missing_file_cleans_recent_list(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+    missing_path = tmp_path / "missing_project.hrp"
+    existing_path = tmp_path / "existing_project.hrp"
+    existing_path.write_text("{}", encoding="utf-8")
+
+    store = {
+        "recent_projects": [str(missing_path), str(existing_path)],
+    }
+
+    def _value(_self, key, default=None, **_kw):
+        return store.get(key, default)
+
+    def _set_value(_self, key, value):
+        store[key] = value
+
+    monkeypatch.setattr(QSettings, "value", _value)
+    monkeypatch.setattr(QSettings, "setValue", _set_value)
+
+    warnings: list[tuple] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda *a, **k: warnings.append(a) or QMessageBox.Ok),
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        window._open_recent(missing_path)
+        assert warnings, "Erwartete Warnung bei fehlender Datei"
+        assert str(missing_path) not in store["recent_projects"]
+        assert str(existing_path) in store["recent_projects"]
+    finally:
+        window.deleteLater()
+
+
+
+# ── H-1 bis H-5: Heizungs-Workflow ────────────────────────────────── #
+
+def _make_heating_window(monkeypatch, app, with_circuit=False):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("EG", True)))
+
+    window = AppWindow()
+    window._add_floorplan()
+
+    if with_circuit:
+        window._add_circuit()
+
+    return window
+
+
+def test_h1_add_circuit_creates_element_and_starts_draw(app, monkeypatch):
+    window = _make_heating_window(monkeypatch, app)
+    try:
+        from gui.canvas_widget import ToolMode  # noqa: PLC0415
+        window._add_circuit()
+        circuits = window._document.elements["circuits"]
+        assert len(circuits) == 1
+        cid = next(iter(circuits))
+        assert circuits[cid].floor_plan_id == next(iter(window._document.floorplans))
+        assert window.canvas.tool_mode() == ToolMode.DRAW_POLY
+    finally:
+        window.deleteLater()
+
+
+def test_h2_draw_polygon_via_property_action(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                "circuits": {"HK-1": {"circuit_id": "HK-1", "floor_plan_id": "grundriss-1", "name": "Wohnzimmer"}},
+            },
+        })
+        window._set_document(doc)
+
+        drawn = []
+        monkeypatch.setattr(window.canvas, "start_drawing", lambda cid: drawn.append(cid))
+        window._on_property_action("HK-1", "draw_polygon")
+
+        assert drawn == ["HK-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_h3_draw_route_action_passes_circuit_params(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtCore import QPointF  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "polygons": {"HK-1": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]]},
+                "start_points": {"HK-1": [10.0, 10.0]},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                "circuits": {
+                    "HK-1": {
+                        "circuit_id": "HK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Wohnzimmer",
+                        "wall_dist": 200.0,
+                        "spacing": 150.0,
+                    }
+                },
+            },
+        })
+        window._set_document(doc)
+
+        calls = []
+        monkeypatch.setattr(
+            window.canvas, "start_route_drawing",
+            lambda cid, wall_mm, line_mm: calls.append((cid, wall_mm, line_mm)),
+        )
+        window._on_property_action("HK-1", "draw_route")
+        assert calls == [("HK-1", 200.0, 150.0)]
+    finally:
+        window.deleteLater()
+
+
+def test_h4_draw_supply_line_action_starts_canvas_mode(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "start_points": {"HK-1": [10.0, 10.0]},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                "circuits": {"HK-1": {"circuit_id": "HK-1", "floor_plan_id": "grundriss-1"}},
+            },
+        })
+        window._set_document(doc)
+
+        calls = []
+        monkeypatch.setattr(window.canvas, "start_draw_supply_line", lambda cid: calls.append(cid))
+        window._on_property_action("HK-1", "draw_supply")
+        assert calls == ["HK-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_h5_add_hkv_creates_element_and_starts_place(app, monkeypatch):
+    window = _make_heating_window(monkeypatch, app)
+    try:
+        from gui.canvas_widget import ToolMode  # noqa: PLC0415
+        window._add_hkv()
+        hkvs = window._document.elements["hkv_points"]
+        assert len(hkvs) == 1
+        hid = next(iter(hkvs))
+        assert hkvs[hid].floor_plan_id == next(iter(window._document.floorplans))
+        assert window.canvas.tool_mode() == ToolMode.PLACE_HKV
+    finally:
+        window.deleteLater()
+
+
+def test_h5_add_hkv_line_creates_element_and_starts_draw(app, monkeypatch):
+    window = _make_heating_window(monkeypatch, app)
+    try:
+        from gui.canvas_widget import ToolMode  # noqa: PLC0415
+        window._add_hkv_line()
+        lines = window._document.elements["hkv_lines"]
+        assert len(lines) == 1
+        lid = next(iter(lines))
+        assert lines[lid].floor_plan_id == next(iter(window._document.floorplans))
+        assert window.canvas.tool_mode() == ToolMode.DRAW_HKV_LINE
+    finally:
+        window.deleteLater()
+
+
+# ── E-1 bis E-6: Elektro-Workflow ────────────────────────────────── #
+
+def _make_elec_window(monkeypatch, app):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QFileDialog, QInputDialog
+    from gui.app_window import AppWindow
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("EG", True)))
+
+    window = AppWindow()
+    window._add_floorplan()
+    return window
+
+
+def test_e1_add_elec_point_creates_element_and_starts_place(app, monkeypatch):
+    window = _make_elec_window(monkeypatch, app)
+    try:
+        from gui.canvas_widget import ToolMode
+        window._add_elec_point()
+        points = window._document.elements["elec_points"]
+        assert len(points) == 1
+        pid = next(iter(points))
+        assert points[pid].floor_plan_id == next(iter(window._document.floorplans))
+        assert window.canvas.tool_mode() == ToolMode.PLACE_ELEC_POINT
+    finally:
+        window.deleteLater()
+
+
+def test_e1_ap_properties_are_editable_via_property_changed(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow
+    from model.document import Document
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "elec_points": {"AP-1": [10.0, 10.0]},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Steckdose",
+                        "color": "#4fc3f7",
+                        "visible": True,
+                    }
+                },
+            },
+        })
+        window._set_document(doc)
+        doc.elements["elec_points"]["AP-1"].data["name"] = "UV Küche"
+        window._on_property_changed("AP-1", "name", "UV Küche")
+        assert doc.elements["elec_points"]["AP-1"].name == "UV Küche"
+    finally:
+        window.deleteLater()
+
+
+def test_e5_add_elec_room_creates_element_and_starts_draw(app, monkeypatch):
+    window = _make_elec_window(monkeypatch, app)
+    try:
+        from gui.canvas_widget import ToolMode
+        window._add_elec_room()
+        rooms = window._document.elements["elec_rooms"]
+        assert len(rooms) == 1
+        rid = next(iter(rooms))
+        assert rooms[rid].floor_plan_id == next(iter(window._document.floorplans))
+        assert window.canvas.tool_mode() == ToolMode.DRAW_POLY
+    finally:
+        window.deleteLater()
+
+
+def test_e6_add_elec_cable_creates_element_and_starts_draw(app, monkeypatch):
+    window = _make_elec_window(monkeypatch, app)
+    try:
+        from gui.canvas_widget import ToolMode
+        window._add_elec_cable()
+        cables = window._document.elements["elec_cables"]
+        assert len(cables) == 1
+        eid = next(iter(cables))
+        assert cables[eid].floor_plan_id == next(iter(window._document.floorplans))
+        assert window.canvas.tool_mode() == ToolMode.DRAW_ELEC_CABLE
+    finally:
+        window.deleteLater()
+
+
+def test_e6_draw_cable_property_action_starts_canvas_mode(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow
+    from model.document import Document
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "elec_cables": {"EK-1": [[0.0, 0.0], [100.0, 0.0]]},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                "elec_cables": {"EK-1": {"cable_id": "EK-1", "floor_plan_id": "grundriss-1"}},
+            },
+        })
+        window._set_document(doc)
+        calls = []
+        monkeypatch.setattr(window.canvas, "start_draw_elec_cable", lambda eid: calls.append(eid))
+        window._on_property_action("EK-1", "draw_cable")
+        assert calls == ["EK-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_e1_ap_place_action_starts_canvas_mode(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow
+    from model.document import Document
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "elec_points": {"AP-1": [10.0, 10.0]},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "width": 30.0,
+                        "height": 30.0,
+                    }
+                },
+            },
+        })
+        window._set_document(doc)
+        calls = []
+        monkeypatch.setattr(
+            window.canvas, "start_place_elec_point",
+            lambda pid, w, h: calls.append((pid, w, h)),
+        )
+        window._on_property_action("AP-1", "place")
+        assert calls == [("AP-1", 30.0, 30.0)]
+    finally:
+        window.deleteLater()
+
+
+# ── F-1 bis F-3: Einrichtungs-Workflow ────────────────────────────── #
+
+def test_f1_add_furniture_creates_element_and_starts_polygon_draw(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QFileDialog, QInputDialog
+    from gui.app_window import AppWindow
+    from gui.canvas_widget import ToolMode
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Sofa", True)))
+
+    window = AppWindow()
+    try:
+        # Grundriss zuerst anlegen
+        monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("EG", True)))
+        window._add_floorplan()
+        # Einrichtung mit eigenem Namen
+        monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Sofa", True)))
+        window._add_furniture()
+
+        furniture = window._document.furniture
+        assert len(furniture) == 1
+        fid = next(iter(furniture))
+        assert furniture[fid].name == "Sofa"
+        assert window.canvas.tool_mode() == ToolMode.DRAW_FURNITURE_POLY
+    finally:
+        window.deleteLater()
+
+
+def test_f2_draw_furniture_polygon_via_property_action(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow
+    from model.document import Document
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}, {"fp_id": "einrichtung-1"}]},
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "furniture": {"einrichtung-1": {"name": "Sofa"}},
+            },
+        })
+        window._set_document(doc)
+
+        calls = []
+        monkeypatch.setattr(
+            window.canvas, "start_draw_floor_plan_polygon",
+            lambda fid: calls.append(fid),
+        )
+        window._on_property_action("einrichtung-1", "draw_polygon")
+        assert calls == ["einrichtung-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_f3_move_furniture_property_action_starts_canvas_move(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow
+    from model.document import Document
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}, {"fp_id": "einrichtung-1"}]},
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "furniture": {"einrichtung-1": {"name": "Sofa"}},
+            },
+        })
+        window._set_document(doc)
+
+        calls = []
+        monkeypatch.setattr(window.canvas, "start_move_floor_plan", lambda fid: calls.append(fid))
+        window._on_property_action("einrichtung-1", "move")
+        assert calls == ["einrichtung-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_f4_add_furniture_uses_active_floorplan_as_parent(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        names = iter([("EG", True), ("OG", True), ("Schrank", True)])
+        monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: next(names)))
+
+        window._add_floorplan()
+        window._add_floorplan()
+        window._document.active_floorplan_id = "grundriss-2"
+
+        window._add_furniture()
+
+        fid = next(iter(window._document.furniture))
+        assert window._document.furniture[fid].floor_plan_id == "grundriss-2"
+    finally:
+        window.deleteLater()
+
+
+def test_f4_furniture_fixed_sizes_update_canvas_layer(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from model.field_access import set_field  # noqa: PLC0415
+    from model.schema import FURNITURE_SCHEMA  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True},
+                        {"fp_id": "einrichtung-1", "visible": True},
+                    ]
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG"}},
+                    "furniture": {
+                        "einrichtung-1": {
+                            "name": "Sofa",
+                            "floor_plan_id": "grundriss-1",
+                            "fixed_width_mm": 0.0,
+                            "fixed_height_mm": 0.0,
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        furniture = window._document.furniture["einrichtung-1"]
+        schema_fields = {spec.key: spec for spec in FURNITURE_SCHEMA.fields}
+        set_field(furniture, schema_fields["fixed_width_mm"], 1200.0)
+        set_field(furniture, schema_fields["fixed_height_mm"], 800.0)
+
+        window._on_property_changed("einrichtung-1", "fixed_width_mm", 1200.0)
+        window._on_property_changed("einrichtung-1", "fixed_height_mm", 800.0)
+
+        layer = window.canvas._floor_plans["einrichtung-1"]
+        assert abs(layer.fixed_width_mm - 1200.0) < 1e-9
+        assert abs(layer.fixed_height_mm - 800.0) < 1e-9
+    finally:
+        window.deleteLater()
+
+
+def test_a1_measure_distance_persists_line(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget, ToolMode  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas.set_mm_per_px(10.0)
+        emitted: list[bool] = []
+        canvas.measure_changed.connect(lambda: emitted.append(True))
+
+        canvas.start_measure()
+        canvas.mousePressEvent(_MouseEventStub(QPointF(0.0, 0.0), button=Qt.LeftButton))
+        canvas.mousePressEvent(_MouseEventStub(QPointF(100.0, 0.0), button=Qt.LeftButton))
+
+        assert canvas.tool_mode() == ToolMode.MEASURE
+        assert len(canvas._measure_lines) == 1
+        p1, p2, mm_len = canvas._measure_lines[0]
+        assert p1 == QPointF(0.0, 0.0)
+        assert p2 == QPointF(100.0, 0.0)
+        assert abs(mm_len - 1000.0) < 1e-9
+        assert emitted == [True]
+    finally:
+        canvas.deleteLater()
+
+
+def test_a2_measure_angle_persists_angle(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget, ToolMode  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas.start_angle_measure()
+        canvas.mousePressEvent(_MouseEventStub(QPointF(0.0, 0.0), button=Qt.LeftButton))
+        canvas.mousePressEvent(_MouseEventStub(QPointF(0.0, 10.0), button=Qt.LeftButton))
+        canvas.mousePressEvent(_MouseEventStub(QPointF(10.0, 10.0), button=Qt.LeftButton))
+
+        assert canvas.tool_mode() == ToolMode.MEASURE_ANGLE
+        assert len(canvas._angle_measurements) == 1
+        p1, p2, p3, angle_deg = canvas._angle_measurements[0]
+        assert p1 == QPointF(0.0, 0.0)
+        assert p2 == QPointF(0.0, 10.0)
+        assert p3 == QPointF(10.0, 10.0)
+        assert abs(angle_deg - 90.0) < 1e-9
+    finally:
+        canvas.deleteLater()
+
+
+def test_a4_place_text_persists_annotation(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget, ToolMode  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        emitted: list[str] = []
+        canvas.text_placed.connect(lambda tid: emitted.append(tid))
+
+        canvas.start_place_text("TEXT-1", "Hallo")
+        canvas.mousePressEvent(_MouseEventStub(QPointF(40.0, 60.0), button=Qt.LeftButton))
+
+        assert canvas.tool_mode() == ToolMode.NONE
+        assert canvas._text_annotations["TEXT-1"] == QPointF(40.0, 60.0)
+        assert canvas._text_contents["TEXT-1"] == "Hallo"
+        assert emitted == ["TEXT-1"]
+    finally:
+        canvas.deleteLater()
+
+
+def test_a3_edit_helper_line_endpoint_updates_geometry(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget, ToolMode  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas.add_floor_plan("grundriss-1")
+        canvas.set_mm_per_px(1.0)
+        canvas._floor_helper_lines["grundriss-1"] = {
+            "HL-1": [QPointF(0.0, 0.0), QPointF(100.0, 0.0)]
+        }
+        canvas._floor_helper_line_visible["grundriss-1"] = {"HL-1": True}
+        canvas._floor_helper_line_length_mm["grundriss-1"] = {"HL-1": 100.0}
+        canvas._floor_helper_line_fixed["grundriss-1"] = {"HL-1": False}
+
+        emitted: list[bool] = []
+        canvas.helper_lines_changed.connect(lambda: emitted.append(True))
+
+        canvas.start_edit_helper_lines("grundriss-1")
+        assert canvas.tool_mode() == ToolMode.EDIT_HELPER_LINE
+
+        canvas.mousePressEvent(_MouseEventStub(QPointF(0.0, 0.0), button=Qt.LeftButton))
+        canvas.mouseMoveEvent(
+            _MouseEventStub(
+                QPointF(20.0, 30.0),
+                button=Qt.NoButton,
+                buttons=Qt.LeftButton,
+            )
+        )
+        canvas.mouseReleaseEvent(_MouseEventStub(QPointF(20.0, 30.0), button=Qt.LeftButton))
+
+        pts = canvas._floor_helper_lines["grundriss-1"]["HL-1"]
+        assert pts[0] == QPointF(20.0, 30.0)
+        assert pts[1] == QPointF(100.0, 0.0)
+        assert emitted == [True]
+    finally:
+        canvas.deleteLater()

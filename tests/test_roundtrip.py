@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -82,6 +83,138 @@ def test_migration_moves_global_helper_lines():
     )
     assert "global_helper_lines" not in raw["canvas"]
     assert raw["canvas"]["floor_helper_lines"]["grundriss-1"]["H-1"] == [[0, 0], [1, 1]]
+
+
+def test_migration_normalizes_absolute_icon_paths():
+    raw = migrate_raw(
+        {
+            "params": {
+                "elec_points": {
+                    "AP-1": {
+                        "icon_path": r"C:\\Users\\demo\\AppData\\Local\\Temp\\_MEI123\\icons\\Steckdose.png"
+                    },
+                    "AP-2": {"icon_path": r"icons\\LAN_2fach.png"},
+                },
+                "hkv_points": {
+                    "HKV-1": {"icon_path": r"\\\\server\\share\\icons\\Heizkreisverteiler.png"}
+                },
+            }
+        }
+    )
+    assert raw["params"]["elec_points"]["AP-1"]["icon_path"] == "icons/Steckdose.png"
+    assert raw["params"]["elec_points"]["AP-2"]["icon_path"] == "icons/LAN_2fach.png"
+    assert raw["params"]["hkv_points"]["HKV-1"]["icon_path"] == "icons/Heizkreisverteiler.png"
+
+
+def test_load_raw_planung_linda_has_no_absolute_icon_paths():
+    example = ROOT / "examples" / "Planung_Linda.hrp"
+    if not example.exists():
+        pytest.skip("Planung_Linda.hrp fehlt")
+
+    absolute_re = re.compile(r"^(?:[a-zA-Z]:[\\/]|\\\\|/)")
+    raw = load_raw(example)
+    params = raw.get("params") or {}
+
+    for bucket_name in ("elec_points", "hkv_points"):
+        bucket = params.get(bucket_name) or {}
+        for entry in bucket.values():
+            icon_path = str((entry or {}).get("icon_path", "") or "")
+            assert not absolute_re.match(icon_path), icon_path
+
+
+def test_migration_maps_legacy_ids_and_ap_name_refs():
+    raw = migrate_raw(
+        {
+            "canvas": {
+                "elec_cables": {"KV-1": [[1, 2], [3, 4]]},
+                "cable_start_ap": {"KV-1": "Steckdose Küche"},
+                "cable_end_ap": {"KV-1": "AP-2"},
+                "elec_cable_notes": {"KV-1": "legacy"},
+                "elec_rooms": {"R-1": [[0, 0], [1, 0], [1, 1]]},
+                "elec_room_visible": {"R-1": True},
+            },
+            "params": {
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "name": "Steckdose Küche"},
+                    "AP-2": {"point_id": "AP-2", "name": "Leuchte"},
+                    "AP-UV": {
+                        "point_id": "AP-UV",
+                        "name": "UV",
+                        "uv_config": {"slots": [{"slot": 1, "cable": "KV-1"}]},
+                        "up_distribution_config": {
+                            "incoming_cable_id": "KV-1",
+                            "outgoing_cable_ids": ["KV-1"],
+                            "mappings": [{"to_cable_id": "KV-1", "from": "L1", "to": "L1"}],
+                        },
+                    },
+                },
+                "elec_cables": {
+                    "KV-1": {
+                        "cable_id": "KV-1",
+                        "start_ap": "Steckdose Küche",
+                        "end_ap": "AP-2",
+                    }
+                },
+                "elec_rooms": {"R-1": {"room_id": "R-1", "name": "Küche"}},
+            },
+        }
+    )
+
+    assert "EK-1" in raw["params"]["elec_cables"]
+    assert raw["params"]["elec_cables"]["EK-1"]["cable_id"] == "EK-1"
+    assert raw["params"]["elec_cables"]["EK-1"]["start_ap"] == "AP-1"
+    assert raw["params"]["elec_cables"]["EK-1"]["end_ap"] == "AP-2"
+
+    assert "ER-1" in raw["params"]["elec_rooms"]
+    assert raw["params"]["elec_rooms"]["ER-1"]["room_id"] == "ER-1"
+
+    assert "EK-1" in raw["canvas"]["elec_cables"]
+    assert "EK-1" in raw["canvas"]["cable_start_ap"]
+    assert raw["canvas"]["cable_start_ap"]["EK-1"] == "AP-1"
+    assert raw["canvas"]["cable_end_ap"]["EK-1"] == "AP-2"
+    assert "ER-1" in raw["canvas"]["elec_rooms"]
+    assert "ER-1" in raw["canvas"]["elec_room_visible"]
+
+    uv = raw["params"]["elec_points"]["AP-UV"]["uv_config"]
+    up = raw["params"]["elec_points"]["AP-UV"]["up_distribution_config"]
+    assert uv["slots"][0]["cable"] == "EK-1"
+    assert up["incoming_cable_id"] == "EK-1"
+    assert up["outgoing_cable_ids"] == ["EK-1"]
+    assert up["mappings"][0]["to_cable_id"] == "EK-1"
+
+
+def test_migration_resolves_duplicate_ap_names_by_cable_geometry():
+    raw = migrate_raw(
+        {
+            "canvas": {
+                "elec_points": {
+                    "AP-1": [0, 0],
+                    "AP-2": [100, 0],
+                    "AP-3": [200, 0],
+                },
+                "elec_cables": {"KV-1": [[95, 0], [205, 0]]},
+            },
+            "params": {
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "name": "Dose", "floor_plan_id": "grundriss-1"},
+                    "AP-2": {"point_id": "AP-2", "name": "Dose", "floor_plan_id": "grundriss-1"},
+                    "AP-3": {"point_id": "AP-3", "name": "Leuchte", "floor_plan_id": "grundriss-1"},
+                },
+                "elec_cables": {
+                    "KV-1": {
+                        "cable_id": "KV-1",
+                        "floor_plan_id": "grundriss-1",
+                        "start_ap": "Dose",
+                        "end_ap": "Leuchte",
+                    }
+                },
+            },
+        }
+    )
+
+    cable = raw["params"]["elec_cables"]["EK-1"]
+    assert cable["start_ap"] == "AP-2"
+    assert cable["end_ap"] == "AP-3"
 
 
 def test_id_allocator_continues_after_existing_ids():

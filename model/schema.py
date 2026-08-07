@@ -448,6 +448,7 @@ FLOOR_PLAN_SCHEMA = ElementSchema(
         ActionSpec("move", "Verschieben"),
         ActionSpec("rotate", "Drehen"),
         ActionSpec("draw_polygon", "Umriss zeichnen"),
+        ActionSpec("remove_polygon", "Umriss entfernen"),
         ActionSpec("delete", "Löschen", destructive=True),
     ),
     computed=(("mm_per_px", "Maßstab"),),
@@ -484,6 +485,7 @@ FURNITURE_SCHEMA = ElementSchema(
     ),
     actions=(
         ActionSpec("draw_polygon", "Umriss zeichnen"),
+        ActionSpec("remove_polygon", "Umriss entfernen"),
         ActionSpec("move", "Verschieben"),
         ActionSpec("delete", "Löschen", destructive=True),
     ),
