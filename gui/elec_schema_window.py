@@ -120,7 +120,7 @@ class _AddApDialog(QDialog):
         self.cmb_room = QComboBox()
         self.cmb_room.addItem("(kein Raum)", "")
         for room_id, room_name in room_choices:
-            label = f"{room_name} [{room_id}]" if room_id else room_name
+            label = room_name or room_id
             self.cmb_room.addItem(label, room_id)
         form.addRow("Raum:", self.cmb_room)
 
@@ -179,7 +179,7 @@ class _AddCableDialog(QDialog):
         self.cmb_start_ap.addItem("(keiner)", "")
         self.cmb_end_ap.addItem("(keiner)", "")
         for ap_id, ap_name in sorted_aps:
-            label_text = f"{ap_name} [{ap_id}]"
+            label_text = ap_name or ap_id
             self.cmb_start_ap.addItem(label_text, ap_id)
             self.cmb_end_ap.addItem(label_text, ap_id)
         form.addRow("Start-AP:", self.cmb_start_ap)
@@ -576,7 +576,7 @@ class _EditCableDialog(QDialog):
         self.cmb_start_ap = QComboBox()
         self.cmb_end_ap = QComboBox()
         for ap_id, ap_name in sorted_aps:
-            label_text = f"{ap_name} [{ap_id}]" if ap_id else "(keiner)"
+            label_text = (ap_name or ap_id) if ap_id else "(keiner)"
             self.cmb_start_ap.addItem(label_text, ap_id)
             self.cmb_end_ap.addItem(label_text, ap_id)
         for cmb, target in [(self.cmb_start_ap, edge.start_ap_id), (self.cmb_end_ap, edge.end_ap_id)]:
@@ -626,7 +626,7 @@ class _DeleteSelectDialog(QDialog):
 
         self.cmb = QComboBox()
         for item_id, item_label in items:
-            self.cmb.addItem(f"{item_label} [{item_id}]", item_id)
+            self.cmb.addItem(item_label or item_id, item_id)
         form.addRow(label, self.cmb)
         layout.addLayout(form)
 

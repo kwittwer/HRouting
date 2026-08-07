@@ -155,8 +155,6 @@ class NavigatorDock(QDockWidget):
 
     def _add_element_item(self, parent: QTreeWidgetItem, element: Element) -> None:
         label = element.name or element.id
-        if element.name:
-            label = f"{element.id} · {element.name}"
         item = QTreeWidgetItem(parent, [label])
         item.setData(0, _ID_ROLE, element.id)
         item.setData(0, _KIND_ROLE, "element")
@@ -344,10 +342,7 @@ class NavigatorDock(QDockWidget):
             item.setCheckState(0, self._to_state(document.is_visible(element_id)))
             element = document.get(element_id)
             if element is not None:
-                label = element.name or element.id
-                if element.name:
-                    label = f"{element.id} · {element.name}"
-                item.setText(0, label)
+                item.setText(0, element.name or element.id)
                 color = str(element.color or "").strip()
                 base_brush = QBrush(QColor(color)) if color else QBrush()
                 item.setData(0, _BASE_BRUSH_ROLE, base_brush)

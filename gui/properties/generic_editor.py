@@ -106,14 +106,16 @@ class GenericElementEditor(QWidget):
         self._schema = schema
         self._widgets: dict[str, FieldWidget] = {}
         self._computed_labels: dict[str, QLabel] = {}
+        self._header: QLabel | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        header = QLabel(f"<b>{schema.title}</b> · {element.id}", self)
-        header.setWordWrap(True)
-        layout.addWidget(header)
+        self._header = QLabel(self._header_text(), self)
+        self._header.setWordWrap(True)
+        self._header.setObjectName("element_header")
+        layout.addWidget(self._header)
 
         for group_name, specs in groups_of(schema):
             layout.addWidget(self._build_group(group_name, specs))
@@ -126,6 +128,10 @@ class GenericElementEditor(QWidget):
 
         layout.addStretch(1)
         self.refresh()
+
+    def _header_text(self) -> str:
+        display_name = str(getattr(self._element, "name", "") or "").strip() or self._element.id
+        return f"<b>{self._schema.title}</b> · {display_name}"
 
     # ------------------------------------------------------------------
     def _build_group(self, title: str, specs: list[FieldSpec]) -> QGroupBox:
@@ -274,6 +280,8 @@ class GenericElementEditor(QWidget):
 
     def refresh(self) -> None:
         """Alle Feldwerte aus dem Element übernehmen."""
+        if self._header is not None:
+            self._header.setText(self._header_text())
         self._refresh_dynamic_options()
         for spec in self._schema.fields:
             widget = self._widgets.get(spec.key)

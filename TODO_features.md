@@ -3,20 +3,21 @@
 Stand: 2026-08-07
 Basis: Code-Analyse der neuen UI und Testprojekt `examples/Planung_Linda.hrp`
 
-
 # Basics
 
 * [X] A-1 per Kontextmenü (rechte maustatse) sollen immer in abhänigkeit des aktuell gewählten worspaces die für das aktuell selektierte elemnete verfügbaren werkzeuge angezeigt werden
 * [X] A-2 im Kontextmenü allegeime für alles einfügen:
-    -> undo
-    -> redo
-    -> kopieren
-    -> einfügen
-    -> ausschneiden
-    -> dupizieren
-    -> löschen
+  -> undo
+  -> redo
+  -> kopieren
+  -> einfügen
+  -> ausschneiden
+  -> dupizieren
+  -> löschen
 * [X] A-3 Funktion zum kopieren und einfügen von elementen (AP, kabel, usw)
-
+* [ ] A-4 grundsätzlich soll für alle elemente der Name anstatt der nummer angezeigt werden also z.B. Ankleide anstatt ER-13 (siehe Planung-Linda.hrp) Das gilt für alle elemente
+* [ ] es soll persistent sein was in der navigation auf bzw zugefaltet ist. bitte füge einen butteon um alle zusammen zu falten ein
+* [ ] 
 
 ## Blocker
 
@@ -35,9 +36,12 @@ Basis: Code-Analyse der neuen UI und Testprojekt `examples/Planung_Linda.hrp`
   -> Kabel
   -> Einrichtung
   -> Texte
-   [X] F-1 Einrichtung hinzufuegen Workflow pruefen
-   [X] F-2 Einrichtungs-Polygon zeichnen pruefen
-   [X] F-3 Einrichtung verschieben / rotieren pruefen
+  [X] F-1 Einrichtung hinzufuegen Workflow pruefen
+  [X] F-2 Einrichtungs-Polygon zeichnen pruefen
+  [X] F-3 Einrichtung verschieben / rotieren pruefen
+
+# Grundriss
+
 - [X] G-2 Grundriss verschieben pruefen
 - [X] G-3 Grundriss drehen pruefen
 - [X] G-4 Referenzlinie zeichnen pruefen
@@ -64,8 +68,14 @@ Basis: Code-Analyse der neuen UI und Testprojekt `examples/Planung_Linda.hrp`
 - [X] E-4 UP-Distribution pruefen
 - [X] E-5 Elektro-Raum zeichnen / bearbeiten pruefen
 - [X] E-6 Kabel zeichnen / bearbeiten pruefen
+  - [ ] E-6.1 ich kann keine neuen kabel zichen
 - [X] E-7 Strangschema gegen Planung_Linda pruefen
 - [X] E-8 BOM / Exportdaten gegen Planung_Linda pruefen
+- [ ] E-9 in den APs werden keine Bilder angezeigt
+- [ ] E-10 aktuell werden alle APs blau dargetsellt obwohl in den eingeschaften etwas anderes eingestellt ist. bite fixen
+- [ ]
+
+
 
 ## Einrichtung
 
@@ -73,19 +83,27 @@ Basis: Code-Analyse der neuen UI und Testprojekt `examples/Planung_Linda.hrp`
 - [X] F-2 Einrichtungs-Polygon zeichnen pruefen
 - [X] F-3 Einrichtung verschieben / rotieren pruefen
 - [X] F-4 Parent-Floorplan und feste Groessen pruefen
+- [ ] F-5 wenn ich im einrichtungs Workspace pin mmöchte ich die elemente direkt per drag and drop verschieben können
 
 ## Vermessung
 
 - [X] A-1 Distanzmessung pruefen
+  - [ ] A-1.1 maß wird nicht richtig angezeigt. -> mass soll schon beim zeiehn des zweiten messpunkte angezeigt werden
 - [X] A-2 Winkelmessung pruefen
 - [X] A-3 Hilfslinien zeichnen / bearbeiten pruefen
 - [X] A-4 Text platzieren / editieren pruefen
+
+  - [ ] funktioniert überhaupt nicht
 
 ## Export
 
 - [X] X-1 Exportrahmen zeichnen pruefen
 - [X] X-2 PDF-Export mit Planung_Linda pruefen
+- [ ] beim PDF export verschwindest die Anzeige des planes.
+- [ ] das exportierte pdf enthält nur eien screenshot. Es soll der export aber wider so funktionieren wie vor dem gui umbau.
 - [X] X-3 SVG / KiCad / QElectroTech Export pruefen
+- [ ] bitte kicad und qelektrotech export entfernen
+- [ ] die ansicht der stückliste ist unvollständig, bitte orienteire dich auch hiuer an der alten implementierung
 
 ## Allgemein
 

@@ -17,6 +17,7 @@
 import math
 import os
 from enum import Enum, auto
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 
@@ -588,14 +589,37 @@ class CanvasWidget(QWidget):
     def _cache_key(path: str) -> str:
         return os.path.normcase(os.path.normpath(path or ""))
 
+    def _resolve_icon_path(self, path: str) -> str:
+        """Resolve icon path, handling both absolute and relative paths.
+        
+        For relative paths (e.g., 'icons/Steckdose.png'), resolve relative to
+        the project directory (where the .hrp file is).
+        """
+        if not path:
+            return ""
+        p = Path(path)
+        if p.is_absolute() and p.exists():
+            return str(path)
+        # Try relative to project root
+        if self._document and hasattr(self._document, "source_path"):
+            project_dir = Path(self._document.source_path).parent
+            rel_path = project_dir / path
+            if rel_path.exists():
+                return str(rel_path)
+        # Try from current working directory
+        if Path(path).exists():
+            return str(Path(path).resolve())
+        return str(path)  # Return original, will fail to load
+
     def _get_cached_pixmap(self, path: str) -> Optional[QPixmap]:
-        key = self._cache_key(path)
+        resolved_path = self._resolve_icon_path(path)
+        key = self._cache_key(resolved_path)
         if not key:
             return None
         cached = self._pixmap_cache.get(key)
         if cached is not None and not cached.isNull():
             return cached
-        pm = QPixmap(path)
+        pm = QPixmap(resolved_path)
         if pm.isNull():
             self._pixmap_cache.pop(key, None)
             return None
@@ -603,13 +627,14 @@ class CanvasWidget(QWidget):
         return pm
 
     def _get_cached_svg_renderer(self, path: str) -> Optional[QSvgRenderer]:
-        key = self._cache_key(path)
+        resolved_path = self._resolve_icon_path(path)
+        key = self._cache_key(resolved_path)
         if not key:
             return None
         cached = self._svg_renderer_cache.get(key)
         if cached is not None and cached.isValid():
             return cached
-        renderer = QSvgRenderer(path)
+        renderer = QSvgRenderer(resolved_path)
         if not renderer.isValid():
             self._svg_renderer_cache.pop(key, None)
             return None
@@ -1333,17 +1358,13 @@ class CanvasWidget(QWidget):
         old_w = self.width()
         old_h = self.height()
         old_min_size = self.minimumSize()
-        old_parent = self.parentWidget()
 
         try:
             self._scale = s
             self._offset = off
-            # Detach from the layout-managing parent (if any) so its layout
-            # doesn't reassert the widget's old geometry before/while we grab,
-            # and bypass the UI minimum size so small export resolutions
-            # aren't silently clamped up (e.g. 400x300 becoming 400x400).
-            if old_parent is not None:
-                self.setParent(None)
+            # Keep the widget in its layout while exporting. Temporarily
+            # detaching it can remove it from the layout and make it disappear
+            # after export.
             self.setMinimumSize(0, 0)
             self.resize(output_w, output_h)
             pixmap = self.grab()
@@ -1352,8 +1373,6 @@ class CanvasWidget(QWidget):
             self._offset = old_offset
             self.resize(old_w, old_h)
             self.setMinimumSize(old_min_size)
-            if old_parent is not None:
-                self.setParent(old_parent)
             self.update()
 
         return pixmap.toImage()
@@ -3717,8 +3736,16 @@ class CanvasWidget(QWidget):
 
     def _ensure_color(self, cid: str):
         if cid not in self._color_map:
-            self._color_map[cid] = QColor(COLORS[self._color_index % len(COLORS)])
-            self._color_index += 1
+            color_hex = ""
+            if self._document:
+                element = self._document.get(cid)
+                if element and hasattr(element, 'color'):
+                    color_hex = str(element.color or "").strip()
+            if color_hex and color_hex.startswith("#"):
+                self._color_map[cid] = QColor(color_hex)
+            else:
+                self._color_map[cid] = QColor(COLORS[self._color_index % len(COLORS)])
+                self._color_index += 1
 
     def _hit_start_point(self, canvas_pt: QPointF) -> Optional[str]:
         threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
@@ -5575,6 +5602,10 @@ class CanvasWidget(QWidget):
             self._constraint_violation_point = None
             self._constraint_violation_line = None
             self._constraint_violation_reason = ""
+            self.update()
+            return
+
+        if self._mode == ToolMode.MEASURE:
             self.update()
             return
 

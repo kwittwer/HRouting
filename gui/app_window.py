@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import copy
 import math
+from collections import defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QSettings, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QFileDialog,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QInputDialog,
     QMenu,
     QToolBar,
@@ -39,7 +42,9 @@ from model.elements import Circuit, ElecPoint, ElecRoom, ElecCable, FloorPlan, H
 from model.schema import schema_for
 from storage.hrp_io import load_document, save_document
 from .elec_schema_window import ApNode, CableEdge, ElecSchemaWindow
+from .pdf_export_dialog import PdfExportConfigDialog
 from .schaltplan_window import SchaltplanWindow
+from logic.schaltplan_generator import build_uv_hierarchy, get_uv_circuits
 
 from . import layout_store
 from .canvas_widget import CanvasWidget, ToolMode
@@ -91,6 +96,7 @@ class AppWindow(QMainWindow):
         self._elec_schema_window: ElecSchemaWindow | None = None
         self._schaltplan_window: SchaltplanWindow | None = None
         self._elec_schema_ap_positions: dict[str, list[float]] = {}
+        self._pdf_export_pages: list[dict] = []
 
         self._build_central()
         self._build_docks()
@@ -200,9 +206,6 @@ class AppWindow(QMainWindow):
         self.export_menu = bar.addMenu("&Export")
         self._add_action(self.export_menu, "PDF exportieren…", self._export_pdf)
         self._add_action(self.export_menu, "SVG exportieren…", self._export_svg)
-        self._add_action(self.export_menu, "KiCad exportieren…", self._export_kicad)
-        self._add_action(self.export_menu, "QElectroTech exportieren…", self._export_qet)
-        self.export_menu.addSeparator()
         self._add_action(self.export_menu, "Längen & Stückliste…", self._export_lengths)
 
         help_menu = bar.addMenu("&Hilfe")
@@ -1852,6 +1855,13 @@ class AppWindow(QMainWindow):
         self._emit_structure_changed()
         self.navigator.select(eid)
         self.canvas.start_draw_elec_cable(eid)
+        self.statusBar().showMessage(
+            "Kabel zeichnen: Linksklick Punkte setzen, Rechtsklick abschließen.",
+            5000,
+        )
+        self.log.info(
+            f"Kabel {eid} im Zeichenmodus: Linksklick Punkte, Rechtsklick Abschluss"
+        )
         self._mark_dirty()
 
     def _add_hkv(self) -> None:
@@ -2707,7 +2717,1426 @@ class AppWindow(QMainWindow):
         import pathlib  # noqa: PLC0415
         pathlib.Path(path).write_text("\n".join(lines), encoding="utf-8")
 
-    def _export_pdf(self) -> None:
+    @staticmethod
+    def _default_pdf_element_visibility() -> dict[str, bool]:
+        return {
+            "background": True,
+            "furniture": True,
+            "hk": True,
+            "hkv": True,
+            "hkv_line": True,
+            "ap": True,
+            "room": True,
+            "kv": True,
+            "text": True,
+        }
+
+    @staticmethod
+    def _default_pdf_table_sections(ptype: str) -> list[str]:
+        if ptype == "heating":
+            return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
+        if ptype == "elektro":
+            return [
+                "el_kabel",
+                "el_ap_types",
+                "el_ap_connections",
+                "el_rooms",
+                "el_ap_infos",
+                "el_uv",
+                "el_up_distribution",
+                "el_bom",
+                "el_uv_busbars",
+                "schaltplan_uv",
+                "schaltplan_stromkreise",
+                "schaltplan_hierarchie",
+            ]
+        return []
+
+    def _default_pdf_export_pages(self) -> list[dict]:
+        return [
+            {
+                "id": "overview-all",
+                "type": "plan",
+                "title": "Gesamtübersicht – Alle Elemente",
+                "enabled": True,
+                "show_background": True,
+                "show_heating": True,
+                "show_elektro": True,
+                "element_visibility": self._default_pdf_element_visibility(),
+                "floor_plan_id": None,
+                "source_rect": None,
+            },
+            {
+                "id": "plan-heating",
+                "type": "heating",
+                "title": "Fußbodenheizung – Verlegeplan",
+                "enabled": True,
+                "show_background": True,
+                "show_heating": True,
+                "show_elektro": False,
+                "element_visibility": {
+                    **self._default_pdf_element_visibility(),
+                    "ap": False,
+                    "room": False,
+                    "kv": False,
+                },
+                "table_sections": self._default_pdf_table_sections("heating"),
+                "floor_plan_id": None,
+                "source_rect": None,
+            },
+            {
+                "id": "table-lengths",
+                "type": "lengths",
+                "title": "Heizkreise – Rohrlängen",
+                "enabled": True,
+            },
+            {
+                "id": "table-hydraulics",
+                "type": "hydraulics",
+                "title": "Hydraulische Übersicht",
+                "enabled": True,
+            },
+            {
+                "id": "page-elektro",
+                "type": "elektro",
+                "title": "Elektro – Übersicht",
+                "enabled": True,
+                "show_background": True,
+                "show_heating": False,
+                "show_elektro": True,
+                "element_visibility": {
+                    **self._default_pdf_element_visibility(),
+                    "hk": False,
+                    "hkv": False,
+                    "hkv_line": False,
+                },
+                "table_sections": self._default_pdf_table_sections("elektro"),
+                "floor_plan_id": None,
+                "source_rect": None,
+            },
+        ]
+
+    def _normalize_pdf_export_pages(self, pages: list[dict] | None) -> list[dict]:
+        if not pages:
+            return self._default_pdf_export_pages()
+        normalized: list[dict] = []
+        for index, src in enumerate(pages):
+            if not isinstance(src, dict):
+                continue
+            ptype = str(src.get("type", "plan")).strip().lower()
+            if ptype not in ("plan", "heating", "lengths", "hydraulics", "elektro"):
+                continue
+            page = {
+                "id": str(src.get("id") or f"page-{index + 1}"),
+                "type": ptype,
+                "title": str(src.get("title") or "Seite"),
+                "enabled": bool(src.get("enabled", True)),
+            }
+            if ptype in ("plan", "heating", "elektro"):
+                page["show_background"] = bool(src.get("show_background", True))
+                page["show_heating"] = bool(src.get("show_heating", True))
+                page["show_elektro"] = bool(src.get("show_elektro", True))
+                vis = self._default_pdf_element_visibility()
+                vis_src = src.get("element_visibility")
+                if isinstance(vis_src, dict):
+                    for key in vis:
+                        vis[key] = bool(vis_src.get(key, vis[key]))
+                page["element_visibility"] = vis
+                page["table_sections"] = list(src.get("table_sections") or self._default_pdf_table_sections(ptype))
+                page["floor_plan_id"] = src.get("floor_plan_id") or None
+                rect = src.get("source_rect")
+                if isinstance(rect, (list, tuple)) and len(rect) == 4:
+                    try:
+                        x, y, w, h = [float(v) for v in rect]
+                        page["source_rect"] = [x, y, w, h] if w > 0 and h > 0 else None
+                    except (TypeError, ValueError):
+                        page["source_rect"] = None
+                else:
+                    page["source_rect"] = None
+            normalized.append(page)
+        return normalized or self._default_pdf_export_pages()
+
+    def _current_floor_plans_for_export_dialog(self) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for fid in self.canvas._floor_plan_order:
+            floor = self._document.floorplans.get(fid)
+            out.append((fid, (floor.name if floor else "") or fid))
+        return out
+
+    @staticmethod
+    def _page_source_rect(page: dict | None) -> QRectF | None:
+        if not page:
+            return None
+        rect = page.get("source_rect")
+        if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+            return None
+        try:
+            x, y, w, h = [float(v) for v in rect]
+        except (TypeError, ValueError):
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        return QRectF(x, y, w, h).normalized()
+
+    def _effective_pdf_source_rect(self, page: dict | None) -> QRectF:
+        custom = self._page_source_rect(page)
+        if custom is not None:
+            return custom
+        frame = self.canvas.get_export_frame()
+        if frame is not None:
+            nr = QRectF(frame).normalized()
+            if nr.width() > 0 and nr.height() > 0:
+                return nr
+        return self.canvas.get_default_source_rect()
+
+    def _open_pdf_export_config_dialog(self) -> list[dict] | None:
+        dialog = PdfExportConfigDialog(
+            pages=self._normalize_pdf_export_pages(self._pdf_export_pages),
+            floor_plans=self._current_floor_plans_for_export_dialog(),
+            svg_size=self.canvas._svg_size,
+            canvas=self.canvas,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return self._normalize_pdf_export_pages(dialog.get_pages())
+
+    def _save_all_visibility(self) -> dict:
+        return {
+            "circuit_visible": dict(self.canvas._circuit_visible),
+            "hkv_visible": dict(self.canvas._hkv_visible),
+            "hkv_line_visible": dict(self.canvas._hkv_line_visible),
+            "elec_visible": dict(self.canvas._elec_visible),
+            "elec_room_visible": dict(self.canvas._elec_room_visible),
+            "text_visible": dict(self.canvas._text_visible),
+            "label_visible": dict(self.canvas._label_visible),
+            "floor_plan_visible": {fid: layer.visible for fid, layer in self.canvas._floor_plans.items()},
+        }
+
+    def _restore_all_visibility(self, saved: dict) -> None:
+        self.canvas._circuit_visible = dict(saved.get("circuit_visible", {}))
+        self.canvas._hkv_visible = dict(saved.get("hkv_visible", {}))
+        self.canvas._hkv_line_visible = dict(saved.get("hkv_line_visible", {}))
+        self.canvas._elec_visible = dict(saved.get("elec_visible", {}))
+        self.canvas._elec_room_visible = dict(saved.get("elec_room_visible", {}))
+        self.canvas._text_visible = dict(saved.get("text_visible", {}))
+        self.canvas._label_visible = dict(saved.get("label_visible", {}))
+        for fid, vis in saved.get("floor_plan_visible", {}).items():
+            layer = self.canvas._floor_plans.get(fid)
+            if layer is not None:
+                layer.visible = bool(vis)
+
+    def _apply_page_visibility(self, page: dict) -> None:
+        vis = page.get("element_visibility") or self._default_pdf_element_visibility()
+        for fid in self.canvas._floor_plan_order:
+            layer = self.canvas._floor_plans.get(fid)
+            if layer is None:
+                continue
+            layer.visible = bool(vis.get("background", True))
+
+        show_hk = bool(vis.get("hk", True))
+        for cid in list(self.canvas._polygons) + list(self.canvas._manual_routes) + list(self.canvas._supply_lines):
+            self.canvas._circuit_visible[cid] = show_hk
+
+        show_hkv = bool(vis.get("hkv", True))
+        for hid in self.canvas._hkv_points:
+            self.canvas._hkv_visible[hid] = show_hkv
+
+        show_hkv_line = bool(vis.get("hkv_line", True))
+        for lid in self.canvas._hkv_lines:
+            self.canvas._hkv_line_visible[lid] = show_hkv_line
+
+        show_ap = bool(vis.get("ap", True))
+        for pid in self.canvas._elec_points:
+            self.canvas._elec_visible[pid] = show_ap
+
+        show_room = bool(vis.get("room", True))
+        for rid in self.canvas._elec_room_polygons:
+            self.canvas._elec_room_visible[rid] = show_room
+
+        show_kv = bool(vis.get("kv", True))
+        for kid in self.canvas._elec_cables:
+            self.canvas._elec_visible[kid] = show_kv
+
+        show_text = bool(vis.get("text", True))
+        for tid in self.canvas._text_annotations:
+            self.canvas._text_visible[tid] = show_text
+
+    def _collect_pdf_electro_rows(self) -> tuple[list[list[str]], list[list[str]]]:
+        mm_per_px = max(float(self.canvas.get_mm_per_px()), 1e-9)
+
+        ap_rows: list[list[str]] = []
+        for pid, point in self._document.elements["elec_points"].items():
+            ap_rows.append([
+                str(point.name or pid),
+                str(point.builtin_symbol or ""),
+                str(point.position or ""),
+                f"{float(point.height_from_floor or 0.0):.1f} cm",
+                str(point.note or ""),
+            ])
+        ap_rows.sort(key=lambda row: row[0].lower())
+
+        cable_rows: list[list[str]] = []
+        for cid, cable in self._document.elements["elec_cables"].items():
+            start_id, end_id = self.canvas.get_cable_ap(cid)
+            start_name = self._document.elements["elec_points"].get(start_id).name if start_id in self._document.elements["elec_points"] else (start_id or "")
+            end_name = self._document.elements["elec_points"].get(end_id).name if end_id in self._document.elements["elec_points"] else (end_id or "")
+            length_m = self.canvas.get_elec_cable_length_px(cid) * mm_per_px / 1000.0
+            cable_rows.append([
+                str(cable.name or cid),
+                str(cable.cable_type or ""),
+                str(start_name or ""),
+                str(end_name or ""),
+                f"{length_m:.2f} m",
+            ])
+        cable_rows.sort(key=lambda row: row[0].lower())
+        return ap_rows, cable_rows
+
+    @staticmethod
+    def _is_uv_type(point: ElecPoint) -> bool:
+        return str(point.ap_type or "standard").strip().lower() == "uv"
+
+    @staticmethod
+    def _is_up_distribution_type(point: ElecPoint) -> bool:
+        return str(point.ap_type or "standard").strip().lower() == "up_distribution"
+
+    def _describe_ap_type(self, point: ElecPoint) -> str:
+        if self._is_uv_type(point):
+            return "Unterverteilung (UV)"
+        if self._is_up_distribution_type(point):
+            return "Verteilung in Unterputzdose"
+        symbol = str(point.builtin_symbol or "").strip()
+        icon_path = str(point.icon_path or "").strip()
+        if symbol and symbol != "(kein Symbol)":
+            return symbol
+        if icon_path:
+            label = Path(icon_path).stem.replace("_", " ").replace("-", " ").strip()
+            return label or "Eigenes Symbol"
+        return "(kein Symbol)"
+
+    def _collect_uv_rows(self, point_id_to_room_name: dict[str, str] | None = None) -> list[dict]:
+        point_id_to_room_name = point_id_to_room_name or self._collect_point_id_to_room_name()
+        rows: list[dict] = []
+        for pid, point in self._document.elements["elec_points"].items():
+            if not self._is_uv_type(point):
+                continue
+            uv_config = point.data.get("uv_config") or {}
+            if not isinstance(uv_config, dict):
+                uv_config = {}
+            try:
+                uv_rows = int(uv_config.get("rows", 0) or 0)
+            except (TypeError, ValueError):
+                uv_rows = 0
+            try:
+                uv_modules = int(uv_config.get("modules_per_row", 0) or 0)
+            except (TypeError, ValueError):
+                uv_modules = 0
+            ap_name = str(point.name or pid)
+            room_name = point_id_to_room_name.get(pid, "(ohne Raum)")
+            slots = uv_config.get("slots", [])
+            if not isinstance(slots, list):
+                slots = []
+            normalized_slots = sorted(
+                [
+                    {
+                        "row": int(slot.get("row", 0) or 0),
+                        "slot": int(slot.get("slot", 0) or 0),
+                        "device_type": str(slot.get("device_type", "") or "").strip(),
+                        "te_size": max(1, int(slot.get("te_size", 1) or 1)),
+                        "spec": str(slot.get("spec", "") or "").strip(),
+                        "label": str(slot.get("label", "") or "").strip(),
+                        "assignment": str(slot.get("assignment", "") or "").strip(),
+                        "manufacturer": str(slot.get("manufacturer", "") or "").strip(),
+                        "article_number": str(slot.get("article_number", "") or "").strip(),
+                        "note": str(slot.get("note", "") or "").strip(),
+                    }
+                    for slot in slots
+                    if isinstance(slot, dict)
+                ],
+                key=lambda slot: (slot["row"], slot["slot"]),
+            )
+            if not normalized_slots:
+                rows.append(
+                    {
+                        "ap": ap_name,
+                        "room": room_name,
+                        "rows": uv_rows,
+                        "modules_per_row": uv_modules,
+                        "row": "",
+                        "slot": "",
+                        "device_type": "",
+                        "te_size": 1,
+                        "spec": "",
+                        "label": "",
+                        "assignment": "",
+                        "note": "",
+                    }
+                )
+                continue
+            for slot in normalized_slots:
+                rows.append(
+                    {
+                        "ap": ap_name,
+                        "room": room_name,
+                        "rows": uv_rows,
+                        "modules_per_row": uv_modules,
+                        "row": slot["row"],
+                        "slot": slot["slot"],
+                        "device_type": slot["device_type"],
+                        "te_size": slot["te_size"],
+                        "spec": slot["spec"],
+                        "label": slot["label"],
+                        "assignment": slot["assignment"],
+                        "manufacturer": slot["manufacturer"],
+                        "article_number": slot["article_number"],
+                        "note": slot["note"],
+                    }
+                )
+        return rows
+
+    def _collect_uv_data(self, point_id_to_room_name: dict[str, str] | None = None) -> list[dict]:
+        point_id_to_room_name = point_id_to_room_name or self._collect_point_id_to_room_name()
+        result: list[dict] = []
+        for pid, point in self._document.elements["elec_points"].items():
+            if not self._is_uv_type(point):
+                continue
+            uv_config = point.data.get("uv_config") or {}
+            if not isinstance(uv_config, dict):
+                uv_config = {}
+            try:
+                uv_rows = int(uv_config.get("rows", 0) or 0)
+            except (TypeError, ValueError):
+                uv_rows = 0
+            try:
+                uv_modules = int(uv_config.get("modules_per_row", 0) or 0)
+            except (TypeError, ValueError):
+                uv_modules = 0
+            slots_raw = uv_config.get("slots", [])
+            if not isinstance(slots_raw, list):
+                slots_raw = []
+            slots = sorted(
+                [
+                    {
+                        "row": int(s.get("row", 0) or 0),
+                        "slot": int(s.get("slot", 0) or 0),
+                        "device_type": str(s.get("device_type", "") or "").strip(),
+                        "te_size": max(1, int(s.get("te_size", 1) or 1)),
+                        "spec": str(s.get("spec", "") or "").strip(),
+                        "label": str(s.get("label", "") or "").strip(),
+                        "assignment": str(s.get("assignment", "") or "").strip(),
+                        "manufacturer": str(s.get("manufacturer", "") or "").strip(),
+                        "article_number": str(s.get("article_number", "") or "").strip(),
+                        "note": str(s.get("note", "") or "").strip(),
+                    }
+                    for s in slots_raw
+                    if isinstance(s, dict)
+                ],
+                key=lambda s: (s["row"], s["slot"]),
+            )
+            busbars_raw = uv_config.get("busbars", [])
+            if not isinstance(busbars_raw, list):
+                busbars_raw = []
+            result.append(
+                {
+                    "ap_id": pid,
+                    "ap_name": str(point.name or pid),
+                    "room": point_id_to_room_name.get(pid, "(ohne Raum)"),
+                    "rows": uv_rows,
+                    "modules_per_row": uv_modules,
+                    "preset": str(uv_config.get("preset", "") or ""),
+                    "slots": slots,
+                    "busbars": [
+                        {
+                            "phase": str(b.get("phase", "") or "").strip(),
+                            "color": str(b.get("color", "#888888") or "#888888"),
+                            "te_start": max(1, int(b.get("te_start", 1) or 1)),
+                            "te_end": max(1, int(b.get("te_end", 1) or 1)),
+                        }
+                        for b in busbars_raw
+                        if isinstance(b, dict) and str(b.get("phase", "") or "").strip()
+                    ],
+                }
+            )
+        return result
+
+    def _collect_up_distribution_rows(self, point_id_to_room_name: dict[str, str] | None = None) -> list[dict]:
+        point_id_to_room_name = point_id_to_room_name or self._collect_point_id_to_room_name()
+        cable_id_to_name = {
+            cable_id: str(cable.name or cable_id)
+            for cable_id, cable in self._document.elements["elec_cables"].items()
+        }
+        rows: list[dict] = []
+        for pid, point in self._document.elements["elec_points"].items():
+            if not self._is_up_distribution_type(point):
+                continue
+            config = point.data.get("up_distribution_config") or {}
+            if not isinstance(config, dict):
+                continue
+            ap_name = str(point.name or pid)
+            room_name = point_id_to_room_name.get(pid, "(ohne Raum)")
+            incoming_id = str(config.get("incoming_cable_id", "") or "").strip()
+            incoming_name = cable_id_to_name.get(incoming_id, incoming_id)
+            outgoing_raw = config.get("outgoing_cable_ids", [])
+            if not isinstance(outgoing_raw, list):
+                outgoing_raw = []
+            outgoing_ids = []
+            for cable_id in outgoing_raw:
+                text = str(cable_id or "").strip()
+                if text and text not in outgoing_ids:
+                    outgoing_ids.append(text)
+            outgoing_names = [cable_id_to_name.get(cable_id, cable_id) for cable_id in outgoing_ids]
+            mappings_raw = config.get("mappings", [])
+            if not isinstance(mappings_raw, list):
+                mappings_raw = []
+            mappings = []
+            for mapping in mappings_raw:
+                if not isinstance(mapping, dict):
+                    continue
+                to_cable_id = str(mapping.get("to_cable_id", "") or "").strip()
+                mappings.append(
+                    {
+                        "from_conductor": str(mapping.get("from_conductor", "") or "").strip(),
+                        "to_cable_id": to_cable_id,
+                        "to_cable_name": cable_id_to_name.get(to_cable_id, to_cable_id),
+                        "to_conductor": str(mapping.get("to_conductor", "") or "").strip(),
+                        "note": str(mapping.get("note", "") or "").strip(),
+                    }
+                )
+            distribution_note = str(config.get("note", "") or "").strip()
+            if not mappings:
+                rows.append(
+                    {
+                        "ap": ap_name,
+                        "room": room_name,
+                        "incoming_cable": incoming_name,
+                        "incoming_cable_id": incoming_id,
+                        "outgoing_cables": ", ".join(outgoing_names),
+                        "from_conductor": "",
+                        "to_cable": "",
+                        "to_cable_id": "",
+                        "to_conductor": "",
+                        "mapping_note": "",
+                        "distribution_note": distribution_note,
+                    }
+                )
+                continue
+            for mapping in mappings:
+                rows.append(
+                    {
+                        "ap": ap_name,
+                        "room": room_name,
+                        "incoming_cable": incoming_name,
+                        "incoming_cable_id": incoming_id,
+                        "outgoing_cables": ", ".join(outgoing_names),
+                        "from_conductor": mapping["from_conductor"],
+                        "to_cable": mapping["to_cable_name"],
+                        "to_cable_id": mapping["to_cable_id"],
+                        "to_conductor": mapping["to_conductor"],
+                        "mapping_note": mapping["note"],
+                        "distribution_note": distribution_note,
+                    }
+                )
+        return rows
+
+    def _collect_ap_type_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
+        for point in self._document.elements["elec_points"].values():
+            counts[self._describe_ap_type(point)] += 1
+        return dict(sorted(counts.items(), key=lambda kv: kv[0].lower()))
+
+    @staticmethod
+    def _build_ap_cable_map(kv_rows: list[dict]) -> dict[str, list[dict]]:
+        ap_map: dict[str, list[dict]] = defaultdict(list)
+        for row in kv_rows:
+            for role, key, dev_key, color_key, note_key in [
+                ("Start", "start_ap", "start_device", "start_device_color", "start_note"),
+                ("Ende", "end_ap", "end_device", "end_device_color", "end_note"),
+            ]:
+                ap_name = row.get(key, "")
+                if ap_name:
+                    ap_map[ap_name].append(
+                        {
+                            "cable": row.get("name", ""),
+                            "type": row.get("type", ""),
+                            "length_m": float(row.get("length_m", 0.0) or 0.0),
+                            "role": role,
+                            "ap_device": row.get(dev_key, ""),
+                            "ap_device_color": row.get(color_key, ""),
+                            "ap_note": row.get(note_key, ""),
+                            "cable_note": row.get("comment", ""),
+                        }
+                    )
+        return dict(ap_map)
+
+    def _build_room_ap_connection_map(self, kv_rows: list[dict]) -> list[dict]:
+        point_id_to_room_name = self._collect_point_id_to_room_name()
+        point_id_to_name = {
+            pid: str(point.name or pid)
+            for pid, point in self._document.elements["elec_points"].items()
+        }
+        point_id_to_device = {
+            pid: str(point.smarthome_device or "")
+            for pid, point in self._document.elements["elec_points"].items()
+        }
+        point_id_to_device_color = {
+            pid: str(point.smarthome_device_color or "")
+            for pid, point in self._document.elements["elec_points"].items()
+        }
+        point_id_to_note = {
+            pid: str(point.note or "")
+            for pid, point in self._document.elements["elec_points"].items()
+        }
+        cable_meta = {
+            row.get("name", ""): {
+                "type": row.get("type", ""),
+                "length_m": float(row.get("length_m", 0.0) or 0.0),
+                "comment": str(row.get("comment", "") or ""),
+            }
+            for row in kv_rows
+        }
+
+        rows: list[dict] = []
+        for cable_id, cable in self._document.elements["elec_cables"].items():
+            cable_name = str(cable.name or cable_id)
+            cable_type = cable_meta.get(cable_name, {}).get("type", str(cable.cable_type or ""))
+            cable_len = float(cable_meta.get(cable_name, {}).get("length_m", 0.0))
+            cable_note = cable_meta.get(cable_name, {}).get("comment", str(cable.comment or ""))
+            start_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "")
+            end_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "")
+
+            if start_id:
+                rows.append(
+                    {
+                        "room": point_id_to_room_name.get(start_id, "(ohne Raum)"),
+                        "ap": point_id_to_name.get(start_id, start_id),
+                        "cable": cable_name,
+                        "type": cable_type,
+                        "role": "Start",
+                        "target_ap": point_id_to_name.get(end_id, end_id) if end_id else "(offenes Ende)",
+                        "length_m": cable_len,
+                        "ap_device": point_id_to_device.get(start_id, ""),
+                        "ap_device_color": point_id_to_device_color.get(start_id, ""),
+                        "ap_note": point_id_to_note.get(start_id, ""),
+                        "cable_note": cable_note,
+                    }
+                )
+            if end_id:
+                rows.append(
+                    {
+                        "room": point_id_to_room_name.get(end_id, "(ohne Raum)"),
+                        "ap": point_id_to_name.get(end_id, end_id),
+                        "cable": cable_name,
+                        "type": cable_type,
+                        "role": "Ende",
+                        "target_ap": point_id_to_name.get(start_id, start_id) if start_id else "(offenes Ende)",
+                        "length_m": cable_len,
+                        "ap_device": point_id_to_device.get(end_id, ""),
+                        "ap_device_color": point_id_to_device_color.get(end_id, ""),
+                        "ap_note": point_id_to_note.get(end_id, ""),
+                        "cable_note": cable_note,
+                    }
+                )
+
+        return sorted(
+            rows,
+            key=lambda row: (
+                str(row.get("room", "")).lower(),
+                str(row.get("ap", "")).lower(),
+                str(row.get("cable", "")).lower(),
+                str(row.get("role", "")).lower(),
+            ),
+        )
+
+    @staticmethod
+    def _safe_te_count(te_start: int, te_end: int) -> int:
+        if te_end < te_start:
+            te_start, te_end = te_end, te_start
+        return max(0, (te_end - te_start + 1))
+
+    def _collect_bom_rows(
+        self,
+        hk_rows: list[dict],
+        kv_rows: list[dict],
+        ap_info_rows: list[dict],
+        uv_data: list[dict],
+        hl_rows: list[dict],
+    ) -> dict:
+        cable_by_type: dict[str, float] = defaultdict(float)
+        for row in kv_rows:
+            cable_type = str(row.get("type", "") or "").strip() or "(unbekannt)"
+            cable_by_type[cable_type] += float(row.get("length_m", 0.0) or 0.0)
+        cable_bom_rows = [
+            {
+                "category": "Elektro-Kabel",
+                "item_type": "elec_cable",
+                "key": cable_type,
+                "description": cable_type,
+                "unit": "m",
+                "quantity": length_m,
+                "manufacturer": "",
+                "article_number": "",
+                "note": "",
+            }
+            for cable_type, length_m in sorted(cable_by_type.items(), key=lambda kv: kv[0].lower())
+        ]
+
+        ap_by_type: dict[str, int] = defaultdict(int)
+        for row in ap_info_rows:
+            ap_type = str(row.get("type", "") or "").strip() or "(kein Typ)"
+            ap_by_type[ap_type] += 1
+        ap_bom_rows = [
+            {
+                "category": "Anschlusspunkte",
+                "item_type": "ap",
+                "key": ap_type,
+                "description": ap_type,
+                "unit": "Stk",
+                "quantity": count,
+                "manufacturer": "",
+                "article_number": "",
+                "note": "",
+            }
+            for ap_type, count in sorted(ap_by_type.items(), key=lambda kv: kv[0].lower())
+        ]
+
+        hkv_line_by_type: dict[str, float] = defaultdict(float)
+        for row in hl_rows:
+            line_type = str(row.get("type", "") or "").strip() or "(unbekannt)"
+            hkv_line_by_type[line_type] += float(row.get("length_m", 0.0) or 0.0)
+        hkv_line_bom_rows = [
+            {
+                "category": "HKV-Leitungen",
+                "item_type": "hkv_line",
+                "key": line_type,
+                "description": line_type,
+                "unit": "m",
+                "quantity": length_m,
+                "manufacturer": "",
+                "article_number": "",
+                "note": "",
+            }
+            for line_type, length_m in sorted(hkv_line_by_type.items(), key=lambda kv: kv[0].lower())
+        ]
+
+        uv_device_summary: dict[tuple[str, str, str, str], dict] = {}
+        uv_busbar_summary: dict[tuple[str, int, int], dict] = {}
+        for uv in uv_data:
+            uv_name = str(uv.get("ap_name", "") or "").strip() or str(uv.get("ap_id", "") or "UV")
+            room = str(uv.get("room", "") or "").strip()
+            for slot in uv.get("slots", []) or []:
+                device_type = str(slot.get("device_type", "") or "").strip() or "(leer)"
+                te_size = max(1, int(slot.get("te_size", 1) or 1))
+                manufacturer = str(slot.get("manufacturer", "") or "").strip()
+                article_number = str(slot.get("article_number", "") or "").strip()
+                key = (uv_name, device_type, manufacturer, article_number)
+                if key not in uv_device_summary:
+                    uv_device_summary[key] = {
+                        "category": "UV-Geräte",
+                        "item_type": "uv_device",
+                        "key": device_type,
+                        "uv": uv_name,
+                        "room": room,
+                        "description": device_type,
+                        "unit": "Stk",
+                        "quantity": 0,
+                        "te_total": 0,
+                        "manufacturer": manufacturer,
+                        "article_number": article_number,
+                        "note": "",
+                    }
+                uv_device_summary[key]["quantity"] += 1
+                uv_device_summary[key]["te_total"] += te_size
+
+            for busbar in uv.get("busbars", []) or []:
+                phase = str(busbar.get("phase", "") or "").strip()
+                if not phase:
+                    continue
+                te_start = max(1, int(busbar.get("te_start", 1) or 1))
+                te_end = max(1, int(busbar.get("te_end", 1) or 1))
+                if te_end < te_start:
+                    te_start, te_end = te_end, te_start
+                te_count = self._safe_te_count(te_start, te_end)
+                key = (phase, te_start, te_end)
+                if key not in uv_busbar_summary:
+                    uv_busbar_summary[key] = {
+                        "category": "UV-Phasenschienen",
+                        "item_type": "uv_busbar",
+                        "phase": phase,
+                        "description": f"Phasenschiene {phase}",
+                        "te_start": te_start,
+                        "te_end": te_end,
+                        "unit": "TE",
+                        "quantity": 0,
+                        "uv_names": set(),
+                        "manufacturer": "",
+                        "article_number": "",
+                    }
+                uv_busbar_summary[key]["quantity"] += te_count
+                uv_busbar_summary[key]["uv_names"].add(uv_name)
+
+        uv_device_bom_rows = sorted(
+            uv_device_summary.values(),
+            key=lambda row: (
+                str(row.get("room", "")).lower(),
+                str(row.get("uv", "")).lower(),
+                str(row.get("description", "")).lower(),
+            ),
+        )
+        uv_busbar_bom_rows = []
+        for row in sorted(
+            uv_busbar_summary.values(),
+            key=lambda item: (
+                str(item.get("phase", "")).lower(),
+                int(item.get("te_start", 0) or 0),
+                int(item.get("te_end", 0) or 0),
+            ),
+        ):
+            enriched = dict(row)
+            enriched["uv_names"] = ", ".join(sorted(row.get("uv_names", set())))
+            uv_busbar_bom_rows.append(enriched)
+
+        return {
+            "cable_bom_rows": cable_bom_rows,
+            "ap_bom_rows": ap_bom_rows,
+            "hkv_line_bom_rows": hkv_line_bom_rows,
+            "uv_device_bom_rows": uv_device_bom_rows,
+            "uv_busbar_bom_rows": uv_busbar_bom_rows,
+            "custom_bom_rows": [],
+        }
+
+    def _collect_export_data(self) -> dict:
+        hk_rows, t_supply, t_return = self._collect_length_overview_rows()
+
+        hkv_sum: dict[str, dict] = defaultdict(lambda: {"volume_flow": 0.0, "power": 0.0})
+        for row in hk_rows:
+            dist = str(row.get("distributor", "") or "")
+            if dist:
+                hkv_sum[dist]["volume_flow"] += float(row.get("volume_flow_lmin", 0.0) or 0.0)
+                hkv_sum[dist]["power"] += float(row.get("power_w", 0.0) or 0.0)
+
+        kv_rows: list[dict] = []
+        kv_sum: dict[str, float] = defaultdict(float)
+        for cable_id, cable in self._document.elements["elec_cables"].items():
+            mm_per_px = max(float(self.canvas.get_mm_per_px()), 1e-9)
+            fp = self._document.floorplans.get(cable.floor_plan_id or "")
+            if fp is not None and float(fp.mm_per_px) > 0:
+                mm_per_px = float(fp.mm_per_px)
+            length_m = self.canvas.get_elec_cable_length_px(cable_id) * mm_per_px / 1000.0
+
+            start_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "")
+            end_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "")
+            start_point = self._document.elements["elec_points"].get(start_id)
+            end_point = self._document.elements["elec_points"].get(end_id)
+
+            start_height = float(start_point.height_from_floor if start_point else 0.0)
+            end_height = float(end_point.height_from_floor if end_point else 0.0)
+            length_m += (start_height + end_height) / 100.0
+
+            row = {
+                "name": str(cable.name or cable_id),
+                "type": str(cable.cable_type or ""),
+                "comment": str(cable.comment or ""),
+                "length_m": length_m,
+                "start_ap": str(start_point.name or start_id) if start_id else "",
+                "end_ap": str(end_point.name or end_id) if end_id else "",
+                "start_height_cm": start_height,
+                "end_height_cm": end_height,
+                "start_position": str(start_point.position or "") if start_point else "",
+                "end_position": str(end_point.position or "") if end_point else "",
+                "start_device": str(start_point.smarthome_device or "") if start_point else "",
+                "start_device_color": str(start_point.smarthome_device_color or "") if start_point else "",
+                "start_note": str(start_point.note or "") if start_point else "",
+                "end_device": str(end_point.smarthome_device or "") if end_point else "",
+                "end_device_color": str(end_point.smarthome_device_color or "") if end_point else "",
+                "end_note": str(end_point.note or "") if end_point else "",
+            }
+            kv_rows.append(row)
+            kv_sum[row["type"]] += length_m
+
+        ap_cables = self._build_ap_cable_map(kv_rows)
+        room_ap_connections = self._build_room_ap_connection_map(kv_rows)
+        ap_type_counts = self._collect_ap_type_counts()
+        point_id_to_room_name = self._collect_point_id_to_room_name()
+
+        ap_info_rows: list[dict] = []
+        for pid, point in self._document.elements["elec_points"].items():
+            ap_info_rows.append(
+                {
+                    "name": str(point.name or pid),
+                    "type": self._describe_ap_type(point),
+                    "room": point_id_to_room_name.get(pid, "(ohne Raum)"),
+                    "position": str(point.position or "").strip(),
+                    "height_cm": float(point.height_from_floor or 0.0),
+                    "device_color": str(point.smarthome_device_color or "").strip(),
+                    "device": str(point.smarthome_device or "").strip(),
+                    "note": str(point.note or "").strip(),
+                }
+            )
+        ap_info_rows.sort(key=lambda row: (str(row.get("room", "")).lower(), str(row.get("name", "")).lower()))
+
+        uv_rows = self._collect_uv_rows(point_id_to_room_name)
+        uv_data = self._collect_uv_data(point_id_to_room_name)
+        up_distribution_rows = self._collect_up_distribution_rows(point_id_to_room_name)
+
+        hl_rows: list[dict] = []
+        hl_sum: dict[str, float] = defaultdict(float)
+        for line_id, line in self._document.elements["hkv_lines"].items():
+            mm_per_px = max(float(self.canvas.get_mm_per_px()), 1e-9)
+            fp = self._document.floorplans.get(line.floor_plan_id or "")
+            if fp is not None and float(fp.mm_per_px) > 0:
+                mm_per_px = float(fp.mm_per_px)
+            length_m = self.canvas.get_hkv_line_length_px(line_id) * mm_per_px / 1000.0
+            start_id = str(line.start_hkv or line.geom.get("hkv_line_start") or "")
+            end_id = str(line.end_hkv or line.geom.get("hkv_line_end") or "")
+            start_hkv = self._document.elements["hkv_points"].get(start_id)
+            end_hkv = self._document.elements["hkv_points"].get(end_id)
+            row = {
+                "name": str(line.name or line_id),
+                "type": str(line.data.get("type", "") or ""),
+                "length_m": length_m,
+                "start_hkv": str(start_hkv.name or start_id) if start_id else "",
+                "end_hkv": str(end_hkv.name or end_id) if end_id else "",
+            }
+            hl_rows.append(row)
+            hl_sum[row["type"]] += length_m
+
+        bom_data = self._collect_bom_rows(
+            hk_rows=hk_rows,
+            kv_rows=kv_rows,
+            ap_info_rows=ap_info_rows,
+            uv_data=uv_data,
+            hl_rows=hl_rows,
+        )
+
+        return {
+            "t_supply": t_supply,
+            "t_return": t_return,
+            "hk_rows": hk_rows,
+            "hkv_sum": hkv_sum,
+            "kv_rows": kv_rows,
+            "kv_sum": kv_sum,
+            "ap_cables": ap_cables,
+            "room_ap_connections": room_ap_connections,
+            "ap_type_counts": ap_type_counts,
+            "ap_info_rows": ap_info_rows,
+            "uv_rows": uv_rows,
+            "uv_data": uv_data,
+            "up_distribution_rows": up_distribution_rows,
+            "hl_rows": hl_rows,
+            "hl_sum": hl_sum,
+            **bom_data,
+        }
+
+    def _draw_pdf_title(self, painter, page_rect: QRectF, title: str) -> tuple[QRectF, QRectF]:
+        from PySide6.QtGui import QFont  # noqa: PLC0415
+
+        title_font = QFont(painter.font())
+        title_font.setPointSizeF(max(10.0, title_font.pointSizeF() + 4.0))
+        painter.setFont(title_font)
+        title_h = max(36.0, page_rect.height() * 0.06)
+        title_rect = QRectF(page_rect.x(), page_rect.y(), page_rect.width(), title_h)
+        painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, title)
+        content_rect = QRectF(page_rect.x(), title_rect.bottom() + 8.0, page_rect.width(), max(1.0, page_rect.bottom() - (title_rect.bottom() + 8.0)))
+        return title_rect, content_rect
+
+    def _draw_pdf_table(
+        self,
+        painter,
+        writer,
+        title: str,
+        headers: list[str],
+        rows: list[list[str]],
+        col_widths: list[float] | None = None,
+    ) -> None:
+        from PySide6.QtGui import QBrush, QFont, QPen  # noqa: PLC0415
+
+        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        title_rect, content_rect = self._draw_pdf_title(painter, page_rect, title)
+        _ = title_rect
+        body_font = QFont(painter.font())
+        body_font.setPointSizeF(max(7.0, body_font.pointSizeF() - 1.0))
+        painter.setFont(body_font)
+
+        n_cols = max(1, len(headers))
+        if col_widths and len(col_widths) == n_cols and sum(col_widths) > 0:
+            total_w = float(sum(col_widths))
+            widths = [content_rect.width() * (w / total_w) for w in col_widths]
+        else:
+            widths = [content_rect.width() / n_cols] * n_cols
+
+        header_h = max(24.0, page_rect.height() * 0.036)
+        min_row_h = max(20.0, page_rect.height() * 0.030)
+        cell_pad = 4.0
+        y = content_rect.y() + 6.0
+        bottom_margin = 6.0
+        fm = painter.fontMetrics()
+
+        def draw_header(_y: float):
+            x = content_rect.x()
+            painter.save()
+            painter.setFont(QFont(body_font.family(), body_font.pointSize() + 1, QFont.Bold))
+            painter.setPen(QPen(Qt.black, 1.0))
+            for idx, header in enumerate(headers):
+                cell = QRectF(x, _y, widths[idx], header_h)
+                painter.fillRect(cell, QBrush(QColor("#e0e0e0")))
+                painter.drawRect(cell)
+                painter.drawText(
+                    cell.adjusted(cell_pad, cell_pad, -cell_pad, -cell_pad),
+                    Qt.AlignCenter | Qt.TextWordWrap,
+                    header,
+                )
+                x += widths[idx]
+            painter.restore()
+
+        def row_height(values: list[str]) -> float:
+            height = min_row_h
+            for idx, value in enumerate(values):
+                inner_w = max(1, int(widths[idx] - 2 * cell_pad))
+                br = fm.boundingRect(0, 0, inner_w, 100000, Qt.TextWordWrap | Qt.AlignLeft, str(value))
+                height = max(height, br.height() + 2 * cell_pad)
+            return height
+
+        draw_header(y)
+        y += header_h
+        for row_index, row in enumerate(rows):
+            data_row = [str(row[idx]) if idx < len(row) else "" for idx in range(n_cols)]
+            rh = row_height(data_row)
+            if y + rh > content_rect.bottom() - bottom_margin:
+                writer.newPage()
+                page_rect2 = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+                _, content_rect2 = self._draw_pdf_title(painter, page_rect2, f"{title} (Fortsetzung)")
+                content_rect = content_rect2
+                y = content_rect.y() + 6.0
+                if col_widths and len(col_widths) == n_cols and sum(col_widths) > 0:
+                    total_w = float(sum(col_widths))
+                    widths = [content_rect.width() * (w / total_w) for w in col_widths]
+                else:
+                    widths = [content_rect.width() / n_cols] * n_cols
+                painter.setFont(body_font)
+                draw_header(y)
+                y += header_h
+
+            x = content_rect.x()
+            if row_index % 2 == 1:
+                painter.fillRect(QRectF(content_rect.x(), y, content_rect.width(), rh), QBrush(QColor("#f5f5f5")))
+            for idx, value in enumerate(data_row):
+                cell = QRectF(x, y, widths[idx], rh)
+                painter.drawRect(cell)
+                align = (Qt.AlignRight | Qt.AlignTop) if idx >= 2 else (Qt.AlignLeft | Qt.AlignTop)
+                painter.drawText(
+                    cell.adjusted(cell_pad, cell_pad, -cell_pad, -cell_pad),
+                    align | Qt.TextWordWrap,
+                    value,
+                )
+                x += widths[idx]
+            y += rh
+
+    def _render_pdf_export_page(
+        self,
+        painter,
+        writer,
+        page: dict,
+        hk_rows: list[dict],
+        t_supply: float,
+        t_return: float,
+        ap_rows: list[list[str]],
+        cable_rows: list[list[str]],
+        export_data: dict | None = None,
+    ) -> None:
+        ptype = str(page.get("type", "plan")).strip().lower()
+        title = str(page.get("title") or "Seite").strip() or "Seite"
+
+        if ptype == "lengths":
+            rows = [
+                [
+                    str(r.get("id", "")),
+                    str(r.get("name", "")),
+                    f"{float(r.get('area_m2', 0.0)):.2f} m²",
+                    f"{float(r.get('route_m', 0.0)):.2f} m",
+                    f"{float(r.get('supply_m', 0.0)):.2f} m",
+                    f"{float(r.get('total_m', 0.0)):.2f} m",
+                ]
+                for r in hk_rows
+            ]
+            self._draw_pdf_table(
+                painter,
+                writer,
+                title,
+                ["ID", "Name", "Fläche", "Rohr", "Zuleitung", "Gesamt"],
+                rows,
+                col_widths=[0.8, 1.6, 1.0, 1.0, 1.0, 1.0],
+            )
+            return
+
+        if ptype == "hydraulics":
+            rows = [
+                [
+                    str(r.get("id", "")),
+                    str(r.get("name", "")),
+                    f"{float(r.get('power_w', 0.0)):.0f} W",
+                    f"{float(r.get('volume_flow_lmin', 0.0)):.2f} l/min",
+                    f"{float(r.get('pressure_drop_mbar', 0.0)):.0f} mbar",
+                ]
+                for r in hk_rows
+            ]
+            self._draw_pdf_table(
+                painter,
+                writer,
+                f"{title} (Vorlauf {t_supply:.1f}°C / Rücklauf {t_return:.1f}°C)",
+                ["ID", "Name", "Leistung", "Volumenstrom", "Druckverlust"],
+                rows,
+                col_widths=[0.9, 1.6, 1.0, 1.1, 1.1],
+            )
+            return
+
+        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        _, content_rect = self._draw_pdf_title(painter, page_rect, title)
+        source_rect = self._effective_pdf_source_rect(page)
+
+        img = self.canvas.render_for_export(
+            source_rect=source_rect,
+            output_w=int(content_rect.width()),
+            output_h=int(content_rect.height()),
+        )
+        painter.drawImage(content_rect, img)
+
+        sections = set(page.get("table_sections") or [])
+        if ptype == "heating":
+            if "hk_lengths" in sections and hk_rows:
+                writer.newPage()
+                rows = [
+                    [
+                        str(r.get("id", "")),
+                        str(r.get("name", "")),
+                        f"{float(r.get('total_m', 0.0)):.2f} m",
+                    ]
+                    for r in hk_rows
+                ]
+                self._draw_pdf_table(painter, writer, "Heizkreise – Einzellängen", ["ID", "Name", "Gesamt"], rows)
+            if "hk_hydraulics" in sections and hk_rows:
+                writer.newPage()
+                rows = [
+                    [
+                        str(r.get("id", "")),
+                        str(r.get("name", "")),
+                        f"{float(r.get('power_w', 0.0)):.0f} W",
+                        f"{float(r.get('volume_flow_lmin', 0.0)):.2f} l/min",
+                        f"{float(r.get('pressure_drop_mbar', 0.0)):.0f} mbar",
+                    ]
+                    for r in hk_rows
+                ]
+                self._draw_pdf_table(painter, writer, "Hydraulische Übersicht", ["ID", "Name", "Leistung", "Vol.-Strom", "Δp"], rows)
+            if "hk_hkv_lines" in sections and export_data and export_data.get("hl_rows"):
+                writer.newPage()
+                rows = [
+                    [
+                        str(r.get("name", "")),
+                        str(r.get("type", "")),
+                        str(r.get("start_hkv", "")),
+                        str(r.get("end_hkv", "")),
+                        f"{float(r.get('length_m', 0.0)):.2f} m",
+                    ]
+                    for r in export_data.get("hl_rows", [])
+                ]
+                self._draw_pdf_table(
+                    painter,
+                    writer,
+                    "HKV-Leitungen",
+                    ["Name", "Typ", "Start-HKV", "End-HKV", "Länge"],
+                    rows,
+                    col_widths=[1.4, 1.2, 1.3, 1.3, 0.8],
+                )
+
+        if ptype == "elektro":
+            if "el_ap_infos" in sections and ap_rows:
+                writer.newPage()
+                self._draw_pdf_table(
+                    painter,
+                    writer,
+                    "Elektro – Anschlusspunkte",
+                    ["Name", "Symbol", "Position", "Höhe", "Notiz"],
+                    ap_rows,
+                )
+            if "el_kabel" in sections and cable_rows:
+                writer.newPage()
+                self._draw_pdf_table(
+                    painter,
+                    writer,
+                    "Elektro – Kabelverbindungen",
+                    ["Name", "Typ", "Start", "Ende", "Länge"],
+                    cable_rows,
+                    col_widths=[1.6, 1.2, 1.4, 1.4, 0.9],
+                )
+            if export_data:
+                if "el_ap_types" in sections and export_data.get("ap_type_counts"):
+                    writer.newPage()
+                    rows = [
+                        [str(k), str(v)]
+                        for k, v in sorted(export_data.get("ap_type_counts", {}).items(), key=lambda item: str(item[0]).lower())
+                    ]
+                    self._draw_pdf_table(
+                        painter,
+                        writer,
+                        "Anschlusspunkt-Typen",
+                        ["Typ", "Anzahl"],
+                        rows,
+                    )
+
+                if "el_ap_connections" in sections and export_data.get("ap_cables"):
+                    writer.newPage()
+                    ap_rows_ext: list[list[str]] = []
+                    for ap_name in sorted(export_data.get("ap_cables", {}).keys()):
+                        for conn in export_data["ap_cables"][ap_name]:
+                            ap_rows_ext.append(
+                                [
+                                    ap_name,
+                                    str(conn.get("cable", "")),
+                                    str(conn.get("type", "")),
+                                    str(conn.get("role", "")),
+                                    str(conn.get("ap_device", "")),
+                                    str(conn.get("ap_device_color", "")),
+                                    str(conn.get("ap_note", "")),
+                                    str(conn.get("cable_note", "")),
+                                    f"{float(conn.get('length_m', 0.0)):.2f} m",
+                                ]
+                            )
+                    self._draw_pdf_table(
+                        painter,
+                        writer,
+                        "Anschlusspunkte – Kabelzuordnung",
+                        ["AP", "Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "Länge"],
+                        ap_rows_ext,
+                        col_widths=[1.0, 1.0, 0.8, 0.8, 1.0, 0.7, 1.4, 1.4, 0.8],
+                    )
+
+                if "el_rooms" in sections and export_data.get("room_ap_connections"):
+                    writer.newPage()
+                    rows = [
+                        [
+                            str(r.get("room", "")),
+                            str(r.get("ap", "")),
+                            str(r.get("ap_device", "")),
+                            str(r.get("ap_device_color", "")),
+                            str(r.get("ap_note", "")),
+                            str(r.get("cable", "")),
+                            str(r.get("type", "")),
+                            str(r.get("cable_note", "")),
+                            str(r.get("target_ap", "")),
+                            f"{float(r.get('length_m', 0.0)):.2f} m",
+                        ]
+                        for r in export_data.get("room_ap_connections", [])
+                    ]
+                    self._draw_pdf_table(
+                        painter,
+                        writer,
+                        "AP-Zuordnung nach Räumen",
+                        ["Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Ziel-AP", "Länge"],
+                        rows,
+                        col_widths=[1.0, 0.9, 0.9, 0.7, 1.1, 0.9, 0.8, 1.1, 0.9, 0.7],
+                    )
+
+                if "el_uv" in sections and export_data.get("uv_rows"):
+                    writer.newPage()
+                    rows = [
+                        [
+                            str(r.get("ap", "")),
+                            str(r.get("room", "")),
+                            f"{r.get('rows', 0)}x{r.get('modules_per_row', 0)}",
+                            str(r.get("row", "")),
+                            str(r.get("slot", "")),
+                            str(r.get("device_type", "")),
+                            str(r.get("spec", "")),
+                            str(r.get("label", "")),
+                            str(r.get("assignment", "")),
+                            str(r.get("note", "")),
+                        ]
+                        for r in export_data.get("uv_rows", [])
+                    ]
+                    self._draw_pdf_table(
+                        painter,
+                        writer,
+                        "Unterverteilungen (UV)",
+                        ["UV", "Raum", "Raster", "Reihe", "TE", "Belegung", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"],
+                        rows,
+                        col_widths=[1.1, 1.0, 0.8, 0.6, 0.6, 1.0, 0.9, 1.2, 1.2, 1.2],
+                    )
+
+                if "el_up_distribution" in sections and export_data.get("up_distribution_rows"):
+                    writer.newPage()
+                    rows = [
+                        [
+                            str(r.get("ap", "")),
+                            str(r.get("room", "")),
+                            str(r.get("incoming_cable", "")),
+                            str(r.get("outgoing_cables", "")),
+                            str(r.get("from_conductor", "")),
+                            str(r.get("to_cable", "")),
+                            str(r.get("to_conductor", "")),
+                            str(r.get("mapping_note", "")),
+                            str(r.get("distribution_note", "")),
+                        ]
+                        for r in export_data.get("up_distribution_rows", [])
+                    ]
+                    self._draw_pdf_table(
+                        painter,
+                        writer,
+                        "Unterputz-Verteilungen",
+                        ["AP", "Raum", "Zuleitung", "Abgänge", "Ader (Zul.)", "Abgehendes Kabel", "Ader (Abg.)", "Zuordn.-Notiz", "Verteilungs-Notiz"],
+                        rows,
+                        col_widths=[0.9, 0.9, 1.1, 1.2, 0.8, 1.1, 0.8, 1.2, 1.2],
+                    )
+
+                if "el_bom" in sections:
+                    bom_rows = []
+                    for section_name, key in [
+                        ("Elektro-Kabel", "cable_bom_rows"),
+                        ("Anschlusspunkte", "ap_bom_rows"),
+                        ("HKV-Leitungen", "hkv_line_bom_rows"),
+                        ("UV-Geräte", "uv_device_bom_rows"),
+                        ("UV-Phasenschienen", "uv_busbar_bom_rows"),
+                        ("Manuelle Positionen", "custom_bom_rows"),
+                    ]:
+                        for row in export_data.get(key, []) or []:
+                            note = ""
+                            if key == "uv_device_bom_rows":
+                                note = f"TE: {row.get('te_total', 0)}"
+                            elif key == "uv_busbar_bom_rows":
+                                note = f"TE {row.get('te_start', '')}-{row.get('te_end', '')}; UV: {row.get('uv_names', '')}"
+                            else:
+                                note = str(row.get("note", "") or "")
+                            bom_rows.append(
+                                [
+                                    section_name,
+                                    str(row.get("description", "")),
+                                    str(row.get("manufacturer", "")),
+                                    str(row.get("article_number", "")),
+                                    str(row.get("unit", "")),
+                                    f"{float(row.get('quantity', 0.0) or 0.0):.2f}",
+                                    note,
+                                ]
+                            )
+                    if bom_rows:
+                        writer.newPage()
+                        self._draw_pdf_table(
+                            painter,
+                            writer,
+                            "Stückliste",
+                            ["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz"],
+                            bom_rows,
+                            col_widths=[1.0, 1.6, 1.1, 1.2, 0.7, 0.7, 1.2],
+                        )
+
+                if "el_uv_busbars" in sections and export_data.get("uv_busbar_bom_rows"):
+                    writer.newPage()
+                    rows = [
+                        [
+                            str(r.get("phase", "")),
+                            str(r.get("te_start", "")),
+                            str(r.get("te_end", "")),
+                            f"{float(r.get('quantity', 0.0) or 0.0):.2f}",
+                            str(r.get("uv_names", "")),
+                        ]
+                        for r in export_data.get("uv_busbar_bom_rows", [])
+                    ]
+                    self._draw_pdf_table(
+                        painter,
+                        writer,
+                        "UV-Phasenschienen",
+                        ["Phase", "TE Start", "TE Ende", "Menge (TE)", "UV"],
+                        rows,
+                        col_widths=[0.8, 0.9, 0.9, 1.0, 2.0],
+                    )
+
+                if any(key in sections for key in {"schaltplan_uv", "schaltplan_stromkreise", "schaltplan_hierarchie"}):
+                    ap_nodes, cable_edges, room_map = self._build_schema_data()
+                    ap_nodes_dict = {node.point_id: node for node in ap_nodes}
+                    cable_edges_dict = {edge.cable_id: edge for edge in cable_edges}
+                    uv_data = export_data.get("uv_data", [])
+
+                    if "schaltplan_uv" in sections and uv_data:
+                        writer.newPage()
+                        rows = [
+                            [
+                                str(uv.get("ap_name", "")),
+                                str(uv.get("room", "")),
+                                f"{uv.get('rows', 0)}x{uv.get('modules_per_row', 0)}",
+                                str(len(uv.get("slots", []) or [])),
+                            ]
+                            for uv in uv_data
+                        ]
+                        self._draw_pdf_table(
+                            painter,
+                            writer,
+                            "Schaltplan – UV-Übersicht",
+                            ["UV", "Raum", "Raster", "Anzahl Slots"],
+                            rows,
+                        )
+
+                    if "schaltplan_stromkreise" in sections and uv_data:
+                        circuits_rows: list[list[str]] = []
+                        for uv in uv_data:
+                            uv_id = str(uv.get("ap_id", "") or "")
+                            uv_name = str(uv.get("ap_name", uv_id) or uv_id)
+                            circuits = get_uv_circuits(uv_id, ap_nodes_dict, cable_edges_dict, room_map)
+                            for circuit in circuits:
+                                circuits_rows.append(
+                                    [
+                                        uv_name,
+                                        str(circuit.get("row", "")),
+                                        str(circuit.get("slot", "")),
+                                        str(circuit.get("device_type", "")),
+                                        str(circuit.get("spec", "")),
+                                        str(circuit.get("label", "")),
+                                        str(circuit.get("cable_id", "")),
+                                        str(circuit.get("end_ap_name", "")),
+                                        str(circuit.get("end_ap_room", "")),
+                                        str(circuit.get("note", "")),
+                                    ]
+                                )
+                        if circuits_rows:
+                            writer.newPage()
+                            self._draw_pdf_table(
+                                painter,
+                                writer,
+                                "Schaltplan – Stromkreise",
+                                ["UV", "Reihe", "TE", "Gerät", "Kennz.", "Bezeichnung", "Kabel", "Verbraucher", "Raum", "Notiz"],
+                                circuits_rows,
+                            )
+
+                    if "schaltplan_hierarchie" in sections:
+                        hierarchy = build_uv_hierarchy(ap_nodes_dict, cable_edges_dict)
+
+                        def _flatten_edges(nodes: list[dict], parent: dict | None = None, out: list[list[str]] | None = None) -> list[list[str]]:
+                            out = out if out is not None else []
+                            for node in nodes:
+                                if parent is not None:
+                                    out.append(
+                                        [
+                                            str(parent.get("ap_type", "")).upper(),
+                                            str(parent.get("name", "")),
+                                            str(node.get("ap_type", "")).upper(),
+                                            str(node.get("name", "")),
+                                        ]
+                                    )
+                                _flatten_edges(node.get("children", []), node, out)
+                            return out
+
+                        rows = _flatten_edges(hierarchy)
+                        writer.newPage()
+                        self._draw_pdf_table(
+                            painter,
+                            writer,
+                            "Schaltplan – Hierarchie",
+                            ["Typ Quelle", "Quelle", "Typ Ziel", "Ziel"],
+                            rows or [["", "Keine Hierarchie-Verbindungen vorhanden.", "", ""]],
+                        )
+
+    def _continue_export_pdf(self, pages: list[dict]) -> None:
+        enabled_pages = [p for p in pages if p.get("enabled", True)]
+        if not enabled_pages:
+            QMessageBox.information(self, "PDF-Export", "Keine aktive Exportseite ausgewählt.")
+            return
+
         path, _ = QFileDialog.getSaveFileName(
             self, "Als PDF exportieren", "projektbericht.pdf", "PDF (*.pdf)"
         )
@@ -2715,99 +4144,77 @@ class AppWindow(QMainWindow):
             return
 
         from PySide6.QtGui import QPageLayout, QPageSize, QPainter, QPdfWriter  # noqa: PLC0415
-        from PySide6.QtCore import QRectF  # noqa: PLC0415
 
         writer = QPdfWriter(path)
         writer.setResolution(150)
         writer.setPageSize(QPageSize(QPageSize.A4))
         writer.setPageOrientation(QPageLayout.Landscape)
 
+        progress = QProgressDialog("PDF wird exportiert…", "Abbrechen", 0, len(enabled_pages), self)
+        progress.setWindowTitle("PDF-Export")
+        progress.setMinimumDuration(0)
+        progress.setModal(True)
+        progress.setValue(0)
+        QApplication.processEvents()
+
         painter = QPainter()
         if not painter.begin(writer):
+            progress.close()
             QMessageBox.critical(self, "PDF-Export", "PDF konnte nicht erstellt werden.")
             return
 
+        saved_vis = self._save_all_visibility()
+        cancelled = False
         try:
-            page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
-            img = self.canvas.render_for_export(
-                output_w=int(page_rect.width()),
-                output_h=int(page_rect.height()),
-            )
-            painter.drawImage(page_rect, img)
+            export_data = self._collect_export_data()
+            hk_rows = export_data.get("hk_rows", [])
+            t_supply = float(export_data.get("t_supply", self._document.settings.get("t_supply", 35.0)))
+            t_return = float(export_data.get("t_return", self._document.settings.get("t_return", 30.0)))
+            ap_rows, cable_rows = self._collect_pdf_electro_rows()
+            for idx, page in enumerate(enabled_pages):
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+                if idx > 0:
+                    writer.newPage()
+                self._apply_page_visibility(page)
+                self._render_pdf_export_page(
+                    painter,
+                    writer,
+                    page,
+                    hk_rows,
+                    t_supply,
+                    t_return,
+                    ap_rows,
+                    cable_rows,
+                    export_data,
+                )
+                progress.setValue(idx + 1)
+                QApplication.processEvents()
         finally:
             painter.end()
+            self._restore_all_visibility(saved_vis)
+            self.canvas.update()
+            progress.close()
 
+        if cancelled:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.statusBar().showMessage("PDF-Export abgebrochen.", 3000)
+            return
+
+        self._pdf_export_pages = pages
+        self._mark_dirty()
         self.log.success(f"PDF exportiert: {path}")
         self.statusBar().showMessage(f"PDF exportiert: {path}", 4000)
 
-    def _export_kicad(self) -> None:
-        if self._project_path is None:
-            QMessageBox.warning(
-                self,
-                "Projekt nicht gespeichert",
-                "Bitte speichern Sie das Projekt zuerst.",
-            )
+    def _export_pdf(self) -> None:
+        pages = self._open_pdf_export_config_dialog()
+        if pages is None:
             return
-
-        suggested = self._project_path.with_suffix(".kicad_sch").name
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "KiCad-Export",
-            str(self._project_path.parent / suggested),
-            "KiCad Schaltplan (*.kicad_sch);;Alle Dateien (*)",
-        )
-        if not path:
-            return
-
-        try:
-            from logic.kicad_export import export_project_to_kicad  # noqa: PLC0415
-        except ImportError as exc:
-            QMessageBox.critical(self, "KiCad-Export", f"Modul nicht gefunden: {exc}")
-            return
-
-        project_dict = self._collect_project_dict()
-        success, message = export_project_to_kicad(project_dict, path)
-        if success:
-            self.log.success(f"KiCad exportiert: {path}")
-            self.statusBar().showMessage(f"KiCad exportiert: {path}", 4000)
-        else:
-            QMessageBox.critical(self, "KiCad-Export fehlgeschlagen", message)
-            self.log.error(message)
-
-    def _export_qet(self) -> None:
-        if self._project_path is None:
-            QMessageBox.warning(
-                self,
-                "Projekt nicht gespeichert",
-                "Bitte speichern Sie das Projekt zuerst.",
-            )
-            return
-
-        suggested = self._project_path.with_suffix(".qet").name
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "QElectroTech-Export",
-            str(self._project_path.parent / suggested),
-            "QElectroTech (*.qet);;Alle Dateien (*)",
-        )
-        if not path:
-            return
-
-        try:
-            from logic.qet_export import QETExporter  # noqa: PLC0415
-        except ImportError as exc:
-            QMessageBox.critical(self, "QET-Export", f"Modul nicht gefunden: {exc}")
-            return
-
-        project_dict = self._collect_project_dict()
-        try:
-            exporter = QETExporter(project_dict)
-            exporter.export_to_file(path)
-            self.log.success(f"QET exportiert: {path}")
-            self.statusBar().showMessage(f"QET exportiert: {path}", 4000)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "QET-Export fehlgeschlagen", str(exc))
-            self.log.error(str(exc))
+        self._continue_export_pdf(pages)
 
     def _collect_length_overview_rows(self) -> tuple[list[dict], float, float]:
         """Collect heating rows for the length / hydraulics overview."""

@@ -686,6 +686,294 @@ def test_selecting_element_syncs_active_floorplan(app, monkeypatch):
         window.deleteLater()
 
 
+def test_a4_navigator_and_properties_prefer_element_names(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QLabel  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_rooms": {
+                        "ER-13": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_rooms": {
+                        "ER-13": {
+                            "room_id": "ER-13",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Ankleide",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        item = window.navigator._find_item_by_id("ER-13")
+        assert item is not None
+        assert item.text(0) == "Ankleide"
+
+        window.properties.show_element("ER-13")
+        editor = window.properties._editors.get("ER-13")
+        assert editor is not None
+        header = editor.findChild(QLabel, "element_header")
+        assert header is not None
+        assert "Ankleide" in header.text()
+        assert "ER-13" not in header.text()
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_render_keeps_canvas_parent(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        parent_before = window.canvas.parentWidget()
+        assert parent_before is not None
+
+        img = window.canvas.render_for_export(output_w=640, output_h=360)
+
+        assert not img.isNull()
+        assert window.canvas.parentWidget() is parent_before
+    finally:
+        window.deleteLater()
+
+
+def test_export_menu_hides_kicad_and_qet_actions(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        export_action = next(
+            (a for a in window.menuBar().actions() if "export" in a.text().lower()),
+            None,
+        )
+        assert export_action is not None
+        export_menu = export_action.menu()
+        assert export_menu is not None
+        labels = [a.text() for a in export_menu.actions() if a.text()]
+
+        assert "PDF exportieren…" in labels
+        assert "SVG exportieren…" in labels
+        assert "Längen & Stückliste…" in labels
+        assert "KiCad exportieren…" not in labels
+        assert "QElectroTech exportieren…" not in labels
+    finally:
+        window.deleteLater()
+
+
+def test_export_pdf_smoke_writes_file(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    pdf_path = tmp_path / "report.pdf"
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *a, **k: (str(pdf_path), "PDF (*.pdf)")),
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "polygons": {
+                        "HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 150.0], [0.0, 150.0]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "visible": True,
+                            "diameter": 16.0,
+                            "spacing": 150.0,
+                            "wall_dist": 200.0,
+                            "room_temp": 20.0,
+                            "floor_covering": "Fliesen / Keramik",
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        monkeypatch.setattr(
+            window,
+            "_open_pdf_export_config_dialog",
+            lambda: window._normalize_pdf_export_pages(window._default_pdf_export_pages()),
+        )
+
+        window._export_pdf()
+
+        assert pdf_path.exists()
+        assert pdf_path.stat().st_size > 0
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_collects_extended_elektro_sections(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {
+                        "AP-1": [100.0, 100.0],
+                        "AP-2": [220.0, 100.0],
+                        "AP-3": [360.0, 100.0],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[100.0, 100.0], [220.0, 100.0]],
+                        "EK-2": [[220.0, 100.0], [360.0, 100.0]],
+                    },
+                    "cable_start_ap": {"EK-1": "AP-1", "EK-2": "AP-2"},
+                    "cable_end_ap": {"EK-1": "AP-2", "EK-2": "AP-3"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "UV Flur",
+                            "ap_type": "uv",
+                            "uv_config": {
+                                "rows": 1,
+                                "modules_per_row": 12,
+                                "slots": [
+                                    {
+                                        "row": 1,
+                                        "slot": 1,
+                                        "device_type": "LS",
+                                        "te_size": 1,
+                                        "assignment": "EK-1",
+                                    }
+                                ],
+                                "busbars": [{"phase": "L1", "te_start": 1, "te_end": 3}],
+                            },
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "UP Dose",
+                            "ap_type": "up_distribution",
+                            "up_distribution_config": {
+                                "incoming_cable_id": "EK-1",
+                                "outgoing_cable_ids": ["EK-2"],
+                                "mappings": [
+                                    {
+                                        "from_conductor": "L1",
+                                        "to_cable_id": "EK-2",
+                                        "to_conductor": "L1",
+                                    }
+                                ],
+                            },
+                        },
+                        "AP-3": {
+                            "point_id": "AP-3",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose",
+                            "ap_type": "standard",
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Zuleitung UV->UP",
+                            "type": "NYM-J 5x1,5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        },
+                        "EK-2": {
+                            "cable_id": "EK-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Abgang UP->AP",
+                            "type": "NYM-J 3x1,5",
+                            "start_ap": "AP-2",
+                            "end_ap": "AP-3",
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        sections = set(window._default_pdf_table_sections("elektro"))
+        data = window._collect_export_data()
+
+        assert "el_uv" in sections
+        assert "el_up_distribution" in sections
+        assert "el_bom" in sections
+        assert "el_uv_busbars" in sections
+        assert len(data["uv_rows"]) >= 1
+        assert len(data["up_distribution_rows"]) >= 1
+        assert len(data["cable_bom_rows"]) >= 1
+        assert len(data["uv_busbar_bom_rows"]) >= 1
+    finally:
+        window.deleteLater()
+
+
 def test_navigator_allows_selecting_non_workspace_elements_for_properties(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -3665,6 +3953,33 @@ def test_a1_measure_distance_persists_line(app):
         assert p2 == QPointF(100.0, 0.0)
         assert abs(mm_len - 1000.0) < 1e-9
         assert emitted == [True]
+    finally:
+        canvas.deleteLater()
+
+
+def test_a1_measure_distance_repaints_while_dragging_second_point(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas.start_measure()
+        canvas.mousePressEvent(_MouseEventStub(QPointF(0.0, 0.0), button=Qt.LeftButton))
+
+        update_calls = {"count": 0}
+        original_update = canvas.update
+
+        def _counting_update(*args, **kwargs):
+            update_calls["count"] += 1
+            return original_update(*args, **kwargs)
+
+        canvas.update = _counting_update
+        canvas.mouseMoveEvent(
+            _MouseEventStub(QPointF(50.0, 0.0), button=Qt.NoButton, buttons=Qt.NoButton)
+        )
+
+        assert update_calls["count"] > 0
     finally:
         canvas.deleteLater()
 
