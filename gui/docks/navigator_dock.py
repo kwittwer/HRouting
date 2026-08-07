@@ -19,8 +19,40 @@ from model.layers import LayerId
 
 _ID_ROLE = Qt.UserRole + 1
 _KIND_ROLE = Qt.UserRole + 2
+_BASE_BRUSH_ROLE = Qt.UserRole + 10
 
 _ACTIVE_COLOR = QColor("#4fc3f7")
+
+
+_HEATING_GROUP = (
+    "Heizung",
+    (
+        ("Heizkreisverteiler", ("Hkv", "HkvLine")),
+        ("Heizkreise", ("Circuit",)),
+    ),
+)
+_ELECTRICAL_GROUP = (
+    "Elektro",
+    (
+        ("Räume", ("ElecRoom",)),
+        ("Anschlusspunkte", ("ElecPoint",)),
+        ("Kabel", ("ElecCable",)),
+    ),
+)
+_ANNOTATION_GROUP = (
+    "Texte",
+    (
+        ("Texte", ("TextAnnotation",)),
+    ),
+)
+
+
+def _index_element_types() -> dict[str, type[Element]]:
+    mapping = {cls.__name__: cls for cls in ELEMENT_TYPES}
+    return mapping
+
+
+_ELEMENT_TYPES_BY_NAME = _index_element_types()
 
 
 class NavigatorDock(QDockWidget):
@@ -53,6 +85,9 @@ class NavigatorDock(QDockWidget):
         self._tree = QTreeWidget(container)
         self._tree.setHeaderHidden(True)
         self._tree.setUniformRowHeights(True)
+        self._tree.setStyleSheet(
+            "QTreeWidget::item:selected { background-color: #4fc3f7; color: #0b1d2a; }"
+        )
         self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_double_clicked)
@@ -107,30 +142,7 @@ class NavigatorDock(QDockWidget):
             fp_item.setCheckState(0, self._to_state(document.is_visible(fp_id)))
             self._items[fp_id] = fp_item
 
-            for element_cls in ELEMENT_TYPES:
-                elements = document.elements_of(element_cls, fp_id)
-                if not elements:
-                    continue  # leere Kategorien werden gar nicht erzeugt
-                cat_item = QTreeWidgetItem(fp_item, [element_cls.CATEGORY_LABEL])
-                cat_item.setFlags(cat_item.flags() & ~Qt.ItemIsSelectable)
-                cat_item.setFlags(cat_item.flags() | Qt.ItemIsUserCheckable)
-                cat_item.setData(0, _KIND_ROLE, "category")
-                cat_item.setData(0, _ID_ROLE, element_cls.LAYER.value)
-                for element in sorted(elements, key=_sort_key):
-                    self._add_element_item(cat_item, element)
-                self._refresh_branch_state(cat_item)
-
-            furniture = [f for f in document.furniture.values()
-                         if f.floor_plan_id in ("", fp_id)]
-            if furniture:
-                cat_item = QTreeWidgetItem(fp_item, [Furniture.CATEGORY_LABEL])
-                cat_item.setFlags(cat_item.flags() & ~Qt.ItemIsSelectable)
-                cat_item.setFlags(cat_item.flags() | Qt.ItemIsUserCheckable)
-                cat_item.setData(0, _KIND_ROLE, "category")
-                cat_item.setData(0, _ID_ROLE, LayerId.FURNITURE.value)
-                for element in sorted(furniture, key=_sort_key):
-                    self._add_element_item(cat_item, element)
-                self._refresh_branch_state(cat_item)
+            self._build_floorplan_groups(fp_item, fp_id)
 
             self._refresh_branch_state(fp_item)
             fp_item.setExpanded(True)
@@ -155,9 +167,76 @@ class NavigatorDock(QDockWidget):
             self._to_state(self._document.is_visible(element.id) if self._document else True),
         )
         color = element.color
+        base_brush = QBrush()
         if color:
-            item.setForeground(0, QBrush(QColor(color)))
+            base_brush = QBrush(QColor(color))
+            item.setForeground(0, base_brush)
+        item.setData(0, _BASE_BRUSH_ROLE, base_brush)
         self._items[element.id] = item
+
+    def _new_group_item(self, parent: QTreeWidgetItem, label: str, layer: LayerId) -> QTreeWidgetItem:
+        group = QTreeWidgetItem(parent, [label])
+        group.setFlags(group.flags() & ~Qt.ItemIsSelectable)
+        group.setFlags(group.flags() | Qt.ItemIsUserCheckable)
+        group.setData(0, _KIND_ROLE, "category")
+        group.setData(0, _ID_ROLE, layer.value)
+        return group
+
+    def _build_floorplan_groups(self, fp_item: QTreeWidgetItem, fp_id: str) -> None:
+        document = self._document
+        if document is None:
+            return
+
+        self._build_nested_group(fp_item, fp_id, _HEATING_GROUP, LayerId.HEATING)
+        self._build_nested_group(fp_item, fp_id, _ELECTRICAL_GROUP, LayerId.ELECTRICAL)
+
+        furniture = [
+            f for f in document.furniture.values()
+            if f.floor_plan_id in ("", fp_id)
+        ]
+        if furniture:
+            furn_group = self._new_group_item(fp_item, Furniture.CATEGORY_LABEL, LayerId.FURNITURE)
+            for element in sorted(furniture, key=_sort_key):
+                self._add_element_item(furn_group, element)
+            self._refresh_branch_state(furn_group)
+
+        self._build_nested_group(fp_item, fp_id, _ANNOTATION_GROUP, LayerId.ANNOTATION)
+
+    def _build_nested_group(
+        self,
+        fp_item: QTreeWidgetItem,
+        fp_id: str,
+        group_spec: tuple[str, tuple[tuple[str, tuple[str, ...]], ...]],
+        layer: LayerId,
+    ) -> None:
+        document = self._document
+        if document is None:
+            return
+
+        group_label, categories = group_spec
+        prepared: list[tuple[str, list[Element]]] = []
+        for category_label, class_names in categories:
+            elements: list[Element] = []
+            for class_name in class_names:
+                element_cls = _ELEMENT_TYPES_BY_NAME.get(class_name)
+                if element_cls is None:
+                    continue
+                elements.extend(document.elements_of(element_cls, fp_id))
+            if elements:
+                prepared.append((category_label, sorted(elements, key=_sort_key)))
+
+        if not prepared:
+            return
+
+        top_group = self._new_group_item(fp_item, group_label, layer)
+        for category_label, elements in prepared:
+            cat_item = self._new_group_item(top_group, category_label, layer)
+            for element in elements:
+                self._add_element_item(cat_item, element)
+            self._refresh_branch_state(cat_item)
+            cat_item.setExpanded(True)
+        self._refresh_branch_state(top_group)
+        top_group.setExpanded(True)
 
     # ------------------------------------------------------------------
     def _highlight_active(self) -> None:
@@ -210,7 +289,27 @@ class NavigatorDock(QDockWidget):
             if kind == "element":
                 layer_value = item.data(0, _KIND_ROLE + 1)
                 enabled = layer_value in {layer.value for layer in self._selectable_layers}
-                item.setDisabled(not enabled)
+                # Navigator bleibt immer auswählbar; nur die Canvas-Interaktion
+                # ist workspace-gefiltert. Fremde Layer werden visuell gedimmt.
+                item.setDisabled(False)
+                font = item.font(0)
+                base_brush = item.data(0, _BASE_BRUSH_ROLE)
+                if not isinstance(base_brush, QBrush):
+                    base_brush = QBrush()
+                if enabled:
+                    font.setItalic(False)
+                    item.setFont(0, font)
+                    item.setForeground(0, base_brush)
+                    item.setToolTip(0, "")
+                else:
+                    font.setItalic(True)
+                    item.setFont(0, font)
+                    item.setForeground(0, _dim_brush(base_brush))
+                    item.setToolTip(
+                        0,
+                        "Im aktuellen Workspace im Canvas nicht direkt auswählbar, "
+                        "aber Eigenschaften sind editierbar.",
+                    )
             for index in range(item.childCount()):
                 self._apply_selectability_recursive(item.child(index))
         except RuntimeError:
@@ -243,11 +342,21 @@ class NavigatorDock(QDockWidget):
         self._tree.blockSignals(True)
         try:
             item.setCheckState(0, self._to_state(document.is_visible(element_id)))
+            element = document.get(element_id)
+            if element is not None:
+                label = element.name or element.id
+                if element.name:
+                    label = f"{element.id} · {element.name}"
+                item.setText(0, label)
+                color = str(element.color or "").strip()
+                base_brush = QBrush(QColor(color)) if color else QBrush()
+                item.setData(0, _BASE_BRUSH_ROLE, base_brush)
         except RuntimeError:
             pass
         finally:
             self._tree.blockSignals(False)
             self._suspend_item_events = False
+        self._apply_selectability()
 
     def _on_active_changed(self, _fp_id: str) -> None:
         self._highlight_active()
@@ -414,3 +523,15 @@ def _filter_item(item: QTreeWidgetItem, needle: str) -> bool:
     if needle and child_match:
         item.setExpanded(True)
     return visible
+
+
+def _dim_brush(base_brush: QBrush) -> QBrush:
+    color = base_brush.color()
+    if not color.isValid():
+        return QBrush(QColor("#8a8a8a"))
+    # Farbton beibehalten, Sättigung reduzieren und leicht aufhellen.
+    h, s, v, a = color.getHsv()
+    s = int(max(0, min(255, s * 0.25)))
+    v = int(max(0, min(255, v * 0.85 + 35)))
+    dimmed = QColor.fromHsv(h, s, v, a)
+    return QBrush(dimmed)

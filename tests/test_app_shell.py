@@ -93,10 +93,22 @@ def test_navigator_hides_empty_categories(app):
         root = dock._tree.invisibleRootItem()
         assert root.childCount() == 1
         fp_item = root.child(0)
-        labels = {fp_item.child(i).text(0) for i in range(fp_item.childCount())}
-        assert labels == {"Heizkreise"}
+        top_labels = {fp_item.child(i).text(0) for i in range(fp_item.childCount())}
+        assert top_labels == {"Heizung"}
+
+        heating_group = fp_item.child(0)
+        sub_labels = {heating_group.child(i).text(0) for i in range(heating_group.childCount())}
+        assert sub_labels == {"Heizkreise"}
     finally:
         dock.deleteLater()
+
+
+def _find_tree_child_by_text(parent, text: str):
+    for index in range(parent.childCount()):
+        child = parent.child(index)
+        if child.text(0) == text:
+            return child
+    return None
 
 
 def test_canvas_selection_filter(app):
@@ -155,7 +167,10 @@ def test_branch_visibility_toggle_no_rebuild(app, monkeypatch):
 
         root = window.navigator._tree.invisibleRootItem()
         fp_item = root.child(0)
-        cat_item = fp_item.child(0)  # "Anschlusspunkte"
+        elec_group = _find_tree_child_by_text(fp_item, "Elektro")
+        assert elec_group is not None
+        cat_item = _find_tree_child_by_text(elec_group, "Anschlusspunkte")
+        assert cat_item is not None
         cat_item.setCheckState(0, Qt.Unchecked)
 
         # Alle 5 APs müssen im Modell unsichtbar sein
@@ -516,6 +531,205 @@ def test_selecting_floorplan_updates_properties_dock(app, monkeypatch):
         window.navigator._on_selection_changed()
 
         assert window.properties._current_id == "grundriss-2"
+    finally:
+        window.deleteLater()
+
+
+def test_selecting_element_syncs_active_floorplan(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True},
+                        {"fp_id": "grundriss-2", "visible": True},
+                    ],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                        "grundriss-2": {"name": "OG", "visible": True, "file_path": ""},
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-2",
+                            "name": "Wohnzimmer",
+                        }
+                    },
+                },
+            }
+        )
+        document.active_floorplan_id = "grundriss-1"
+        window._set_document(document)
+
+        window._on_element_selected("HK-1")
+
+        assert window._document.active_floorplan_id == "grundriss-2"
+        assert window.properties._current_id == "HK-1"
+    finally:
+        window.deleteLater()
+
+
+def test_navigator_allows_selecting_non_workspace_elements_for_properties(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [100.0, 100.0]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                        }
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window._apply_workspace("floorplan")
+
+        item = window.navigator._find_item_by_id("AP-1")
+        assert item is not None
+        assert not item.isDisabled()
+
+        window.navigator._tree.setCurrentItem(item)
+        window.navigator._on_selection_changed()
+
+        assert window.properties._current_id == "AP-1"
+    finally:
+        window.deleteLater()
+
+
+def test_navigator_selection_keeps_canvas_highlight_for_non_workspace_element(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [100.0, 100.0]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                        }
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window._apply_workspace("floorplan")
+
+        window._on_element_selected("AP-1")
+
+        assert window.canvas._selected_item_id == "AP-1"
+        assert window.canvas._selected_item_type == "elec_point"
+    finally:
+        window.deleteLater()
+
+
+def test_property_color_change_updates_canvas_color(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "manual_routes": {"HK-1": [[0.0, 0.0], [100.0, 0.0]]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                        }
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "color": "#2a9d8f",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        window._document.elements["circuits"]["HK-1"].data["color"] = "#ff0000"
+        window._on_property_changed("HK-1", "color", "#ff0000")
+
+        assert "HK-1" in window.canvas._color_map
+        assert window.canvas._color_map["HK-1"].name().lower() == "#ff0000"
     finally:
         window.deleteLater()
 

@@ -3150,10 +3150,6 @@ class CanvasWidget(QWidget):
                 self._selected_item_type = None
         else:
             self._selected_item_type = None
-        if self._selected_item_id and self._selected_item_type:
-            if not self._is_selectable(self._selected_item_type, self._selected_item_id):
-                self._selected_item_id = None
-                self._selected_item_type = None
         self.update()
 
     def to_dict(self) -> dict:

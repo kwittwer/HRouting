@@ -5,11 +5,11 @@ Basis: Code-Analyse der neuen UI und Testprojekt `examples/Planung_Linda.hrp`
 
 ## Blocker
 
-- [ ] B-1 Navigator-Selektion gegen echten Canvas/Properties-Workflow pruefen und reparieren
+- [X] B-1 Navigator-Selektion gegen echten Canvas/Properties-Workflow pruefen und reparieren
     Das im Navigator selektierte element soll aktiv geschalten sein, Blau gekennzeichnet und dessen eigenschaften sollen im eigenschaften fenster sichtbar sein
-- [ ] B-2 `fp.polygon` im Grundriss-Workspace an selektierten Grundriss binden
-- [ ] B-3 `draw_polygon` fuer Grundriss und Einrichtung korrekt routen
-- [ ] B-4 Strucktur in Seitenleiste überarbeiten. Stuckur soll wie folgt sein:
+- [X] B-2 `fp.polygon` im Grundriss-Workspace an selektierten Grundriss binden
+- [X] B-3 `draw_polygon` fuer Grundriss und Einrichtung korrekt routen
+- [X] B-4 Strucktur in Seitenleiste überarbeiten. Stuckur soll wie folgt sein:
   Grundriss
   -> Heizung
     -> Heizkreisverteiler

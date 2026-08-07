@@ -15,7 +15,7 @@ import math
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -347,6 +347,11 @@ class AppWindow(QMainWindow):
         element = self._document.get(element_id)
         if element is None:
             return
+
+        if key == "color" and element_id not in self._document.floorplans:
+            color_value = str(element.data.get("color") or "").strip()
+            if color_value:
+                self.canvas.set_color(element_id, QColor(color_value))
 
         if key == "visible":
             self.canvas.set_element_visible(element_id, bool(element.visible))
@@ -1407,14 +1412,38 @@ class AppWindow(QMainWindow):
 
 
     def _on_element_selected(self, element_id: str) -> None:
-        self.canvas.set_selected_item(element_id)
-        self.properties.show_element(element_id)
+        self._select_element_everywhere(element_id, update_navigator=False)
 
     def _on_canvas_object_clicked(self, _obj_type: str, obj_id: str) -> None:
         if not obj_id:
             return
-        self.navigator.select(obj_id)
-        self.properties.show_element(obj_id)
+        self._select_element_everywhere(obj_id, update_navigator=True)
+
+    def _select_element_everywhere(self, element_id: str, *, update_navigator: bool) -> None:
+        if not element_id:
+            return
+        self._sync_active_floorplan_for_selection(element_id)
+        if update_navigator:
+            self.navigator.select(element_id)
+        self.canvas.set_selected_item(element_id)
+        self.properties.show_element(element_id)
+
+    def _sync_active_floorplan_for_selection(self, element_id: str) -> None:
+        if self._document is None:
+            return
+
+        target_floorplan = ""
+        if element_id in self._document.floorplans:
+            target_floorplan = element_id
+        else:
+            element = self._document.get(element_id)
+            if element is not None:
+                target_floorplan = str(element.floor_plan_id or "").strip()
+
+        if target_floorplan and target_floorplan in self._document.floorplans:
+            if self._document.active_floorplan_id != target_floorplan:
+                self._document.active_floorplan_id = target_floorplan
+            self.canvas.set_active_helper_floor(target_floorplan)
 
     def _on_floorplan_activated(self, fp_id: str) -> None:
         self._document.active_floorplan_id = fp_id
