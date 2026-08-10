@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtCore import QMimeData, QSettings, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QDrag, QFont
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDockWidget,
     QPushButton,
     QLineEdit,
@@ -94,6 +95,105 @@ def _index_element_types() -> dict[str, type[Element]]:
 _ELEMENT_TYPES_BY_NAME = _index_element_types()
 
 
+class _NavigatorTree(QTreeWidget):
+    """QTreeWidget mit Drag-and-Drop für Grundriss-Umzüge.
+
+    Elemente (kind=element/helper_line) können auf Grundriss-Items
+    (kind=floorplan) gezogen werden.  Das ``drop_onto_floorplan``-Signal
+    wird mit (element_id, floorplan_id) emittiert.
+    """
+
+    drop_onto_floorplan = Signal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(False)
+        self._drag_element_id: str = ""
+        self._drag_highlight_item: QTreeWidgetItem | None = None
+
+    # -- highlight helpers --------------------------------------------
+    def _clear_highlight(self) -> None:
+        if self._drag_highlight_item is not None:
+            try:
+                self._drag_highlight_item.setBackground(0, QBrush())
+            except RuntimeError:
+                pass
+            self._drag_highlight_item = None
+
+    def _set_highlight(self, item: QTreeWidgetItem | None) -> None:
+        if item is self._drag_highlight_item:
+            return
+        self._clear_highlight()
+        if item is not None:
+            try:
+                item.setBackground(0, QBrush(QColor("#1a5276")))
+                self._drag_highlight_item = item
+            except RuntimeError:
+                self._drag_highlight_item = None
+
+    # -- QAbstractItemView overrides ----------------------------------
+    def startDrag(self, supported_actions) -> None:
+        items = self.selectedItems()
+        if not items:
+            return
+        item = items[0]
+        kind = item.data(0, _KIND_ROLE)
+        if kind not in ("element", "helper_line"):
+            self._drag_element_id = ""
+            return
+        element_id = item.data(0, _ID_ROLE) or ""
+        if not element_id:
+            self._drag_element_id = ""
+            return
+        self._drag_element_id = element_id
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText(element_id)
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction)
+        self._drag_element_id = ""
+        self._clear_highlight()
+
+    def dragEnterEvent(self, event) -> None:
+        if self._drag_element_id:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if not self._drag_element_id:
+            self._clear_highlight()
+            event.ignore()
+            return
+        target = self.itemAt(event.position().toPoint())
+        if target is not None and target.data(0, _KIND_ROLE) == "floorplan":
+            self._set_highlight(target)
+            event.acceptProposedAction()
+        else:
+            self._clear_highlight()
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._clear_highlight()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        self._clear_highlight()
+        if not self._drag_element_id:
+            event.ignore()
+            return
+        target = self.itemAt(event.position().toPoint())
+        if target is not None and target.data(0, _KIND_ROLE) == "floorplan":
+            fp_id = target.data(0, _ID_ROLE) or ""
+            if fp_id:
+                self.drop_onto_floorplan.emit(self._drag_element_id, fp_id)
+        self._drag_element_id = ""
+        event.accept()
+        # Kein super().dropEvent() — verhindert das eingebaute Item-Verschieben.
+
+
 class NavigatorDock(QDockWidget):
     """Zeigt Grundrisse mit ihren Elementen; leere Kategorien entfallen."""
 
@@ -101,6 +201,7 @@ class NavigatorDock(QDockWidget):
     floorplan_activated = Signal(str)
     visibility_changed = Signal(str, bool)
     context_requested = Signal(str, str, object)
+    reassign_floorplan = Signal(str, str)  # element_id, new_fp_id
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigator", parent)
@@ -131,7 +232,7 @@ class NavigatorDock(QDockWidget):
 
         layout.addLayout(controls)
 
-        self._tree = QTreeWidget(container)
+        self._tree = _NavigatorTree(container)
         self._tree.setHeaderHidden(True)
         self._tree.setUniformRowHeights(True)
         self._tree.setStyleSheet(
@@ -144,6 +245,7 @@ class NavigatorDock(QDockWidget):
         self._tree.itemExpanded.connect(self._on_item_expanded_changed)
         self._tree.itemCollapsed.connect(self._on_item_expanded_changed)
         self._tree.customContextMenuRequested.connect(self._on_context_menu)
+        self._tree.drop_onto_floorplan.connect(self.reassign_floorplan)
         layout.addWidget(self._tree, 1)
 
         self.setWidget(container)
@@ -189,7 +291,7 @@ class NavigatorDock(QDockWidget):
             fp_item = QTreeWidgetItem(self._tree, [floorplan.name or fp_id])
             fp_item.setData(0, _ID_ROLE, fp_id)
             fp_item.setData(0, _KIND_ROLE, "floorplan")
-            fp_item.setFlags(fp_item.flags() | Qt.ItemIsUserCheckable)
+            fp_item.setFlags(fp_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled)
             fp_item.setCheckState(0, self._to_state(document.is_visible(fp_id)))
             self._items[fp_id] = fp_item
 
@@ -211,17 +313,20 @@ class NavigatorDock(QDockWidget):
         item.setData(0, _ID_ROLE, element.id)
         item.setData(0, _KIND_ROLE, "element")
         item.setData(0, _KIND_ROLE + 1, type(element).LAYER.value)
-        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled)
         item.setCheckState(
             0,
             self._to_state(self._document.is_visible(element.id) if self._document else True),
         )
         color = element.color
-        base_brush = QBrush()
         if color:
             base_brush = QBrush(QColor(color))
-            item.setForeground(0, base_brush)
+        else:
+            # Kein Element-Farbe gesetzt → helles Grau für dunklen Hintergrund
+            base_brush = QBrush(QColor("#cccccc"))
+        item.setForeground(0, base_brush)
         item.setData(0, _BASE_BRUSH_ROLE, base_brush)
+        item.setToolTip(0, "Ziehen: auf Grundriss ablegen, um umzuordnen")
         self._items[element.id] = item
 
     def _new_group_item(self, parent: QTreeWidgetItem, label: str, layer: LayerId) -> QTreeWidgetItem:
@@ -330,7 +435,7 @@ class NavigatorDock(QDockWidget):
         item.setData(0, _ID_ROLE, nav_id)
         item.setData(0, _KIND_ROLE, "helper_line")
         item.setData(0, _KIND_ROLE + 1, LayerId.ANNOTATION.value)
-        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled)
         item.setCheckState(0, self._to_state(visible))
         text_color = QColor(color)
         if not text_color.isValid():
@@ -479,7 +584,7 @@ class NavigatorDock(QDockWidget):
                     self._to_state(document.is_visible(room.id) if document else True),
                 )
                 color = room.color
-                base_brush = QBrush(QColor(color)) if color else QBrush()
+                base_brush = QBrush(QColor(color)) if color else QBrush(QColor("#cccccc"))
                 room_item.setForeground(0, base_brush)
                 room_item.setData(0, _BASE_BRUSH_ROLE, base_brush)
                 self._items[room.id] = room_item
@@ -617,7 +722,7 @@ class NavigatorDock(QDockWidget):
             if element is not None:
                 item.setText(0, element.name or element.id)
                 color = str(element.color or "").strip()
-                base_brush = QBrush(QColor(color)) if color else QBrush()
+                base_brush = QBrush(QColor(color)) if color else QBrush(QColor("#cccccc"))
                 item.setData(0, _BASE_BRUSH_ROLE, base_brush)
         except RuntimeError:
             pass

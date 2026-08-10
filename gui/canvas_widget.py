@@ -993,6 +993,21 @@ class CanvasWidget(QWidget):
             return self._default_helper_settings()
         return self._floor_helper_settings[fid]
 
+    def _resolve_draw_helper_floor(self, preferred_floor_id: Optional[str]) -> Optional[str]:
+        """Resolve helper draw target to a visible floor layer when possible."""
+        fid = self._ensure_helper_floor(preferred_floor_id)
+        if not fid:
+            return None
+        layer = self._floor_plans.get(fid)
+        if layer is not None and bool(getattr(layer, "visible", True)):
+            return fid
+        for candidate_id in self._floor_plan_order:
+            candidate = self._floor_plans.get(candidate_id)
+            if candidate is not None and bool(getattr(candidate, "visible", True)):
+                self._ensure_helper_floor(candidate_id)
+                return candidate_id
+        return fid
+
     def _helper_floor_lines(self, floor_id: Optional[str]) -> Dict[str, List[QPointF]]:
         fid = self._ensure_helper_floor(floor_id)
         if not fid:
@@ -1126,7 +1141,9 @@ class CanvasWidget(QWidget):
         return style if style in {"solid", "dash", "dot", "dashdot"} else "dash"
 
     def start_draw_helper_line(self, floor_id: Optional[str] = None):
-        self.set_active_helper_floor(floor_id)
+        self.set_active_helper_floor(self._resolve_draw_helper_floor(floor_id))
+        if self._helper_active_floor_id:
+            self.set_helper_line_visible(self._helper_active_floor_id, True)
         self._mode = ToolMode.DRAW_HELPER_LINE
         self._helper_draw_start = None
         self._helper_draw_current = None
@@ -1184,6 +1201,33 @@ class CanvasWidget(QWidget):
         self._floor_helper_line_length_mm.get(fid, {}).pop(helper_id, None)
         self._floor_helper_line_fixed.get(fid, {}).pop(helper_id, None)
         if self._helper_selected_id == helper_id and self._helper_selected_floor_id == fid:
+            self._helper_selected_id = None
+            self._helper_selected_floor_id = None
+        self.helper_lines_changed.emit()
+        self.update()
+
+    def move_helper_line(self, old_floor_id: str, helper_id: str, new_floor_id: str) -> None:
+        """Verschiebt eine Hilfslinie auf einen anderen Grundriss.
+
+        Alle zugehörigen Metadaten (Sichtbarkeit, Länge, Fixed-Flag) werden
+        mitgenommen.  Das ``helper_lines_changed``-Signal wird emittiert.
+        """
+        old_fid = old_floor_id if old_floor_id in self._floor_plans else None
+        new_fid = new_floor_id if new_floor_id in self._floor_plans else None
+        if not old_fid or not new_fid or old_fid == new_fid:
+            return
+        pts = self._floor_helper_lines.get(old_fid, {}).pop(helper_id, None)
+        if pts is None:
+            return
+        visible = self._floor_helper_line_visible.get(old_fid, {}).pop(helper_id, True)
+        length_mm = self._floor_helper_line_length_mm.get(old_fid, {}).pop(helper_id, None)
+        fixed = self._floor_helper_line_fixed.get(old_fid, {}).pop(helper_id, False)
+        self._floor_helper_lines.setdefault(new_fid, {})[helper_id] = pts
+        self._floor_helper_line_visible.setdefault(new_fid, {})[helper_id] = visible
+        if length_mm is not None:
+            self._floor_helper_line_length_mm.setdefault(new_fid, {})[helper_id] = length_mm
+        self._floor_helper_line_fixed.setdefault(new_fid, {})[helper_id] = fixed
+        if self._helper_selected_id == helper_id and self._helper_selected_floor_id == old_fid:
             self._helper_selected_id = None
             self._helper_selected_floor_id = None
         self.helper_lines_changed.emit()
@@ -5163,9 +5207,14 @@ class CanvasWidget(QWidget):
 
         # ── Hilfslinie zeichnen ──
         if self._mode == ToolMode.DRAW_HELPER_LINE:
-            fid = self._ensure_helper_floor(self._helper_active_floor_id)
+            fid = self._resolve_draw_helper_floor(self._helper_active_floor_id)
             if not fid:
                 return
+            if self._helper_active_floor_id != fid:
+                self._helper_active_floor_id = fid
+            settings = self._helper_settings(fid)
+            if not bool(settings.get("visible", True)):
+                settings["visible"] = True
             if event.button() == Qt.LeftButton:
                 ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
                 snapped_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
@@ -5179,7 +5228,6 @@ class CanvasWidget(QWidget):
                     dy = end.y() - start.y()
                     direction_len = math.hypot(dx, dy)
                     if direction_len > 1e-9 and self._mm_per_px > 0:
-                        settings = self._helper_settings(fid)
                         target_length_mm = float(settings.get("target_length_mm", self._helper_target_length_mm))
                         target_px = target_length_mm / self._mm_per_px
                         ux = dx / direction_len
@@ -8130,9 +8178,26 @@ class CanvasWidget(QWidget):
                 self._label_rects[label_id] = rect
                 self._label_draw_pos[label_id] = QPointF(pt)
 
+        draw_order: List[str] = []
+        seen_floor_ids: set[str] = set()
         for fid in self._floor_plan_order:
+            draw_order.append(fid)
+            seen_floor_ids.add(fid)
+        for fid in self._floor_helper_lines.keys():
+            if fid not in seen_floor_ids:
+                draw_order.append(fid)
+                seen_floor_ids.add(fid)
+
+        for fid in draw_order:
             layer = self._floor_plans.get(fid)
-            if not layer or not layer.visible:
+            is_forced_visible = fid in {
+                self._helper_active_floor_id,
+                self._helper_selected_floor_id,
+            }
+            if not layer:
+                if not is_forced_visible:
+                    continue
+            elif not layer.visible and not is_forced_visible:
                 continue
             settings = self._helper_settings(fid)
             if not bool(settings.get("visible", True)):
@@ -8174,7 +8239,9 @@ class CanvasWidget(QWidget):
                 draw_text_with_background(label_pos, f"{mm_len / 1000:.3f} m", pen.color(), helper_id)
 
         if self._mode == ToolMode.DRAW_HELPER_LINE and self._helper_draw_start and self._helper_draw_current:
-            fid = self._ensure_helper_floor(self._helper_active_floor_id)
+            fid = self._resolve_draw_helper_floor(self._helper_active_floor_id)
+            if not fid:
+                return
             settings = self._helper_settings(fid)
             p1 = self._helper_draw_start
             p2 = self._helper_draw_current

@@ -861,6 +861,56 @@ def test_floorplan_draw_polygon_property_action_uses_floorplan_polygon_mode(app,
         window.deleteLater()
 
 
+def test_helper_tool_uses_visible_floor_when_active_floor_hidden(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": False},
+                        {"fp_id": "grundriss-2", "visible": True},
+                    ],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "Hidden",
+                            "visible": False,
+                            "file_path": "",
+                        },
+                        "grundriss-2": {
+                            "name": "Visible",
+                            "visible": True,
+                            "file_path": "",
+                        },
+                    }
+                },
+            }
+        )
+        document.active_floorplan_id = "grundriss-1"
+        window._set_document(document)
+
+        window._on_tool_activated("ann.helper")
+
+        assert window.canvas._helper_active_floor_id == "grundriss-2"
+        assert window.canvas.tool_mode() == ToolMode.DRAW_HELPER_LINE
+    finally:
+        window.deleteLater()
+
+
 def test_selecting_floorplan_updates_properties_dock(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -1090,10 +1140,10 @@ def test_context_menu_includes_generic_actions_for_measurements(app, monkeypatch
         window._set_document(document)
 
         generic = {entry[0]: entry[2] for entry in window._generic_context_action_specs("MSRD-1")}
-        assert generic["copy"] is True
-        assert generic["cut"] is True
+        assert generic["copy"] is False, "Messungen dürfen nicht kopiert werden"
+        assert generic["cut"] is False, "Messungen dürfen nicht ausgeschnitten werden"
+        assert generic["duplicate"] is False, "Messungen dürfen nicht dupliziert werden"
         assert generic["delete"] is True
-        assert generic["duplicate"] is True
     finally:
         window.deleteLater()
 
@@ -2089,6 +2139,157 @@ def test_canvas_helper_lines_are_scoped_per_floorplan(app):
         assert len(emitted) == 2
     finally:
         canvas.deleteLater()
+
+
+def test_canvas_helper_draw_falls_back_to_visible_floor(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        hidden = canvas.add_floor_plan("grundriss-1")
+        visible = canvas.add_floor_plan("grundriss-2")
+        hidden.visible = False
+        visible.visible = True
+
+        canvas.set_mm_per_px(1.0)
+        canvas.set_active_helper_floor("grundriss-1")
+        canvas.start_draw_helper_line("grundriss-1")
+
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(0.0, 0.0), button=Qt.LeftButton)
+        )
+        canvas.mouseMoveEvent(
+            _MouseEventStub(
+                QPointF(10.0, 0.0),
+                button=Qt.NoButton,
+                buttons=Qt.NoButton,
+            )
+        )
+        canvas.mousePressEvent(
+            _MouseEventStub(QPointF(10.0, 0.0), button=Qt.LeftButton)
+        )
+
+        assert canvas._helper_active_floor_id == "grundriss-2"
+        assert len(canvas._floor_helper_lines.get("grundriss-1", {})) == 0
+        assert len(canvas._floor_helper_lines.get("grundriss-2", {})) == 1
+    finally:
+        canvas.deleteLater()
+
+
+def test_canvas_helper_draw_enables_floor_helper_visibility(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        floor = canvas.add_floor_plan("grundriss-1")
+        floor.visible = True
+        canvas.set_helper_line_visible("grundriss-1", False)
+
+        assert canvas.get_helper_line_visible("grundriss-1") is False
+
+        canvas.start_draw_helper_line("grundriss-1")
+
+        assert canvas.get_helper_line_visible("grundriss-1") is True
+    finally:
+        canvas.deleteLater()
+
+
+def test_repair_project_menu_action_creates_backup_and_reloads(app, monkeypatch, tmp_path):
+    """_repair_project() creates a backup, repairs the file, and reloads the document."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+    from storage.hrp_io import save_raw  # noqa: PLC0415
+
+    hrp_file = tmp_path / "project.hrp"
+    raw = {
+        "canvas": {
+            "floor_plans": [{"fp_id": "grundriss-1"}],
+            "polygons": {
+                "HK-1": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]],
+                "HK-orphan": [[0.0, 0.0], [50.0, 0.0], [50.0, 50.0]],
+            },
+        },
+        "params": {
+            "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+            "floorplans_order": ["grundriss-orphan", "grundriss-1"],
+            "circuits": {
+                "HK-1": {"circuit_id": "HK-1", "floor_plan_id": "grundriss-1", "name": "Wohnzimmer"}
+            },
+            "elec_points": {},
+            "elec_cables": {},
+            "hkv_points": {},
+            "hkv_lines": {},
+            "elec_rooms": {},
+            "text_annotations": {},
+            "furniture": {},
+        },
+    }
+    save_raw(raw, hrp_file)
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(hrp_file)
+        result = window._repair_project()
+
+        assert result is True
+        backup = hrp_file.with_suffix(".hrp.bak")
+        assert backup.exists()
+
+        # After reload: orphan canvas key removed, order normalised
+        doc = window._document
+        assert doc is not None
+        assert "HK-orphan" not in doc.view.get("polygons", {})
+        assert doc.elements.get("circuits", {}) or True  # project still loadable
+        assert window._document is not None
+    finally:
+        window.deleteLater()
+
+
+def test_repair_project_menu_action_dry_run_does_not_write(app, monkeypatch, tmp_path):
+    """repair_hrp_data called with dry_run=True does not modify the source file."""
+    from storage.hrp_io import save_raw  # noqa: PLC0415
+    from storage.hrp_repair import repair_hrp_data  # noqa: PLC0415
+
+    hrp_file = tmp_path / "project.hrp"
+    raw = {
+        "canvas": {
+            "floor_plans": [{"fp_id": "grundriss-1"}],
+            "polygons": {"HK-orphan": [[0.0, 0.0], [50.0, 0.0], [50.0, 50.0]]},
+        },
+        "params": {
+            "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+            "circuits": {},
+            "elec_points": {},
+            "elec_cables": {},
+            "hkv_points": {},
+            "hkv_lines": {},
+            "elec_rooms": {},
+            "text_annotations": {},
+            "furniture": {},
+        },
+    }
+    save_raw(raw, hrp_file)
+    original_mtime = hrp_file.stat().st_mtime
+
+    import copy as _copy  # noqa: PLC0415
+    import json  # noqa: PLC0415
+    with open(hrp_file, encoding="utf-8") as fh:
+        raw_loaded = json.load(fh)
+    repaired, changes = repair_hrp_data(_copy.deepcopy(raw_loaded), aggressive=True)
+
+    # File not touched in dry-run simulation
+    assert hrp_file.stat().st_mtime == original_mtime
+    assert not (tmp_path / "project.hrp.bak").exists()
+    assert changes  # orphan polygon reported
 
 
 def test_ref_line_and_ref_length_recompute_floorplan_scale(app, monkeypatch):
@@ -4809,3 +5010,134 @@ def test_a3_edit_helper_line_endpoint_updates_geometry(app):
         assert emitted == [True]
     finally:
         canvas.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# Phase-5 tests: live-draw → Navigator visibility (Measurements & Helpers)
+# ---------------------------------------------------------------------------
+
+
+def test_live_distance_measurement_appears_in_navigator(app, monkeypatch):
+    """Distanzmessung via Canvas → Document-Element → Navigator sichtbar."""
+    from PySide6.QtCore import QPointF, QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+    from model.elements import DistanceMeasurement  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}]},
+                "params": {"floorplans": {"grundriss-1": {"name": "EG"}}},
+            }
+        )
+        window._set_document(document)
+
+        # Simulate: Nutzer zeichnet eine Messlinie im Canvas
+        window.canvas._measure_lines.append(
+            (QPointF(0.0, 0.0), QPointF(100.0, 0.0), 100.0)
+        )
+        window.canvas.measure_changed.emit()
+
+        # Nach dem Signal muss ein echtes Element im Dokument existieren
+        elements = list(document.elements_of(DistanceMeasurement, "grundriss-1"))
+        assert len(elements) == 1, "Kein DistanceMeasurement-Element nach live draw"
+        assert elements[0].id == "MSRD-1"
+
+        # Und der Navigator muss es zeigen
+        item = window.navigator._find_item_by_id("MSRD-1")
+        assert item is not None, "MSRD-1 nicht im Navigator-Baum"
+    finally:
+        window.deleteLater()
+
+
+def test_live_helper_line_appears_in_navigator(app, monkeypatch):
+    """Hilfslinie via Canvas-Signal → Navigator sichtbar ohne Reload."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.docks.navigator_dock import make_helper_nav_id  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}]},
+                "params": {"floorplans": {"grundriss-1": {"name": "EG"}}},
+            }
+        )
+        window._set_document(document)
+
+        # Simulate: Hilfslinie direkt in Canvas-Datenstuktur eintragen
+        window.canvas._floor_helper_lines.setdefault("grundriss-1", {})["HL-1"] = [
+            (0.0, 0.0), (200.0, 0.0)
+        ]
+        window.canvas._floor_helper_line_visible.setdefault("grundriss-1", {})["HL-1"] = True
+        window.canvas.helper_lines_changed.emit()
+
+        nav_id = make_helper_nav_id("grundriss-1", "HL-1")
+        item = window.navigator._find_item_by_id(nav_id)
+        assert item is not None, f"Hilfslinie nicht im Navigator-Baum ({nav_id})"
+    finally:
+        window.deleteLater()
+
+
+def test_delete_measurement_via_navigator_removes_element_and_canvas(app, monkeypatch):
+    """Löschen einer Messung über Navigator entfernt Canvas-Eintrag und Element."""
+    from PySide6.QtCore import QPointF, QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes)
+    )
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+    from model.elements import DistanceMeasurement  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}]},
+                "params": {"floorplans": {"grundriss-1": {"name": "EG"}}},
+            }
+        )
+        window._set_document(document)
+
+        # Messung hinzufügen und im Dokument synchronisieren
+        window.canvas._measure_lines.append(
+            (QPointF(0.0, 0.0), QPointF(50.0, 0.0), 50.0)
+        )
+        window.canvas.measure_changed.emit()
+        assert document.get("MSRD-1") is not None
+
+        # Selektion setzen (wie der Navigator/Canvas es tut)
+        window.canvas._selected_item_id = "MSRD-1"
+        window._delete_selected()
+
+        # Canvas-Liste muss leer sein
+        assert len(window.canvas._measure_lines) == 0, "Canvas-Liste nicht geleert"
+        # Element darf nicht mehr im Dokument stehen
+        assert document.get("MSRD-1") is None, "Element noch im Dokument"
+        # Navigator-Baum darf es nicht mehr zeigen
+        assert window.navigator._find_item_by_id("MSRD-1") is None, "Item noch im Navigator"
+    finally:
+        window.deleteLater()

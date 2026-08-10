@@ -1,3 +1,4 @@
+
 # HRouting – Feature ToDo
 
 Stand: 2026-08-07
@@ -98,15 +99,46 @@ Basis: Code-Analyse der neuen UI und Testprojekt `examples/Planung_Linda.hrp`
 - [X] V-07 Werkzeug "Text platzieren" funktioniert per Klick, Text ist platzierbar und Eigenschaften (Text, Textgröße, Farbe) sind editierbar
 - [X] V-08 Maßlinienpunkte fangen am Raster; mit gedrückter Strg-Taste wird Rasterfang ignoriert
 
-## Export
+# Projektübersicht
 
-- [X] X-1 Exportrahmen zeichnen pruefen
-- [X] X-2 PDF-Export mit Planung_Linda pruefen
-- [X] beim PDF export verschwindest die Anzeige des planes.
-- [X] das exportierte pdf enthält nur eien screenshot. Es soll der export aber wider so funktionieren wie vor dem gui umbau.
-- [X] X-3 SVG / KiCad / QElectroTech Export pruefen
-- [X] bitte kicad und elekteotecht export entfernen
-- [X] die ansicht der stückliste ist unvollständig, bitte orienteire dich auch hiuer an der alten implementierung
+Die Projektübersicht soll ein zusätliches eigenes andockbares Fenster sein ähnlich wie z.B. das Eigenschaten Fenster. Es soll dazu dienen berechnete Infomation für das gesamte Projekt darstellen.
+Das Fenster soll über folgende Tabs verfügen: 
+- Allgemein
+- Heizung
+- Elektro
+
+Innerhalb der Tabs soll in zusammenfaltbarenen sektionen dann die infos dargestellt werden
+
+## Tab Allgemein
+Hier soll die summer aller elemente nach ihmrem typ sortiert aufgeführt werden
+
+## Heizung
+- Tabelle mit Heizkreisen
+  - HK name
+  - Heizkreisverteiler
+  - Rohrlänge gesamt
+  - Rohrlänge im raum
+  - Rohrlänge der zuleitung
+  - Solltemperatur
+  - Spreizung
+  - Durchfluss
+  - Leistung
+  - Druckverlust
+  - berechnete einstellung druckabgleich
+- Tabelle Heizkreisverteiler
+  - Gesamtdurchfluss
+  - Durchfluss pro Heizkreis
+  - gesamtleistung
+- Materialliste
+  - Gesamtlänge Rohr nach Querschnitt
+  - Anzahl Ventile
+  - Anzahl Fittings 
+  - Anzahl HKV Kästen
+
+
+
+
+
 
 ## Allgemein
 

@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.document import Document  # noqa: E402
-from storage.hrp_io import load_raw, save_raw  # noqa: E402
+from storage.hrp_io import load_raw, repair_and_save_hrp, save_raw  # noqa: E402
 from storage.migration import migrate_raw  # noqa: E402
 
 EXAMPLES = sorted((ROOT / "examples").glob("*.hrp"))
@@ -318,6 +318,96 @@ def test_measurements_roundtrip_is_lossless():
     assert _normalize(params.get("angle_measurements", {})) == _normalize(
         raw["params"]["angle_measurements"]
     )
+
+
+def test_repair_and_save_hrp_creates_backup_and_cleans_orphans(tmp_path: Path):
+    raw = {
+        "canvas": {
+            "floor_plans": [{"fp_id": "grundriss-1"}],
+            "polygons": {
+                "HK-1": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]],
+                "HK-999": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]],
+            },
+            "supply_hkv": {"HK-999": "HKV-1"},
+            "cable_start_ap": {"EK-1": "AP-404"},
+        },
+        "params": {
+            "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+            "floorplans_order": ["grundriss-404", "grundriss-1"],
+            "circuits": {
+                "HK-1": {
+                    "circuit_id": "HK-1",
+                    "floor_plan_id": "grundriss-1",
+                    "name": "Wohnzimmer",
+                }
+            },
+            "elec_points": {
+                "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Dose"}
+            },
+            "elec_cables": {
+                "EK-1": {
+                    "cable_id": "EK-1",
+                    "floor_plan_id": "grundriss-1",
+                    "start_ap": "AP-404",
+                    "end_ap": "AP-1",
+                }
+            },
+            "hkv_points": {"HKV-1": {"hkv_id": "HKV-1", "floor_plan_id": "grundriss-404"}},
+            "hkv_lines": {},
+            "elec_rooms": {},
+            "text_annotations": {},
+            "furniture": {},
+        },
+    }
+
+    source = tmp_path / "broken.hrp"
+    save_raw(raw, source)
+    original = json.loads(source.read_text(encoding="utf-8"))
+
+    repaired, changes, backup_path, written = repair_and_save_hrp(source)
+
+    assert written == source
+    assert backup_path is not None and backup_path.exists()
+    backup_data = json.loads(backup_path.read_text(encoding="utf-8"))
+    assert _normalize(backup_data) == _normalize(original)
+
+    assert "HK-999" not in repaired["canvas"]["polygons"]
+    assert "HK-999" not in repaired["canvas"].get("supply_hkv", {})
+    assert repaired["params"]["elec_cables"]["EK-1"]["start_ap"] == ""
+    assert repaired["canvas"]["cable_start_ap"]["EK-1"] == ""
+    assert repaired["params"]["floorplans_order"] == ["grundriss-1"]
+    assert changes
+
+
+def test_repair_and_save_hrp_writes_to_output_path(tmp_path: Path):
+    raw = {
+        "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}]},
+        "params": {
+            "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+            "circuits": {},
+            "elec_points": {},
+            "elec_rooms": {},
+            "elec_cables": {},
+            "hkv_points": {},
+            "hkv_lines": {},
+            "text_annotations": {},
+            "furniture": {},
+        },
+    }
+    source = tmp_path / "input.hrp"
+    target = tmp_path / "output.hrp"
+    save_raw(raw, source)
+
+    _repaired, _changes, backup_path, written = repair_and_save_hrp(
+        source,
+        output_path=target,
+        backup=True,
+    )
+
+    assert written == target
+    assert target.exists()
+    assert backup_path is not None and backup_path.exists()
+    assert source.exists()
 
 
 def test_json_serializable():

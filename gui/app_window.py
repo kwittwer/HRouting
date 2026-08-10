@@ -38,9 +38,20 @@ from PySide6.QtWidgets import (
 )
 
 from model.document import Document
-from model.elements import Circuit, ElecPoint, ElecRoom, ElecCable, FloorPlan, Hkv, HkvLine, TextAnnotation
+from model.elements import (
+    AngleMeasurement,
+    Circuit,
+    DistanceMeasurement,
+    ElecCable,
+    ElecPoint,
+    ElecRoom,
+    FloorPlan,
+    Hkv,
+    HkvLine,
+    TextAnnotation,
+)
 from model.schema import schema_for
-from storage.hrp_io import load_document, save_document
+from storage.hrp_io import load_document, repair_and_save_hrp, save_document
 from .elec_schema_window import ApNode, CableEdge, ElecSchemaWindow
 from .pdf_export_dialog import PdfExportConfigDialog
 from .schaltplan_window import SchaltplanWindow
@@ -76,6 +87,22 @@ def _parse_helper_nav_id(nav_id: str) -> tuple[str, str] | None:
     if not sep or not floor_id or not helper_id:
         return None
     return floor_id, helper_id
+
+
+def _parse_measurement_nav_id(nav_id: str) -> tuple[str, int] | None:
+    """Gibt ``(prefix, list_index)`` zurück, wenn *nav_id* eine Messung ist.
+
+    Messungs-IDs folgen dem Schema ``MSRD-N`` (Distanz) oder ``MSRA-N``
+    (Winkel), wobei N ≥ 1.  Der zurückgegebene Index ist 0-basiert.
+    """
+    for prefix in ("MSRD", "MSRA"):
+        if nav_id.startswith(prefix + "-"):
+            rest = nav_id[len(prefix) + 1:]
+            if rest.isdigit():
+                n = int(rest)
+                if n >= 1:
+                    return prefix, n - 1
+    return None
 
 
 class AppWindow(QMainWindow):
@@ -176,6 +203,8 @@ class AppWindow(QMainWindow):
         self._add_action(
             file_menu, "Speichern unter…", self._save_project_as, QKeySequence.SaveAs
         )
+        file_menu.addSeparator()
+        self._add_action(file_menu, "Projekt reparieren & bereinigen…", self._repair_project)
         file_menu.addSeparator()
         self._add_action(file_menu, "Beenden", self.close, QKeySequence.Quit)
 
@@ -289,6 +318,7 @@ class AppWindow(QMainWindow):
         self.navigator.floorplan_activated.connect(self._on_floorplan_activated)
         self.navigator.visibility_changed.connect(self._on_visibility_changed)
         self.navigator.context_requested.connect(self._on_navigator_context)
+        self.navigator.reassign_floorplan.connect(self._on_reassign_floorplan)
         self.tools.tool_activated.connect(self._on_tool_activated)
         self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
         self.canvas.context_menu_requested.connect(self._on_canvas_context_requested)
@@ -308,8 +338,10 @@ class AppWindow(QMainWindow):
         self.canvas.floor_plan_polygon_changed.connect(self._on_canvas_mutation_signal)
         self.canvas.export_frame_drawn.connect(self._on_canvas_mutation_signal)
         self.canvas.helper_lines_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.helper_lines_changed.connect(self._on_helper_lines_changed)
         self.canvas.label_moved.connect(self._on_canvas_mutation_signal)
         self.canvas.measure_changed.connect(self._on_canvas_mutation_signal)
+        self.canvas.measure_changed.connect(self._on_measure_changed)
         self.canvas.multi_objects_moved.connect(self._on_canvas_mutation_signal)
         self.canvas.will_move_multi_objects.connect(self._push_undo)
         self.canvas.ref_line_set.connect(self._on_ref_line_set)
@@ -465,6 +497,25 @@ class AppWindow(QMainWindow):
         if not self._dirty:
             self._dirty = True
             self._update_title()
+
+    def _on_measure_changed(self, *_args) -> None:
+        """Synchronisiert Messungen in Document-Elemente und aktualisiert den Navigator."""
+        if self._document is None or self._restoring_snapshot:
+            return
+        self._sync_measurements_to_elements()
+
+    def _on_helper_lines_changed(self, *_args) -> None:
+        """Hilfslinien geändert – Navigator neu aufbauen und Properties aktualisieren."""
+        if self._document is None or self._restoring_snapshot:
+            return
+        self._document.structure_changed.emit()
+        # If a helper line editor is currently visible, refresh it.
+        cur_id = self.properties._current_id
+        if cur_id:
+            helper_ref = _parse_helper_nav_id(cur_id)
+            if helper_ref is not None:
+                floor_id, helper_id = helper_ref
+                self.properties.refresh_helper(floor_id, helper_id)
 
     def _on_floor_plan_transform_updated(self, fp_id: str, _ox: float, _oy: float, _rot: float) -> None:
         """Synchronisiert Property-Ansicht und Undo bei Drag-Transformationen."""
@@ -699,6 +750,7 @@ class AppWindow(QMainWindow):
         finally:
             self._restoring_snapshot = False
             self._undo_group_open = False
+            self._sync_measurements_to_elements()
             self._last_document_snapshot = self._document.snapshot()
 
     def _update_undo_redo_state(self) -> None:
@@ -807,6 +859,21 @@ class AppWindow(QMainWindow):
             self._add_text()
             self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
             return
+        if tool_id == "ann.helper":
+            fp_id = self._active_floorplan_id() or ""
+            layer = self.canvas._floor_plans.get(fp_id) if fp_id else None
+            if layer is None or not bool(getattr(layer, "visible", True)):
+                for candidate_id in self.canvas._floor_plan_order:
+                    candidate = self.canvas._floor_plans.get(candidate_id)
+                    if candidate is not None and bool(getattr(candidate, "visible", True)):
+                        fp_id = candidate_id
+                        break
+            self.canvas.start_draw_helper_line(fp_id or None)
+            resolved_fp_id = self.canvas._helper_active_floor_id or fp_id
+            self.properties.show_helper_draw_settings(resolved_fp_id or "", self.canvas)
+
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
 
         mode = getattr(ToolMode, tool.tool_mode, ToolMode.NONE)
         self.canvas.set_tool_mode(mode)
@@ -835,6 +902,7 @@ class AppWindow(QMainWindow):
         # das Dokument die einzige Datenquelle: Zeichnen im Canvas verändert
         # unmittelbar das Projekt.
         self.canvas.set_document(document)
+        self._sync_measurements_to_elements()
 
         self._load_floor_plan_images(document)
         self._reload_elec_points_to_canvas(document)
@@ -1145,6 +1213,29 @@ class AppWindow(QMainWindow):
             self.navigator.rebuild()
             self._mark_dirty()
             self.statusBar().showMessage(f"Hilfslinie gelöscht: {helper_id}", 2500)
+            return
+        # Distanz- oder Winkelmessungen werden im Canvas (nicht im Dokument) gelöscht.
+        meas_ref = _parse_measurement_nav_id(element_id)
+        if meas_ref is not None:
+            prefix, idx = meas_ref
+            kind_label = "Distanzmessung" if prefix == "MSRD" else "Winkelmessung"
+            answer = QMessageBox.question(
+                self,
+                f"{kind_label} löschen",
+                f"{kind_label} '{element_id}' wirklich löschen?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            self._push_undo()
+            if prefix == "MSRD":
+                self.canvas.delete_measurement_at(idx)
+            else:
+                self.canvas.delete_angle_measurement_at(idx)
+            # measure_changed wurde bereits von der canvas-Methode emittiert;
+            # _on_measure_changed synchronisiert die Elements und triggert den Navigator.
+            self._mark_dirty()
+            self.statusBar().showMessage(f"{kind_label} gelöscht: {element_id}", 2500)
             return
         self._delete_element_with_confirm(element_id)
 
@@ -1467,14 +1558,18 @@ class AppWindow(QMainWindow):
     def _generic_context_action_specs(self, element_id: str) -> list[tuple[str, str, bool]]:
         has_element = self._document.get(element_id) is not None if element_id else False
         is_helper = _parse_helper_nav_id(element_id) is not None if element_id else False
+        is_measurement = _parse_measurement_nav_id(element_id) is not None if element_id else False
+        # Messungen können nicht kopiert / dupliziert werden – ihre IDs sind
+        # positionsbasiert und an die Canvas-Listen gebunden.
+        can_copy_cut_dup = has_element and not is_measurement
         return [
             ("undo", "Rückgängig", bool(self._undo_stack)),
             ("redo", "Wiederherstellen", bool(self._redo_stack)),
-            ("cut", "Ausschneiden", has_element),
-            ("copy", "Kopieren", has_element),
+            ("cut", "Ausschneiden", can_copy_cut_dup),
+            ("copy", "Kopieren", can_copy_cut_dup),
             ("paste", "Einfügen", self._copy_buffer is not None),
-            ("duplicate", "Duplizieren", has_element),
-            ("delete", "Löschen", has_element or is_helper),
+            ("duplicate", "Duplizieren", can_copy_cut_dup),
+            ("delete", "Löschen", has_element or is_helper or is_measurement),
         ]
 
     def _run_context_action(self, action_id: str, element_id: str, kind: str) -> None:
@@ -1593,6 +1688,75 @@ class AppWindow(QMainWindow):
         ):
             document.view[key] = canvas_state.get(key, {})
 
+    def _sync_measurements_to_elements(self) -> None:
+        """Spiegelt Canvas-Messlisten in echte Document-Elements.
+
+        Die Canvas-Laufzeitlisten ``_measure_lines`` / ``_angle_measurements``
+        sind die einzige Quelle der Wahrheit für interaktiv gezeichnete
+        Messungen.  Diese Methode erstellt oder aktualisiert zugehörige
+        ``DistanceMeasurement``- / ``AngleMeasurement``-Elemente im Dokument
+        (IDs ``MSRD-{idx+1}`` / ``MSRA-{idx+1}``).  Stale Elemente werden
+        entfernt, damit der Navigator stets mit den Canvas-Listen übereinstimmt.
+        """
+        document = self._document
+        if document is None:
+            return
+
+        fp_id = self._active_floorplan_id()
+
+        # --- Distanzmessungen ---
+        live_dist_ids: set[str] = set()
+        for idx, (p1, p2, _mm) in enumerate(self.canvas._measure_lines):
+            eid = f"MSRD-{idx + 1}"
+            live_dist_ids.add(eid)
+            el = document.elements.get("distance_measurements", {}).get(eid)
+            if el is None:
+                el = DistanceMeasurement.create(eid, floor_plan_id=fp_id, visible=True)
+                document.add(el)
+            # Geometrie aktualisieren
+            el.geom["distance_measurements"] = [[p1.x(), p1.y()], [p2.x(), p2.y()]]
+            lp_list = self.canvas._measure_label_positions
+            if idx < len(lp_list):
+                el.geom["distance_label_positions"] = list(lp_list[idx])
+            else:
+                el.geom.pop("distance_label_positions", None)
+
+        # Veraltete Distanzmessungen entfernen
+        stale_dist = [
+            eid for eid in list(document.elements.get("distance_measurements", {}))
+            if eid not in live_dist_ids
+        ]
+        for eid in stale_dist:
+            document.remove(eid)
+
+        # --- Winkelmessungen ---
+        live_angle_ids: set[str] = set()
+        for idx, (p1, p2, p3, _deg) in enumerate(self.canvas._angle_measurements):
+            eid = f"MSRA-{idx + 1}"
+            live_angle_ids.add(eid)
+            el = document.elements.get("angle_measurements", {}).get(eid)
+            if el is None:
+                el = AngleMeasurement.create(eid, floor_plan_id=fp_id, visible=True)
+                document.add(el)
+            el.geom["angle_measurements"] = [
+                [p1.x(), p1.y()], [p2.x(), p2.y()], [p3.x(), p3.y()]
+            ]
+            lp_list = self.canvas._angle_measure_label_positions
+            if idx < len(lp_list):
+                el.geom["angle_label_positions"] = list(lp_list[idx])
+            else:
+                el.geom.pop("angle_label_positions", None)
+
+        # Veraltete Winkelmessungen entfernen
+        stale_angle = [
+            eid for eid in list(document.elements.get("angle_measurements", {}))
+            if eid not in live_angle_ids
+        ]
+        for eid in stale_angle:
+            document.remove(eid)
+
+        document.structure_changed.emit()
+
     @staticmethod
     def _bound_canvas_keys() -> set[str]:
         """canvas-Schlüssel, die bereits über Views im Dokument liegen."""
@@ -1668,7 +1832,7 @@ class AppWindow(QMainWindow):
             return
         helper_ref = _parse_helper_nav_id(element_id)
         if helper_ref is not None:
-            floor_id, _helper_id = helper_ref
+            floor_id, helper_id = helper_ref
             if floor_id and floor_id in self._document.floorplans:
                 if self._document.active_floorplan_id != floor_id:
                     self._document.active_floorplan_id = floor_id
@@ -1676,6 +1840,8 @@ class AppWindow(QMainWindow):
             if update_navigator:
                 self.navigator.select(element_id)
             self.canvas.set_selected_item(element_id)
+            self.properties.show_helper_line(floor_id, helper_id, self.canvas,
+                                             nav_id=element_id)
             return
         self._sync_active_floorplan_for_selection(element_id)
         if update_navigator:
@@ -1735,6 +1901,37 @@ class AppWindow(QMainWindow):
         self._apply_canvas_visibility(element_id, visible)
         self._dirty = True
         self._update_title()
+
+    def _on_reassign_floorplan(self, element_id: str, new_fp_id: str) -> None:
+        """Ordnet ein Element per Drag-and-Drop einem anderen Grundriss zu."""
+        document = self._document
+        if document is None or new_fp_id not in document.floorplans:
+            return
+
+        # Hilfslinien: physisch im Canvas verschieben (canvas-seitig gespeichert)
+        helper_ref = _parse_helper_nav_id(element_id)
+        if helper_ref is not None:
+            old_fp_id, helper_id = helper_ref
+            if old_fp_id == new_fp_id:
+                return
+            self._push_undo()
+            self.canvas.move_helper_line(old_fp_id, helper_id, new_fp_id)
+            self._mark_dirty()
+            fp_name = (document.floorplans.get(new_fp_id) or object()).name or new_fp_id
+            self.statusBar().showMessage(f"Hilfslinie {helper_id} → {fp_name}", 2500)
+            return
+
+        # Alle anderen Elemente (inkl. Messungen): floor_plan_id ändern
+        element = document.get(element_id)
+        if element is None or element.floor_plan_id == new_fp_id:
+            return
+        self._push_undo()
+        element.floor_plan_id = new_fp_id
+        self._emit_structure_changed()
+        self._mark_dirty()
+        fp_name = (document.floorplans.get(new_fp_id) or object()).name or new_fp_id
+        label = element.name or element_id
+        self.statusBar().showMessage(f"{label} → {fp_name}", 2500)
 
     def _apply_canvas_visibility(self, element_id: str, visible: bool) -> None:
         """Spiegelt die Sichtbarkeit in den Canvas.
@@ -2144,6 +2341,44 @@ class AppWindow(QMainWindow):
             return False
         self._project_path = Path(path)
         return self._save_project()
+
+    def _repair_project(self) -> bool:
+        if self._project_path is None:
+            if not self._save_project_as():
+                return False
+        elif self._dirty and not self._save_project():
+            return False
+
+        assert self._project_path is not None
+        try:
+            _repaired, changes, backup_path, _written = repair_and_save_hrp(
+                self._project_path,
+                output_path=self._project_path,
+                backup=True,
+                aggressive=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Fehler", f"Reparatur fehlgeschlagen:\n{exc}")
+            self.log.error(f"Reparatur fehlgeschlagen: {exc}")
+            return False
+
+        if not self.open_project_file(self._project_path):
+            return False
+
+        backup_text = str(backup_path) if backup_path is not None else "(kein Backup)"
+        QMessageBox.information(
+            self,
+            "Reparatur abgeschlossen",
+            (
+                f"Projekt wurde repariert und neu geladen.\n\n"
+                f"Backup: {backup_text}\n"
+                f"Aenderungen: {len(changes)}"
+            ),
+        )
+        self.log.success(
+            f"Reparatur abgeschlossen ({len(changes)} Aenderungen, Backup: {backup_text})"
+        )
+        return True
 
     def _confirm_discard(self) -> bool:
         if not self._dirty:

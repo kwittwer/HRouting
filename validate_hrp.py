@@ -19,6 +19,8 @@ import re
 import sys
 from pathlib import Path
 
+from storage.hrp_io import repair_and_save_hrp
+
 
 def _load_schema(schema_path: Path) -> dict:
     """Lädt das JSON-Schema."""
@@ -533,6 +535,26 @@ def main():
         "--schema", type=Path, default=None,
         help="Pfad zur Schema-Datei (Standard: hrp_schema.json neben diesem Skript)."
     )
+    parser.add_argument(
+        "--repair", action="store_true",
+        help="Datei reparieren und bereinigen."
+    )
+    parser.add_argument(
+        "--in-place", action="store_true",
+        help="Reparatur in derselben Datei speichern."
+    )
+    parser.add_argument(
+        "--output", type=Path, default=None,
+        help="Zieldatei für repariertes Projekt (ohne --in-place)."
+    )
+    parser.add_argument(
+        "--no-backup", action="store_true",
+        help="Kein .bak-Backup vor Reparatur erstellen."
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Nur anzeigen, was repariert wuerde – keine Datei schreiben."
+    )
     args = parser.parse_args()
 
     # HRP laden
@@ -551,6 +573,58 @@ def main():
         else:
             print(f"✗ JSON-Syntaxfehler: {e}", file=sys.stderr)
         sys.exit(1)
+
+    repair_changes: list[str] = []
+    backup_path: Path | None = None
+    validated_path = hrp_path
+
+    if getattr(args, 'dry_run', False) and not args.repair:
+        print("Fehler: --dry-run erfordert auch --repair.", file=sys.stderr)
+        sys.exit(2)
+
+    if args.repair:
+        if args.in_place and args.output is not None:
+            print("Fehler: --in-place und --output koennen nicht kombiniert werden.", file=sys.stderr)
+            sys.exit(2)
+        if getattr(args, 'dry_run', False) and args.in_place:
+            print("Fehler: --dry-run und --in-place koennen nicht kombiniert werden.", file=sys.stderr)
+            sys.exit(2)
+
+        if getattr(args, 'dry_run', False):
+            # Dry-run: repair_hrp_data aufrufen, aber nicht schreiben
+            from storage.hrp_repair import repair_hrp_data  # noqa: PLC0415
+            import copy as _copy  # noqa: PLC0415
+            raw_original = _load_hrp(hrp_path)
+            _repaired_dry, repair_changes = repair_hrp_data(_copy.deepcopy(raw_original), aggressive=True)
+            data = _repaired_dry
+            validated_path = hrp_path
+            backup_path = None
+        else:
+            output_path = args.output
+            if args.in_place:
+                output_path = hrp_path
+            elif output_path is None:
+                output_path = hrp_path.with_name(f"{hrp_path.stem}.repaired{hrp_path.suffix}")
+
+            try:
+                data, repair_changes, backup_path, validated_path = repair_and_save_hrp(
+                    hrp_path,
+                    output_path=output_path,
+                    backup=not args.no_backup,
+                    aggressive=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if args.json_output:
+                    result = {
+                        "file": str(hrp_path),
+                        "valid": False,
+                        "errors": [f"Reparatur fehlgeschlagen: {exc}"],
+                        "warnings": [],
+                    }
+                    print(json.dumps(result, indent=2, ensure_ascii=False))
+                else:
+                    print(f"✗ Reparatur fehlgeschlagen: {exc}", file=sys.stderr)
+                sys.exit(1)
 
     # Schema laden
     schema_path = args.schema
@@ -581,21 +655,41 @@ def main():
 
     if args.json_output:
         result = {
-            "file": str(hrp_path),
+            "file": str(validated_path),
             "valid": is_valid,
             "errors": all_errors,
             "warnings": all_warnings,
         }
+        if args.repair:
+            result["repair"] = {
+                "dry_run": getattr(args, 'dry_run', False),
+                "changes": repair_changes,
+                "backup": str(backup_path) if backup_path is not None else None,
+            }
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
+        if args.repair:
+            if getattr(args, 'dry_run', False):
+                print(f"i Dry-run: keine Datei geschrieben ({hrp_path.name})")
+            else:
+                print(f"i Reparierte Datei: {validated_path}")
+                if backup_path is not None:
+                    print(f"i Backup erstellt: {backup_path}")
+            if repair_changes:
+                print(f"i Reparatur-Aenderungen: {len(repair_changes)}")
+                for change in repair_changes:
+                    print(f"  - {change}")
+            else:
+                print("i Reparatur-Aenderungen: 0")
+
         if is_valid and not all_warnings:
-            print(f"✓ {hrp_path.name}: Gültig.")
+            print(f"✓ {validated_path.name}: Gültig.")
         elif is_valid:
-            print(f"✓ {hrp_path.name}: Gültig (mit Warnungen).")
+            print(f"✓ {validated_path.name}: Gültig (mit Warnungen).")
             for w in all_warnings:
                 print(f"  ⚠ {w}")
         else:
-            print(f"✗ {hrp_path.name}: Ungültig ({len(all_errors)} Fehler).")
+            print(f"✗ {validated_path.name}: Ungültig ({len(all_errors)} Fehler).")
             for e in all_errors:
                 print(f"  ✗ {e}")
             for w in all_warnings:
