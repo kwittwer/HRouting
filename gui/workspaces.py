@@ -24,6 +24,7 @@ class DockId:
     SCHEMA = "schema"
     SCHALTPLAN = "schaltplan"
     LOG = "log"
+    OVERVIEW = "overview"
 
 
 #: Docks, die in jedem Workspace verfügbar sind
@@ -62,7 +63,7 @@ WORKSPACES: tuple[WorkspaceDefinition, ...] = (
         id="heating",
         label="Heizung",
         layer=LayerId.HEATING,
-        default_docks=BASE_DOCKS + (DockId.RESULTS,),
+        default_docks=BASE_DOCKS + (DockId.RESULTS, DockId.OVERVIEW),
     ),
     WorkspaceDefinition(
         id="electrical",

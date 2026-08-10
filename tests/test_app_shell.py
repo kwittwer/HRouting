@@ -2292,6 +2292,97 @@ def test_repair_project_menu_action_dry_run_does_not_write(app, monkeypatch, tmp
     assert changes  # orphan polygon reported
 
 
+def test_project_overview_dock_set_document(app, monkeypatch):
+    """ProjectOverviewDock nimmt set_document entgegen und zeigt Heizkreise an."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "mm_per_px": 10.0}],
+                    "polygons": {
+                        "HK-1": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                    },
+                    "manual_routes": {"HK-1": [[0, 0], [50, 0], [100, 50]]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                            "mm_per_px": 10.0,
+                        }
+                    },
+                    "floorplans_order": ["grundriss-1"],
+                    "t_supply": 35.0,
+                    "t_return": 30.0,
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "spacing": 150.0,
+                            "diameter": 16.0,
+                            "room_temp": 20.0,
+                            "floor_covering": "Fliesen / Keramik",
+                        }
+                    },
+                    "elec_points": {},
+                    "elec_cables": {},
+                    "hkv_points": {},
+                    "hkv_lines": {},
+                    "elec_rooms": {},
+                    "text_annotations": {},
+                    "furniture": {},
+                },
+            }
+        )
+        window._set_document(doc)
+        overview = window.overview
+        assert overview is not None
+        assert overview._document is doc
+        assert overview._hk_table.rowCount() == 1
+        assert overview._hk_table.item(0, 0).text() == "Wohnzimmer"
+    finally:
+        window.deleteLater()
+
+
+
+
+def test_project_overview_dock_planung_linda(app, monkeypatch):
+    """Projektübersicht lädt Planung_Linda und zeigt mehrere Heizkreise."""
+    from pathlib import Path  # noqa: PLC0415
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    example = Path(__file__).resolve().parents[1] / "examples" / "Planung_Linda.hrp"
+    if not example.exists():
+        import pytest as _pytest  # noqa: PLC0415
+        _pytest.skip("Planung_Linda.hrp fehlt")
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(example)
+        overview = window.overview
+        assert overview._document is not None
+        assert overview._hk_table.rowCount() > 0, "Keine Heizkreise in Tabelle"
+    finally:
+        window.deleteLater()
+
+
 def test_ref_line_and_ref_length_recompute_floorplan_scale(app, monkeypatch):
     from PySide6.QtCore import QPointF, QSettings  # noqa: PLC0415
 
@@ -3606,7 +3697,7 @@ def test_export_lengths_includes_supply_length():
     assert rows
     assert any(row["supply_m"] > 0 for row in rows)
     assert all(
-        row["total_m"] == pytest.approx(row["route_m"] + row["supply_m"] * 2.0)
+        row["total_m"] == pytest.approx(row["route_m"] + row["supply_m"])
         for row in rows
     )
 

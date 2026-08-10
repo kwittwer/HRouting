@@ -60,6 +60,7 @@ from logic.schaltplan_generator import build_uv_hierarchy, get_uv_circuits
 from . import layout_store
 from .canvas_widget import CanvasWidget, ToolMode
 from .docks import LogDock, NavigatorDock, PropertiesDock, ToolsDock
+from .docks import ProjectOverviewDock
 from .workspaces import (
     DEFAULT_WORKSPACE_ID,
     DockId,
@@ -176,18 +177,22 @@ class AppWindow(QMainWindow):
         self.properties = PropertiesDock(self)
         self.tools = ToolsDock(self)
         self.log = LogDock(self)
+        self.overview = ProjectOverviewDock(self)
 
         self.addDockWidget(Qt.LeftDockWidgetArea, self.tools)
         self.addDockWidget(Qt.RightDockWidgetArea, self.navigator)
         self.addDockWidget(Qt.RightDockWidgetArea, self.properties)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.overview)
         self.log.hide()
+        self.overview.hide()
 
         self._docks = {
             DockId.NAVIGATOR: self.navigator,
             DockId.PROPERTIES: self.properties,
             DockId.TOOLS: self.tools,
             DockId.LOG: self.log,
+            DockId.OVERVIEW: self.overview,
         }
 
     def _build_menus(self) -> None:
@@ -893,6 +898,7 @@ class AppWindow(QMainWindow):
 
         self.navigator.set_document(document)
         self.properties.set_document(document)
+        self.overview.set_document(document)
 
         # Globale Ansichtsdaten (Zoom, Raster, Grundriss-Transformationen,
         # Hilfslinien, Messungen) in den Canvas übertragen …

@@ -413,3 +413,40 @@ def test_repair_and_save_hrp_writes_to_output_path(tmp_path: Path):
 def test_json_serializable():
     doc = Document.from_dict(load_raw(EXAMPLES[0])) if EXAMPLES else Document()
     json.dumps(doc.to_dict(), ensure_ascii=False)
+
+
+def test_project_overview_data_planung_linda():
+    from model.computed import project_overview_data  # noqa: PLC0415
+
+    example = ROOT / "examples" / "Planung_Linda.hrp"
+    if not example.exists():
+        pytest.skip("Planung_Linda.hrp fehlt")
+
+    doc = Document.from_dict(load_raw(example))
+    data = project_overview_data(doc)
+
+    assert "general" in data
+    assert "heating_rows" in data
+    assert "hkv_rows" in data
+    assert "materials" in data
+
+    rows = data["heating_rows"]
+    assert len(rows) > 0, "Keine Heizkreise gefunden"
+
+    required_keys = {
+        "id", "name", "route_m", "supply_m", "total_m",
+        "area_m2", "power_w", "volume_flow_lmin", "pressure_drop_mbar",
+        "kv_value",
+    }
+    for row in rows:
+        missing = required_keys - row.keys()
+        assert not missing, f"Fehlende Schlüssel in Zeile: {missing}"
+
+    materials = data["materials"]
+    assert "circuit_count" in materials
+    assert materials["circuit_count"] == len(rows)
+    assert materials.get("valve_count", 0) == materials["circuit_count"]
+
+    # Summen müssen sinnvoll sein (Planung_Linda hat Heizkreise mit Polygonen)
+    total_power = sum(r.get("power_w", 0.0) for r in rows)
+    assert total_power >= 0.0

@@ -3505,12 +3505,14 @@ def _create_mcp(window: MainWindow, bridge):
             area_m2 = (area_mm2 or 0.0) / 1_000_000.0
 
             # Rohrlängen
-            route_m = (
+            route_oneway_m = (
                 window.canvas.get_manual_route_length_px(circuit_id)
                 * scale / 1000.0)
-            supply_m = (
+            supply_oneway_m = (
                 window.canvas.get_supply_line_length_px(circuit_id)
                 * scale / 1000.0)
+            route_m = route_oneway_m * 2.0
+            supply_m = supply_oneway_m * 2.0
             total_m = route_m + supply_m
 
             spacing_cm = params["spacing"] / 10.0
@@ -3527,7 +3529,7 @@ def _create_mcp(window: MainWindow, bridge):
                 spacing_cm=spacing_cm,
                 r_lambda_b=r_lambda_b,
                 area_m2=area_m2,
-                pipe_length_m=route_m,
+                pipe_length_m=route_oneway_m,
                 outer_diameter_mm=diameter_mm,
                 total_pipe_length_m=total_m,
             )
@@ -4900,14 +4902,16 @@ def _create_mcp(window: MainWindow, bridge):
                         })
                         continue
 
-                    route_m = (
+                    route_oneway_m = (
                         window.canvas.get_manual_route_length_px(cid)
                         * mpp / 1000.0
                     )
-                    supply_m = (
+                    supply_oneway_m = (
                         window.canvas.get_supply_line_length_px(cid)
                         * mpp / 1000.0
                     )
+                    route_m = route_oneway_m * 2.0
+                    supply_m = supply_oneway_m * 2.0
                     total_m = route_m + supply_m
 
                     floor_name = cdata.get("floor_covering", "Fliesen / Keramik")
@@ -4919,7 +4923,7 @@ def _create_mcp(window: MainWindow, bridge):
                         spacing_cm=(cdata.get("spacing", 150.0) / 10.0),
                         r_lambda_b=r_lambda_b,
                         area_m2=area_m2,
-                        pipe_length_m=route_m,
+                        pipe_length_m=route_oneway_m,
                         outer_diameter_mm=cdata.get("diameter", 16.0),
                         total_pipe_length_m=total_m,
                     )

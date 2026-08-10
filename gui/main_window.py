@@ -2392,7 +2392,8 @@ class MainWindow(QMainWindow):
         # Rohrlänge
         route_m = self.canvas.get_manual_route_length_px(circuit_id) * scale / 1000.0
         supply_m = self.canvas.get_supply_line_length_px(circuit_id) * scale / 1000.0
-        total_m = route_m + supply_m
+        # Heizkreis und Zuleitung werden als Hin- und Rücklauf berücksichtigt.
+        total_m = (route_m + supply_m) * 2.0
 
         spacing_cm = params["spacing"] / 10.0
         floor_name = params.get("floor_covering", "Fliesen / Keramik")
@@ -6195,9 +6196,12 @@ class MainWindow(QMainWindow):
         for cid, panel in self.param_panel.circuit_panels.items():
             params = panel.get_parameters()
             route_px = self.canvas.get_manual_route_length_px(cid)
-            route_m = route_px * scale / 1000.0
+            route_oneway_m = route_px * scale / 1000.0
             supply_px = self.canvas.get_supply_line_length_px(cid)
-            supply_m = supply_px * scale / 1000.0
+            supply_oneway_m = supply_px * scale / 1000.0
+            # Heizkreis und Zuleitung werden als Hin- und Rücklauf berücksichtigt.
+            route_m = route_oneway_m * 2.0
+            supply_m = supply_oneway_m * 2.0
             total_m = route_m + supply_m
 
             # Fläche berechnen
@@ -6220,7 +6224,7 @@ class MainWindow(QMainWindow):
                 spacing_cm=spacing_cm,
                 r_lambda_b=r_lambda_b,
                 area_m2=area_m2,
-                pipe_length_m=route_m,
+                pipe_length_m=route_oneway_m,
                 outer_diameter_mm=diameter_mm,
                 total_pipe_length_m=total_m,
             )
@@ -7266,8 +7270,11 @@ class MainWindow(QMainWindow):
         hk_rows = []
         for cid, panel in self.param_panel.circuit_panels.items():
             params = panel.get_parameters()
-            route_m = self.canvas.get_manual_route_length_px(cid) * scale / 1000.0
-            supply_m = self.canvas.get_supply_line_length_px(cid) * scale / 1000.0
+            route_oneway_m = self.canvas.get_manual_route_length_px(cid) * scale / 1000.0
+            supply_oneway_m = self.canvas.get_supply_line_length_px(cid) * scale / 1000.0
+            # Heizkreis und Zuleitung werden als Hin- und Rücklauf berücksichtigt.
+            route_m = route_oneway_m * 2.0
+            supply_m = supply_oneway_m * 2.0
             total_m = route_m + supply_m
             area_mm2 = self._compute_polygon_area_mm2(cid)
             area_m2 = (area_mm2 or 0.0) / 1_000_000.0
@@ -7281,7 +7288,7 @@ class MainWindow(QMainWindow):
             hc = calc_circuit(
                 t_supply=t_supply, t_return=t_return, t_room=room_temp,
                 spacing_cm=spacing_cm, r_lambda_b=r_lambda_b,
-                area_m2=area_m2, pipe_length_m=route_m,
+                area_m2=area_m2, pipe_length_m=route_oneway_m,
                 outer_diameter_mm=diameter_mm, total_pipe_length_m=total_m,
             )
             hk_rows.append({

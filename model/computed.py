@@ -100,10 +100,12 @@ def _circuit_values(document: Document, circuit: Circuit) -> dict[str, str]:
 
     area_m2 = polygon_area_px2(polygon) * (mm_per_px**2) / 1_000_000.0
     perimeter_m = polyline_length_px(polygon, closed=True) * mm_per_px / 1000.0
-    pipe_length_m = polyline_length_px(route) * mm_per_px / 1000.0
-    supply_length_m = polyline_length_px(supply) * mm_per_px / 1000.0
-    # Zuleitung wird hin und zurück verlegt
-    total_length_m = pipe_length_m + supply_length_m * 2.0
+    pipe_length_oneway_m = polyline_length_px(route) * mm_per_px / 1000.0
+    supply_length_oneway_m = polyline_length_px(supply) * mm_per_px / 1000.0
+    pipe_length_m = pipe_length_oneway_m * 2.0
+    supply_length_m = supply_length_oneway_m * 2.0
+    # Heizkreis und Zuleitung werden jeweils als Hin- und Rücklauf verlegt.
+    total_length_m = pipe_length_m + supply_length_m
 
     values = {
         "area_m2": _format_number(area_m2, 2, "m²"),
@@ -132,7 +134,7 @@ def _circuit_values(document: Document, circuit: Circuit) -> dict[str, str]:
             spacing_cm=float(circuit.spacing or 150.0) / 10.0,
             r_lambda_b=r_lambda_b,
             area_m2=area_m2,
-            pipe_length_m=pipe_length_m,
+            pipe_length_m=pipe_length_oneway_m,
             outer_diameter_mm=float(circuit.diameter or 16.0),
             total_pipe_length_m=total_length_m or None,
         )
@@ -202,9 +204,11 @@ def heating_length_overview(document: Document) -> tuple[list[dict[str, float | 
             perimeter_px = polyline_length_px([(float(x), float(y)) for x, y in polygon], closed=True)
             perimeter_m = perimeter_px * scale / 1000.0
 
-        route_m = polyline_length_px([(float(x), float(y)) for x, y in route]) * scale / 1000.0
-        supply_m = polyline_length_px([(float(x), float(y)) for x, y in supply]) * scale / 1000.0
-        total_m = route_m + supply_m * 2.0
+        route_oneway_m = polyline_length_px([(float(x), float(y)) for x, y in route]) * scale / 1000.0
+        supply_oneway_m = polyline_length_px([(float(x), float(y)) for x, y in supply]) * scale / 1000.0
+        route_m = route_oneway_m * 2.0
+        supply_m = supply_oneway_m * 2.0
+        total_m = route_m + supply_m
 
         floor_name = str(circuit.floor_covering or "Fliesen / Keramik")
         r_lambda = FLOOR_COVERINGS.get(floor_name, 0.01)
@@ -220,7 +224,7 @@ def heating_length_overview(document: Document) -> tuple[list[dict[str, float | 
                 spacing_cm=spacing_cm,
                 r_lambda_b=r_lambda,
                 area_m2=area_m2,
-                pipe_length_m=route_m,
+                pipe_length_m=route_oneway_m,
                 outer_diameter_mm=diameter_mm,
                 total_pipe_length_m=total_m,
             )
@@ -251,3 +255,107 @@ def heating_length_overview(document: Document) -> tuple[list[dict[str, float | 
         })
 
     return rows, t_supply, t_return
+
+
+def project_overview_data(document: Document) -> dict:
+    """Alle Übersichtsdaten für die Projektübersicht.
+
+    Returns
+    -------
+    dict mit Schlüsseln:
+        general       – Elementzählung je Typ (str → int)
+        heating_rows  – Liste der Heizkreis-Zeilen (aus heating_length_overview)
+        hkv_rows      – Liste der HKV-Verteiler-Zeilen mit Aggregatwerten
+        materials     – Materiallisten-Dict
+        t_supply      – Vorlauftemperatur [°C]
+        t_return      – Rücklauftemperatur [°C]
+    """
+    from logic.heating_calc import calc_balancing  # noqa: PLC0415
+
+    # ── Heizkreis-Zeilen + hydraulischer Abgleich ─────────────────────
+    heating_rows, t_supply, t_return = heating_length_overview(document)
+
+    try:
+        balancing = calc_balancing(heating_rows)
+    except Exception:  # pragma: no cover
+        balancing = heating_rows
+
+    for row, bal in zip(heating_rows, balancing):
+        row["dp_valve_mbar"] = float(bal.get("dp_valve_mbar", 0.0) or 0.0)
+        row["kv_value"] = float(bal.get("kv_value", 0.0) or 0.0)
+        row["dp_max_mbar"] = float(bal.get("dp_max_mbar", 0.0) or 0.0)
+
+    # ── HKV-Aggregation ───────────────────────────────────────────────
+    hkv_agg: dict[str, dict] = {}
+    for row in heating_rows:
+        dist = str(row.get("distributor") or "") or "–"
+        if dist not in hkv_agg:
+            hkv_agg[dist] = {
+                "name": dist,
+                "total_flow_lmin": 0.0,
+                "total_power_w": 0.0,
+                "circuit_count": 0,
+                "circuits": [],
+            }
+        hkv_agg[dist]["total_flow_lmin"] += float(row.get("volume_flow_lmin", 0.0) or 0.0)
+        hkv_agg[dist]["total_power_w"] += float(row.get("power_w", 0.0) or 0.0)
+        hkv_agg[dist]["circuit_count"] += 1
+        hkv_agg[dist]["circuits"].append({
+            "name": row.get("name", row.get("id", "")),
+            "volume_flow_lmin": float(row.get("volume_flow_lmin", 0.0) or 0.0),
+        })
+    hkv_rows = sorted(hkv_agg.values(), key=lambda r: r["name"])
+
+    # ── Materialliste ─────────────────────────────────────────────────
+    pipe_by_diam: dict[float, float] = {}
+    for row in heating_rows:
+        d = float(row.get("diameter_mm", 16.0) or 16.0)
+        pipe_by_diam[d] = pipe_by_diam.get(d, 0.0) + float(row.get("total_m", 0.0) or 0.0)
+
+    circuit_count = len(heating_rows)
+    hkv_count = len(document.elements.get("hkv_points", {}))
+    # Ventile = 1 je Heizkreis (Rücklaufverschraubung)
+    valve_count = circuit_count
+    # Fittings vereinfacht: 2 je Heizkreis (VL + RL am HKV) + 2 je HKV-Verbindung
+    fitting_count = circuit_count * 2 + len(document.elements.get("hkv_lines", {})) * 2
+
+    materials = {
+        "pipe_by_diameter_m": {f"Ø{d:.0f} mm": round(length, 2) for d, length in sorted(pipe_by_diam.items())},
+        "circuit_count": circuit_count,
+        "hkv_count": hkv_count,
+        "valve_count": valve_count,
+        "fitting_count": fitting_count,
+    }
+
+    # ── Allgemeine Elementzählung ─────────────────────────────────────
+    _BUCKET_LABELS = {
+        "circuits": "Heizkreise",
+        "elec_points": "Anschlusspunkte",
+        "elec_cables": "Kabel",
+        "elec_rooms": "Elektro-Räume",
+        "hkv_points": "Heizkreisverteiler",
+        "hkv_lines": "HKV-Leitungen",
+        "text_annotations": "Texte",
+        "distance_measurements": "Distanzmessungen",
+        "angle_measurements": "Winkelmessungen",
+    }
+    general: dict[str, int] = {}
+    for bucket, label in _BUCKET_LABELS.items():
+        count = len(document.elements.get(bucket, {}))
+        if count:
+            general[label] = count
+    fp_count = len(document.floorplans)
+    if fp_count:
+        general["Grundrisse"] = fp_count
+    furn_count = len(document.furniture)
+    if furn_count:
+        general["Einrichtung"] = furn_count
+
+    return {
+        "general": general,
+        "heating_rows": heating_rows,
+        "hkv_rows": hkv_rows,
+        "materials": materials,
+        "t_supply": t_supply,
+        "t_return": t_return,
+    }
