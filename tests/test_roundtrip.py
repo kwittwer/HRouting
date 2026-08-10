@@ -246,6 +246,80 @@ def test_layers_in_use_only_reports_existing_elements():
     assert LayerId.ELECTRICAL not in used
 
 
+def test_measurements_roundtrip_is_lossless():
+    raw = {
+        "canvas": {
+            "floor_plans": [{"fp_id": "grundriss-1"}],
+            "distance_measurements": {
+                "MSRD-1": [[10.0, 20.0], [210.0, 20.0]],
+            },
+            "distance_label_positions": {
+                "MSRD-1": [220.0, 12.0],
+            },
+            "angle_measurements": {
+                "MSRA-1": [[20.0, 20.0], [80.0, 20.0], [80.0, 90.0]],
+            },
+            "angle_label_positions": {
+                "MSRA-1": [92.0, 84.0],
+            },
+        },
+        "params": {
+            "floorplans": {"grundriss-1": {"name": "EG"}},
+            "distance_measurements": {
+                "MSRD-1": {
+                    "measurement_id": "MSRD-1",
+                    "floor_plan_id": "grundriss-1",
+                    "name": "Abstand Tür",
+                    "color": "#00e5ff",
+                    "stroke_width": 2.0,
+                    "line_style": "dashdot",
+                    "text_size": 10.0,
+                    "auto_label_pos": False,
+                    "visible": True,
+                }
+            },
+            "angle_measurements": {
+                "MSRA-1": {
+                    "measurement_id": "MSRA-1",
+                    "floor_plan_id": "grundriss-1",
+                    "name": "Winkel Nische",
+                    "color": "#00e5ff",
+                    "stroke_width": 2.0,
+                    "line_style": "dashdot",
+                    "text_size": 10.0,
+                    "auto_label_pos": True,
+                    "visible": True,
+                }
+            },
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    result = doc.to_dict()
+    canvas = result.get("canvas", {})
+    params = result.get("params", {})
+
+    assert _normalize(canvas.get("distance_measurements", {})) == _normalize(
+        raw["canvas"]["distance_measurements"]
+    )
+    assert _normalize(canvas.get("distance_label_positions", {})) == _normalize(
+        raw["canvas"]["distance_label_positions"]
+    )
+    assert _normalize(canvas.get("angle_measurements", {})) == _normalize(
+        raw["canvas"]["angle_measurements"]
+    )
+    assert _normalize(canvas.get("angle_label_positions", {})) == _normalize(
+        raw["canvas"]["angle_label_positions"]
+    )
+
+    assert _normalize(params.get("distance_measurements", {})) == _normalize(
+        raw["params"]["distance_measurements"]
+    )
+    assert _normalize(params.get("angle_measurements", {})) == _normalize(
+        raw["params"]["angle_measurements"]
+    )
+
+
 def test_json_serializable():
     doc = Document.from_dict(load_raw(EXAMPLES[0])) if EXAMPLES else Document()
     json.dumps(doc.to_dict(), ensure_ascii=False)

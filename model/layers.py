@@ -43,6 +43,8 @@ PREFIX_LAYERS: dict[str, LayerId] = {
     "ER": LayerId.ELECTRICAL,
     "EK": LayerId.ELECTRICAL,
     "TEXT": LayerId.ANNOTATION,
+    "MSRD": LayerId.ANNOTATION,
+    "MSRA": LayerId.ANNOTATION,
 }
 
 

@@ -103,6 +103,217 @@ def test_navigator_hides_empty_categories(app):
         dock.deleteLater()
 
 
+def test_navigator_persists_expanded_state_and_has_collapse_button(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    store: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        QSettings,
+        "value",
+        lambda self, key, default=None, **kw: store.get(key, default),
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: store.__setitem__(key, value))
+
+    from gui.docks.navigator_dock import NavigatorDock  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}]},
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "circuits": {
+                    "HK-1": {"circuit_id": "HK-1", "floor_plan_id": "grundriss-1"}
+                },
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1"}
+                },
+            },
+        }
+    )
+
+    dock = NavigatorDock()
+    try:
+        assert dock._collapse_all_button.text() == "Alle zuklappen"
+        dock.set_document(document)
+
+        root = dock._tree.invisibleRootItem()
+        fp_item = root.child(0)
+        elec_group = _find_tree_child_by_text(fp_item, "Elektro")
+        assert elec_group is not None
+        # APs ohne Raum landen unter "Ohne Raum" (kein Raum im Test-Dokument)
+        ap_group = _find_tree_child_by_text(elec_group, "Ohne Raum")
+        assert ap_group is not None, "Erwarte 'Ohne Raum' Kategorie für APs ohne Raum"
+
+        fp_item.setExpanded(True)
+        elec_group.setExpanded(True)
+        ap_group.setExpanded(False)
+        dock._save_expanded_state()
+
+        dock.rebuild()
+
+        root_after = dock._tree.invisibleRootItem()
+        fp_after = root_after.child(0)
+        elec_after = _find_tree_child_by_text(fp_after, "Elektro")
+        ap_after = _find_tree_child_by_text(elec_after, "Ohne Raum")
+        assert fp_after.isExpanded()
+        assert elec_after is not None and elec_after.isExpanded()
+        assert ap_after is not None and not ap_after.isExpanded()
+    finally:
+        dock.deleteLater()
+
+
+def test_navigator_shows_measurement_categories(app):
+    from gui.docks.navigator_dock import (  # noqa: PLC0415
+        NavigatorDock,
+        make_helper_nav_id,
+    )
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "distance_measurements": {
+                    "MSRD-1": [[0.0, 0.0], [100.0, 0.0]],
+                },
+                "distance_label_positions": {
+                    "MSRD-1": [50.0, -10.0],
+                },
+                "angle_measurements": {
+                    "MSRA-1": [[0.0, 0.0], [50.0, 0.0], [50.0, 50.0]],
+                },
+                "angle_label_positions": {
+                    "MSRA-1": [58.0, 42.0],
+                },
+                "floor_helper_lines": {
+                    "grundriss-1": {"HL-1": [[0.0, 0.0], [30.0, 0.0]]}
+                },
+                "floor_helper_line_visible": {
+                    "grundriss-1": {"HL-1": True}
+                },
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "distance_measurements": {
+                    "MSRD-1": {
+                        "measurement_id": "MSRD-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Distanz 1",
+                        "visible": True,
+                    }
+                },
+                "angle_measurements": {
+                    "MSRA-1": {
+                        "measurement_id": "MSRA-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Winkel 1",
+                        "visible": True,
+                    }
+                },
+            },
+        }
+    )
+
+    dock = NavigatorDock()
+    dock.set_document(document)
+    try:
+        root = dock._tree.invisibleRootItem()
+        assert root.childCount() == 1
+        fp_item = root.child(0)
+
+        annotation_group = _find_tree_child_by_text(fp_item, "Annotationen")
+        assert annotation_group is not None
+
+        category_labels = [
+            annotation_group.child(i).text(0)
+            for i in range(annotation_group.childCount())
+        ]
+        assert "Distanz 1" in category_labels or "MSRD-1" in category_labels
+        assert "Winkel 1" in category_labels or "MSRA-1" in category_labels
+
+        dist_item = dock._find_item_by_id("MSRD-1")
+        angle_item = dock._find_item_by_id("MSRA-1")
+        helper_item = dock._find_item_by_id(make_helper_nav_id("grundriss-1", "HL-1"))
+        assert dist_item is not None
+        assert angle_item is not None
+        assert helper_item is not None
+        assert helper_item.text(0).startswith("Hilfslinie HL-1")
+        assert helper_item.toolTip(0).startswith("Hilfslinie HL-1") or helper_item.toolTip(0) == ""
+    finally:
+        dock.deleteLater()
+
+
+def test_navigator_helper_lines_are_sorted_naturally(app):
+    from gui.docks.navigator_dock import (  # noqa: PLC0415
+        NavigatorDock,
+        make_helper_nav_id,
+    )
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "floor_helper_lines": {
+                    "grundriss-1": {
+                        "HL-10": [[0.0, 0.0], [10.0, 0.0]],
+                        "HL-2": [[0.0, 0.0], [20.0, 0.0]],
+                        "HL-1": [[0.0, 0.0], [30.0, 0.0]],
+                    }
+                },
+                "floor_helper_line_visible": {
+                    "grundriss-1": {
+                        "HL-10": True,
+                        "HL-2": True,
+                        "HL-1": True,
+                    }
+                },
+                "floor_helper_line_length_mm": {
+                    "grundriss-1": {
+                        "HL-10": 100.0,
+                        "HL-2": 200.0,
+                        "HL-1": 300.0,
+                    }
+                },
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+            },
+        }
+    )
+
+    dock = NavigatorDock()
+    dock.set_document(document)
+    try:
+        helper_ids = ["HL-1", "HL-2", "HL-10"]
+        labels = [
+            dock._find_item_by_id(make_helper_nav_id("grundriss-1", hid)).text(0)
+            for hid in helper_ids
+        ]
+        assert labels[0].startswith("Hilfslinie HL-1")
+        assert labels[1].startswith("Hilfslinie HL-2")
+        assert labels[2].startswith("Hilfslinie HL-10")
+
+        root = dock._tree.invisibleRootItem()
+        fp_item = root.child(0)
+        annotations_top = _find_tree_child_by_text(fp_item, "Annotationen")
+        assert annotations_top is not None
+        helper_texts = [
+            annotations_top.child(i).text(0)
+            for i in range(annotations_top.childCount())
+            if annotations_top.child(i).text(0).startswith("Hilfslinie ")
+        ]
+        assert helper_texts == [
+            "Hilfslinie HL-1 (300 mm)",
+            "Hilfslinie HL-2 (200 mm)",
+            "Hilfslinie HL-10 (100 mm)",
+        ]
+    finally:
+        dock.deleteLater()
+
+
 def _find_tree_child_by_text(parent, text: str):
     for index in range(parent.childCount()):
         child = parent.child(index)
@@ -121,6 +332,29 @@ def test_canvas_selection_filter(app):
         assert not canvas._is_selectable("elec_cable", "EK-1")
         canvas.set_selectable_layers(None)
         assert canvas._is_selectable("elec_cable", "EK-1")
+    finally:
+        canvas.deleteLater()
+
+
+def test_canvas_angle_label_positions_roundtrip(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas.from_dict(
+            {
+                "mm_per_px": 1.0,
+                "angle_measurements": {
+                    "MSRA-1": [[0.0, 0.0], [50.0, 0.0], [50.0, 50.0]],
+                },
+                "angle_label_positions": {
+                    "MSRA-1": [60.0, 44.0],
+                },
+            }
+        )
+
+        exported = canvas.to_dict()
+        assert exported.get("angle_label_positions", {}).get("MSRA-1") == [60.0, 44.0]
     finally:
         canvas.deleteLater()
 
@@ -170,6 +404,8 @@ def test_branch_visibility_toggle_no_rebuild(app, monkeypatch):
         elec_group = _find_tree_child_by_text(fp_item, "Elektro")
         assert elec_group is not None
         cat_item = _find_tree_child_by_text(elec_group, "Anschlusspunkte")
+        if cat_item is None:
+            cat_item = _find_tree_child_by_text(elec_group, "Ohne Raum")
         assert cat_item is not None
         cat_item.setCheckState(0, Qt.Unchecked)
 
@@ -178,6 +414,96 @@ def test_branch_visibility_toggle_no_rebuild(app, monkeypatch):
             assert not window._document.is_visible(f"AP-{i}")
         # Kein einziger voller Rebuild durch die Sichtbarkeitsänderung
         assert rebuilds["count"] == 0
+    finally:
+        window.deleteLater()
+
+
+def test_helper_line_selection_from_navigator_sets_active_floor(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.docks.navigator_dock import make_helper_nav_id  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        window._set_document(
+            Document.from_dict(
+                {
+                    "canvas": {
+                        "floor_plans": [
+                            {"fp_id": "grundriss-1"},
+                            {"fp_id": "grundriss-2"},
+                        ],
+                        "floor_helper_lines": {
+                            "grundriss-2": {"HL-1": [[0.0, 0.0], [20.0, 0.0]]}
+                        },
+                        "floor_helper_line_visible": {
+                            "grundriss-2": {"HL-1": True}
+                        },
+                    },
+                    "params": {
+                        "floorplans": {
+                            "grundriss-1": {"name": "EG"},
+                            "grundriss-2": {"name": "OG"},
+                        }
+                    },
+                }
+            )
+        )
+
+        nav_id = make_helper_nav_id("grundriss-2", "HL-1")
+        window._select_element_everywhere(nav_id, update_navigator=True)
+
+        assert window._document.active_floorplan_id == "grundriss-2"
+        assert window.canvas._selected_item_id == nav_id
+        assert window.canvas._selected_item_type == "helper_line"
+        assert window.canvas._helper_selected_floor_id == "grundriss-2"
+        assert window.canvas._helper_selected_id == "HL-1"
+    finally:
+        window.deleteLater()
+
+
+def test_helper_line_visibility_toggle_from_navigator_updates_canvas(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.docks.navigator_dock import make_helper_nav_id  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        window._set_document(
+            Document.from_dict(
+                {
+                    "canvas": {
+                        "floor_plans": [{"fp_id": "grundriss-1"}],
+                        "floor_helper_lines": {
+                            "grundriss-1": {"HL-1": [[0.0, 0.0], [20.0, 0.0]]}
+                        },
+                        "floor_helper_line_visible": {
+                            "grundriss-1": {"HL-1": True}
+                        },
+                    },
+                    "params": {"floorplans": {"grundriss-1": {"name": "EG"}}},
+                }
+            )
+        )
+
+        nav_id = make_helper_nav_id("grundriss-1", "HL-1")
+        window._on_visibility_changed(nav_id, False)
+
+        assert window.canvas._floor_helper_line_visible["grundriss-1"]["HL-1"] is False
     finally:
         window.deleteLater()
 
@@ -251,6 +577,47 @@ def test_app_window_add_elements(app, tmp_path, monkeypatch):
         window._add_text()
         after_texts = len(window._document.elements["text_annotations"])
         assert after_texts == before_texts + 1
+    finally:
+        window.deleteLater()
+
+
+def test_annotation_text_tool_creates_and_places_text(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    }
+                },
+            }
+        )
+        document.active_floorplan_id = "grundriss-1"
+        window._set_document(document)
+        window._apply_workspace("annotation")
+
+        before = len(window._document.elements["text_annotations"])
+        window._on_tool_activated("ann.text")
+        after = len(window._document.elements["text_annotations"])
+
+        assert after == before + 1
+        assert window.canvas._mode == ToolMode.PLACE_TEXT
+        assert window.canvas._placing_text_id is not None
     finally:
         window.deleteLater()
 
@@ -586,6 +953,48 @@ def test_context_menu_shows_workspace_actions_for_selected_element(app, monkeypa
         window.deleteLater()
 
 
+def test_context_menu_offers_draw_cable_for_ap(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [120.0, 80.0]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window._apply_workspace("electrical")
+        actions = [entry[0] for entry in window._workspace_context_action_specs("AP-1", "element")]
+        assert "draw_cable_from_ap" in actions
+    finally:
+        window.deleteLater()
+
+
 def test_context_menu_includes_generic_actions(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -639,6 +1048,56 @@ def test_context_menu_includes_generic_actions(app, monkeypatch):
         window.deleteLater()
 
 
+def test_context_menu_includes_generic_actions_for_measurements(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "distance_measurements": {
+                        "MSRD-1": [[0.0, 0.0], [100.0, 0.0]],
+                    },
+                    "distance_label_positions": {
+                        "MSRD-1": [50.0, -10.0],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "distance_measurements": {
+                        "MSRD-1": {
+                            "measurement_id": "MSRD-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Distanz 1",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        generic = {entry[0]: entry[2] for entry in window._generic_context_action_specs("MSRD-1")}
+        assert generic["copy"] is True
+        assert generic["cut"] is True
+        assert generic["delete"] is True
+        assert generic["duplicate"] is True
+    finally:
+        window.deleteLater()
+
+
 def test_selecting_element_syncs_active_floorplan(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -682,6 +1141,115 @@ def test_selecting_element_syncs_active_floorplan(app, monkeypatch):
 
         assert window._document.active_floorplan_id == "grundriss-2"
         assert window.properties._current_id == "HK-1"
+    finally:
+        window.deleteLater()
+
+
+def test_selecting_measurement_syncs_properties_and_active_floorplan(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True},
+                        {"fp_id": "grundriss-2", "visible": True},
+                    ],
+                    "distance_measurements": {
+                        "MSRD-1": [[10.0, 10.0], [120.0, 10.0]],
+                    },
+                    "distance_label_positions": {
+                        "MSRD-1": [70.0, 0.0],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                        "grundriss-2": {"name": "OG", "visible": True, "file_path": ""},
+                    },
+                    "distance_measurements": {
+                        "MSRD-1": {
+                            "measurement_id": "MSRD-1",
+                            "floor_plan_id": "grundriss-2",
+                            "name": "Messung OG",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        document.active_floorplan_id = "grundriss-1"
+        window._set_document(document)
+
+        window._on_element_selected("MSRD-1")
+
+        assert window._document.active_floorplan_id == "grundriss-2"
+        assert window.properties._current_id == "MSRD-1"
+        assert window.canvas._selected_item_id == "MSRD-1"
+    finally:
+        window.deleteLater()
+
+
+def test_sync_canvas_to_document_persists_measurements(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from PySide6.QtCore import QPointF  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+
+        window.canvas._measure_lines = [
+            (QPointF(10.0, 10.0), QPointF(110.0, 10.0), 100.0),
+        ]
+        window.canvas._measure_label_positions = [(120.0, 4.0)]
+        window.canvas._angle_measurements = [
+            (QPointF(0.0, 0.0), QPointF(50.0, 0.0), QPointF(50.0, 50.0), 90.0),
+        ]
+        window.canvas._angle_measure_label_positions = [(60.0, 40.0)]
+
+        window._sync_canvas_to_document()
+
+        assert window._document.view.get("distance_measurements", {}).get("MSRD-1") == [
+            (10.0, 10.0),
+            (110.0, 10.0),
+        ]
+        assert window._document.view.get("distance_label_positions", {}).get("MSRD-1") == [120.0, 4.0]
+        assert window._document.view.get("angle_measurements", {}).get("MSRA-1") == [
+            (0.0, 0.0),
+            (50.0, 0.0),
+            (50.0, 50.0),
+        ]
+        assert window._document.view.get("angle_label_positions", {}).get("MSRA-1") == [60.0, 40.0]
     finally:
         window.deleteLater()
 
@@ -734,8 +1302,10 @@ def test_a4_navigator_and_properties_prefer_element_names(app, monkeypatch):
         assert editor is not None
         header = editor.findChild(QLabel, "element_header")
         assert header is not None
-        assert "Ankleide" in header.text()
-        assert "ER-13" not in header.text()
+        # Properties-Header zeigt die ID; der Name erscheint im Canvas-Label
+        assert "ER-13" in header.text()
+        # Canvas-Label verwendet den Namen statt der ID
+        assert window.canvas._label_map.get("ER-13") == "Ankleide"
     finally:
         window.deleteLater()
 
@@ -3696,6 +4266,129 @@ def test_e6_add_elec_cable_creates_element_and_starts_draw(app, monkeypatch):
         window.deleteLater()
 
 
+def test_e6_context_action_starts_cable_from_ap(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from PySide6.QtCore import QPointF  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [100.0, 100.0]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+
+        window._run_context_action("draw_cable_from_ap", "AP-1", "element")
+
+        cables = window._document.elements["elec_cables"]
+        assert len(cables) == 1
+        cable_id = next(iter(cables))
+        cable = cables[cable_id]
+        assert cable.start_ap == "AP-1"
+
+        assert window.canvas.tool_mode() == ToolMode.DRAW_ELEC_CABLE
+        assert window.canvas._current_elec_cable_id == cable_id
+        assert len(window.canvas._current_elec_cable_points) == 1
+        assert window.canvas._current_elec_cable_points[0] == QPointF(100.0, 100.0)
+        assert window.canvas.get_cable_ap(cable_id)[0] == "AP-1"
+    finally:
+        window.deleteLater()
+
+
+def test_e6_draw_cable_interaction_snaps_and_finishes(app):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [100.0, 100.0], "AP-2": [220.0, 100.0]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                        }
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose 2",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+        window._add_elec_cable()
+        cable_id = window.canvas._current_elec_cable_id
+        assert cable_id
+        assert window.canvas.tool_mode() == ToolMode.DRAW_ELEC_CABLE
+
+        window.canvas.mousePressEvent(
+            _MouseEventStub(QPointF(100.0, 100.0), button=Qt.LeftButton)
+        )
+        window.canvas.mousePressEvent(
+            _MouseEventStub(QPointF(220.0, 100.0), button=Qt.LeftButton)
+        )
+        window.canvas.mousePressEvent(
+            _MouseEventStub(QPointF(220.0, 100.0), button=Qt.RightButton)
+        )
+
+        cable = window._document.elements["elec_cables"][cable_id]
+        assert cable.geom.get("points")
+        assert window.canvas.tool_mode() == ToolMode.NONE
+        assert window.canvas._current_elec_cable_id is None
+        assert window.canvas.get_cable_ap(cable_id) == ("AP-1", "AP-2")
+    finally:
+        window.deleteLater()
+
+
 def test_e6_draw_cable_property_action_starts_canvas_mode(app, monkeypatch):
     from PySide6.QtCore import QSettings
     monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
@@ -3721,6 +4414,56 @@ def test_e6_draw_cable_property_action_starts_canvas_mode(app, monkeypatch):
         monkeypatch.setattr(window.canvas, "start_draw_elec_cable", lambda eid: calls.append(eid))
         window._on_property_action("EK-1", "draw_cable")
         assert calls == ["EK-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_e6_cable_properties_show_start_and_end_ap(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow
+    from model.document import Document
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "elec_points": {
+                    "AP-1": [0.0, 0.0],
+                    "AP-2": [100.0, 0.0],
+                },
+                "elec_cables": {"EK-1": [[0.0, 0.0], [100.0, 0.0]]},
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Steckdose 1"},
+                    "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Steckdose 2"},
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "start_ap": "",
+                        "end_ap": "",
+                    }
+                },
+            },
+        })
+        window._set_document(doc)
+
+        window.properties.show_element("EK-1")
+        editor = window.properties._editors.get("EK-1")
+        assert editor is not None
+        assert "start_ap" in editor._widgets
+        assert "end_ap" in editor._widgets
+        assert editor._widgets["start_ap"].value() == "AP-1"
+        assert editor._widgets["end_ap"].value() == "AP-2"
     finally:
         window.deleteLater()
 

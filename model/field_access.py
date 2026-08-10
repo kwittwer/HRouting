@@ -64,6 +64,8 @@ _MIRRORED_GEOM_FIELDS: dict[type[Element], dict[str, str]] = {
         "stroke_width": "elec_cable_stroke_width",
         "type": "elec_cable_type_text",
         "type_label_visible": "elec_cable_type_label_visible",
+        "start_ap": "cable_start_ap",
+        "end_ap": "cable_end_ap",
     },
     ElecRoom: {"visible": "elec_room_visible"},
     Hkv: {"visible": "hkv_visible"},
@@ -98,7 +100,15 @@ def get_field(element: Element, spec: FieldSpec) -> Any:
             return element.data.get(key, spec.default)
 
     if key in element.data:
-        return element.data[key]
+        value = element.data[key]
+        # Bei gespiegelt geführten Feldern bevorzugen wir die canvas-Map,
+        # wenn params leer ist (z. B. nach Canvas-Zeichenvorgängen).
+        mirror = _mirror_key(element, key)
+        if mirror is not None and mirror in element.geom:
+            mirror_value = element.geom[mirror]
+            if value in (None, "", []) and mirror_value not in (None, "", []):
+                return mirror_value
+        return value
 
     # Manche Projekte führen den Wert nur in der canvas-Map.
     mirror = _mirror_key(element, key)

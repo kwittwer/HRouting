@@ -558,6 +558,30 @@
           "default": {},
           "description": "Text-Annotationen pro Text-ID (z.B. 'TEXT-1')."
         },
+        "distance_measurements": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Polyline" },
+          "default": {},
+          "description": "Distanzmessungen als Punktpaare/Polylinien pro ID (z.B. 'MSRD-1')."
+        },
+        "distance_label_positions": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Point2D" },
+          "default": {},
+          "description": "Verschobene Label-Ankerposition pro Distanzmessung-ID."
+        },
+        "angle_measurements": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Polyline" },
+          "default": {},
+          "description": "Winkelmessungen als Punktlisten (typisch drei Punkte) pro ID (z.B. 'MSRA-1')."
+        },
+        "angle_label_positions": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Point2D" },
+          "default": {},
+          "description": "Verschobene Label-Ankerposition pro Winkelmessung-ID."
+        },
 
         "floor_plans": {
           "type": "array",
@@ -786,6 +810,18 @@
           "additionalProperties": { "$ref": "#/$defs/ParamTextAnnotation" },
           "default": {},
           "description": "Text-Annotationen pro ID (z.B. 'TEXT-1')."
+        },
+        "distance_measurements": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamDistanceMeasurement" },
+          "default": {},
+          "description": "Persistente Distanzmessungen pro ID (z.B. 'MSRD-1')."
+        },
+        "angle_measurements": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ParamAngleMeasurement" },
+          "default": {},
+          "description": "Persistente Winkelmessungen pro ID (z.B. 'MSRA-1')."
         }
       }
     },
@@ -976,6 +1012,38 @@
         "color": { "$ref": "#/$defs/HexColor", "default": "#ffffff" },
         "comment": { "type": "string", "default": "" },
         "visible": { "type": "boolean", "default": true }
+      }
+    },
+
+    "ParamDistanceMeasurement": {
+      "type": "object",
+      "required": ["measurement_id"],
+      "properties": {
+        "measurement_id": { "type": "string", "pattern": "^MSRD-\\d+$" },
+        "floor_plan_id": { "type": "string", "default": "" },
+        "name": { "type": "string" },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#00e5ff" },
+        "visible": { "type": "boolean", "default": true },
+        "line_style": { "type": "string", "default": "dashdot" },
+        "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 10.0, "default": 2.0 },
+        "text_size": { "type": "number", "minimum": 1.0, "default": 10.0 },
+        "auto_label_pos": { "type": "boolean", "default": true }
+      }
+    },
+
+    "ParamAngleMeasurement": {
+      "type": "object",
+      "required": ["measurement_id"],
+      "properties": {
+        "measurement_id": { "type": "string", "pattern": "^MSRA-\\d+$" },
+        "floor_plan_id": { "type": "string", "default": "" },
+        "name": { "type": "string" },
+        "color": { "$ref": "#/$defs/HexColor", "default": "#00e5ff" },
+        "visible": { "type": "boolean", "default": true },
+        "line_style": { "type": "string", "default": "dashdot" },
+        "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 10.0, "default": 2.0 },
+        "text_size": { "type": "number", "minimum": 1.0, "default": 10.0 },
+        "auto_label_pos": { "type": "boolean", "default": true }
       }
     },
 

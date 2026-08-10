@@ -1925,6 +1925,20 @@ class MainWindow(QMainWindow):
             
             menu.addSeparator()
 
+        elif obj_type == "distance_measure" and obj_id:
+            delete_action = menu.addAction("🗑️ Messlinie löschen")
+            delete_action.triggered.connect(
+                lambda checked=False, mid=obj_id: self._context_delete_distance_measurement(mid)
+            )
+            menu.addSeparator()
+
+        elif obj_type == "angle_measure" and obj_id:
+            delete_action = menu.addAction("🗑️ Winkelmessung löschen")
+            delete_action.triggered.connect(
+                lambda checked=False, mid=obj_id: self._context_delete_angle_measurement(mid)
+            )
+            menu.addSeparator()
+
         elif selected_id:
             copy_action = menu.addAction("📋 Kopieren")
             copy_action.triggered.connect(self._copy_selected_object)
@@ -2070,6 +2084,22 @@ class MainWindow(QMainWindow):
             return
         self.canvas.delete_helper_line(fid, helper_id)
         self._mark_dirty()
+
+    def _context_delete_distance_measurement(self, measurement_id: str):
+        try:
+            index = int(str(measurement_id).split("-", 1)[1]) - 1
+        except (ValueError, IndexError):
+            return
+        if self.canvas.delete_measurement_at(index):
+            self._mark_dirty()
+
+    def _context_delete_angle_measurement(self, measurement_id: str):
+        try:
+            index = int(str(measurement_id).split("-", 1)[1]) - 1
+        except (ValueError, IndexError):
+            return
+        if self.canvas.delete_angle_measurement_at(index):
+            self._mark_dirty()
 
     def _context_info_lines(self, context_type: str | None, context_id: str | None) -> list[str]:
         if not context_type or not context_id:

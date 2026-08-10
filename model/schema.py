@@ -17,7 +17,9 @@ from enum import Enum
 from typing import Any, Callable
 
 from .elements import (
+    AngleMeasurement,
     Circuit,
+    DistanceMeasurement,
     ElecCable,
     ElecPoint,
     ElecRoom,
@@ -165,6 +167,12 @@ def _hkv_name_options(document: Any) -> tuple[str, ...]:
         for hkv_id, hkv in document.elements.get("hkv_points", {}).items()
     )
     return ("", *names)
+
+
+def _elec_point_id_options(document: Any) -> tuple[str, ...]:
+    """IDs aller Anschlusspunkte (leere Auswahl zuerst)."""
+    ids = sorted(document.elements.get("elec_points", {}).keys())
+    return ("", *ids)
 
 
 AP_POSITIONS = ("Wand", "Decke", "Boden")
@@ -325,6 +333,12 @@ ELEC_CABLE_SCHEMA = ElementSchema(
     title="Elektro-Kabel",
     fields=(
         *_common_fields("#ff9800"),
+        FieldSpec("start_ap", "Start-AP", FieldKind.CHOICE,
+                  document_options=_elec_point_id_options, default="",
+                  group="Verbindungen"),
+        FieldSpec("end_ap", "End-AP", FieldKind.CHOICE,
+                  document_options=_elec_point_id_options, default="",
+                  group="Verbindungen"),
         FieldSpec("type", "Kabeltyp", FieldKind.EDITABLE_CHOICE,
                   options=CABLE_TYPES, default="5x1,5", group="Kabel"),
         FieldSpec("type_label_visible", "Kabeltyp im Plan anzeigen",
@@ -405,6 +419,52 @@ TEXT_SCHEMA = ElementSchema(
     ),
     actions=(
         ActionSpec("place", "Neu platzieren"),
+        ActionSpec("delete", "Löschen", destructive=True),
+    ),
+)
+
+
+DISTANCE_MEASUREMENT_SCHEMA = ElementSchema(
+    element_cls=DistanceMeasurement,
+    title="Distanzmessung",
+    fields=(
+        *_common_fields("#00e5ff"),
+        FieldSpec("line_style", "Linientyp", FieldKind.CHOICE,
+                  options=("solid", "dash", "dot", "dashdot"),
+                  default="dashdot", group="Darstellung"),
+        FieldSpec("stroke_width", "Strichstärke", FieldKind.NUMBER,
+                  minimum=0.5, maximum=10.0, step=0.5, decimals=1, unit="px",
+                  default=2.0, group="Darstellung"),
+        FieldSpec("text_size", "Textgröße", FieldKind.NUMBER,
+                  minimum=1.0, maximum=999.0, step=1.0, decimals=1, unit="pt",
+                  default=10.0, group="Darstellung"),
+        FieldSpec("auto_label_pos", "Text automatisch platzieren",
+                  FieldKind.BOOL, default=True, group="Darstellung"),
+    ),
+    actions=(
+        ActionSpec("delete", "Löschen", destructive=True),
+    ),
+)
+
+
+ANGLE_MEASUREMENT_SCHEMA = ElementSchema(
+    element_cls=AngleMeasurement,
+    title="Winkelmessung",
+    fields=(
+        *_common_fields("#00e5ff"),
+        FieldSpec("line_style", "Linientyp", FieldKind.CHOICE,
+                  options=("solid", "dash", "dot", "dashdot"),
+                  default="dashdot", group="Darstellung"),
+        FieldSpec("stroke_width", "Strichstärke", FieldKind.NUMBER,
+                  minimum=0.5, maximum=10.0, step=0.5, decimals=1, unit="px",
+                  default=2.0, group="Darstellung"),
+        FieldSpec("text_size", "Textgröße", FieldKind.NUMBER,
+                  minimum=1.0, maximum=999.0, step=1.0, decimals=1, unit="pt",
+                  default=10.0, group="Darstellung"),
+        FieldSpec("auto_label_pos", "Text automatisch platzieren",
+                  FieldKind.BOOL, default=True, group="Darstellung"),
+    ),
+    actions=(
         ActionSpec("delete", "Löschen", destructive=True),
     ),
 )
@@ -514,6 +574,8 @@ SCHEMAS: tuple[ElementSchema, ...] = (
     HKV_SCHEMA,
     HKV_LINE_SCHEMA,
     TEXT_SCHEMA,
+    DISTANCE_MEASUREMENT_SCHEMA,
+    ANGLE_MEASUREMENT_SCHEMA,
     FLOOR_PLAN_SCHEMA,
     FURNITURE_SCHEMA,
 )

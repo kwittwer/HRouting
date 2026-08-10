@@ -17,7 +17,9 @@ from typing import Any, Callable
 
 from .document import Document
 from .elements import (
+        AngleMeasurement,
     Circuit,
+        DistanceMeasurement,
     ElecCable,
     ElecPoint,
     ElecRoom,
@@ -178,10 +180,20 @@ BINDINGS: tuple[Binding, ...] = (
             geom_key="floor_helper_line_visible", converters=RAW),
     Binding("_helper_label_positions", "A4.7", "nested_view",
             geom_key="helper_label_positions", converters=RAW),
+
+    # -- A4.8  Persistente Vermessung ------------------------------------
+    Binding("_persisted_distance_measurements", "A4.8", "geom", "distance_measurements",
+            element_cls=DistanceMeasurement, converters=POINT_LIST),
+    Binding("_persisted_distance_label_positions", "A4.8", "geom", "distance_label_positions",
+            element_cls=DistanceMeasurement, converters=POINT),
+    Binding("_persisted_angle_measurements", "A4.8", "geom", "angle_measurements",
+            element_cls=AngleMeasurement, converters=POINT_LIST),
+    Binding("_persisted_angle_label_positions", "A4.8", "geom", "angle_label_positions",
+            element_cls=AngleMeasurement, converters=POINT),
 )
 
 #: Reihenfolge der Umstellungsstufen
-STAGES: tuple[str, ...] = ("A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6", "A4.7")
+STAGES: tuple[str, ...] = ("A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6", "A4.7", "A4.8")
 
 #: ``document.view``-Schlüssel, die bereits über Views gebunden sind
 BOUND_VIEW_KEYS: frozenset[str] = frozenset(

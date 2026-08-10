@@ -2,19 +2,33 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QDockWidget,
+    QPushButton,
     QLineEdit,
     QTreeWidget,
     QTreeWidgetItem,
+    QHBoxLayout,
     QVBoxLayout,
     QWidget,
 )
 
 from model.document import Document
-from model.elements import ELEMENT_TYPES, Element, Furniture
+from model.elements import (
+    ELEMENT_TYPES,
+    Element,
+    ElecPoint,
+    ElecRoom,
+    ElecCable,
+    Hkv,
+    HkvLine,
+    Furniture,
+    TextAnnotation,
+    DistanceMeasurement,
+    AngleMeasurement,
+)
 from model.layers import LayerId
 
 _ID_ROLE = Qt.UserRole + 1
@@ -40,11 +54,36 @@ _ELECTRICAL_GROUP = (
     ),
 )
 _ANNOTATION_GROUP = (
-    "Texte",
+    "Annotationen",
     (
-        ("Texte", ("TextAnnotation",)),
+        "TextAnnotation",
+        "DistanceMeasurement",
+        "AngleMeasurement",
     ),
 )
+
+_HELPER_NAV_ID_PREFIX = "NAV-HLP::"
+
+
+def make_helper_nav_id(floor_plan_id: str, helper_id: str) -> str:
+    return f"{_HELPER_NAV_ID_PREFIX}{floor_plan_id}::{helper_id}"
+
+
+def parse_helper_nav_id(nav_id: str) -> tuple[str, str] | None:
+    if not nav_id.startswith(_HELPER_NAV_ID_PREFIX):
+        return None
+    payload = nav_id[len(_HELPER_NAV_ID_PREFIX):]
+    floor_id, sep, helper_id = payload.partition("::")
+    if not sep or not floor_id or not helper_id:
+        return None
+    return floor_id, helper_id
+
+
+def _helper_sort_key(helper_id: str) -> tuple[int, int | str]:
+    suffix = helper_id.rsplit("-", 1)[-1]
+    if suffix.isdigit():
+        return (0, int(suffix))
+    return (1, helper_id.lower())
 
 
 def _index_element_types() -> dict[str, type[Element]]:
@@ -70,6 +109,7 @@ class NavigatorDock(QDockWidget):
         self._selectable_layers: set[LayerId] = set(LayerId)
         self._items: dict[str, QTreeWidgetItem] = {}
         self._suspend_item_events = False
+        self._expanded_state_key = "navigator/expanded_paths"
 
         container = QWidget(self)
         layout = QVBoxLayout(container)
@@ -80,7 +120,16 @@ class NavigatorDock(QDockWidget):
         self._filter.setPlaceholderText("Filtern…")
         self._filter.setClearButtonEnabled(True)
         self._filter.textChanged.connect(self._apply_filter)
-        layout.addWidget(self._filter)
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(4)
+        controls.addWidget(self._filter, 1)
+
+        self._collapse_all_button = QPushButton("Alle zuklappen", container)
+        self._collapse_all_button.clicked.connect(self._collapse_all)
+        controls.addWidget(self._collapse_all_button)
+
+        layout.addLayout(controls)
 
         self._tree = QTreeWidget(container)
         self._tree.setHeaderHidden(True)
@@ -92,6 +141,8 @@ class NavigatorDock(QDockWidget):
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_double_clicked)
         self._tree.itemChanged.connect(self._on_item_changed)
+        self._tree.itemExpanded.connect(self._on_item_expanded_changed)
+        self._tree.itemCollapsed.connect(self._on_item_expanded_changed)
         self._tree.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self._tree, 1)
 
@@ -150,6 +201,7 @@ class NavigatorDock(QDockWidget):
         self._apply_selectability()
         self._highlight_active()
         self._apply_filter(self._filter.text())
+        self._restore_expanded_state()
         self._tree.blockSignals(False)
         self._suspend_item_events = False
 
@@ -186,7 +238,7 @@ class NavigatorDock(QDockWidget):
             return
 
         self._build_nested_group(fp_item, fp_id, _HEATING_GROUP, LayerId.HEATING)
-        self._build_nested_group(fp_item, fp_id, _ELECTRICAL_GROUP, LayerId.ELECTRICAL)
+        self._build_electrical_group(fp_item, fp_id)
 
         furniture = [
             f for f in document.furniture.values()
@@ -198,7 +250,138 @@ class NavigatorDock(QDockWidget):
                 self._add_element_item(furn_group, element)
             self._refresh_branch_state(furn_group)
 
-        self._build_nested_group(fp_item, fp_id, _ANNOTATION_GROUP, LayerId.ANNOTATION)
+        self._build_annotation_group(fp_item, fp_id)
+
+    def _iter_helper_lines_for_floor(self, fp_id: str) -> list[tuple[str, bool, str, float | None]]:
+        """Return helper line metadata for a floor plan from canvas view data."""
+        document = self._document
+        if document is None:
+            return []
+
+        helper_items: list[tuple[str, bool, str, float | None]] = []
+        seen: set[str] = set()
+
+        default_color = "#f8f32b"
+        floor_settings = document.view.get("floor_helper_settings", {})
+        if isinstance(floor_settings, dict):
+            floor_setting = floor_settings.get(fp_id, {})
+            if isinstance(floor_setting, dict):
+                default_color = str(floor_setting.get("color", default_color))
+
+        per_floor = document.view.get("helper_lines_per_floor", {})
+        if isinstance(per_floor, dict):
+            floor_map = per_floor.get(fp_id, {})
+            if isinstance(floor_map, dict):
+                for helper_id, helper_data in floor_map.items():
+                    hid = str(helper_id)
+                    if not hid or hid in seen:
+                        continue
+                    visible = True
+                    color = default_color
+                    length_mm: float | None = None
+                    if isinstance(helper_data, dict):
+                        visible = bool(helper_data.get("visible", True))
+                        color = str(helper_data.get("color", default_color))
+                        length_raw = helper_data.get("length_mm")
+                        if isinstance(length_raw, (int, float)) and length_raw > 0:
+                            length_mm = float(length_raw)
+                    helper_items.append((hid, visible, color, length_mm))
+                    seen.add(hid)
+
+        legacy_lines = document.view.get("floor_helper_lines", {})
+        legacy_visible = document.view.get("floor_helper_line_visible", {})
+        legacy_lengths = document.view.get("floor_helper_line_length_mm", {})
+        if isinstance(legacy_lines, dict):
+            floor_lines = legacy_lines.get(fp_id, {})
+            floor_vis = legacy_visible.get(fp_id, {}) if isinstance(legacy_visible, dict) else {}
+            floor_len = legacy_lengths.get(fp_id, {}) if isinstance(legacy_lengths, dict) else {}
+            if isinstance(floor_lines, dict):
+                for helper_id in floor_lines.keys():
+                    hid = str(helper_id)
+                    if not hid or hid in seen:
+                        continue
+                    visible = True
+                    if isinstance(floor_vis, dict):
+                        visible = bool(floor_vis.get(hid, True))
+                    length_mm: float | None = None
+                    if isinstance(floor_len, dict):
+                        raw_len = floor_len.get(hid)
+                        if isinstance(raw_len, (int, float)) and raw_len > 0:
+                            length_mm = float(raw_len)
+                    helper_items.append((hid, visible, default_color, length_mm))
+                    seen.add(hid)
+
+        return sorted(helper_items, key=lambda item: _helper_sort_key(item[0]))
+
+    def _add_helper_line_item(
+        self,
+        parent: QTreeWidgetItem,
+        floor_plan_id: str,
+        helper_id: str,
+        visible: bool,
+        color: str,
+        length_mm: float | None,
+    ) -> None:
+        nav_id = make_helper_nav_id(floor_plan_id, helper_id)
+        label = f"Hilfslinie {helper_id}"
+        if isinstance(length_mm, (int, float)) and length_mm > 0:
+            label += f" ({length_mm:.0f} mm)"
+        item = QTreeWidgetItem(parent, [label])
+        item.setData(0, _ID_ROLE, nav_id)
+        item.setData(0, _KIND_ROLE, "helper_line")
+        item.setData(0, _KIND_ROLE + 1, LayerId.ANNOTATION.value)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(0, self._to_state(visible))
+        text_color = QColor(color)
+        if not text_color.isValid():
+            text_color = QColor("#f8f32b")
+        base_brush = QBrush(text_color)
+        item.setForeground(0, base_brush)
+        item.setData(0, _BASE_BRUSH_ROLE, base_brush)
+        if isinstance(length_mm, (int, float)) and length_mm > 0:
+            item.setToolTip(0, f"Hilfslinie {helper_id}\nLänge: {length_mm:.0f} mm")
+        else:
+            item.setToolTip(0, f"Hilfslinie {helper_id}")
+        self._items[nav_id] = item
+
+    def _build_annotation_group(self, fp_item: QTreeWidgetItem, fp_id: str) -> None:
+        document = self._document
+        if document is None:
+            return
+
+        group_label, class_names = _ANNOTATION_GROUP
+
+        elements: list[Element] = []
+        for class_name in class_names:
+            element_cls = _ELEMENT_TYPES_BY_NAME.get(class_name)
+            if element_cls is None:
+                continue
+            elements.extend(document.elements_of(element_cls, fp_id))
+
+        helper_lines = self._iter_helper_lines_for_floor(fp_id)
+
+        if not elements and not helper_lines:
+            return
+
+        top_group = self._new_group_item(fp_item, group_label, LayerId.ANNOTATION)
+
+        direct_items: list[tuple[tuple[int, int | str], str, object]] = []
+        for element in sorted(elements, key=_sort_key):
+            direct_items.append((_sort_key(element), "element", element))
+        for helper_id, visible, color, length_mm in helper_lines:
+            direct_items.append((_helper_sort_key(helper_id), "helper", (helper_id, visible, color, length_mm)))
+
+        direct_items.sort(key=lambda item: item[0])
+
+        for _sort_token, kind, payload in direct_items:
+            if kind == "element":
+                self._add_element_item(top_group, payload)
+            else:
+                helper_id, visible, color, length_mm = payload
+                self._add_helper_line_item(top_group, fp_id, helper_id, visible, color, length_mm)
+
+        self._refresh_branch_state(top_group)
+        top_group.setExpanded(True)
 
     def _build_nested_group(
         self,
@@ -233,6 +416,96 @@ class NavigatorDock(QDockWidget):
                 self._add_element_item(cat_item, element)
             self._refresh_branch_state(cat_item)
             cat_item.setExpanded(True)
+        self._refresh_branch_state(top_group)
+        top_group.setExpanded(True)
+
+    def _build_electrical_group(self, fp_item: QTreeWidgetItem, fp_id: str) -> None:
+        """Baut die Elektro-Gruppe auf.
+
+        Räume und Kabel werden flach aufgelistet. APs werden den Räumen
+        zugeordnet, in denen sie geometrisch liegen (Point-in-Polygon).
+        APs ohne Raum landen unter „Ohne Raum".
+        """
+        document = self._document
+        if document is None:
+            return
+
+        rooms: list[ElecRoom] = list(document.elements_of(ElecRoom, fp_id))
+        points: list[ElecPoint] = list(document.elements_of(ElecPoint, fp_id))
+        cables: list[ElecCable] = list(document.elements_of(ElecCable, fp_id))
+
+        if not rooms and not points and not cables:
+            return
+
+        # Raum-Polygone für PiP aufbauen (aus geom-Daten)
+        room_polygons: dict[str, list[tuple[float, float]]] = {}
+        for room in rooms:
+            pts_raw = room.geom.get("elec_rooms") or []
+            if len(pts_raw) >= 3:
+                room_polygons[room.id] = [(float(p[0]), float(p[1])) for p in pts_raw]
+
+        # AP → Raum-Zuordnung
+        room_to_aps: dict[str, list[ElecPoint]] = {r.id: [] for r in rooms}
+        unassigned: list[ElecPoint] = []
+        for point in sorted(points, key=_sort_key):
+            pos_raw = point.geom.get("elec_points")
+            if pos_raw and len(pos_raw) >= 2:
+                px, py = float(pos_raw[0]), float(pos_raw[1])
+                found = ""
+                for rid, poly in room_polygons.items():
+                    if _point_in_polygon(px, py, poly):
+                        found = rid
+                        break
+                if found:
+                    room_to_aps[found].append(point)
+                else:
+                    unassigned.append(point)
+            else:
+                unassigned.append(point)
+
+        top_group = self._new_group_item(fp_item, "Elektro", LayerId.ELECTRICAL)
+
+        # Räume mit ihren APs
+        if rooms:
+            rooms_cat = self._new_group_item(top_group, "Räume", LayerId.ELECTRICAL)
+            for room in sorted(rooms, key=_sort_key):
+                room_item = self._new_group_item(rooms_cat, room.name or room.id, LayerId.ELECTRICAL)
+                room_item.setData(0, _ID_ROLE, room.id)
+                room_item.setData(0, _KIND_ROLE, "element")
+                room_item.setData(0, _KIND_ROLE + 1, LayerId.ELECTRICAL.value)
+                room_item.setFlags(room_item.flags() | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                room_item.setCheckState(
+                    0,
+                    self._to_state(document.is_visible(room.id) if document else True),
+                )
+                color = room.color
+                base_brush = QBrush(QColor(color)) if color else QBrush()
+                room_item.setForeground(0, base_brush)
+                room_item.setData(0, _BASE_BRUSH_ROLE, base_brush)
+                self._items[room.id] = room_item
+                for ap in room_to_aps.get(room.id, []):
+                    self._add_element_item(room_item, ap)
+                self._refresh_branch_state(room_item)
+                room_item.setExpanded(True)
+            self._refresh_branch_state(rooms_cat)
+            rooms_cat.setExpanded(True)
+
+        # APs ohne Raum (nur wenn vorhanden)
+        if unassigned:
+            no_room_cat = self._new_group_item(top_group, "Ohne Raum", LayerId.ELECTRICAL)
+            for ap in unassigned:
+                self._add_element_item(no_room_cat, ap)
+            self._refresh_branch_state(no_room_cat)
+            no_room_cat.setExpanded(True)
+
+        # Kabel
+        if cables:
+            cables_cat = self._new_group_item(top_group, "Kabel", LayerId.ELECTRICAL)
+            for cable in sorted(cables, key=_sort_key):
+                self._add_element_item(cables_cat, cable)
+            self._refresh_branch_state(cables_cat)
+            cables_cat.setExpanded(True)
+
         self._refresh_branch_state(top_group)
         top_group.setExpanded(True)
 
@@ -284,7 +557,7 @@ class NavigatorDock(QDockWidget):
     def _apply_selectability_recursive(self, item: QTreeWidgetItem) -> None:
         try:
             kind = item.data(0, _KIND_ROLE)
-            if kind == "element":
+            if kind in ("element", "helper_line"):
                 layer_value = item.data(0, _KIND_ROLE + 1)
                 enabled = layer_value in {layer.value for layer in self._selectable_layers}
                 # Navigator bleibt immer auswählbar; nur die Canvas-Interaktion
@@ -361,7 +634,7 @@ class NavigatorDock(QDockWidget):
         if not items:
             return
         kind = items[0].data(0, _KIND_ROLE)
-        if kind not in ("element", "floorplan"):
+        if kind not in ("element", "floorplan", "helper_line"):
             return
         element_id = items[0].data(0, _ID_ROLE)
         if element_id:
@@ -378,7 +651,7 @@ class NavigatorDock(QDockWidget):
         if item is None:
             return
         kind = item.data(0, _KIND_ROLE)
-        if kind not in ("element", "floorplan"):
+        if kind not in ("element", "floorplan", "helper_line"):
             return
         element_id = item.data(0, _ID_ROLE)
         if not element_id:
@@ -428,7 +701,7 @@ class NavigatorDock(QDockWidget):
         kind = item.data(0, _KIND_ROLE)
         state = item.checkState(0)
         visible = state != Qt.Unchecked
-        if kind == "element":
+        if kind in ("element", "helper_line"):
             element_id = item.data(0, _ID_ROLE)
             if element_id:
                 self.visibility_changed.emit(element_id, visible)
@@ -444,6 +717,65 @@ class NavigatorDock(QDockWidget):
             for element_id in affected_ids:
                 self.visibility_changed.emit(element_id, visible)
 
+    def _on_item_expanded_changed(self, _item: QTreeWidgetItem) -> None:
+        self._save_expanded_state()
+
+    def _collapse_all(self) -> None:
+        self._tree.collapseAll()
+        self._save_expanded_state()
+
+    def _save_expanded_state(self) -> None:
+        settings = QSettings("HRouting", "HRouting")
+        expanded: list[str] = []
+        root = self._tree.invisibleRootItem()
+        for index in range(root.childCount()):
+            self._collect_expanded_paths(root.child(index), [], expanded)
+        settings.setValue(self._expanded_state_key, expanded)
+
+    def _restore_expanded_state(self) -> None:
+        settings = QSettings("HRouting", "HRouting")
+        raw = settings.value(self._expanded_state_key, [])
+        if isinstance(raw, str):
+            saved = {raw}
+        elif isinstance(raw, list):
+            saved = {str(entry) for entry in raw}
+        else:
+            saved = set()
+        if not saved:
+            return
+        root = self._tree.invisibleRootItem()
+        for index in range(root.childCount()):
+            self._restore_expanded_paths(root.child(index), [], saved)
+
+    def _collect_expanded_paths(
+        self,
+        item: QTreeWidgetItem,
+        prefix: list[str],
+        out: list[str],
+    ) -> None:
+        path = prefix + [self._item_path_token(item)]
+        if item.childCount() > 0 and item.isExpanded():
+            out.append("/".join(path))
+        for index in range(item.childCount()):
+            self._collect_expanded_paths(item.child(index), path, out)
+
+    def _restore_expanded_paths(
+        self,
+        item: QTreeWidgetItem,
+        prefix: list[str],
+        saved: set[str],
+    ) -> None:
+        path = prefix + [self._item_path_token(item)]
+        item.setExpanded("/".join(path) in saved)
+        for index in range(item.childCount()):
+            self._restore_expanded_paths(item.child(index), path, saved)
+
+    def _item_path_token(self, item: QTreeWidgetItem) -> str:
+        kind = str(item.data(0, _KIND_ROLE) or "")
+        item_id = str(item.data(0, _ID_ROLE) or "")
+        text = str(item.text(0) or "")
+        return f"{kind}:{item_id}:{text}"
+
     def _set_branch_state(self, item: QTreeWidgetItem, state: Qt.CheckState) -> None:
         item.setCheckState(0, state)
         for index in range(item.childCount()):
@@ -451,7 +783,7 @@ class NavigatorDock(QDockWidget):
 
     def _emit_branch_visibility(self, item: QTreeWidgetItem, visible: bool) -> None:
         kind = item.data(0, _KIND_ROLE)
-        if kind in ("element", "floorplan"):
+        if kind in ("element", "floorplan", "helper_line"):
             element_id = item.data(0, _ID_ROLE)
             if element_id:
                 self.visibility_changed.emit(element_id, visible)
@@ -461,7 +793,7 @@ class NavigatorDock(QDockWidget):
     def _collect_branch_ids(self, item: QTreeWidgetItem) -> list[str]:
         ids: list[str] = []
         kind = item.data(0, _KIND_ROLE)
-        if kind in ("element", "floorplan"):
+        if kind in ("element", "floorplan", "helper_line"):
             element_id = item.data(0, _ID_ROLE)
             if element_id:
                 ids.append(element_id)
@@ -502,8 +834,23 @@ class NavigatorDock(QDockWidget):
 
 
 def _sort_key(element: Element) -> tuple:
+
     suffix = element.id.rsplit("-", 1)[-1]
     return (0, int(suffix)) if suffix.isdigit() else (1, element.id)
+
+
+def _point_in_polygon(px: float, py: float, poly: list[tuple[float, float]]) -> bool:
+    """Ray-casting Point-in-Polygon für (px, py) gegen ein Polygon."""
+    n = len(poly)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
 
 
 def _filter_item(item: QTreeWidgetItem, needle: str) -> bool:

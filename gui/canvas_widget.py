@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from PySide6.QtCore import Qt, QPointF, Signal, QRectF
 from PySide6.QtGui import (
-    QPainter, QPen, QColor, QBrush, QPolygonF, QPainterPath, QPixmap,
+    QPainter, QPen, QColor, QBrush, QPolygonF, QPainterPath, QPixmap, QFont,
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget, QApplication, QToolTip
@@ -62,6 +62,17 @@ HIT_POINT_RADIUS_PX = 10.0
 HIT_EDGE_RADIUS_PX = 8.0
 HIT_CABLE_POINT_RADIUS_PX = 20.0
 MIN_SYMBOL_PICK_HALF_PX = 8.0
+_HELPER_NAV_ID_PREFIX = "NAV-HLP::"
+
+
+def _parse_helper_nav_id(nav_id: str) -> tuple[str, str] | None:
+    if not nav_id.startswith(_HELPER_NAV_ID_PREFIX):
+        return None
+    payload = nav_id[len(_HELPER_NAV_ID_PREFIX):]
+    floor_id, sep, helper_id = payload.partition("::")
+    if not sep or not floor_id or not helper_id:
+        return None
+    return floor_id, helper_id
 
 class ToolMode(Enum):
     NONE       = auto()
@@ -305,6 +316,9 @@ class CanvasWidget(QWidget):
         self._measure_color: str = "#00e5ff"  # Color for measurement tool
         # Positions for measurement labels (persisted)
         self._measure_label_positions: List[Tuple[float, float]] = []
+        self._angle_measure_label_positions: List[Tuple[float, float]] = []
+        self._debug_measure_last_store_idx: Optional[int] = None
+        self._debug_measure_pos_logs: bool = os.getenv("HROUTING_DEBUG_MEASURE_POS", "1") in {"1", "true", "True", "yes", "on"}
         # Positions for helper line labels (persisted)
         self._helper_label_positions: Dict[str, Dict[str, Tuple[float, float]]] = {}
         # Currently dragging label index
@@ -377,6 +391,15 @@ class CanvasWidget(QWidget):
         self._dragging_multi: Set[Tuple[str, str]] = set()  # Aktuell verschobene Objekte
         self._drag_multi_start_positions: Dict[Tuple[str, str], QPointF] = {}  # Start-Positionen
         self._drag_multi_anchor: Optional[QPointF] = None  # Maus-Anchor beim Multi-Drag
+
+        self._debug_measure_pos("ENABLED", active=self._debug_measure_pos_logs)
+
+    def _debug_measure_pos(self, tag: str, **values) -> None:
+        """Emit optional debug logs for measurement position tracing."""
+        if not self._debug_measure_pos_logs:
+            return
+        details = "  ".join(f"{k}={v}" for k, v in values.items())
+        print(f"[MEASURE-{tag}] {details}", flush=True)
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -885,6 +908,16 @@ class CanvasWidget(QWidget):
         self.measure_changed.emit()
         self.update()
 
+    def delete_measurement_at(self, index: int) -> bool:
+        if index < 0 or index >= len(self._measure_lines):
+            return False
+        del self._measure_lines[index]
+        if 0 <= index < len(self._measure_label_positions):
+            del self._measure_label_positions[index]
+        self.measure_changed.emit()
+        self.update()
+        return True
+
     def start_angle_measure(self):
         """Enter angle measurement mode (3 points)."""
         self._mode = ToolMode.MEASURE_ANGLE
@@ -897,8 +930,19 @@ class CanvasWidget(QWidget):
 
     def clear_angle_measurements(self):
         self._angle_measurements.clear()
+        self._angle_measure_label_positions.clear()
         self.measure_changed.emit()
         self.update()
+
+    def delete_angle_measurement_at(self, index: int) -> bool:
+        if index < 0 or index >= len(self._angle_measurements):
+            return False
+        del self._angle_measurements[index]
+        if 0 <= index < len(self._angle_measure_label_positions):
+            del self._angle_measure_label_positions[index]
+        self.measure_changed.emit()
+        self.update()
+        return True
 
     def cancel_active_placement(self) -> bool:
         if self._mode not in (ToolMode.PLACE_ELEC_POINT, ToolMode.PLACE_HKV, ToolMode.PLACE_TEXT):
@@ -2095,6 +2139,18 @@ class CanvasWidget(QWidget):
         self.mode_changed.emit()
         self.update()
 
+    def start_draw_elec_cable_from_ap(self, cable_id: str, ap_id: str):
+        """Startet das Kabelzeichnen mit festem Start am angegebenen AP."""
+        self.start_draw_elec_cable(cable_id)
+        ap_pos = self._elec_points.get(ap_id)
+        if ap_pos is None:
+            return
+        self._current_elec_cable_points = [QPointF(ap_pos)]
+        self._cable_start_ap[cable_id] = ap_id
+        self._drawing_cable_from_start = False
+        self._current_elec_cable_preview = None
+        self.update()
+
     def start_edit_elec_cable(self, cable_id: str):
         if cable_id not in self._elec_cables:
             return
@@ -2334,7 +2390,10 @@ class CanvasWidget(QWidget):
         "supply_line": "heating",
         "route": "heating",
         "polygon": "heating",
+        "helper_line": "annotation",
         "text": "annotation",
+        "distance_measure": "annotation",
+        "angle_measure": "annotation",
     }
 
     def set_tool_mode(self, mode: "ToolMode") -> None:
@@ -2364,7 +2423,24 @@ class CanvasWidget(QWidget):
 
         self._document = document
         bind_canvas(self, document, stages, on_change=self._on_document_data_changed)
+        self._rebuild_label_map()
         self.update()
+
+    def _rebuild_label_map(self) -> None:
+        """Befüllt ``_label_map`` aus den Elementnamen des gebundenen Dokuments."""
+        if self._document is None:
+            return
+        for group in (
+            self._document.elements.get("circuits", {}),
+            self._document.elements.get("elec_rooms", {}),
+            self._document.elements.get("elec_points", {}),
+            self._document.elements.get("elec_cables", {}),
+            self._document.elements.get("hkv_points", {}),
+            self._document.elements.get("hkv_lines", {}),
+        ):
+            for eid, element in group.items():
+                name = str(getattr(element, "name", "") or "").strip()
+                self._label_map[eid] = name if name else eid
 
     def document(self):
         """Das aktuell gebundene ``Document`` (oder ``None``)."""
@@ -2396,6 +2472,16 @@ class CanvasWidget(QWidget):
             if element_id in mapping:
                 mapping[element_id] = visible
 
+        self.update()
+
+    def set_helper_line_item_visible(self, floor_id: str, helper_id: str, visible: bool) -> None:
+        """Set visibility for one helper line on a specific floor plan."""
+        fid = str(floor_id or "")
+        hid = str(helper_id or "")
+        if not fid or not hid:
+            return
+        self._floor_helper_line_visible.setdefault(fid, {})[hid] = bool(visible)
+        self.helper_lines_changed.emit()
         self.update()
 
     def get_element_visible(self, element_id: str) -> bool:
@@ -2499,9 +2585,94 @@ class CanvasWidget(QWidget):
             return "route"
         if owner_id in self._supply_lines:
             return "supply_line"
+        if owner_id.startswith("MSRD-"):
+            return "distance_measure"
+        if owner_id.startswith("MSRA-"):
+            return "angle_measure"
         if owner_id in self._floor_plans:
             return "floor_polygon"
         return ""
+
+    def _measurement_obj_to_index(self, measurement_id: str, prefix: str) -> Optional[int]:
+        if not measurement_id.startswith(prefix + "-"):
+            return None
+        try:
+            idx = int(measurement_id.split("-", 1)[1]) - 1
+        except (TypeError, ValueError, IndexError):
+            return None
+        return idx if idx >= 0 else None
+
+    def _measurement_distance(self, p1: QPointF, p2: QPointF) -> float:
+        return _qdist(p1, p2) * self._mm_per_px if self._mm_per_px > 0 else 0.0
+
+    def _measurement_angle_deg(self, p1: QPointF, p2: QPointF, p3: QPointF) -> float:
+        v1x, v1y = p1.x() - p2.x(), p1.y() - p2.y()
+        v2x, v2y = p3.x() - p2.x(), p3.y() - p2.y()
+        l1 = math.hypot(v1x, v1y)
+        l2 = math.hypot(v2x, v2y)
+        if l1 <= 1e-9 or l2 <= 1e-9:
+            return 0.0
+        dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (l1 * l2)))
+        return math.degrees(math.acos(dot))
+
+    def _measurement_style(self, measurement_id: str) -> Dict[str, object]:
+        style: Dict[str, object] = {
+            "visible": True,
+            "color": self._measure_color,
+            "line_style": "dashdot",
+            "stroke_width": 2.0,
+            "text_size": 10.0,
+            "auto_label_pos": True,
+            "name": measurement_id,
+        }
+        if self._document is None:
+            return style
+
+        element = self._document.get(measurement_id)
+        if element is None:
+            return style
+
+        style["visible"] = bool(getattr(element, "visible", True))
+        color = str(element.data.get("color") or "").strip()
+        if color:
+            style["color"] = color
+        style["line_style"] = str(element.data.get("line_style") or style["line_style"])
+        try:
+            style["stroke_width"] = float(element.data.get("stroke_width", style["stroke_width"]))
+        except (TypeError, ValueError):
+            pass
+        try:
+            style["text_size"] = float(element.data.get("text_size", style["text_size"]))
+        except (TypeError, ValueError):
+            pass
+        style["auto_label_pos"] = bool(element.data.get("auto_label_pos", style["auto_label_pos"]))
+        name = str(getattr(element, "name", "") or "").strip()
+        if name:
+            style["name"] = name
+        return style
+
+    def _set_measure_auto_label_pos(self, measurement_id: str, enabled: bool) -> None:
+        """Update auto-label flag for a persisted measurement element if present."""
+        if self._document is None:
+            return
+        element = self._document.get(measurement_id)
+        if element is None:
+            return
+        element.data["auto_label_pos"] = bool(enabled)
+
+    def _normalize_measure_label_positions(self) -> None:
+        """Keep distance label positions aligned 1:1 with stored distance lines."""
+        line_count = len(self._measure_lines)
+        label_count = len(self._measure_label_positions)
+        if label_count > line_count:
+            del self._measure_label_positions[line_count:]
+            self._debug_measure_pos("LABELS-TRUNCATE", lines=line_count, labels_before=label_count)
+            return
+        if label_count < line_count:
+            for idx in range(label_count, line_count):
+                _p1, p2, _mm = self._measure_lines[idx]
+                self._measure_label_positions.append((float(p2.x()), float(p2.y())))
+            self._debug_measure_pos("LABELS-PAD", lines=line_count, labels_before=label_count)
 
     def _is_selectable(self, obj_type: str, obj_id: str) -> bool:
         allowed = getattr(self, "_selectable_layers", None)
@@ -2565,6 +2736,18 @@ class CanvasWidget(QWidget):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
                         return ("route", cid)
+
+        # 6b. Distance measurements
+        if selectable("distance_measure", ""):
+            hit = self._hit_distance_measurement(canvas_pt)
+            if hit is not None:
+                return ("distance_measure", f"MSRD-{hit + 1}")
+
+        # 6c. Angle measurements
+        if selectable("angle_measure", ""):
+            hit = self._hit_angle_measurement(canvas_pt)
+            if hit is not None:
+                return ("angle_measure", f"MSRA-{hit + 1}")
 
         # 7. Heating circuits polygons
         for cid, poly in self._polygons.items():
@@ -3118,9 +3301,11 @@ class CanvasWidget(QWidget):
         self._text_visible.clear()
         self._text_rects.clear()
         self._measure_lines.clear()
+        self._measure_label_positions.clear()
         self._measure_p1 = None
         self._measure_p2 = None
         self._angle_measurements.clear()
+        self._angle_measure_label_positions.clear()
         self._angle_measure_p1 = None
         self._angle_measure_p2 = None
         self._angle_measure_p3 = None
@@ -3141,6 +3326,19 @@ class CanvasWidget(QWidget):
     def set_selected_item(self, item_id: str):
         """Set the item to highlight in the canvas (from treeview selection)."""
         self._selected_item_id = item_id if item_id else None
+        helper_ref = _parse_helper_nav_id(item_id) if item_id else None
+        if helper_ref is not None:
+            fid, hid = helper_ref
+            if hid in self._floor_helper_lines.get(fid, {}):
+                self._helper_selected_floor_id = fid
+                self._helper_selected_id = hid
+                self._selected_item_type = "helper_line"
+            else:
+                self._selected_item_type = None
+            self.update()
+            return
+        self._helper_selected_id = None
+        self._helper_selected_floor_id = None
         # Auto-detect type from the item id
         if item_id:
             if item_id in self._polygons:
@@ -3163,6 +3361,12 @@ class CanvasWidget(QWidget):
                 self._selected_item_type = "route"
             elif item_id in self._text_annotations:
                 self._selected_item_type = "text"
+            elif self._measurement_obj_to_index(item_id, "MSRD") is not None:
+                idx = self._measurement_obj_to_index(item_id, "MSRD")
+                self._selected_item_type = "distance_measure" if idx is not None and idx < len(self._measure_lines) else None
+            elif self._measurement_obj_to_index(item_id, "MSRA") is not None:
+                idx = self._measurement_obj_to_index(item_id, "MSRA")
+                self._selected_item_type = "angle_measure" if idx is not None and idx < len(self._angle_measurements) else None
             elif item_id in self._floor_plans:
                 self._selected_item_type = "floor_polygon"
             else:
@@ -3317,7 +3521,7 @@ class CanvasWidget(QWidget):
             "label_visible": dict(self._label_visible),
             "text_annotations": {
                 tid: {
-                    "pos": (p.x(), p.y()),
+                    "pos": (pt.x(), pt.y()),
                     "content": self._text_contents.get(tid, ""),
                     "font_size": self._text_font_sizes.get(tid, 14.0),
                     "color": self._text_colors.get(tid, "#ffffff"),
@@ -3325,6 +3529,24 @@ class CanvasWidget(QWidget):
                     "visible": self._text_visible.get(tid, True),
                 }
                 for tid, p in self._text_annotations.items()
+                for pt in [self._coerce_canvas_point(p)]
+                if pt is not None
+            },
+            "distance_measurements": {
+                f"MSRD-{idx + 1}": [(p1.x(), p1.y()), (p2.x(), p2.y())]
+                for idx, (p1, p2, _mm_len) in enumerate(self._measure_lines)
+            },
+            "distance_label_positions": {
+                f"MSRD-{idx + 1}": [float(lp[0]), float(lp[1])]
+                for idx, lp in enumerate(self._measure_label_positions)
+            },
+            "angle_measurements": {
+                f"MSRA-{idx + 1}": [(p1.x(), p1.y()), (p2.x(), p2.y()), (p3.x(), p3.y())]
+                for idx, (p1, p2, p3, _angle_deg) in enumerate(self._angle_measurements)
+            },
+            "angle_label_positions": {
+                f"MSRA-{idx + 1}": [float(lp[0]), float(lp[1])]
+                for idx, lp in enumerate(self._angle_measure_label_positions)
             },
         }
         if self._ref_p1 and self._ref_p2:
@@ -3435,6 +3657,52 @@ class CanvasWidget(QWidget):
             self._ref_p1 = QPointF(*ref[0])
             self._ref_p2 = QPointF(*ref[1])
         self._mm_per_px = d.get("mm_per_px", 1.0)
+        legacy_measure_labels = list(self._measure_label_positions)
+        self._measure_lines = []
+        self._angle_measurements = []
+        self._measure_label_positions = []
+        self._angle_measure_label_positions = []
+
+        distance_measurements = d.get("distance_measurements", {})
+        for _measurement_id, points in sorted(distance_measurements.items()):
+            if not isinstance(points, (list, tuple)) or len(points) < 2:
+                continue
+            p1 = QPointF(float(points[0][0]), float(points[0][1]))
+            p2 = QPointF(float(points[1][0]), float(points[1][1]))
+            mm_len = _qdist(p1, p2) * self._mm_per_px if self._mm_per_px > 0 else 0.0
+            self._measure_lines.append((p1, p2, mm_len))
+
+        distance_labels = d.get("distance_label_positions", {})
+        for _measurement_id, label_pos in sorted(distance_labels.items()):
+            if not isinstance(label_pos, (list, tuple)) or len(label_pos) < 2:
+                continue
+            self._measure_label_positions.append((float(label_pos[0]), float(label_pos[1])))
+        if not self._measure_label_positions and legacy_measure_labels:
+            self._measure_label_positions = legacy_measure_labels
+
+        angle_measurements = d.get("angle_measurements", {})
+        for _measurement_id, points in sorted(angle_measurements.items()):
+            if not isinstance(points, (list, tuple)) or len(points) < 3:
+                continue
+            p1 = QPointF(float(points[0][0]), float(points[0][1]))
+            p2 = QPointF(float(points[1][0]), float(points[1][1]))
+            p3 = QPointF(float(points[2][0]), float(points[2][1]))
+            v1x, v1y = p1.x() - p2.x(), p1.y() - p2.y()
+            v2x, v2y = p3.x() - p2.x(), p3.y() - p2.y()
+            l1 = math.hypot(v1x, v1y)
+            l2 = math.hypot(v2x, v2y)
+            angle_deg = 0.0
+            if l1 > 1e-9 and l2 > 1e-9:
+                dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (l1 * l2)))
+                angle_deg = math.degrees(math.acos(dot))
+            self._angle_measurements.append((p1, p2, p3, angle_deg))
+
+        angle_labels = d.get("angle_label_positions", {})
+        for _measurement_id, label_pos in sorted(angle_labels.items()):
+            if not isinstance(label_pos, (list, tuple)) or len(label_pos) < 2:
+                continue
+            self._angle_measure_label_positions.append((float(label_pos[0]), float(label_pos[1])))
+
         for cid, pts in d.get("manual_routes", {}).items():
             self._manual_routes[cid] = [QPointF(x, y) for x, y in pts]
         self._route_wall_dist_px = {
@@ -3705,6 +3973,16 @@ class CanvasWidget(QWidget):
 
     def _px_to_canvas_units(self, px: float) -> float:
         return px / max(self._scale, 1e-9)
+
+    def _coerce_canvas_point(self, value) -> Optional[QPointF]:
+        if isinstance(value, QPointF):
+            return value
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            try:
+                return QPointF(float(value[0]), float(value[1]))
+            except (TypeError, ValueError):
+                return None
+        return None
 
     def _fit_to_window(self):
         w, h = self._svg_size
@@ -4664,7 +4942,10 @@ class CanvasWidget(QWidget):
                                     self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._hkv_points[sel_id])
                             elif sel_type == "text":
                                 if sel_id in self._text_annotations:
-                                    self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._text_annotations[sel_id])
+                                    pos = self._coerce_canvas_point(self._text_annotations[sel_id])
+                                    if pos is not None:
+                                        self._text_annotations[sel_id] = pos
+                                        self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(pos)
                             elif sel_type == "elec_cable":
                                 if sel_id in self._elec_cables:
                                     pts = [QPointF(p) for p in self._elec_cables[sel_id]]
@@ -4756,22 +5037,71 @@ class CanvasWidget(QWidget):
         # ── Messen ──
         if self._mode == ToolMode.MEASURE:
             if event.button() == Qt.LeftButton:
+                snapped_now = self._snap_measure_point(canvas_pt)
+                # Keep preview and commit source in sync with the click event.
+                # This prevents stale mouse-move state from influencing finalize.
+                self._mouse_pos = QPointF(snapped_now)
                 if self._measure_p1 is None:
-                    self._measure_p1 = canvas_pt
+                    self._measure_p1 = snapped_now
                     self._measure_p2 = None
                 else:
-                    self._measure_p2 = canvas_pt
+                    snapped_click = snapped_now
+                    preview_pt = QPointF(self._mouse_pos) if self._mouse_pos is not None else None
+                    if preview_pt is None:
+                        self._measure_p2 = snapped_click
+                        source = "click"
+                    else:
+                        # Use preview point only if it matches the current click
+                        # position within a small tolerance; this avoids stale
+                        # mouse-move state causing wrong finalize points.
+                        tol = self._px_to_canvas_units(2.0)
+                        if _qdist(preview_pt, snapped_click) <= tol:
+                            self._measure_p2 = preview_pt
+                            source = "preview"
+                        else:
+                            self._measure_p2 = snapped_click
+                            source = "click-fallback"
                     # Save measurement and start next one
                     if self._mm_per_px > 0:
                         px_len = _qdist(self._measure_p1, self._measure_p2)
+                        if px_len <= 1e-6:
+                            self._debug_measure_pos(
+                                "DROP-ZERO",
+                                p1=f"({self._measure_p1.x():.2f},{self._measure_p1.y():.2f})",
+                                p2=f"({self._measure_p2.x():.2f},{self._measure_p2.y():.2f})",
+                                source=source,
+                            )
+                            self._measure_p1 = None
+                            self._measure_p2 = None
+                            self.update()
+                            return
                         mm_len = px_len * self._mm_per_px
                         self._measure_lines.append(
                             (QPointF(self._measure_p1),
                              QPointF(self._measure_p2), mm_len))
-                        # Default label position: midpoint
-                        mid_x = (self._measure_p1.x() + self._measure_p2.x()) / 2.0
-                        mid_y = (self._measure_p1.y() + self._measure_p2.y()) / 2.0
-                        self._measure_label_positions.append((float(mid_x), float(mid_y)))
+                        line_idx = len(self._measure_lines) - 1
+                        self._normalize_measure_label_positions()
+                        # Place label exactly at the second point (p2).
+                        anchor_x = self._measure_p2.x()
+                        anchor_y = self._measure_p2.y()
+                        if line_idx < len(self._measure_label_positions):
+                            self._measure_label_positions[line_idx] = (float(anchor_x), float(anchor_y))
+                        else:
+                            self._measure_label_positions.append((float(anchor_x), float(anchor_y)))
+                        self._debug_measure_last_store_idx = line_idx
+                        self._debug_measure_pos(
+                            "STORE",
+                            idx=line_idx,
+                            lines=len(self._measure_lines),
+                            labels=len(self._measure_label_positions),
+                            p1=f"({self._measure_p1.x():.2f},{self._measure_p1.y():.2f})",
+                            p2=f"({self._measure_p2.x():.2f},{self._measure_p2.y():.2f})",
+                            clicked=f"({snapped_click.x():.2f},{snapped_click.y():.2f})",
+                            preview=f"({preview_pt.x():.2f},{preview_pt.y():.2f})" if preview_pt is not None else "None",
+                            label=f"({anchor_x:.2f},{anchor_y:.2f})",
+                            source=source,
+                            scale=f"{self._scale:.4f}",
+                        )
                         self.measure_changed.emit()
                     self._measure_p1 = None
                     self._measure_p2 = None
@@ -4810,6 +5140,10 @@ class CanvasWidget(QWidget):
                         dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (l1 * l2)))
                         angle_deg = math.degrees(math.acos(dot))
                         self._angle_measurements.append((QPointF(p1), QPointF(p2), QPointF(p3), angle_deg))
+                        anchor_x = p3.x() + 10.0 / max(self._scale, 1e-9)
+                        anchor_y = p3.y() - 6.0 / max(self._scale, 1e-9)
+                        self._angle_measure_label_positions.append((float(anchor_x), float(anchor_y)))
+                        self.measure_changed.emit()
                     self._angle_measure_p1 = None
                     self._angle_measure_p2 = None
                     self._angle_measure_p3 = None
@@ -5436,6 +5770,27 @@ class CanvasWidget(QWidget):
                 self._mode = ToolMode.MOVE_ROUTE_POINT
                 self.setCursor(Qt.ClosedHandCursor)
                 return
+
+            if self._is_selectable("distance_measure", ""):
+                distance_point_hit = self._hit_distance_measurement_point(canvas_pt)
+                if distance_point_hit is not None:
+                    measure_id, point_idx = distance_point_hit
+                    self.object_clicked.emit("distance_measure", measure_id)
+                    self._dragging_route_point = (measure_id, point_idx)
+                    self._mode = ToolMode.MOVE_ROUTE_POINT
+                    self.setCursor(Qt.ClosedHandCursor)
+                    return
+
+            if self._is_selectable("angle_measure", ""):
+                angle_point_hit = self._hit_angle_measurement_point(canvas_pt)
+                if angle_point_hit is not None:
+                    measure_id, point_idx = angle_point_hit
+                    self.object_clicked.emit("angle_measure", measure_id)
+                    self._dragging_route_point = (measure_id, point_idx)
+                    self._mode = ToolMode.MOVE_ROUTE_POINT
+                    self.setCursor(Qt.ClosedHandCursor)
+                    return
+
             hit = self._hit_start_point(canvas_pt)
             if hit and self._is_selectable("polygon", hit):
                 self._dragging_start = hit
@@ -5475,6 +5830,8 @@ class CanvasWidget(QWidget):
         if self._mode != ToolMode.NONE:
             self._helper_hover_endpoint = None
         if self._mode == ToolMode.MEASURE_ANGLE:
+            self._mouse_pos = self._snap_measure_point(canvas_pt)
+        elif self._mode == ToolMode.MEASURE:
             self._mouse_pos = self._snap_measure_point(canvas_pt)
         else:
             self._mouse_pos = canvas_pt
@@ -5626,11 +5983,26 @@ class CanvasWidget(QWidget):
                 except ValueError:
                     idx = None
                 if idx is not None:
-                    anchor_pos = QPointF(new_pos.x(), new_pos.y() + 10 / self._scale)
                     if 0 <= idx < len(self._measure_label_positions):
-                        self._measure_label_positions[idx] = (float(anchor_pos.x()), float(anchor_pos.y()))
+                        old_lp = self._measure_label_positions[idx]
+                        self._measure_label_positions[idx] = (float(new_pos.x()), float(new_pos.y()))
+                        self._set_measure_auto_label_pos(f"MSRD-{idx + 1}", False)
+                        self._debug_measure_pos(
+                            "LABEL-DRAG",
+                            idx=idx,
+                            old=f"({old_lp[0]:.2f},{old_lp[1]:.2f})",
+                            new=f"({new_pos.x():.2f},{new_pos.y():.2f})",
+                            ctrl=ctrl_held,
+                        )
                     else:
-                        self._measure_label_positions.append((float(anchor_pos.x()), float(anchor_pos.y())))
+                        self._measure_label_positions.append((float(new_pos.x()), float(new_pos.y())))
+                        self._set_measure_auto_label_pos(f"MSRD-{idx + 1}", False)
+                        self._debug_measure_pos(
+                            "LABEL-APPEND",
+                            idx=idx,
+                            new=f"({new_pos.x():.2f},{new_pos.y():.2f})",
+                            ctrl=ctrl_held,
+                        )
             elif self._dragging_label.startswith("helper:"):
                 parts = self._dragging_label.split(":", 2)
                 if len(parts) == 3:
@@ -5938,7 +6310,7 @@ class CanvasWidget(QWidget):
             return
 
         if self._mode == ToolMode.MOVE_ROUTE_POINT and self._dragging_route_point:
-            cid, idx = self._dragging_route_point
+            owner_id, idx = self._dragging_route_point
             ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
             if ctrl_held:
                 constrained = canvas_pt
@@ -5946,9 +6318,77 @@ class CanvasWidget(QWidget):
                 self._constraint_violation_line = None
                 self._constraint_violation_reason = ""
             else:
-                constrained = self._constrain_dragged_route_point(cid, idx, canvas_pt)
-            if cid in self._manual_routes and 0 <= idx < len(self._manual_routes[cid]):
-                self._manual_routes[cid][idx] = constrained
+                constrained = self._constrain_dragged_route_point(owner_id, idx, canvas_pt)
+            if owner_id in self._manual_routes and 0 <= idx < len(self._manual_routes[owner_id]):
+                self._manual_routes[owner_id][idx] = constrained
+            elif owner_id.startswith("MSRD-"):
+                m_idx = self._measurement_obj_to_index(owner_id, "MSRD")
+                if m_idx is not None and 0 <= m_idx < len(self._measure_lines):
+                    p1, p2, _old_len = self._measure_lines[m_idx]
+                    new_pt = constrained if ctrl_held else self._snap_to_grid(constrained)
+                    if idx == 0:
+                        p1 = new_pt
+                    elif idx == 1:
+                        # Move label together with the last point (p2)
+                        old_p2 = QPointF(p2)
+                        p2 = new_pt
+                        if m_idx < len(self._measure_label_positions):
+                            measurement_id = f"MSRD-{m_idx + 1}"
+                            style = self._measurement_style(measurement_id)
+                            if bool(style.get("auto_label_pos", True)):
+                                offset_x = 0.0
+                                offset_y = 0.0
+                            else:
+                                lx, ly = self._measure_label_positions[m_idx]
+                                offset_x = lx - old_p2.x()
+                                offset_y = ly - old_p2.y()
+                            self._measure_label_positions[m_idx] = (
+                                p2.x() + offset_x,
+                                p2.y() + offset_y,
+                            )
+                            self._debug_measure_pos(
+                                "ENDPOINT-DRAG-LABEL",
+                                idx=m_idx,
+                                old_p2=f"({old_p2.x():.2f},{old_p2.y():.2f})",
+                                new_p2=f"({p2.x():.2f},{p2.y():.2f})",
+                                offset=f"({offset_x:.2f},{offset_y:.2f})",
+                                label=f"({self._measure_label_positions[m_idx][0]:.2f},{self._measure_label_positions[m_idx][1]:.2f})",
+                                auto=bool(style.get("auto_label_pos", True)),
+                                ctrl=ctrl_held,
+                            )
+                    mm_len = self._measurement_distance(p1, p2)
+                    self._measure_lines[m_idx] = (QPointF(p1), QPointF(p2), mm_len)
+                    self._debug_measure_pos(
+                        "ENDPOINT-DRAG",
+                        idx=m_idx,
+                        endpoint=idx,
+                        p1=f"({p1.x():.2f},{p1.y():.2f})",
+                        p2=f"({p2.x():.2f},{p2.y():.2f})",
+                        mm_len=f"{mm_len:.2f}",
+                        ctrl=ctrl_held,
+                    )
+            elif owner_id.startswith("MSRA-"):
+                a_idx = self._measurement_obj_to_index(owner_id, "MSRA")
+                if a_idx is not None and 0 <= a_idx < len(self._angle_measurements):
+                    p1, p2, p3, _old_angle = self._angle_measurements[a_idx]
+                    new_pt = constrained if ctrl_held else self._snap_to_grid(constrained)
+                    if idx == 0:
+                        p1 = new_pt
+                    elif idx == 1:
+                        p2 = new_pt
+                    elif idx == 2:
+                        # Move label together with the last point (p3)
+                        old_p3 = QPointF(p3)
+                        p3 = new_pt
+                        if a_idx < len(self._angle_measure_label_positions):
+                            lx, ly = self._angle_measure_label_positions[a_idx]
+                            offset_x = lx - old_p3.x()
+                            offset_y = ly - old_p3.y()
+                            self._angle_measure_label_positions[a_idx] = (
+                                p3.x() + offset_x, p3.y() + offset_y
+                            )
+                    angle_deg = self._measurement_angle_deg(p1, p2, p3)
+                    self._angle_measurements[a_idx] = (QPointF(p1), QPointF(p2), QPointF(p3), angle_deg)
             self.update()
             return
 
@@ -6070,7 +6510,10 @@ class CanvasWidget(QWidget):
                     elif sel_type == "hkv" and sel_id in self._hkv_points:
                         self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._hkv_points[sel_id])
                     elif sel_type == "text" and sel_id in self._text_annotations:
-                        self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(self._text_annotations[sel_id])
+                        pos = self._coerce_canvas_point(self._text_annotations[sel_id])
+                        if pos is not None:
+                            self._text_annotations[sel_id] = pos
+                            self._drag_multi_start_positions[(sel_type, sel_id)] = QPointF(pos)
                     elif sel_type == "elec_cable" and sel_id in self._elec_cables:
                         self._drag_multi_start_positions[(sel_type, sel_id)] = [QPointF(p) for p in self._elec_cables[sel_id]]
 
@@ -6259,7 +6702,23 @@ class CanvasWidget(QWidget):
                 canvas_pt.x() - self._label_drag_offset.x(),
                 canvas_pt.y() - self._label_drag_offset.y())
             new_pos = raw_pos if ctrl_held else self._snap_to_grid(raw_pos)
-            self._label_positions[self._dragging_label] = new_pos
+            label_id = self._dragging_label
+            if label_id.startswith("measure:"):
+                try:
+                    idx = int(label_id.split(":", 1)[1])
+                except (TypeError, ValueError, IndexError):
+                    idx = -1
+                if 0 <= idx < len(self._measure_label_positions):
+                    self._measure_label_positions[idx] = (float(new_pos.x()), float(new_pos.y()))
+            elif label_id.startswith("angle:"):
+                try:
+                    idx = int(label_id.split(":", 1)[1])
+                except (TypeError, ValueError, IndexError):
+                    idx = -1
+                if 0 <= idx < len(self._angle_measure_label_positions):
+                    self._angle_measure_label_positions[idx] = (float(new_pos.x()), float(new_pos.y()))
+            else:
+                self._label_positions[label_id] = new_pos
             self.update()
             return
 
@@ -6293,6 +6752,14 @@ class CanvasWidget(QWidget):
             if hover_cursor == Qt.ArrowCursor:
                 route_hit = self._hit_route_point(canvas_pt)
                 if route_hit:
+                    hover_cursor = Qt.OpenHandCursor
+
+            if hover_cursor == Qt.ArrowCursor:
+                if self._hit_distance_measurement_point(canvas_pt) is not None:
+                    hover_cursor = Qt.OpenHandCursor
+
+            if hover_cursor == Qt.ArrowCursor:
+                if self._hit_angle_measurement_point(canvas_pt) is not None:
                     hover_cursor = Qt.OpenHandCursor
 
             if hover_cursor == Qt.ArrowCursor:
@@ -6544,7 +7011,7 @@ class CanvasWidget(QWidget):
                 self.setCursor(Qt.ArrowCursor)
                 return
             if self._mode == ToolMode.MOVE_ROUTE_POINT and self._dragging_route_point:
-                cid, _ = self._dragging_route_point
+                owner_id, _ = self._dragging_route_point
                 self._dragging_route_point = None
                 self._current_route_preview_end = None
                 self._constraint_violation_point = None
@@ -6552,7 +7019,10 @@ class CanvasWidget(QWidget):
                 self._constraint_violation_reason = ""
                 self._mode = ToolMode.NONE
                 self.setCursor(Qt.ArrowCursor)
-                self.route_changed.emit(cid)
+                if owner_id.startswith("MSRD-") or owner_id.startswith("MSRA-"):
+                    self.measure_changed.emit()
+                else:
+                    self.route_changed.emit(owner_id)
                 return
             if self._dragging_route_point and self._mode == ToolMode.EDIT_POLYGON:
                 cid, _ = self._dragging_route_point
@@ -7406,18 +7876,31 @@ class CanvasWidget(QWidget):
             rect = self._label_rects.get(obj_id)
             if rect:
                 painter.drawRect(rect)
+        elif obj_type == "distance_measure":
+            idx = self._measurement_obj_to_index(obj_id, "MSRD")
+            if idx is not None and 0 <= idx < len(self._measure_lines):
+                p1, p2, _mm_len = self._measure_lines[idx]
+                painter.drawLine(p1, p2)
+        elif obj_type == "angle_measure":
+            idx = self._measurement_obj_to_index(obj_id, "MSRA")
+            if idx is not None and 0 <= idx < len(self._angle_measurements):
+                p1, p2, p3, _angle = self._angle_measurements[idx]
+                painter.drawLine(p2, p1)
+                painter.drawLine(p2, p3)
         painter.restore()
 
     # ── Measurement drawing ───────────────────────────────────────── #
 
     def _draw_measurements(self, painter: QPainter):
-        color = QColor(self._measure_color)
+        self._normalize_measure_label_positions()
         r = 4.0 / self._scale
-        pen = QPen(color, 2.0 / self._scale, Qt.DashDotLine)
-        font = painter.font()
-        font.setPointSizeF(10.0 / self._scale)
+        base_font = painter.font()
 
-        def draw_text_with_background(pt: QPointF, text: str, label_id: Optional[str] = None, text_color: Optional[QColor] = None):
+        def draw_text_with_background(pt: QPointF, text: str, text_size_pt: float,
+                                      label_id: Optional[str] = None,
+                                      text_color: Optional[QColor] = None):
+            font = QFont(base_font)
+            font.setPointSizeF(max(1.0, float(text_size_pt)) / self._scale)
             painter.setFont(font)
             metrics = painter.fontMetrics()
             pad = 3.0 / self._scale
@@ -7439,6 +7922,16 @@ class CanvasWidget(QWidget):
 
         # Draw persisted measurement lines
         for idx, (p1, p2, mm_len) in enumerate(self._measure_lines):
+            measurement_id = f"MSRD-{idx + 1}"
+            style = self._measurement_style(measurement_id)
+            if not bool(style.get("visible", True)):
+                continue
+            color = QColor(str(style.get("color", self._measure_color)))
+            pen = QPen(
+                color,
+                max(0.5, float(style.get("stroke_width", 2.0))) / self._scale,
+                self._helper_line_pen_style(str(style.get("line_style", "dashdot"))),
+            )
             painter.setPen(pen)
             painter.drawLine(p1, p2)
             painter.setBrush(QBrush(color))
@@ -7448,14 +7941,38 @@ class CanvasWidget(QWidget):
                 lp = self._measure_label_positions[idx]
                 anchor_pos = QPointF(lp[0], lp[1])
             else:
-                anchor_pos = QPointF((p1.x() + p2.x()) / 2,
-                                     (p1.y() + p2.y()) / 2)
-            draw_pos = QPointF(anchor_pos.x(), anchor_pos.y() - 10 / self._scale)
-            draw_text_with_background(draw_pos, f"{mm_len / 1000:.3f} m", f"measure:{idx}")
+                anchor_pos = QPointF(p2.x(), p2.y())
+            draw_text_with_background(
+                anchor_pos,
+                f"{mm_len / 1000:.3f} m",
+                float(style.get("text_size", 10.0)),
+                f"measure:{idx}",
+                color,
+            )
+            if self._debug_measure_last_store_idx == idx:
+                self._debug_measure_pos(
+                    "DRAW-AFTER-STORE",
+                    idx=idx,
+                    measurement_id=measurement_id,
+                    p2=f"({p2.x():.2f},{p2.y():.2f})",
+                    anchor=f"({anchor_pos.x():.2f},{anchor_pos.y():.2f})",
+                    text_size=f"{float(style.get('text_size', 10.0)):.2f}",
+                    line_style=str(style.get("line_style", "dashdot")),
+                    auto=bool(style.get("auto_label_pos", True)),
+                )
+                self._debug_measure_last_store_idx = None
 
         # Draw in-progress measurement
         if self._mode == ToolMode.MEASURE and self._measure_p1:
             p2 = self._mouse_pos if self._mouse_pos else self._measure_p1
+            next_measurement_id = f"MSRD-{len(self._measure_lines) + 1}"
+            next_style = self._measurement_style(next_measurement_id)
+            color = QColor(str(next_style.get("color", self._measure_color)))
+            pen = QPen(
+                color,
+                max(0.5, float(next_style.get("stroke_width", 2.0))) / self._scale,
+                self._helper_line_pen_style(str(next_style.get("line_style", "dashdot"))),
+            )
             painter.setPen(pen)
             painter.drawLine(self._measure_p1, p2)
             painter.setBrush(QBrush(color))
@@ -7464,20 +7981,23 @@ class CanvasWidget(QWidget):
             if self._mm_per_px > 0:
                 px_len = _qdist(self._measure_p1, p2)
                 mm_len = px_len * self._mm_per_px
-                mid = QPointF(
-                    (self._measure_p1.x() + p2.x()) / 2,
-                    (self._measure_p1.y() + p2.y()) / 2 - 10 / self._scale,
+                preview_pos = QPointF(p2.x(), p2.y())
+                draw_text_with_background(
+                    preview_pos,
+                    f"{mm_len / 1000:.3f} m",
+                    float(next_style.get("text_size", 10.0)),
+                    text_color=color,
                 )
-                draw_text_with_background(mid, f"{mm_len / 1000:.3f} m")
 
     def _draw_angle_measurements(self, painter: QPainter):
-        color = QColor(self._measure_color)
         r = 4.0 / self._scale
-        pen = QPen(color, 2.0 / self._scale, Qt.DashDotLine)
-        font = painter.font()
-        font.setPointSizeF(10.0 / self._scale)
+        base_font = painter.font()
 
-        def draw_text_with_background(pt: QPointF, text: str):
+        def draw_text_with_background(pt: QPointF, text: str, text_size_pt: float,
+                                      color: QColor,
+                                      label_id: Optional[str] = None):
+            font = QFont(base_font)
+            font.setPointSizeF(max(1.0, float(text_size_pt)) / self._scale)
             painter.setFont(font)
             metrics = painter.fontMetrics()
             pad = 3.0 / self._scale
@@ -7493,8 +8013,27 @@ class CanvasWidget(QWidget):
             painter.fillRect(rect, QColor(0, 0, 0, 180))
             painter.setPen(QPen(color))
             painter.drawText(pt, text)
+            if label_id:
+                self._label_rects[label_id] = rect
+                self._label_draw_pos[label_id] = QPointF(pt)
 
-        def draw_triplet(p1: QPointF, p2: QPointF, p3: QPointF, angle_deg: float):
+        def draw_triplet(
+            p1: QPointF,
+            p2: QPointF,
+            p3: QPointF,
+            angle_deg: float,
+            color: QColor,
+            line_style: str,
+            stroke_width: float,
+            text_size: float,
+            auto_label_pos: bool,
+            label_id: Optional[str] = None,
+        ):
+            pen = QPen(
+                color,
+                max(0.5, float(stroke_width)) / self._scale,
+                self._helper_line_pen_style(line_style),
+            )
             painter.setPen(pen)
             painter.drawLine(p2, p1)
             painter.drawLine(p2, p3)
@@ -7502,14 +8041,44 @@ class CanvasWidget(QWidget):
             painter.drawEllipse(p1, r, r)
             painter.drawEllipse(p2, r, r)
             painter.drawEllipse(p3, r, r)
-            label_pos = QPointF(
-                p3.x() + 8.0 / self._scale,
-                p3.y() - 8.0 / self._scale,
-            )
-            draw_text_with_background(label_pos, f"{angle_deg:.1f}°")
+            if auto_label_pos:
+                label_pos = QPointF(
+                    p3.x() + 10.0 / max(self._scale, 1e-9),
+                    p3.y() - 6.0 / max(self._scale, 1e-9),
+                )
+            else:
+                label_pos = QPointF(
+                    p3.x() + 10.0 / max(self._scale, 1e-9),
+                    p3.y() - 6.0 / max(self._scale, 1e-9),
+                )
+            if label_id and label_id.startswith("angle:"):
+                try:
+                    idx = int(label_id.split(":", 1)[1])
+                except (TypeError, ValueError, IndexError):
+                    idx = -1
+                if 0 <= idx < len(self._angle_measure_label_positions):
+                    lp = self._angle_measure_label_positions[idx]
+                    label_pos = QPointF(lp[0], lp[1])
+            draw_text_with_background(label_pos, f"{angle_deg:.1f}°", text_size, color, label_id)
 
-        for p1, p2, p3, angle_deg in self._angle_measurements:
-            draw_triplet(p1, p2, p3, angle_deg)
+        for idx, (p1, p2, p3, angle_deg) in enumerate(self._angle_measurements):
+            measurement_id = f"MSRA-{idx + 1}"
+            style = self._measurement_style(measurement_id)
+            if not bool(style.get("visible", True)):
+                continue
+            color = QColor(str(style.get("color", self._measure_color)))
+            draw_triplet(
+                p1,
+                p2,
+                p3,
+                angle_deg,
+                color,
+                str(style.get("line_style", "dashdot")),
+                float(style.get("stroke_width", 2.0)),
+                float(style.get("text_size", 10.0)),
+                bool(style.get("auto_label_pos", True)),
+                f"angle:{idx}",
+            )
 
         if self._mode == ToolMode.MEASURE_ANGLE:
             if self._angle_measure_p1 is not None and self._angle_measure_p2 is not None:
@@ -7524,9 +8093,12 @@ class CanvasWidget(QWidget):
                 if l1 > 1e-9 and l2 > 1e-9:
                     dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (l1 * l2)))
                     angle_deg = math.degrees(math.acos(dot))
-                draw_triplet(p1, p2, p3, angle_deg)
+                color = QColor(self._measure_color)
+                draw_triplet(p1, p2, p3, angle_deg, color, "dashdot", 2.0, 10.0, True)
             elif self._angle_measure_p1 is not None:
                 p2 = self._mouse_pos if self._mouse_pos is not None else self._angle_measure_p1
+                color = QColor(self._measure_color)
+                pen = QPen(color, 2.0 / self._scale, Qt.DashDotLine)
                 painter.setPen(pen)
                 painter.drawLine(self._angle_measure_p1, p2)
                 painter.setBrush(QBrush(color))
@@ -7880,10 +8452,40 @@ class CanvasWidget(QWidget):
             if len(pts) >= 2:
                 painter.drawPolyline(QPolygonF(pts))
 
+        elif item_type == "helper_line" and self._helper_selected_floor_id:
+            pts = self._floor_helper_lines.get(self._helper_selected_floor_id, {}).get(item_id, [])
+            if len(pts) >= 2:
+                painter.drawPolyline(QPolygonF(pts))
+                r = 6.0 / self._scale
+                painter.drawEllipse(pts[0], r, r)
+                painter.drawEllipse(pts[1], r, r)
+
         elif item_type == "text" and item_id in self._text_annotations:
-            pos = self._text_annotations[item_id]
-            r = 8.0 / self._scale
-            painter.drawEllipse(pos, r, r)
+            pos = self._coerce_canvas_point(self._text_annotations[item_id])
+            if pos is not None:
+                self._text_annotations[item_id] = pos
+                r = 8.0 / self._scale
+                painter.drawEllipse(pos, r, r)
+
+        elif item_type == "distance_measure":
+            idx = self._measurement_obj_to_index(item_id, "MSRD")
+            if idx is not None and 0 <= idx < len(self._measure_lines):
+                p1, p2, _mm_len = self._measure_lines[idx]
+                painter.drawLine(p1, p2)
+                r = 7.0 / self._scale
+                painter.drawEllipse(p1, r, r)
+                painter.drawEllipse(p2, r, r)
+
+        elif item_type == "angle_measure":
+            idx = self._measurement_obj_to_index(item_id, "MSRA")
+            if idx is not None and 0 <= idx < len(self._angle_measurements):
+                p1, p2, p3, _angle = self._angle_measurements[idx]
+                painter.drawLine(p2, p1)
+                painter.drawLine(p2, p3)
+                r = 7.0 / self._scale
+                painter.drawEllipse(p1, r, r)
+                painter.drawEllipse(p2, r, r)
+                painter.drawEllipse(p3, r, r)
 
     # ── Text Annotations drawing ─────────────────────────────────── #
 
@@ -7893,6 +8495,11 @@ class CanvasWidget(QWidget):
         for tid, pos in self._text_annotations.items():
             if not self._text_visible.get(tid, True):
                 continue
+            pos_pt = self._coerce_canvas_point(pos)
+            if pos_pt is None:
+                continue
+            if not isinstance(pos, QPointF):
+                self._text_annotations[tid] = pos_pt
             content = self._text_contents.get(tid, "")
             if not content:
                 continue
@@ -7908,8 +8515,8 @@ class CanvasWidget(QWidget):
             total_height = line_height * len(lines)
             # Background
             pad = 4.0 / self._scale
-            bg_rect = QRectF(pos.x() - pad,
-                             pos.y() - fm.ascent() - pad,
+            bg_rect = QRectF(pos_pt.x() - pad,
+                             pos_pt.y() - fm.ascent() - pad,
                              max_width + 2 * pad,
                              total_height + 2 * pad)
             bg = QColor("#2b2b2b")
@@ -7922,7 +8529,7 @@ class CanvasWidget(QWidget):
             painter.setBrush(Qt.NoBrush)
             for i, line in enumerate(lines):
                 painter.drawText(
-                    QPointF(pos.x(), pos.y() + i * line_height), line)
+                    QPointF(pos_pt.x(), pos_pt.y() + i * line_height), line)
             # Store rect for hit testing
             self._text_rects[tid] = bg_rect
 
@@ -8146,6 +8753,43 @@ class CanvasWidget(QWidget):
         for item_id, rect in self._label_rects.items():
             if rect.contains(canvas_pt):
                 return item_id
+        return None
+
+    def _hit_distance_measurement(self, canvas_pt: QPointF) -> Optional[int]:
+        threshold = self._px_to_canvas_units(HIT_EDGE_RADIUS_PX)
+        for idx, (p1, p2, _mm_len) in enumerate(self._measure_lines):
+            proj = _project_on_segment(canvas_pt, p1, p2)
+            if _qdist(canvas_pt, proj) < threshold:
+                return idx
+        return None
+
+    def _hit_angle_measurement(self, canvas_pt: QPointF) -> Optional[int]:
+        threshold = self._px_to_canvas_units(HIT_EDGE_RADIUS_PX)
+        for idx, (p1, p2, p3, _angle) in enumerate(self._angle_measurements):
+            proj1 = _project_on_segment(canvas_pt, p2, p1)
+            proj2 = _project_on_segment(canvas_pt, p2, p3)
+            if _qdist(canvas_pt, proj1) < threshold or _qdist(canvas_pt, proj2) < threshold:
+                return idx
+        return None
+
+    def _hit_distance_measurement_point(self, canvas_pt: QPointF) -> Optional[Tuple[str, int]]:
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
+        for idx, (p1, p2, _mm_len) in enumerate(self._measure_lines):
+            if _qdist(canvas_pt, p1) < threshold:
+                return (f"MSRD-{idx + 1}", 0)
+            if _qdist(canvas_pt, p2) < threshold:
+                return (f"MSRD-{idx + 1}", 1)
+        return None
+
+    def _hit_angle_measurement_point(self, canvas_pt: QPointF) -> Optional[Tuple[str, int]]:
+        threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
+        for idx, (p1, p2, p3, _angle) in enumerate(self._angle_measurements):
+            if _qdist(canvas_pt, p1) < threshold:
+                return (f"MSRA-{idx + 1}", 0)
+            if _qdist(canvas_pt, p2) < threshold:
+                return (f"MSRA-{idx + 1}", 1)
+            if _qdist(canvas_pt, p3) < threshold:
+                return (f"MSRA-{idx + 1}", 2)
         return None
 
     # ------------------------------------------------------------------ #

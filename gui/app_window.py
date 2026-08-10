@@ -65,6 +65,17 @@ _MAX_RECENT = 8
 
 _FILE_FILTER = "HRouting-Projekt (*.hrp);;Alle Dateien (*)"
 _IMAGE_FILTER = "Bilder (*.png *.jpg *.jpeg *.svg);;Alle Dateien (*)"
+_HELPER_NAV_ID_PREFIX = "NAV-HLP::"
+
+
+def _parse_helper_nav_id(nav_id: str) -> tuple[str, str] | None:
+    if not nav_id.startswith(_HELPER_NAV_ID_PREFIX):
+        return None
+    payload = nav_id[len(_HELPER_NAV_ID_PREFIX):]
+    floor_id, sep, helper_id = payload.partition("::")
+    if not sep or not floor_id or not helper_id:
+        return None
+    return floor_id, helper_id
 
 
 class AppWindow(QMainWindow):
@@ -359,6 +370,36 @@ class AppWindow(QMainWindow):
             color_value = str(element.data.get("color") or "").strip()
             if color_value:
                 self.canvas.set_color(element_id, QColor(color_value))
+
+        if key == "name":
+            name = str(element.data.get("name") or "").strip()
+            self.canvas._label_map[element_id] = name if name else element_id
+            self.canvas.update()
+            self.navigator.set_document(self._document)
+
+        if key in ("builtin_symbol", "icon_path") and element_id in self._document.elements.get("elec_points", {}):
+            from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
+            icon_path = str(element.data.get("icon_path") or "").strip()
+            if not icon_path:
+                symbol = str(element.data.get("builtin_symbol") or "").strip()
+                icon_path = str(BUILTIN_SYMBOLS.get(symbol, "") or "")
+            self.canvas.set_elec_point_icon(element_id, icon_path)
+
+        if key in ("start_ap", "end_ap") and element_id in self._document.elements.get("elec_cables", {}):
+            cable = self._document.elements["elec_cables"].get(element_id)
+            if cable is not None:
+                start_ap_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "").strip()
+                end_ap_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "").strip()
+                if start_ap_id and start_ap_id not in self._document.elements["elec_points"]:
+                    start_ap_id = ""
+                if end_ap_id and end_ap_id not in self._document.elements["elec_points"]:
+                    end_ap_id = ""
+                cable.start_ap = start_ap_id
+                cable.end_ap = end_ap_id
+                cable.geom["cable_start_ap"] = start_ap_id
+                cable.geom["cable_end_ap"] = end_ap_id
+                self._rebuild_schema_cable_geometry(cable, start_ap_id, end_ap_id)
+                self.canvas.update()
 
         if key == "visible":
             self.canvas.set_element_visible(element_id, bool(element.visible))
@@ -762,6 +803,10 @@ class AppWindow(QMainWindow):
             self.canvas.start_draw_floor_plan_polygon(target_id)
             self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
             return
+        if tool_id == "ann.text":
+            self._add_text()
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
 
         mode = getattr(ToolMode, tool.tool_mode, ToolMode.NONE)
         self.canvas.set_tool_mode(mode)
@@ -792,6 +837,7 @@ class AppWindow(QMainWindow):
         self.canvas.set_document(document)
 
         self._load_floor_plan_images(document)
+        self._reload_elec_points_to_canvas(document)
         self._sync_grid_toolbar_from_canvas()
         self._refresh_schema_windows()
         self._update_title()
@@ -1082,6 +1128,23 @@ class AppWindow(QMainWindow):
         element_id = self._current_selection_id()
         if not element_id:
             self.statusBar().showMessage("Kein Element ausgewählt", 2000)
+            return
+        helper_ref = _parse_helper_nav_id(element_id)
+        if helper_ref is not None:
+            floor_id, helper_id = helper_ref
+            answer = QMessageBox.question(
+                self,
+                "Hilfslinie löschen",
+                f"Hilfslinie '{helper_id}' wirklich löschen?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            self._push_undo()
+            self.canvas.delete_helper_line(floor_id, helper_id)
+            self.navigator.rebuild()
+            self._mark_dirty()
+            self.statusBar().showMessage(f"Hilfslinie gelöscht: {helper_id}", 2500)
             return
         self._delete_element_with_confirm(element_id)
 
@@ -1381,6 +1444,9 @@ class AppWindow(QMainWindow):
             specs.append(("activate", "Als aktiv setzen", True))
 
         if element is not None:
+            if isinstance(element, ElecPoint):
+                specs.append(("draw_cable_from_ap", "Kabel ziehen", True))
+
             schema = schema_for(element)
             same_workspace = getattr(type(element), "LAYER", None) is self._workspace.layer
             if schema is not None and same_workspace:
@@ -1400,6 +1466,7 @@ class AppWindow(QMainWindow):
 
     def _generic_context_action_specs(self, element_id: str) -> list[tuple[str, str, bool]]:
         has_element = self._document.get(element_id) is not None if element_id else False
+        is_helper = _parse_helper_nav_id(element_id) is not None if element_id else False
         return [
             ("undo", "Rückgängig", bool(self._undo_stack)),
             ("redo", "Wiederherstellen", bool(self._redo_stack)),
@@ -1407,7 +1474,7 @@ class AppWindow(QMainWindow):
             ("copy", "Kopieren", has_element),
             ("paste", "Einfügen", self._copy_buffer is not None),
             ("duplicate", "Duplizieren", has_element),
-            ("delete", "Löschen", has_element),
+            ("delete", "Löschen", has_element or is_helper),
         ]
 
     def _run_context_action(self, action_id: str, element_id: str, kind: str) -> None:
@@ -1440,6 +1507,9 @@ class AppWindow(QMainWindow):
             return
         if action_id == "delete":
             self._delete_selected()
+            return
+        if action_id == "draw_cable_from_ap" and element_id:
+            self._add_elec_cable_from_ap(element_id)
             return
         if element_id:
             self._on_property_action(element_id, action_id)
@@ -1476,6 +1546,12 @@ class AppWindow(QMainWindow):
         self._open_context_menu(element_id, kind, global_pos)
 
     def _on_canvas_context_requested(self, obj_type: str, obj_id: str, _canvas_pt, global_pos) -> None:
+        if obj_type == "helper_line" and obj_id:
+            helper_floor = self.canvas._helper_selected_floor_id or self._active_floorplan_id()
+            obj_id = f"{_HELPER_NAV_ID_PREFIX}{helper_floor}::{obj_id}"
+            kind = "helper_line"
+            self._open_context_menu(obj_id, kind, global_pos)
+            return
         kind = "floorplan" if obj_id in self._document.floorplans else "element"
         self._open_context_menu(obj_id, kind, global_pos)
 
@@ -1506,6 +1582,17 @@ class AppWindow(QMainWindow):
             if floor is not None:
                 floor.layer.update(entry)
 
+        # Persistente Vermessung aktuell aus Canvas-Laufzeitdaten zurückschreiben.
+        # Diese Daten liegen im Canvas in spezialisierten Strukturen und laufen
+        # deshalb nicht vollständig über die gebundenen Map-Views.
+        for key in (
+            "distance_measurements",
+            "distance_label_positions",
+            "angle_measurements",
+            "angle_label_positions",
+        ):
+            document.view[key] = canvas_state.get(key, {})
+
     @staticmethod
     def _bound_canvas_keys() -> set[str]:
         """canvas-Schlüssel, die bereits über Views im Dokument liegen."""
@@ -1534,17 +1621,61 @@ class AppWindow(QMainWindow):
                 self.log.warning(f"Bild nicht gefunden für {fp_id}: {file_path}")
         self.canvas.update()
 
+    def _reload_elec_points_to_canvas(self, document: Document) -> None:
+        """Setzt Farbe, Größe und Icon für alle im Dokument vorhandenen APs.
+
+        ``canvas.from_dict`` und ``set_document`` übertragen nur Geometrie.
+        Icons und Farben müssen danach manuell synchronisiert werden.
+        """
+        from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
+
+        mm_per_px = max(self.canvas._mm_per_px, 1e-9)
+        for pid, point in document.elements.get("elec_points", {}).items():
+            # Farbe
+            color = str(point.data.get("color") or "#4fc3f7").strip()
+            self.canvas.set_color(pid, QColor(color))
+
+            # Größe
+            try:
+                w = float(point.data.get("width") or 30.0)
+                h = float(point.data.get("height") or 30.0)
+            except (TypeError, ValueError):
+                w, h = 30.0, 30.0
+            self.canvas._elec_point_size_px[pid] = (w / mm_per_px, h / mm_per_px)
+
+            # Icon
+            icon_path = str(point.data.get("icon_path") or "").strip()
+            if not icon_path:
+                symbol = str(point.data.get("builtin_symbol") or "").strip()
+                icon_path = str(BUILTIN_SYMBOLS.get(symbol, "") or "")
+            self.canvas.set_elec_point_icon(pid, icon_path)
+
+        self.canvas.update()
 
     def _on_element_selected(self, element_id: str) -> None:
         self._select_element_everywhere(element_id, update_navigator=False)
 
-    def _on_canvas_object_clicked(self, _obj_type: str, obj_id: str) -> None:
+    def _on_canvas_object_clicked(self, obj_type: str, obj_id: str) -> None:
         if not obj_id:
             return
+        if obj_type == "helper_line":
+            helper_floor = self.canvas._helper_selected_floor_id or self._active_floorplan_id()
+            obj_id = f"{_HELPER_NAV_ID_PREFIX}{helper_floor}::{obj_id}"
         self._select_element_everywhere(obj_id, update_navigator=True)
 
     def _select_element_everywhere(self, element_id: str, *, update_navigator: bool) -> None:
         if not element_id:
+            return
+        helper_ref = _parse_helper_nav_id(element_id)
+        if helper_ref is not None:
+            floor_id, _helper_id = helper_ref
+            if floor_id and floor_id in self._document.floorplans:
+                if self._document.active_floorplan_id != floor_id:
+                    self._document.active_floorplan_id = floor_id
+                self.canvas.set_active_helper_floor(floor_id)
+            if update_navigator:
+                self.navigator.select(element_id)
+            self.canvas.set_selected_item(element_id)
             return
         self._sync_active_floorplan_for_selection(element_id)
         if update_navigator:
@@ -1592,6 +1723,13 @@ class AppWindow(QMainWindow):
         return self._active_floorplan_id()
 
     def _on_visibility_changed(self, element_id: str, visible: bool) -> None:
+        helper_ref = _parse_helper_nav_id(element_id)
+        if helper_ref is not None:
+            floor_id, helper_id = helper_ref
+            self.canvas.set_helper_line_item_visible(floor_id, helper_id, visible)
+            self._dirty = True
+            self._update_title()
+            return
         if not self._document.set_visible(element_id, visible):
             return
         self._apply_canvas_visibility(element_id, visible)
@@ -1862,6 +2000,45 @@ class AppWindow(QMainWindow):
         self.log.info(
             f"Kabel {eid} im Zeichenmodus: Linksklick Punkte, Rechtsklick Abschluss"
         )
+        self._mark_dirty()
+
+    def _add_elec_cable_from_ap(self, ap_id: str) -> None:
+        point = self._document.elements["elec_points"].get(ap_id)
+        if point is None:
+            self.statusBar().showMessage("Anschlusspunkt nicht gefunden", 2500)
+            return
+
+        fp_id = str(point.floor_plan_id or "").strip()
+        if not fp_id:
+            fp_id = self._active_floorplan_id() or self._require_floorplan()
+        if not fp_id:
+            return
+
+        self._push_undo()
+        eid = self._document.new_id(ElecCable)
+        cable = ElecCable.create(
+            eid,
+            floor_plan_id=fp_id,
+            name=f"Kabel {eid.rsplit('-', 1)[-1]}",
+            color="#ffb300",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            type="",
+            comment="",
+            start_ap=ap_id,
+            end_ap="",
+        )
+        self._document.add(cable)
+        self.canvas.register_element(eid)
+        self._emit_structure_changed()
+        self.navigator.select(eid)
+        self.canvas.start_draw_elec_cable_from_ap(eid, ap_id)
+        self.statusBar().showMessage(
+            "Kabel ziehen: Start am AP gesetzt, Linksklick Punkte setzen, Rechtsklick abschließen.",
+            5000,
+        )
+        self.log.info(f"Kabel {eid} ab AP {ap_id} im Zeichenmodus gestartet")
         self._mark_dirty()
 
     def _add_hkv(self) -> None:

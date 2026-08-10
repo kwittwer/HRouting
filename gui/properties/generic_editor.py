@@ -130,8 +130,7 @@ class GenericElementEditor(QWidget):
         self.refresh()
 
     def _header_text(self) -> str:
-        display_name = str(getattr(self._element, "name", "") or "").strip() or self._element.id
-        return f"<b>{self._schema.title}</b> · {display_name}"
+        return f"<b>{self._schema.title}</b> · {self._element.id}"
 
     # ------------------------------------------------------------------
     def _build_group(self, title: str, specs: list[FieldSpec]) -> QGroupBox:

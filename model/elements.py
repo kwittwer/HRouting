@@ -297,6 +297,44 @@ class TextAnnotation(Element):
         return self._entry.get("font_size", self.data.get("font_size", 14.0))
 
 
+class DistanceMeasurement(Element):
+    """Persistente Distanzmessung (MSRD)."""
+
+    PREFIX = "MSRD"
+    PARAMS_KEY = "distance_measurements"
+    ID_FIELD = "measurement_id"
+    LAYER = LayerId.ANNOTATION
+    CATEGORY_LABEL = "Distanzmessungen"
+    GEOM_KEYS = ("distance_measurements", "distance_label_positions")
+
+    line_style = _param("line_style", "dashdot")
+    stroke_width = _param("stroke_width", 2.0)
+    text_size = _param("text_size", 10.0)
+    auto_label_pos = _param("auto_label_pos", True)
+
+    points = _geom("distance_measurements")
+    label_anchor = _geom("distance_label_positions")
+
+
+class AngleMeasurement(Element):
+    """Persistente Winkelmessung (MSRA)."""
+
+    PREFIX = "MSRA"
+    PARAMS_KEY = "angle_measurements"
+    ID_FIELD = "measurement_id"
+    LAYER = LayerId.ANNOTATION
+    CATEGORY_LABEL = "Winkelmessungen"
+    GEOM_KEYS = ("angle_measurements", "angle_label_positions")
+
+    line_style = _param("line_style", "dashdot")
+    stroke_width = _param("stroke_width", 2.0)
+    text_size = _param("text_size", 10.0)
+    auto_label_pos = _param("auto_label_pos", True)
+
+    points = _geom("angle_measurements")
+    label_anchor = _geom("angle_label_positions")
+
+
 class FloorPlan(Element):
     """Grundriss-Layer.
 
@@ -368,4 +406,6 @@ ELEMENT_TYPES: tuple[type[Element], ...] = (
     ElecRoom,
     ElecCable,
     TextAnnotation,
+    DistanceMeasurement,
+    AngleMeasurement,
 )
