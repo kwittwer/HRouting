@@ -966,7 +966,15 @@
         "end_ap": { "type": "string", "default": "", "description": "End-Anschlusspunkt-ID (z.B. 'AP-2')." },
         "start_length_surcharge_m": { "type": "number", "minimum": 0.0, "default": 0.0, "description": "Zusätzlicher Längenaufschlag am Kabelanfang in Metern." },
         "end_length_surcharge_m": { "type": "number", "minimum": 0.0, "default": 0.0, "description": "Zusätzlicher Längenaufschlag am Kabelende in Metern." },
-        "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 10.0, "default": 2.0, "description": "Strichstärke der Kabellinie in px." }
+        "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 10.0, "default": 2.0, "description": "Strichstärke der Kabellinie in px." },
+        "kicad_project_uuid": { "type": "string", "default": "", "description": "KiCad Projekt-UUID der Importsource." },
+        "kicad_sheet_uuid": { "type": "string", "default": "", "description": "KiCad Sheet-UUID des hierarchischen Anschlusses." },
+        "kicad_pin_uuid": { "type": "string", "default": "", "description": "KiCad Pin-UUID des importierten Sheet-Pins." },
+        "kicad_pin_name": { "type": "string", "default": "", "description": "Originaler KiCad Pinname inklusive Spezifikation." },
+        "kicad_sheet_path": { "type": "string", "default": "", "description": "Relativer Pfad der KiCad Sheet-Datei." },
+        "kicad_cable_key": { "type": "string", "default": "", "description": "Stabiler Import-/Sync-Schlüssel für Re-Importe." },
+        "kicad_last_import_hash": { "type": "string", "default": "", "description": "Hash der zuletzt importierten KiCad-Kabeldefinition." },
+        "kicad_last_imported_at": { "type": "string", "default": "", "description": "Zeitpunkt des letzten erfolgreichen KiCad-Imports." }
       }
     },
 

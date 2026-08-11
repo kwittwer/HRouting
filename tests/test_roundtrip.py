@@ -683,3 +683,47 @@ def test_cable_length_prefers_ref_line_scale_when_mm_per_px_is_stale():
     assert details["scale_mm_per_px"] == pytest.approx(10.0, abs=1e-9)
     assert details["path_length_m"] == pytest.approx(1.0, abs=1e-9)
     assert details["length_m"] == pytest.approx(1.0, abs=1e-9)
+
+
+def test_elec_cable_preserves_kicad_sync_metadata_roundtrip():
+    raw = {
+        "canvas": {
+            "elec_cables": {
+                "EK-1": [[0.0, 0.0], [100.0, 0.0]],
+            },
+        },
+        "params": {
+            "elec_cables": {
+                "EK-1": {
+                    "cable_id": "EK-1",
+                    "name": "Flur",
+                    "type": "3x1,5",
+                    "kicad_project_uuid": "400d403a-4cdf-4a53-9f0d-9df9db2933a3",
+                    "kicad_sheet_uuid": "c7e4408c-0ac0-4b9b-bedf-7db06cf7d99a",
+                    "kicad_pin_uuid": "fae716c3-d71f-40e5-97a4-d327192e06c1",
+                    "kicad_pin_name": "Flur{3x1_5}",
+                    "kicad_sheet_path": "Ankleide.kicad_sch",
+                    "kicad_cable_key": "400d403a-4cdf-4a53-9f0d-9df9db2933a3::c7e4408c-0ac0-4b9b-bedf-7db06cf7d99a::Flur{3x1_5}",
+                    "kicad_last_import_hash": "sha256:test-hash",
+                    "kicad_last_imported_at": "2026-08-11T12:00:00Z",
+                }
+            },
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    cable = doc.elements["elec_cables"]["EK-1"]
+
+    assert cable.kicad_pin_name == "Flur{3x1_5}"
+    assert cable.kicad_sheet_path == "Ankleide.kicad_sch"
+
+    saved = doc.to_dict()
+    saved_cable = saved["params"]["elec_cables"]["EK-1"]
+    assert saved_cable["kicad_project_uuid"] == "400d403a-4cdf-4a53-9f0d-9df9db2933a3"
+    assert saved_cable["kicad_sheet_uuid"] == "c7e4408c-0ac0-4b9b-bedf-7db06cf7d99a"
+    assert saved_cable["kicad_pin_uuid"] == "fae716c3-d71f-40e5-97a4-d327192e06c1"
+    assert saved_cable["kicad_pin_name"] == "Flur{3x1_5}"
+    assert saved_cable["kicad_sheet_path"] == "Ankleide.kicad_sch"
+    assert saved_cable["kicad_cable_key"].endswith("::Flur{3x1_5}")
+    assert saved_cable["kicad_last_import_hash"] == "sha256:test-hash"
+    assert saved_cable["kicad_last_imported_at"] == "2026-08-11T12:00:00Z"

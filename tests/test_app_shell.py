@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -3440,7 +3441,20 @@ def test_e8_export_data_with_planung_linda_preserves_bom_and_configs(app, monkey
         elec_points_geom = canvas.get("elec_points") or {}
         elec_cables_geom = canvas.get("elec_cables") or {}
         assert len(elec_points_geom) >= len(ap_params)
-        assert len(elec_cables_geom) >= len(cable_params)
+
+        # Fixture-level baseline: some cable params intentionally have no polyline geometry.
+        raw_fixture = json.loads(planning_linda.read_text(encoding="utf-8"))
+        raw_canvas = (raw_fixture.get("canvas") or {}).get("elec_cables") or {}
+        raw_params = (raw_fixture.get("params") or {}).get("elec_cables") or {}
+        expected_missing = {
+            cid for cid in raw_params
+            if cid not in raw_canvas
+        }
+        actual_missing = {
+            cid for cid in cable_params
+            if cid not in elec_cables_geom
+        }
+        assert actual_missing == expected_missing
     finally:
         window.deleteLater()
 
@@ -3683,6 +3697,558 @@ def test_export_kicad_without_saved_project_warns(app, monkeypatch):
     window = AppWindow()
     try:
         assert not hasattr(window, "_export_kicad")
+    finally:
+        window.deleteLater()
+
+
+def test_import_kicad_cables_creates_selected_candidates(app, monkeypatch):
+    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    class _DialogStub:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def selected_keys(self):
+            return ["Flur{3x1_5}", "WP{2xCAT6}"]
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "name": "Flur", "floor_plan_id": "grundriss-1"},
+                        "AP-2": {"point_id": "AP-2", "name": "WP", "floor_plan_id": "grundriss-1"},
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+
+        monkeypatch.setattr(
+            "gui.app_window.QFileDialog.getOpenFileName",
+            lambda *a, **k: (str(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch"), ""),
+        )
+        monkeypatch.setattr("gui.app_window.KiCadImportDialog", _DialogStub)
+        monkeypatch.setattr("gui.app_window.QMessageBox.information", lambda *a, **k: None)
+
+        window._import_kicad_cables()
+
+        cables = window._document.elements["elec_cables"]
+        imported = {cable.name: cable for cable in cables.values()}
+        assert "Flur" in imported
+        assert "WP" in imported
+        assert imported["Flur"].data["type"] == "3x1,5"
+        assert imported["WP"].data["type"] == "2xCAT6"
+        assert imported["Flur"].kicad_pin_name == "Flur{3x1_5}"
+        assert imported["WP"].kicad_pin_name == "WP{2xCAT6}"
+        assert imported["Flur"].kicad_cable_key.endswith("::Flur{3x1_5}")
+        assert imported["Flur"].start_ap == "AP-1"
+        assert imported["WP"].start_ap == "AP-2"
+    finally:
+        window.deleteLater()
+
+
+def test_import_kicad_cables_updates_existing_sync_match(app, monkeypatch):
+    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from logic.kicad_import import build_kicad_cable_key, scan_kicad_project  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    scan_result = scan_kicad_project(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch")
+    flur_sync_key = build_kicad_cable_key(scan_result.project_uuid, scan_result.candidates["Flur{3x1_5}"])
+
+    class _DialogStub:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def selected_keys(self):
+            return ["Flur{3x1_5}"]
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "name": "Altname",
+                            "type": "alt",
+                            "kicad_cable_key": flur_sync_key,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+
+        monkeypatch.setattr(
+            "gui.app_window.QFileDialog.getOpenFileName",
+            lambda *a, **k: (str(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch"), ""),
+        )
+        monkeypatch.setattr("gui.app_window.KiCadImportDialog", _DialogStub)
+        monkeypatch.setattr("gui.app_window.QMessageBox.information", lambda *a, **k: None)
+
+        window._import_kicad_cables()
+
+        cable = window._document.elements["elec_cables"]["EK-1"]
+        assert cable.name == "Flur"
+        assert cable.data["type"] == "3x1,5"
+        assert cable.kicad_pin_name == "Flur{3x1_5}"
+    finally:
+        window.deleteLater()
+
+
+def test_import_kicad_cables_builds_preview_with_match_and_diff_data(app, monkeypatch):
+    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from logic.kicad_import import build_kicad_cable_key, scan_kicad_project  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    scan_result = scan_kicad_project(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch")
+    flur_sync_key = build_kicad_cable_key(scan_result.project_uuid, scan_result.candidates["Flur{3x1_5}"])
+
+    captured = {}
+
+    class _DialogStub:
+        def __init__(self, scan_result, previews, *_args, **kwargs):
+            self._phase = kwargs.get("phase")
+            self._previews = previews
+            captured["scan_result"] = scan_result
+            if self._phase == "cables":
+                captured["previews"] = previews
+
+        def exec(self):
+            if self._phase == "aps":
+                return QDialog.Accepted
+            return QDialog.Rejected
+
+        def selected_keys(self):
+            if self._phase == "aps":
+                return [getattr(preview, "candidate_key", "") for preview in self._previews]
+            return []
+
+        def selected_ap_assignments(self):
+            return {}
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "name": "Steckdose Flur", "floor_plan_id": "grundriss-1"},
+                        "AP-2": {"point_id": "AP-2", "name": "Licht Flur", "floor_plan_id": "grundriss-1"},
+                        "AP-3": {"point_id": "AP-3", "name": "WP", "floor_plan_id": "grundriss-1"},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "name": "Altname",
+                            "type": "alt",
+                            "kicad_cable_key": flur_sync_key,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+
+        monkeypatch.setattr(
+            "gui.app_window.QFileDialog.getOpenFileName",
+            lambda *a, **k: (str(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch"), ""),
+        )
+        monkeypatch.setattr("gui.app_window.KiCadImportDialog", _DialogStub)
+
+        window._import_kicad_cables()
+
+        previews = {preview.candidate_key: preview for preview in captured["previews"]}
+        assert previews["Flur{3x1_5}"].status == "update"
+        assert previews["Flur{3x1_5}"].ap_match_status == "ambiguous"
+        assert previews["WP{2xCAT6}"].ap_match_status == "matched"
+        assert any(diff.field == "name" and diff.changed for diff in previews["Flur{3x1_5}"].diffs)
+    finally:
+        window.deleteLater()
+
+
+def test_import_kicad_cables_hides_unresolved_candidates_in_phase_two(app, monkeypatch):
+    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    captured = {}
+
+    class _DialogStub:
+        def __init__(self, scan_result, previews, *_args, **kwargs):
+            self._phase = kwargs.get("phase")
+            self._previews = previews
+            if self._phase == "cables":
+                captured["previews"] = previews
+                captured["warnings"] = kwargs.get("extra_warnings") or []
+
+        def exec(self):
+            if self._phase == "aps":
+                return QDialog.Accepted
+            return QDialog.Rejected
+
+        def selected_keys(self):
+            if self._phase == "aps":
+                return [preview.candidate_key for preview in self._previews if preview.cable_name == "WP"]
+            return []
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "name": "WP", "floor_plan_id": "grundriss-1"},
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+
+        monkeypatch.setattr(
+            "gui.app_window.QFileDialog.getOpenFileName",
+            lambda *a, **k: (str(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch"), ""),
+        )
+        monkeypatch.setattr("gui.app_window.KiCadImportDialog", _DialogStub)
+
+        window._import_kicad_cables()
+
+        previews = {preview.candidate_key: preview for preview in captured["previews"]}
+        assert "WP{2xCAT6}" in previews
+        assert "Flur{3x1_5}" not in previews
+        assert any("Flur" in warning for warning in captured["warnings"])
+    finally:
+        window.deleteLater()
+
+
+def test_kicad_import_dialog_shows_recursive_hierarchy_paths(app):
+    from PySide6.QtCore import Qt  # noqa: PLC0415
+    from gui.kicad_import_dialog import KiCadImportDialog  # noqa: PLC0415
+    from logic.kicad_import import build_import_preview, scan_kicad_project  # noqa: PLC0415
+
+    scan_result = scan_kicad_project(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch")
+    previews = build_import_preview(scan_result, existing_cables=[], elec_points=[])
+
+    dialog = KiCadImportDialog(scan_result, previews)
+    try:
+        target_item = None
+        for index in range(dialog.tree.topLevelItemCount()):
+            item = dialog.tree.topLevelItem(index)
+            if item.data(0, Qt.UserRole) == "Flur{3x1_5}":
+                target_item = item
+                break
+
+        assert target_item is not None
+        dialog.tree.setCurrentItem(target_item)
+        dialog._update_detail()
+
+        # Column 4 now shows source ("Sheet Pin" or "Text Field"), not hierarchy
+        assert target_item.text(4) in ("Sheet Pin", "Text Field")
+        # Hierarchy information is now in the detail box
+        detail = dialog.detail_box.toPlainText()
+        assert "HWR > UV HWR" in detail
+        assert "Flur_Ankleide" in detail
+    finally:
+        dialog.deleteLater()
+
+
+def test_kicad_textfield_import_creates_ap_and_links_cable(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from logic.kicad_import import (  # noqa: PLC0415
+        KiCadScanResult,
+        KiCadTextFieldCandidate,
+        KiCadTextFieldMetadata,
+    )
+    from model.elements import TextAnnotation  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Grundriss 1", True)))
+
+    window = AppWindow()
+    try:
+        window._add_floorplan()
+        fp_id = list(window._document.floorplans.keys())[0]
+        text_id = window._document.new_id(TextAnnotation)
+        text = TextAnnotation.create(
+            text_id,
+            floor_plan_id=fp_id,
+            content="AP_NAME: Flur Licht",
+            color="#ffffff",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+        )
+        text.geom["text_annotations"] = {"pos": [123.0, 456.0], "content": "AP_NAME: Flur Licht", "font_size": 14.0}
+        window._document.add(text)
+        window.canvas.register_element(text_id)
+
+        scan_result = KiCadScanResult(root_path=ROOT, project_uuid="proj-1")
+        scan_result.textfield_candidates[text_id] = KiCadTextFieldCandidate(
+            key=text_id,
+            source_metadata=KiCadTextFieldMetadata(text_id=text_id, ap_name="Flur Licht", room="", floor_plan_id=fp_id),
+            cable_name="Flur Licht",
+            matched_spec="3x1,5",
+            best_matched_candidate=None,
+        )
+
+        summary = window._apply_kicad_cable_import(scan_result, [text_id])
+
+        assert summary["created"] == 1
+        assert summary["ap_created"] == 1
+        assert summary["ap_reused"] == 0
+        assert len(window._document.elements["elec_points"]) == 1
+        assert len(window._document.elements["elec_cables"]) == 1
+        point = next(iter(window._document.elements["elec_points"].values()))
+        cable = next(iter(window._document.elements["elec_cables"].values()))
+        assert point.name == "Flur Licht"
+        assert point.floor_plan_id == fp_id
+        assert point.pos == [123.0, 456.0]
+        assert cable.start_ap == point.id
+        assert cable.floor_plan_id == fp_id
+        assert cable.cable_type == "3x1,5"
+
+        summary_second = window._apply_kicad_cable_import(scan_result, [text_id])
+        assert summary_second["ap_created"] == 0
+        assert summary_second["ap_reused"] == 1
+    finally:
+        window.deleteLater()
+
+
+def test_kicad_ap_phase_uses_only_explicit_textfield_candidates(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QDialog, QInputDialog  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.elements import TextAnnotation  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Grundriss 1", True)))
+
+    captured: dict[str, object] = {}
+
+    class _DialogStub:
+        def __init__(self, _scan_result, previews, *_args, **kwargs):
+            if kwargs.get("phase") == "aps":
+                captured["previews"] = previews
+
+        def exec(self):
+            return QDialog.Rejected
+
+        def selected_keys(self):
+            return []
+
+        def selected_ap_assignments(self):
+            return {}
+
+    window = AppWindow()
+    try:
+        window._add_floorplan()
+        fp_id = list(window._document.floorplans.keys())[0]
+        text_id = window._document.new_id(TextAnnotation)
+        text = TextAnnotation.create(
+            text_id,
+            floor_plan_id=fp_id,
+            content="AP_NAME: Flur Licht",
+            color="#ffffff",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+        )
+        text.geom["text_annotations"] = {"pos": [123.0, 456.0], "content": "AP_NAME: Flur Licht", "font_size": 14.0}
+        window._document.add(text)
+        window.canvas.register_element(text_id)
+
+        monkeypatch.setattr(
+            "gui.app_window.QFileDialog.getOpenFileName",
+            lambda *a, **k: (str(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch"), ""),
+        )
+        monkeypatch.setattr("gui.app_window.KiCadImportDialog", _DialogStub)
+
+        window._import_kicad_cables()
+
+        previews = list(captured["previews"])
+        assert previews
+        if any(preview.source == "ap_group" for preview in previews):
+            # Group-based AP workflow: AP_ groups take precedence over text fields.
+            assert all(preview.source == "ap_group" for preview in previews)
+        else:
+            # Fallback when no AP_ groups exist in the scanned KiCad project.
+            assert all(preview.source == "text_field" for preview in previews)
+            assert all(preview.candidate_key == text_id for preview in previews)
+    finally:
+        window.deleteLater()
+
+
+def test_kicad_ap_import_places_ap_in_selected_room_centroid(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from logic.kicad_import import KiCadScanResult, KiCadTextFieldCandidate, KiCadTextFieldMetadata  # noqa: PLC0415
+    from model.elements import ElecRoom, TextAnnotation  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Grundriss 1", True)))
+
+    window = AppWindow()
+    try:
+        window._add_floorplan()
+        fp_id = list(window._document.floorplans.keys())[0]
+
+        room_id = window._document.new_id(ElecRoom)
+        room = ElecRoom.create(
+            room_id,
+            floor_plan_id=fp_id,
+            name="Wohnzimmer",
+            color="#43aa8b",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+        )
+        room.geom["elec_rooms"] = [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]]
+        window._document.add(room)
+        window.canvas.register_element(room_id)
+
+        text_id = window._document.new_id(TextAnnotation)
+        text = TextAnnotation.create(
+            text_id,
+            floor_plan_id=fp_id,
+            content="AP_NAME: Flur Licht\nROOM: Wohnzimmer",
+            color="#ffffff",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+        )
+        text.geom["text_annotations"] = {
+            "pos": [123.0, 456.0],
+            "content": "AP_NAME: Flur Licht\nROOM: Wohnzimmer",
+            "font_size": 14.0,
+        }
+        window._document.add(text)
+        window.canvas.register_element(text_id)
+
+        scan_result = KiCadScanResult(root_path=ROOT, project_uuid="proj-1")
+        scan_result.textfield_candidates[text_id] = KiCadTextFieldCandidate(
+            key=text_id,
+            source_metadata=KiCadTextFieldMetadata(text_id=text_id, ap_name="Flur Licht", room="Wohnzimmer", floor_plan_id=fp_id),
+            cable_name="Flur Licht",
+            matched_spec="3x1,5",
+            best_matched_candidate=None,
+        )
+
+        summary = window._apply_kicad_ap_import(
+            scan_result,
+            {text_id},
+            {text_id: {"floor_plan_id": fp_id, "room_id": room_id}},
+        )
+
+        assert summary["created"] == 1
+        point = next(iter(window._document.elements["elec_points"].values()))
+        assert point.floor_plan_id == fp_id
+        assert point.pos == [150.0, 150.0]
+    finally:
+        window.deleteLater()
+
+
+def test_kicad_ap_phase_prefers_ap_group_candidates_over_textfields(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        previews = [
+            type("Preview", (), {"source": "text_field", "cable_name": "TF_AP", "candidate_key": "TEXT-1"})(),
+            type("Preview", (), {"source": "ap_group", "cable_name": "AP_1", "candidate_key": "group::1"})(),
+        ]
+
+        selected = window._build_kicad_ap_phase_previews(previews)
+        assert len(selected) == 1
+        assert selected[0].source == "ap_group"
+        assert selected[0].cable_name == "AP_1"
+    finally:
+        window.deleteLater()
+
+
+def test_kicad_ap_import_creates_ap_from_group_frame_center(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from logic.kicad_import import KiCadApGroupCandidate, KiCadScanResult  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Grundriss 1", True)))
+
+    window = AppWindow()
+    try:
+        window._add_floorplan()
+        fp_id = list(window._document.floorplans.keys())[0]
+
+        scan_result = KiCadScanResult(root_path=ROOT, project_uuid="proj-1")
+        group_key = "group::ap1"
+        scan_result.ap_group_candidates[group_key] = KiCadApGroupCandidate(
+            key=group_key,
+            group_name="AP_1",
+            group_uuid="group-uuid-1",
+            frame_uuid="frame-uuid-1",
+            frame_bounds=(100.0, 200.0, 140.0, 260.0),
+            bus_hits=[],
+        )
+
+        summary = window._apply_kicad_ap_import(
+            scan_result,
+            {group_key},
+            {group_key: {"floor_plan_id": fp_id, "room_id": ""}},
+        )
+
+        assert summary["created"] == 1
+        point = next(iter(window._document.elements["elec_points"].values()))
+        assert point.name == "AP_1"
+        assert point.floor_plan_id == fp_id
+        assert point.pos == [120.0, 230.0]
     finally:
         window.deleteLater()
 

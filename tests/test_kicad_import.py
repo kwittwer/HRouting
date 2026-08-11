@@ -1,0 +1,385 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from logic.kicad_import import (
+    KiCadCableCandidate,
+    KiCadSheetPinRef,
+    build_import_preview,
+    build_kicad_cable_key,
+    build_textfield_candidate_from_scan,
+    scan_kicad_project,
+    suggest_ap_matches,
+    suggest_cable_from_candidates,
+)
+
+
+KICAD_ROOT = ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch"
+KICAD_HWR = ROOT / "examples" / "KiCAD" / "HWR.kicad_sch"
+
+
+def test_scan_kicad_project_extracts_root_sheet_pin_candidates():
+    result = scan_kicad_project(KICAD_ROOT)
+
+    assert result.project_uuid == "400d403a-4cdf-4a53-9f0d-9df9db2933a3"
+    assert "Flur{3x1_5}" in result.candidates
+    assert "Zuleitung_Haus{5x10}" in result.candidates
+    assert "WP{2xCAT6}" in result.candidates
+
+
+def test_scan_kicad_project_aggregates_same_pin_name_across_sheets():
+    result = scan_kicad_project(KICAD_ROOT)
+
+    candidate = result.candidates["Flur{3x1_5}"]
+    sheet_names = {ref.sheet_name for ref in candidate.pin_refs}
+    directions = {ref.pin_direction for ref in candidate.pin_refs}
+
+    assert candidate.base_name == "Flur"
+    assert candidate.spec_raw == "3x1_5"
+    assert candidate.normalized_spec == "3x1,5"
+    assert candidate.spec_kind == "count_x_spec"
+    assert {"UV HWR", "Flur_Ankleide"}.issubset(sheet_names)
+    assert {"input", "output"}.issubset(directions)
+
+
+def test_scan_kicad_project_collects_matching_child_sheet_labels():
+    result = scan_kicad_project(KICAD_ROOT)
+
+    candidate = result.candidates["Flur{3x1_5}"]
+
+    assert "Flur.L" in candidate.local_labels
+    assert "Flur.N" in candidate.local_labels
+    assert "{3x1_5}" in candidate.local_labels
+
+
+def test_scan_kicad_project_detects_token_list_specs():
+    result = scan_kicad_project(KICAD_ROOT)
+
+    candidate = result.candidates["RS485_Powermeter{A,B,GND}"]
+
+    assert candidate.base_name == "RS485_Powermeter"
+    assert candidate.spec_raw == "A,B,GND"
+    assert candidate.normalized_spec == "A,B,GND"
+    assert candidate.spec_kind == "token_list"
+
+
+def test_suggest_ap_matches_marks_unique_exact_match():
+    result = scan_kicad_project(KICAD_ROOT)
+    candidate = result.candidates["Flur{3x1_5}"]
+
+    matches = suggest_ap_matches(
+        candidate,
+        [
+            {"id": "AP-1", "name": "Flur", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "Wohnzimmer", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    assert len(matches) == 1
+    assert matches[0].point_id == "AP-1"
+    assert matches[0].reason == "exakter Name"
+
+
+def test_suggest_ap_matches_can_be_ambiguous_for_room_like_names():
+    result = scan_kicad_project(KICAD_ROOT)
+    candidate = result.candidates["Flur{3x1_5}"]
+
+    matches = suggest_ap_matches(
+        candidate,
+        [
+            {"id": "AP-1", "name": "Steckdose Flur", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "Licht Flur", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    assert len(matches) == 2
+    assert {match.point_id for match in matches} == {"AP-1", "AP-2"}
+    assert matches[0].score == matches[1].score
+
+
+def test_build_import_preview_marks_create_update_and_unchanged_states():
+    result = scan_kicad_project(KICAD_ROOT)
+    flur_key = build_kicad_cable_key(result.project_uuid, result.candidates["Flur{3x1_5}"])
+    wp_key = build_kicad_cable_key(result.project_uuid, result.candidates["WP{2xCAT6}"])
+
+    previews = build_import_preview(
+        result,
+        existing_cables=[
+            {
+                "id": "EK-1",
+                "name": "Altname",
+                "type": "alt",
+                "kicad_cable_key": flur_key,
+            },
+            {
+                "id": "EK-2",
+                "name": "WP",
+                "type": "2xCAT6",
+                "kicad_cable_key": wp_key,
+            },
+        ],
+        elec_points=[
+            {"id": "AP-1", "name": "Steckdose Flur", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "Licht Flur", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-3", "name": "WP", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    by_key = {preview.candidate_key: preview for preview in previews}
+
+    assert by_key["Flur{3x1_5}"].status == "update"
+    assert by_key["Flur{3x1_5}"].existing_cable_id == "EK-1"
+    assert by_key["Flur{3x1_5}"].ap_match_status == "ambiguous"
+    assert any(diff.field == "name" and diff.changed for diff in by_key["Flur{3x1_5}"].diffs)
+    assert any(diff.field == "type" and diff.changed for diff in by_key["Flur{3x1_5}"].diffs)
+
+    assert by_key["WP{2xCAT6}"].status == "unchanged"
+    assert by_key["WP{2xCAT6}"].ap_match_status == "matched"
+    assert all(not diff.changed for diff in by_key["WP{2xCAT6}"].diffs)
+
+    assert by_key["Zuleitung_Haus{5x10}"].status == "create"
+
+
+def test_scan_kicad_project_recurses_into_nested_child_sheets(tmp_path):
+        root = tmp_path / "root.kicad_sch"
+        child = tmp_path / "child.kicad_sch"
+        grand = tmp_path / "grand.kicad_sch"
+
+        root.write_text(
+                """(kicad_sch
+    (uuid \"root-project\")
+    (sheet
+        (uuid \"sheet-child\")
+        (property \"Sheetname\" \"Child\")
+        (property \"Sheetfile\" \"child.kicad_sch\")
+        (pin \"RootFeed{3x1_5}\" input (uuid \"pin-root\"))
+    )
+)""",
+                encoding="utf-8",
+        )
+        child.write_text(
+                """(kicad_sch
+    (uuid \"child-doc\")
+    (label \"RootFeed.L\")
+    (sheet
+        (uuid \"sheet-grand\")
+        (property \"Sheetname\" \"Grand\")
+        (property \"Sheetfile\" \"grand.kicad_sch\")
+        (pin \"GrandCircuit{5x1_5}\" output (uuid \"pin-grand\"))
+    )
+)""",
+                encoding="utf-8",
+        )
+        grand.write_text(
+                """(kicad_sch
+    (uuid \"grand-doc\")
+    (label \"GrandCircuit.PE\")
+)""",
+                encoding="utf-8",
+        )
+
+        result = scan_kicad_project(root)
+
+        assert "GrandCircuit{5x1_5}" in result.candidates
+        nested = result.candidates["GrandCircuit{5x1_5}"]
+        assert nested.pin_refs[0].hierarchy_path == ("Child", "Grand")
+        assert "GrandCircuit.PE" in nested.local_labels
+
+        root_feed = result.candidates["RootFeed{3x1_5}"]
+        assert root_feed.pin_refs[0].hierarchy_path == ("Child",)
+        assert "RootFeed.L" in root_feed.local_labels
+
+
+def test_scan_kicad_project_collects_hierarchical_labels_from_nested_sheets(tmp_path):
+        root = tmp_path / "root.kicad_sch"
+        child = tmp_path / "child.kicad_sch"
+        grand = tmp_path / "grand.kicad_sch"
+
+        root.write_text(
+                """(kicad_sch
+    (uuid \"root-project\")
+    (sheet
+        (uuid \"sheet-child\")
+        (property \"Sheetname\" \"Child\")
+        (property \"Sheetfile\" \"child.kicad_sch\")
+    )
+)""",
+                encoding="utf-8",
+        )
+        child.write_text(
+                """(kicad_sch
+    (uuid \"child-doc\")
+    (hierarchical_label \"ChildBus{3x1_5}\"
+        (shape input)
+        (at 10 10 0)
+        (uuid \"label-child\")
+    )
+    (sheet
+        (uuid \"sheet-grand\")
+        (property \"Sheetname\" \"Grand\")
+        (property \"Sheetfile\" \"grand.kicad_sch\")
+    )
+)""",
+                encoding="utf-8",
+        )
+        grand.write_text(
+                """(kicad_sch
+    (uuid \"grand-doc\")
+    (hierarchical_label \"GrandBus{5x1_5}\"
+        (shape output)
+        (at 20 20 180)
+        (uuid \"label-grand\")
+    )
+)""",
+                encoding="utf-8",
+        )
+
+        result = scan_kicad_project(root)
+
+        assert "ChildBus{3x1_5}" in result.candidates
+        assert "GrandBus{5x1_5}" in result.candidates
+        child_candidate = result.candidates["ChildBus{3x1_5}"]
+        grand_candidate = result.candidates["GrandBus{5x1_5}"]
+        assert child_candidate.pin_refs[0].pin_direction == "hierarchical_label"
+        assert child_candidate.pin_refs[0].hierarchy_path == ("Child",)
+        assert grand_candidate.pin_refs[0].pin_direction == "hierarchical_label"
+        assert grand_candidate.pin_refs[0].hierarchy_path == ("Child", "Grand")
+
+
+def test_suggest_cable_from_candidates_prefers_matching_sheet_context():
+    first_candidate = KiCadCableCandidate(
+        key="candidate-1",
+        base_name="Flur Licht",
+        pin_name_raw="Flur Licht{3x1_5}",
+        spec_raw="3x1_5",
+        normalized_spec="3x1,5",
+        spec_kind="count_x_spec",
+        pin_refs=[
+            KiCadSheetPinRef(
+                sheet_uuid="sheet-1",
+                sheet_name="Wohnen",
+                sheet_file="wohnen.kicad_sch",
+                pin_uuid="pin-1",
+                pin_name_raw="Flur Licht{3x1_5}",
+                pin_direction="input",
+                hierarchy_path=("Wohnen",),
+            )
+        ],
+    )
+    second_candidate = KiCadCableCandidate(
+        key="candidate-2",
+        base_name="Flur Licht",
+        pin_name_raw="Flur Licht AP{5x1_5}",
+        spec_raw="5x1_5",
+        normalized_spec="5x1,5",
+        spec_kind="count_x_spec",
+        pin_refs=[
+            KiCadSheetPinRef(
+                sheet_uuid="sheet-2",
+                sheet_name="Ankleide",
+                sheet_file="ankleide.kicad_sch",
+                pin_uuid="pin-2",
+                pin_name_raw="Flur Licht AP{5x1_5}",
+                pin_direction="input",
+                hierarchy_path=("Ankleide",),
+            )
+        ],
+    )
+
+    selected, matched_spec = suggest_cable_from_candidates(
+        ap_name="Flur Licht",
+        room="",
+        candidates={
+            first_candidate.key: first_candidate,
+            second_candidate.key: second_candidate,
+        },
+        preferred_sheet_name="Ankleide",
+    )
+
+    assert selected is second_candidate
+    assert matched_spec == "5x1,5"
+
+
+def test_build_textfield_candidate_from_scan_uses_floor_plan_name_as_sheet_hint():
+    first_candidate = KiCadCableCandidate(
+        key="candidate-1",
+        base_name="Flur Licht",
+        pin_name_raw="Flur Licht{3x1_5}",
+        spec_raw="3x1_5",
+        normalized_spec="3x1,5",
+        spec_kind="count_x_spec",
+        pin_refs=[
+            KiCadSheetPinRef(
+                sheet_uuid="sheet-1",
+                sheet_name="Wohnen",
+                sheet_file="wohnen.kicad_sch",
+                pin_uuid="pin-1",
+                pin_name_raw="Flur Licht{3x1_5}",
+                pin_direction="input",
+                hierarchy_path=("Wohnen",),
+            )
+        ],
+    )
+    second_candidate = KiCadCableCandidate(
+        key="candidate-2",
+        base_name="Flur Licht",
+        pin_name_raw="Flur Licht AP{5x1_5}",
+        spec_raw="5x1_5",
+        normalized_spec="5x1,5",
+        spec_kind="count_x_spec",
+        pin_refs=[
+            KiCadSheetPinRef(
+                sheet_uuid="sheet-2",
+                sheet_name="Ankleide",
+                sheet_file="ankleide.kicad_sch",
+                pin_uuid="pin-2",
+                pin_name_raw="Flur Licht AP{5x1_5}",
+                pin_direction="input",
+                hierarchy_path=("Ankleide",),
+            )
+        ],
+    )
+
+    textfield_candidate = build_textfield_candidate_from_scan(
+        text_id="TEXT-1",
+        content="AP_NAME: Flur Licht",
+        candidates={
+            first_candidate.key: first_candidate,
+            second_candidate.key: second_candidate,
+        },
+        floor_plan_name="Ankleide",
+    )
+
+    assert textfield_candidate is not None
+    assert textfield_candidate.best_matched_candidate is second_candidate
+    assert textfield_candidate.matched_spec == "5x1,5"
+
+
+def test_scan_kicad_project_collects_ap_group_candidates_from_group_prefix():
+    result = scan_kicad_project(KICAD_HWR)
+
+    ap_candidates = list(result.ap_group_candidates.values())
+    assert ap_candidates, "expected at least one AP_ group candidate"
+    names = {candidate.group_name for candidate in ap_candidates}
+    assert "AP_1" in names
+
+
+def test_scan_kicad_project_ap1_group_contains_expected_bus_overlaps():
+    result = scan_kicad_project(KICAD_HWR)
+
+    ap1 = None
+    for candidate in result.ap_group_candidates.values():
+        if candidate.group_name == "AP_1":
+            ap1 = candidate
+            break
+
+    assert ap1 is not None
+    hit_uuids = {bus.uuid for bus in ap1.bus_hits}
+    assert "4cd5369a-ca39-4bcf-ba8a-257cc9153321" in hit_uuids
+    assert "66f63aa4-fb92-4c51-9c47-439693eb87d5" in hit_uuids

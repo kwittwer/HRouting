@@ -230,6 +230,14 @@ class ElecCable(Element):
     end_ap = _param("end_ap", "")
     start_length_surcharge_m = _param("start_length_surcharge_m", 0.0)
     end_length_surcharge_m = _param("end_length_surcharge_m", 0.0)
+    kicad_project_uuid = _param("kicad_project_uuid", "")
+    kicad_sheet_uuid = _param("kicad_sheet_uuid", "")
+    kicad_pin_uuid = _param("kicad_pin_uuid", "")
+    kicad_pin_name = _param("kicad_pin_name", "")
+    kicad_sheet_path = _param("kicad_sheet_path", "")
+    kicad_cable_key = _param("kicad_cable_key", "")
+    kicad_last_import_hash = _param("kicad_last_import_hash", "")
+    kicad_last_imported_at = _param("kicad_last_imported_at", "")
 
     path = _geom("elec_cables")
 
