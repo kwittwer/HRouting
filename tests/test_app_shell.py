@@ -4957,6 +4957,112 @@ def test_f3_move_furniture_property_action_starts_canvas_move(app, monkeypatch):
         window.deleteLater()
 
 
+def test_f3b_edit_furniture_polygon_property_action_starts_floor_polygon_edit(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow
+    from model.document import Document
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{
+                    "fp_id": "einrichtung-1",
+                    "polygon": [[0.0, 0.0], [40.0, 0.0], [40.0, 30.0]],
+                }]
+            },
+            "params": {
+                "floorplans": {},
+                "furniture": {"einrichtung-1": {"name": "Sofa"}},
+            },
+        })
+        window._set_document(doc)
+
+        calls = []
+        monkeypatch.setattr(
+            window.canvas, "start_edit_floor_plan_polygon", lambda fid: calls.append(fid)
+        )
+        window._on_property_action("einrichtung-1", "edit_polygon")
+        assert calls == ["einrichtung-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_f3c_furniture_edit_tool_starts_floor_polygon_edit(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow
+    from model.document import Document
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{
+                    "fp_id": "einrichtung-1",
+                    "polygon": [[0.0, 0.0], [40.0, 0.0], [40.0, 30.0]],
+                }]
+            },
+            "params": {
+                "floorplans": {},
+                "furniture": {"einrichtung-1": {"name": "Sofa"}},
+            },
+        })
+        window._set_document(doc)
+        window.navigator.select("einrichtung-1")
+        window.canvas.set_selected_item("einrichtung-1")
+
+        calls = []
+        monkeypatch.setattr(
+            window.canvas, "start_edit_floor_plan_polygon", lambda fid: calls.append(fid)
+        )
+        window._on_tool_activated("furn.edit_polygon")
+        assert calls == ["einrichtung-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_floorplan_edit_tool_starts_floor_polygon_edit(app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow
+    from model.document import Document
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{
+                    "fp_id": "grundriss-1",
+                    "polygon": [[0.0, 0.0], [80.0, 0.0], [80.0, 60.0]],
+                }]
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG"}},
+                "furniture": {},
+            },
+        })
+        window._set_document(doc)
+        window.navigator.select("grundriss-1")
+        window.canvas.set_selected_item("grundriss-1")
+
+        calls = []
+        monkeypatch.setattr(
+            window.canvas, "start_edit_floor_plan_polygon", lambda fid: calls.append(fid)
+        )
+        window._on_tool_activated("fp.edit_polygon")
+        assert calls == ["grundriss-1"]
+    finally:
+        window.deleteLater()
+
+
 def test_f4_add_furniture_uses_active_floorplan_as_parent(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
     from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415

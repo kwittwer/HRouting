@@ -884,12 +884,28 @@ class AppWindow(QMainWindow):
             self.canvas.start_draw_floor_plan_polygon(target_id)
             self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
             return
+        if tool_id == "fp.edit_polygon":
+            target_id = self._selected_floorplan_id()
+            if not target_id:
+                self.statusBar().showMessage("Kein Grundriss ausgewählt", 2500)
+                return
+            self.canvas.start_edit_floor_plan_polygon(target_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
         if tool_id == "furn.polygon":
             target_id = self._selected_floor_like_id()
             if not target_id:
                 self.statusBar().showMessage("Kein Einrichtungselement ausgewählt", 2500)
                 return
             self.canvas.start_draw_floor_plan_polygon(target_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
+        if tool_id == "furn.edit_polygon":
+            target_id = self._selected_floor_like_id()
+            if not target_id:
+                self.statusBar().showMessage("Kein Einrichtungselement ausgewählt", 2500)
+                return
+            self.canvas.start_edit_floor_plan_polygon(target_id)
             self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
             return
         if tool_id == "ann.text":
@@ -1176,7 +1192,12 @@ class AppWindow(QMainWindow):
             self.canvas.start_drawing(element_id)
 
     def _action_edit_polygon(self, element_id: str) -> None:
-        self.canvas.start_edit_polygon(element_id)
+        if element_id in self._document.elements["circuits"]:
+            self.canvas.start_edit_polygon(element_id)
+        elif element_id in self._document.elements["elec_rooms"]:
+            self.canvas.start_edit_elec_room_polygon(element_id)
+        elif element_id in self._document.floorplans or element_id in self._document.furniture:
+            self.canvas.start_edit_floor_plan_polygon(element_id)
 
     def _action_remove_polygon(self, element_id: str) -> None:
         floor = self._document.floorplans.get(element_id) or self._document.furniture.get(element_id)

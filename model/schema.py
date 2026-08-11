@@ -125,6 +125,8 @@ class ActionSpec:
         """Prüft, ob die nötige Geometrie vorhanden ist."""
         if not self.requires_geom:
             return True
+        if isinstance(element, FloorPlan):
+            return bool(getattr(element, "layer", {}).get(self.requires_geom))
         return bool(element.geom.get(self.requires_geom))
 
 
@@ -517,6 +519,7 @@ FLOOR_PLAN_SCHEMA = ElementSchema(
         ActionSpec("move", "Verschieben"),
         ActionSpec("rotate", "Drehen"),
         ActionSpec("draw_polygon", "Umriss zeichnen"),
+        ActionSpec("edit_polygon", "Umriss bearbeiten", requires_geom="polygon"),
         ActionSpec("remove_polygon", "Umriss entfernen"),
         ActionSpec("delete", "Löschen", destructive=True),
     ),
@@ -554,6 +557,7 @@ FURNITURE_SCHEMA = ElementSchema(
     ),
     actions=(
         ActionSpec("draw_polygon", "Umriss zeichnen"),
+        ActionSpec("edit_polygon", "Umriss bearbeiten", requires_geom="polygon"),
         ActionSpec("remove_polygon", "Umriss entfernen"),
         ActionSpec("move", "Verschieben"),
         ActionSpec("delete", "Löschen", destructive=True),

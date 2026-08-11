@@ -188,6 +188,97 @@ def test_dragging_route_point_persists_to_document(bound):
     assert saved[1] == [260.0, 140.0], f"Punkt nicht verschoben: {saved}"
 
 
+def test_dragging_circuit_polygon_vertex_snaps_without_ctrl(bound):
+    canvas, document = bound
+    canvas.start_edit_polygon("HK-1")
+
+    _mouse(canvas, "press", QPointF(100, 100))
+    assert canvas._dragging_route_point == ("HK-1", 0)
+
+    _mouse(canvas, "move", QPointF(112, 137))
+    _mouse(canvas, "release", QPointF(112, 137))
+
+    saved = document.to_dict()["canvas"]["polygons"]["HK-1"]
+    assert saved[0] == [112.0, 137.0]
+
+
+def test_dragging_circuit_polygon_vertex_uses_free_drag_with_ctrl(bound):
+    canvas, document = bound
+    canvas.start_edit_polygon("HK-1")
+
+    _mouse(canvas, "press", QPointF(100, 100))
+    _mouse(canvas, "move", QPointF(113, 137), ctrl=True)
+    _mouse(canvas, "release", QPointF(113, 137), ctrl=True)
+
+    saved = document.to_dict()["canvas"]["polygons"]["HK-1"]
+    assert saved[0] == [113.0, 137.0]
+
+
+def test_dragging_elec_room_polygon_vertex_persists(bound):
+    canvas, document = bound
+    canvas.start_edit_elec_room_polygon("ER-1")
+
+    _mouse(canvas, "press", QPointF(50, 50))
+    assert canvas._dragging_route_point == ("ER-1", 0)
+
+    _mouse(canvas, "move", QPointF(75, 75), ctrl=True)
+    _mouse(canvas, "release", QPointF(75, 75), ctrl=True)
+
+    saved = document.to_dict()["canvas"]["elec_rooms"]["ER-1"]
+    assert saved[0] == [75.0, 75.0]
+
+
+def test_dragging_floorplan_polygon_vertex_persists(bound):
+    canvas, document = bound
+    floor = document.floorplans["grundriss-1"]
+    floor.layer["polygon"] = [[0.0, 0.0], [40.0, 0.0], [40.0, 30.0]]
+    canvas.set_document(document)
+    canvas.start_edit_floor_plan_polygon("grundriss-1")
+
+    _mouse(canvas, "press", QPointF(0, 0))
+    assert canvas._dragging_route_point == ("grundriss-1", 0)
+
+    _mouse(canvas, "move", QPointF(13, 37), ctrl=True)
+    _mouse(canvas, "release", QPointF(13, 37), ctrl=True)
+
+    saved_layers = document.to_dict()["canvas"]["floor_plans"]
+    saved = next(entry for entry in saved_layers if entry["fp_id"] == "grundriss-1")
+    assert saved["polygon"][0] == [13.0, 37.0]
+
+
+def test_dragging_furniture_polygon_vertex_persists(bound):
+    canvas, document = bound
+    from model.elements import Furniture
+
+    furniture = document.add(
+        Furniture(
+            "einrichtung-1",
+            data={"name": "Sofa", "visible": True},
+            geom={},
+            layer={"fp_id": "einrichtung-1", "visible": True},
+        )
+    )
+    furniture.layer.update({
+        "polygon": [[0.0, 0.0], [40.0, 0.0], [40.0, 30.0]],
+        "offset_x": 100.0,
+        "offset_y": 200.0,
+        "rotation": 0.0,
+        "visible": True,
+    })
+    canvas.set_document(document)
+    canvas.start_edit_floor_plan_polygon("einrichtung-1")
+
+    _mouse(canvas, "press", QPointF(100, 200))
+    assert canvas._dragging_route_point == ("einrichtung-1", 0)
+
+    _mouse(canvas, "move", QPointF(126, 236), ctrl=True)
+    _mouse(canvas, "release", QPointF(126, 236), ctrl=True)
+
+    saved_layers = document.to_dict()["canvas"]["floor_plans"]
+    saved = next(entry for entry in saved_layers if entry["fp_id"] == "einrichtung-1")
+    assert saved["polygon"][0] == [26.0, 36.0]
+
+
 # ---------------------------------------------------------------------------
 # Bug A: Workspace-Filter muss auch für den Direkt-Drag gelten
 # ---------------------------------------------------------------------------

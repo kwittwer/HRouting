@@ -36,6 +36,8 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("fp.move", "Grundriss verschieben", LayerId.FLOORPLAN, "MOVE_FLOOR_PLAN", "M"),
     ToolSpec("fp.rotate", "Grundriss drehen", LayerId.FLOORPLAN, "ROTATE_FLOOR_PLAN"),
     ToolSpec("fp.polygon", "Grundriss-Umriss", LayerId.FLOORPLAN, "DRAW_POLY"),
+    ToolSpec("fp.edit_polygon", "Grundriss-Umriss bearbeiten", LayerId.FLOORPLAN,
+             "EDIT_POLYGON", needs_selection=True),
 
     # --- Heizung ------------------------------------------------------
     ToolSpec("hk.select", "Auswählen", LayerId.HEATING, "NONE", "Esc"),
@@ -66,6 +68,8 @@ TOOLS: tuple[ToolSpec, ...] = (
     # --- Einrichtung --------------------------------------------------
     ToolSpec("furn.select", "Auswählen", LayerId.FURNITURE, "NONE", "Esc"),
     ToolSpec("furn.polygon", "Möbel zeichnen", LayerId.FURNITURE, "DRAW_FURNITURE_POLY"),
+    ToolSpec("furn.edit_polygon", "Möbel bearbeiten", LayerId.FURNITURE, "EDIT_POLYGON",
+             needs_selection=True),
     ToolSpec("furn.move", "Möbel verschieben", LayerId.FURNITURE, "MOVE_FLOOR_PLAN"),
 
     # --- Vermessung & Annotation --------------------------------------

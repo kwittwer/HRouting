@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from model.computed import polygon_area_px2, polyline_length_px  # noqa: E402
 from model.document import Document  # noqa: E402
-from model.elements import Circuit, ElecPoint, TextAnnotation  # noqa: E402
+from model.elements import Circuit, ElecPoint, Furniture, TextAnnotation  # noqa: E402
 from model.field_access import (  # noqa: E402
     apply_display_value,
     display_value,
@@ -319,6 +319,28 @@ def test_editor_toggles_config_buttons(app, document):
         editor._on_field_changed("ap_type", "zaehler")
         assert visible("configure_zaehler")
         assert not visible("configure_uv")
+    finally:
+        editor.deleteLater()
+
+
+def test_furniture_editor_enables_edit_polygon_when_outline_exists(app, document):
+    from gui.properties import GenericElementEditor  # noqa: PLC0415
+
+    furniture = document.add(
+        Furniture(
+            "einrichtung-1",
+            data={"name": "Sofa", "visible": True},
+            geom={},
+            layer={
+                "fp_id": "einrichtung-1",
+                "visible": True,
+                "polygon": [[0.0, 0.0], [40.0, 0.0], [40.0, 30.0]],
+            },
+        )
+    )
+    editor = GenericElementEditor(document, furniture, schema_for(furniture))
+    try:
+        assert editor._action_buttons["edit_polygon"].isEnabled()
     finally:
         editor.deleteLater()
 
