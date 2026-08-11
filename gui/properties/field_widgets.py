@@ -206,7 +206,16 @@ class ChoiceFieldWidget(FieldWidget):
         try:
             self._combo.clear()
             self._combo.addItems(list(options))
-            self.set_value(current)
+            # For non-editable combos we must not re-insert stale values that
+            # were removed from the source options (e.g. deleted distributors).
+            if self._combo.isEditable():
+                self.set_value(current)
+            else:
+                index = self._combo.findText(str(current))
+                if index >= 0:
+                    self._combo.setCurrentIndex(index)
+                elif self._combo.count() > 0:
+                    self._combo.setCurrentIndex(0)
         finally:
             self._updating = False
 

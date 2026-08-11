@@ -3492,18 +3492,25 @@ def _settings_noop(monkeypatch):
     monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
 
 
-@pytest.mark.slow
 def test_grab_source_rect_returns_pixmap(app):
     """Regression: grab_source_rect() hatte einen leeren Rumpf (toter Code
     lag unerreichbar hinter render_for_export). Muss ein echtes Pixmap liefern."""
-    from PySide6.QtCore import QRectF  # noqa: PLC0415
+    from PySide6.QtCore import QRectF, QPointF  # noqa: PLC0415
+    from PySide6.QtGui import QColor  # noqa: PLC0415
 
-    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
 
-    window = AppWindow()
+    window = CanvasWidget()
     try:
-        assert window.open_project_file(EXAMPLE)
-        pixmap = window.canvas.grab_source_rect(QRectF(0, 0, 800, 400))
+        window.resize(600, 400)
+        window._polygons["HK-1"] = [
+            QPointF(0.0, 0.0),
+            QPointF(300.0, 0.0),
+            QPointF(300.0, 200.0),
+            QPointF(0.0, 200.0),
+        ]
+        window._color_map["HK-1"] = QColor("#2a9d8f")
+        pixmap = window.grab_source_rect(QRectF(0, 0, 800, 400))
         assert not pixmap.isNull()
         assert pixmap.width() > 0
         assert pixmap.height() > 0
@@ -3660,74 +3667,32 @@ def test_x2_export_pdf_with_planung_linda_creates_file(app, tmp_path, monkeypatc
         window.deleteLater()
 
 
-@pytest.mark.skip(reason="KiCad export is no longer exposed by AppWindow")
 def test_export_kicad_creates_file(app, tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
-
-    _settings_noop(monkeypatch)
-    target = tmp_path / "schaltplan.kicad_sch"
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), ""))
-    )
-
     from gui.app_window import AppWindow  # noqa: PLC0415
 
     window = AppWindow()
     try:
-        assert window.open_project_file(EXAMPLE)
-        window._project_path = tmp_path / "demo.hrp"
-        window._export_kicad()
-        assert target.exists()
-        content = target.read_text(encoding="utf-8")
-        assert "kicad_sch" in content
+        assert not hasattr(window, "_export_kicad")
     finally:
         window.deleteLater()
 
 
-@pytest.mark.skip(reason="KiCad export is no longer exposed by AppWindow")
 def test_export_kicad_without_saved_project_warns(app, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
-
-    _settings_noop(monkeypatch)
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        QMessageBox, "warning",
-        staticmethod(lambda *a, **k: warnings.append(a) or QMessageBox.Ok),
-    )
-
     from gui.app_window import AppWindow  # noqa: PLC0415
 
     window = AppWindow()
     try:
-        assert window.open_project_file(EXAMPLE)
-        window._project_path = None
-        window._export_kicad()
-        assert warnings, "Erwartete Warnung bei ungespeichertem Projekt"
+        assert not hasattr(window, "_export_kicad")
     finally:
         window.deleteLater()
 
 
-@pytest.mark.skip(reason="QET export is no longer exposed by AppWindow")
 def test_export_qet_creates_file(app, tmp_path, monkeypatch):
-    import zipfile  # noqa: PLC0415
-
-    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
-
-    _settings_noop(monkeypatch)
-    target = tmp_path / "schaltplan.qet"
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), ""))
-    )
-
     from gui.app_window import AppWindow  # noqa: PLC0415
 
     window = AppWindow()
     try:
-        assert window.open_project_file(EXAMPLE)
-        window._project_path = tmp_path / "demo.hrp"
-        window._export_qet()
-        assert target.exists()
-        assert zipfile.is_zipfile(target)
+        assert not hasattr(window, "_export_qet")
     finally:
         window.deleteLater()
 
@@ -3757,57 +3722,22 @@ def test_x3_export_svg_with_planung_linda_creates_file(app, tmp_path, monkeypatc
         window.deleteLater()
 
 
-@pytest.mark.skip(reason="KiCad export is no longer exposed by AppWindow")
 def test_x3_export_kicad_with_planung_linda_creates_file(app, tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
-
-    _settings_noop(monkeypatch)
-    target = tmp_path / "planung_linda.kicad_sch"
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), ""))
-    )
-
     from gui.app_window import AppWindow  # noqa: PLC0415
-
-    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
-    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
 
     window = AppWindow()
     try:
-        assert window.open_project_file(planning_linda)
-        window._project_path = tmp_path / "planung_linda.hrp"
-        window._export_kicad()
-        assert target.exists()
-        content = target.read_text(encoding="utf-8")
-        assert "kicad_sch" in content
+        assert not hasattr(window, "_export_kicad")
     finally:
         window.deleteLater()
 
 
-@pytest.mark.skip(reason="QET export is no longer exposed by AppWindow")
 def test_x3_export_qet_with_planung_linda_creates_file(app, tmp_path, monkeypatch):
-    import zipfile  # noqa: PLC0415
-
-    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
-
-    _settings_noop(monkeypatch)
-    target = tmp_path / "planung_linda.qet"
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(target), ""))
-    )
-
     from gui.app_window import AppWindow  # noqa: PLC0415
-
-    planning_linda = ROOT / "examples" / "Planung_Linda.hrp"
-    assert planning_linda.exists(), "Fixture fehlt: examples/Planung_Linda.hrp"
 
     window = AppWindow()
     try:
-        assert window.open_project_file(planning_linda)
-        window._project_path = tmp_path / "planung_linda.hrp"
-        window._export_qet()
-        assert target.exists()
-        assert zipfile.is_zipfile(target)
+        assert not hasattr(window, "_export_qet")
     finally:
         window.deleteLater()
 
@@ -4758,7 +4688,6 @@ def test_e6_context_action_starts_cable_from_ap(app, monkeypatch):
         window.deleteLater()
 
 
-@pytest.mark.skip(reason="Flaky under offscreen Qt mouse-event synthesis")
 def test_e6_draw_cable_interaction_snaps_and_finishes(app, monkeypatch):
     from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
 
@@ -4803,23 +4732,18 @@ def test_e6_draw_cable_interaction_snaps_and_finishes(app, monkeypatch):
         )
         window._set_document(doc)
         monkeypatch.setattr(window, "_open_context_menu", lambda *a, **k: None)
-        window._add_elec_cable()
+        window._add_elec_cable_from_ap("AP-1")
         cable_id = window.canvas._current_elec_cable_id
         assert cable_id
         assert window.canvas.tool_mode() == ToolMode.DRAW_ELEC_CABLE
 
-        window.canvas.mousePressEvent(
-            _MouseEventStub(QPointF(100.0, 100.0), button=Qt.LeftButton)
-        )
-        window.canvas.mousePressEvent(
+        window.canvas._current_elec_cable_points.append(QPointF(220.0, 100.0))
+        window.canvas.mouseDoubleClickEvent(
             _MouseEventStub(QPointF(220.0, 100.0), button=Qt.LeftButton)
-        )
-        window.canvas.mousePressEvent(
-            _MouseEventStub(QPointF(220.0, 100.0), button=Qt.RightButton)
         )
 
         cable = window._document.elements["elec_cables"][cable_id]
-        assert cable.geom.get("points")
+        assert cable.path
         assert window.canvas.tool_mode() == ToolMode.NONE
         assert window.canvas._current_elec_cable_id is None
         assert window.canvas.get_cable_ap(cable_id) == ("AP-1", "AP-2")

@@ -20,9 +20,12 @@ from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from gui.app_window import AppWindow  # noqa: E402
 from gui.elec_schema_window import ApNode, CableEdge, ElecSchemaWindow  # noqa: E402
 from gui.pdf_export_dialog import PdfExportConfigDialog  # noqa: E402
 from gui.schaltplan_window import SchaltplanWindow  # noqa: E402
+from model.document import Document  # noqa: E402
+from model.elements import Hkv  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -184,5 +187,221 @@ def test_elec_schema_window_renders_and_delete_signals(app):
         window._delete_ids(["AP-1"], ["EK-1"])
         assert deleted_aps == ["AP-1"]
         assert deleted_cables == ["EK-1"]
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_properties_edit_name_updates_document_and_undo_redo(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "diameter": 16.0,
+                            "spacing": 150.0,
+                            "wall_dist": 200.0,
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_element("HK-1")
+
+        editor = window.properties._editors["HK-1"]
+        name_widget = editor._widgets["name"]
+        name_widget._edit.setText("Kueche")
+        name_widget._edit.editingFinished.emit()
+
+        assert document.elements["circuits"]["HK-1"].data["name"] == "Kueche"
+
+        window._undo()
+        assert document.elements["circuits"]["HK-1"].data["name"] == "Wohnzimmer"
+
+        window._redo()
+        assert document.elements["circuits"]["HK-1"].data["name"] == "Kueche"
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_global_settings_edit_updates_and_undo_redo(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "t_supply": 35.0,
+                    "t_return": 30.0,
+                    "t_norm_outdoor": -12.0,
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_global_settings()
+
+        global_editor = window.properties._global_editor
+        assert global_editor is not None
+        t_supply_widget = global_editor._widgets["t_supply"]
+        t_supply_widget._spin.setValue(40.0)
+
+        assert float(document.settings["t_supply"]) == 40.0
+
+        window._undo()
+        assert float(document.settings["t_supply"]) == 35.0
+
+        window._redo()
+        assert float(document.settings["t_supply"]) == 40.0
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_distributor_dropdown_updates_when_hkv_added(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "distributor": "",
+                            "diameter": 16.0,
+                            "spacing": 150.0,
+                            "wall_dist": 200.0,
+                            "visible": True,
+                        }
+                    },
+                    "hkv_points": {
+                        "HKV-1": {
+                            "hkv_id": "HKV-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Verteiler EG",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_element("HK-1")
+
+        editor = window.properties._editors["HK-1"]
+        combo = editor._widgets["distributor"]._combo
+        options_before = {combo.itemText(i) for i in range(combo.count())}
+        assert "Verteiler EG" in options_before
+        assert "Verteiler OG" not in options_before
+
+        document.add(
+            Hkv.create(
+                "HKV-2",
+                floor_plan_id="grundriss-1",
+                name="Verteiler OG",
+                visible=True,
+            )
+        )
+        window._emit_structure_changed()
+        window.properties.refresh_current()
+
+        options_after = {combo.itemText(i) for i in range(combo.count())}
+        assert "Verteiler OG" in options_after
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_distributor_dropdown_and_value_cleanup_when_hkv_deleted(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "distributor": "Verteiler EG",
+                            "diameter": 16.0,
+                            "spacing": 150.0,
+                            "wall_dist": 200.0,
+                            "visible": True,
+                        }
+                    },
+                    "hkv_points": {
+                        "HKV-1": {
+                            "hkv_id": "HKV-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Verteiler EG",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_element("HK-1")
+
+        editor = window.properties._editors["HK-1"]
+        combo = editor._widgets["distributor"]._combo
+        options_before = {combo.itemText(i) for i in range(combo.count())}
+        assert "Verteiler EG" in options_before
+
+        window._cleanup_references_before_delete("HKV-1")
+        document.remove("HKV-1")
+        window._emit_structure_changed()
+        window.properties.refresh_current()
+
+        circuit = document.elements["circuits"]["HK-1"]
+        assert (circuit.distributor or "") == ""
+
+        options_after = {combo.itemText(i) for i in range(combo.count())}
+        assert "Verteiler EG" not in options_after
     finally:
         window.deleteLater()
