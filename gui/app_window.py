@@ -912,6 +912,82 @@ class AppWindow(QMainWindow):
             self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
             return
 
+        # ── Elektro-Werkzeuge ────────────────────────────────────────────────
+        if tool_id == "ap.place":
+            self._add_elec_point()
+            return
+        if tool_id == "er.polygon":
+            self._add_elec_room()
+            return
+        if tool_id == "ek.draw":
+            selected_id = self._current_selection_id()
+            point = self._document.elements.get("elec_points", {}).get(selected_id)
+            if point is not None:
+                self._add_elec_cable_from_ap(selected_id)
+            else:
+                self._add_elec_cable()
+            return
+        if tool_id == "ek.edit":
+            selected_id = self._current_selection_id()
+            if self._document.elements.get("elec_cables", {}).get(selected_id):
+                self.canvas.start_edit_elec_cable(selected_id)
+                self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            else:
+                self.statusBar().showMessage("Bitte erst ein Kabel auswählen", 2500)
+            return
+
+        # ── Heizungs-Werkzeuge ───────────────────────────────────────────────
+        if tool_id == "hk.polygon":
+            self._add_circuit()
+            return
+        if tool_id in ("hk.edit_polygon", "hk.route", "hk.edit_route",
+                       "hk.supply", "hk.edit_supply"):
+            selected_id = self._current_selection_id()
+            circuit = self._document.elements.get("circuits", {}).get(selected_id)
+            if circuit is None:
+                self.statusBar().showMessage("Bitte erst einen Heizkreis auswählen", 2500)
+                return
+            if tool_id == "hk.edit_polygon":
+                self.canvas.start_edit_polygon(selected_id)
+            elif tool_id == "hk.route":
+                self.canvas.start_route_drawing(
+                    selected_id,
+                    float(circuit.data.get("wall_dist", 200.0)),
+                    float(circuit.data.get("spacing", 150.0)),
+                )
+            elif tool_id == "hk.edit_route":
+                self.canvas.start_edit_route(selected_id)
+            elif tool_id == "hk.supply":
+                self.canvas.start_draw_supply_line(selected_id)
+            elif tool_id == "hk.edit_supply":
+                self.canvas.start_edit_supply_line(selected_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
+        if tool_id == "hkv.place":
+            self._add_hkv()
+            return
+        if tool_id == "hkv.line":
+            self._add_hkv_line()
+            return
+        if tool_id == "hkv.edit_line":
+            selected_id = self._current_selection_id()
+            if self._document.elements.get("hkv_lines", {}).get(selected_id):
+                self.canvas.start_edit_hkv_line(selected_id)
+                self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            else:
+                self.statusBar().showMessage("Bitte erst eine HKV-Leitung auswählen", 2500)
+            return
+
+        # ── Einrichtung ──────────────────────────────────────────────────────
+        if tool_id == "furn.move":
+            target_id = self._selected_floor_like_id()
+            if not target_id:
+                self.statusBar().showMessage("Kein Einrichtungselement ausgewählt", 2500)
+                return
+            self.canvas.start_move_floor_plan(target_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
+
         mode = getattr(ToolMode, tool.tool_mode, ToolMode.NONE)
         self.canvas.set_tool_mode(mode)
         self.statusBar().showMessage(tool.tooltip or tool.label, 3000)

@@ -5360,3 +5360,325 @@ def test_delete_measurement_via_navigator_removes_element_and_canvas(app, monkey
         assert window.navigator._find_item_by_id("MSRD-1") is None, "Item noch im Navigator"
     finally:
         window.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# Workspace-Werkzeuge: Regressionstests für tool_activated → Element erzeugen
+# ---------------------------------------------------------------------------
+
+def _workspace_doc():
+    """Minimalfixture: Grundriss-1 + ein AP + ein HK + ein HKV + eine HKVL."""
+    from model.document import Document  # noqa: PLC0415
+    return Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "elec_points": {"AP-1": [100.0, 100.0]},
+                "hkv_points": {"HKV-1": [200.0, 200.0]},
+                "hkv_lines": {"HKVL-1": [[10.0, 10.0], [50.0, 50.0]]},
+                "polygons": {"HK-1": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]]},
+            },
+            "params": {
+                "floorplans_order": ["grundriss-1"],
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1",
+                             "name": "Dose", "width": 30.0, "height": 30.0}
+                },
+                "hkv_points": {"HKV-1": {"hkv_id": "HKV-1", "floor_plan_id": "grundriss-1", "name": "HKV1"}},
+                "hkv_lines": {"HKVL-1": {"line_id": "HKVL-1", "floor_plan_id": "grundriss-1", "name": "L1"}},
+                "circuits": {
+                    "HK-1": {"circuit_id": "HK-1", "floor_plan_id": "grundriss-1",
+                             "name": "Wohnzimmer", "wall_dist": 200.0, "spacing": 150.0}
+                },
+                "elec_cables": {},
+            },
+        }
+    )
+
+
+def test_elec_workspace_tools_ap_place_creates_elec_point(app, monkeypatch):
+    """ap.place → neues ElecPoint-Element im Dokument + PLACE_ELEC_POINT-Modus."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        doc.active_floorplan_id = "grundriss-1"
+        window._set_document(doc)
+        before = set(doc.elements["elec_points"])
+
+        window._on_tool_activated("ap.place")
+
+        after = set(doc.elements["elec_points"])
+        assert after - before, "Kein AP angelegt"
+        assert window.canvas.tool_mode() == ToolMode.PLACE_ELEC_POINT
+    finally:
+        window.deleteLater()
+
+
+def test_elec_workspace_tools_ek_draw_creates_cable(app, monkeypatch):
+    """ek.draw ohne Selektion → neues ElecCable + DRAW_ELEC_CABLE-Modus."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        doc.active_floorplan_id = "grundriss-1"
+        window._set_document(doc)
+        before = set(doc.elements.get("elec_cables", {}))
+
+        window._on_tool_activated("ek.draw")
+
+        after = set(doc.elements.get("elec_cables", {}))
+        assert after - before, "Kein Kabel angelegt"
+        assert window.canvas.tool_mode() == ToolMode.DRAW_ELEC_CABLE
+    finally:
+        window.deleteLater()
+
+
+def test_elec_workspace_tools_ek_draw_from_selected_ap_starts_from_ap(app, monkeypatch):
+    """ek.draw mit selektiertem AP → Kabel von AP starten."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        doc.active_floorplan_id = "grundriss-1"
+        window._set_document(doc)
+        window.canvas.set_selected_item("AP-1")
+
+        before = set(doc.elements.get("elec_cables", {}))
+        window._on_tool_activated("ek.draw")
+
+        after = set(doc.elements.get("elec_cables", {}))
+        new_cables = after - before
+        assert new_cables, "Kein Kabel angelegt"
+        assert window.canvas.tool_mode() == ToolMode.DRAW_ELEC_CABLE
+        new_cid = next(iter(new_cables))
+        assert window.canvas._cable_start_ap.get(new_cid) == "AP-1"
+    finally:
+        window.deleteLater()
+
+
+def test_elec_workspace_tools_ek_edit_without_selection_shows_message(app, monkeypatch):
+    """ek.edit ohne Kabel selektiert → keine Modusänderung, Statusbar-Meldung."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        window._set_document(doc)
+
+        window._on_tool_activated("ek.edit")
+
+        # Modus soll nicht EDIT_ELEC_CABLE sein – kein Kabel selektiert
+        assert window.canvas.tool_mode() != ToolMode.EDIT_ELEC_CABLE
+    finally:
+        window.deleteLater()
+
+
+def test_heating_workspace_tools_hk_polygon_creates_circuit(app, monkeypatch):
+    """hk.polygon → neuer Circuit im Dokument + DRAW_POLY-Modus."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        doc.active_floorplan_id = "grundriss-1"
+        window._set_document(doc)
+        before = set(doc.elements.get("circuits", {}))
+
+        window._on_tool_activated("hk.polygon")
+
+        after = set(doc.elements.get("circuits", {}))
+        assert after - before, "Kein Heizkreis angelegt"
+        assert window.canvas.tool_mode() == ToolMode.DRAW_POLY
+    finally:
+        window.deleteLater()
+
+
+def test_heating_workspace_tools_hkv_place_creates_hkv(app, monkeypatch):
+    """hkv.place → neues Hkv-Element + PLACE_HKV-Modus."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        doc.active_floorplan_id = "grundriss-1"
+        window._set_document(doc)
+        before = set(doc.elements.get("hkv_points", {}))
+
+        window._on_tool_activated("hkv.place")
+
+        after = set(doc.elements.get("hkv_points", {}))
+        assert after - before, "Kein HKV angelegt"
+        assert window.canvas.tool_mode() == ToolMode.PLACE_HKV
+    finally:
+        window.deleteLater()
+
+
+def test_heating_workspace_tools_hkv_line_creates_hkv_line(app, monkeypatch):
+    """hkv.line → neue HkvLine + DRAW_HKV_LINE-Modus."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        doc.active_floorplan_id = "grundriss-1"
+        window._set_document(doc)
+        before = set(doc.elements.get("hkv_lines", {}))
+
+        window._on_tool_activated("hkv.line")
+
+        after = set(doc.elements.get("hkv_lines", {}))
+        assert after - before, "Keine HKV-Leitung angelegt"
+        assert window.canvas.tool_mode() == ToolMode.DRAW_HKV_LINE
+    finally:
+        window.deleteLater()
+
+
+def test_heating_workspace_tools_hkv_edit_line_without_selection_shows_message(app, monkeypatch):
+    """hkv.edit_line ohne Selektion → keine Modusänderung."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        window._set_document(doc)
+
+        window._on_tool_activated("hkv.edit_line")
+
+        assert window.canvas.tool_mode() != ToolMode.EDIT_HKV_LINE
+    finally:
+        window.deleteLater()
+
+
+def test_heating_workspace_tools_hk_route_without_selection_shows_message(app, monkeypatch):
+    """hk.route ohne Heizkreis selektiert → keine Modusänderung."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        window._set_document(doc)
+
+        window._on_tool_activated("hk.route")
+
+        assert window.canvas.tool_mode() != ToolMode.DRAW_ROUTE
+    finally:
+        window.deleteLater()
+
+
+def test_furniture_workspace_furn_move_tool_starts_move_mode(app, monkeypatch):
+    """furn.move mit selektiertem Einrichtungselement → MOVE_FLOOR_PLAN-Modus."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "einr-1", "visible": True}]},
+                "params": {
+                    "floorplans_order": ["einr-1"],
+                    "furniture": {"einr-1": {"name": "Sofa", "visible": True, "file_path": ""}},
+                    "floorplans": {},
+                },
+            }
+        )
+        doc.active_floorplan_id = "einr-1"
+        window._set_document(doc)
+        window.canvas.set_selected_item("einr-1")
+
+        started: list[str] = []
+        monkeypatch.setattr(window.canvas, "start_move_floor_plan", lambda fp_id: started.append(fp_id))
+
+        window._on_tool_activated("furn.move")
+
+        assert started == ["einr-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_all_workspace_tool_ids_handled_without_crash(app, monkeypatch):
+    """Alle Tool-IDs aus der Registry können aktiviert werden ohne Exception."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.tool_registry import TOOLS  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = _workspace_doc()
+        doc.active_floorplan_id = "grundriss-1"
+        window._set_document(doc)
+
+        for tool in TOOLS:
+            # Alle Tools müssen ohne Exception aktivierbar sein.
+            window._on_tool_activated(tool.id)
+    finally:
+        window.deleteLater()
