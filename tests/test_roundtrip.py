@@ -429,6 +429,7 @@ def test_project_overview_data_planung_linda():
     assert "heating_rows" in data
     assert "hkv_rows" in data
     assert "materials" in data
+    assert "electro" in data
 
     rows = data["heating_rows"]
     assert len(rows) > 0, "Keine Heizkreise gefunden"
@@ -450,3 +451,108 @@ def test_project_overview_data_planung_linda():
     # Summen müssen sinnvoll sein (Planung_Linda hat Heizkreise mit Polygonen)
     total_power = sum(r.get("power_w", 0.0) for r in rows)
     assert total_power >= 0.0
+
+    electro = data["electro"]
+    assert "materials" in electro
+    assert "rooms" in electro
+    assert "cables" in electro
+
+    e_materials = electro["materials"]
+    assert "cable_length_by_type_m" in e_materials
+    assert "ap_count_by_type" in e_materials
+    assert isinstance(e_materials["cable_length_by_type_m"], dict)
+    assert isinstance(e_materials["ap_count_by_type"], dict)
+
+    cables = electro["cables"]
+    if cables:
+        cable_required = {"id", "name", "type", "length_m", "start_ap_name", "end_ap_name"}
+        missing = cable_required - cables[0].keys()
+        assert not missing, f"Fehlende Kabel-Schlüssel: {missing}"
+
+    rooms = electro["rooms"]
+    if rooms:
+        room_required = {"room_name", "ap_count", "aps"}
+        missing = room_required - rooms[0].keys()
+        assert not missing, f"Fehlende Raum-Schlüssel: {missing}"
+
+
+def test_cable_length_uses_strict_floorplan_scale_and_height_surcharge():
+    from model.computed import computed_values, project_overview_data  # noqa: PLC0415
+
+    raw = {
+        "canvas": {
+            "mm_per_px": 1.0,
+            "floor_plans": [
+                {"fp_id": "grundriss-1", "mm_per_px": 25.0},
+                {"fp_id": "grundriss-2", "mm_per_px": 10.0},
+            ],
+            "elec_points": {
+                "AP-1": [0.0, 0.0],
+                "AP-2": [100.0, 0.0],
+            },
+            "elec_cables": {
+                "EK-1": [[0.0, 0.0], [100.0, 0.0]],
+            },
+            "cable_start_ap": {"EK-1": "AP-1"},
+            "cable_end_ap": {"EK-1": "AP-2"},
+        },
+        "params": {
+            "floorplans_order": ["grundriss-1", "grundriss-2"],
+            "floorplans": {
+                "grundriss-1": {"floor_plan_id": "grundriss-1", "name": "EG", "mm_per_px": 25.0},
+                "grundriss-2": {"floor_plan_id": "grundriss-2", "name": "OG", "mm_per_px": 10.0},
+            },
+            "elec_points": {
+                "AP-1": {
+                    "point_id": "AP-1",
+                    "name": "Dose A",
+                    "floor_plan_id": "grundriss-1",
+                    "height_from_floor": 30.0,
+                },
+                "AP-2": {
+                    "point_id": "AP-2",
+                    "name": "Dose B",
+                    "floor_plan_id": "grundriss-1",
+                    "height_from_floor": 40.0,
+                },
+            },
+            "elec_cables": {
+                "EK-1": {
+                    "cable_id": "EK-1",
+                    "name": "Kabel 1",
+                    "type": "NYM-J 3x1,5",
+                    "floor_plan_id": "grundriss-1",
+                    "start_ap": "AP-1",
+                    "end_ap": "AP-2",
+                }
+            },
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    cable = doc.elements["elec_cables"]["EK-1"]
+
+    values = computed_values(doc, cable)
+    assert values["length_m"] == "2.50 m"
+
+    overview = project_overview_data(doc)
+    cable_row = next(row for row in overview["electro"]["cables"] if row["id"] == "EK-1")
+    assert cable_row["length_m"] == pytest.approx(2.5, abs=1e-9)
+    assert cable_row["valid_scale"] is True
+
+    material_sum = overview["electro"]["materials"]["cable_length_by_type_m"]
+    assert material_sum["NYM-J 3x1,5"] == pytest.approx(2.5, abs=1e-9)
+
+    cable.floor_plan_id = "nicht-vorhanden"
+    values_invalid = computed_values(doc, cable)
+    assert values_invalid["length_m"] == "0.00 m"
+
+    overview_invalid = project_overview_data(doc)
+    cable_row_invalid = next(
+        row for row in overview_invalid["electro"]["cables"] if row["id"] == "EK-1"
+    )
+    assert cable_row_invalid["length_m"] == 0.0
+    assert cable_row_invalid["valid_scale"] is False
+
+    invalid_material_sum = overview_invalid["electro"]["materials"]["cable_length_by_type_m"]
+    assert invalid_material_sum["NYM-J 3x1,5"] == 0.0

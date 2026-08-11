@@ -24,7 +24,11 @@ class DockId:
     SCHEMA = "schema"
     SCHALTPLAN = "schaltplan"
     LOG = "log"
-    OVERVIEW = "overview"
+    OVERVIEW_GENERAL = "overview_general"
+    OVERVIEW_HEATING = "overview_heating"
+    OVERVIEW_ELECTRO = "overview_electro"
+    # Backward compatibility alias for old single overview dock id.
+    OVERVIEW = OVERVIEW_HEATING
 
 
 #: Docks, die in jedem Workspace verfügbar sind
@@ -63,7 +67,15 @@ WORKSPACES: tuple[WorkspaceDefinition, ...] = (
         id="heating",
         label="Heizung",
         layer=LayerId.HEATING,
-        default_docks=BASE_DOCKS + (DockId.RESULTS, DockId.OVERVIEW),
+        default_docks=(
+            BASE_DOCKS
+            + (
+                DockId.RESULTS,
+                DockId.OVERVIEW_GENERAL,
+                DockId.OVERVIEW_HEATING,
+                DockId.OVERVIEW_ELECTRO,
+            )
+        ),
     ),
     WorkspaceDefinition(
         id="electrical",

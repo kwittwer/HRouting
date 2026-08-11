@@ -7,6 +7,7 @@ abfragen können.
 
 from __future__ import annotations
 
+from collections import defaultdict
 import math
 from typing import Any
 
@@ -71,6 +72,65 @@ def mm_per_px_for(document: Document, element: Element) -> float:
         return 1.0
     value = float(floor.layer.get("mm_per_px", 1.0) or 1.0)
     return value if value > 0 else 1.0
+
+
+def cable_scale_mm_per_px_strict(document: Document, cable: ElecCable) -> float | None:
+    """Liefert den Kabel-Maßstab nur bei gueltiger floor_plan_id.
+
+    Anders als ``mm_per_px_for`` wird hier nicht auf aktive/erste Ebene
+    zurueckgefallen. Ungueltige Zuordnungen werden explizit als ``None``
+    behandelt.
+    """
+    fp_id = str(cable.floor_plan_id or "").strip()
+    if not fp_id:
+        return None
+
+    floor = document.floorplans.get(fp_id)
+    if floor is None:
+        return None
+
+    value = float(floor.layer.get("mm_per_px", 0.0) or 0.0)
+    return value if value > 0 else None
+
+
+def cable_length_details(document: Document, cable: ElecCable) -> dict[str, float | bool]:
+    """Berechnet die standardisierte Kabellaenge fuer alle Ausgabepfade.
+
+        Definition:
+        - ``length_m`` ist die 2D-Polylinie in Metern (wie Messfunktion im Plan).
+        - ``installed_length_m`` enthaelt optional den Hoehenaufschlag
+            (Start/End-Hoehe) als Zusatzinformation.
+
+    Bei ungueltiger oder fehlender ``floor_plan_id`` wird 0.0 geliefert.
+    """
+    scale = cable_scale_mm_per_px_strict(document, cable)
+    if scale is None:
+        return {
+            "valid_scale": False,
+            "scale_mm_per_px": 0.0,
+            "path_length_m": 0.0,
+            "vertical_length_m": 0.0,
+            "length_m": 0.0,
+            "installed_length_m": 0.0,
+        }
+
+    path_length_m = polyline_length_px(_points(cable.path)) * scale / 1000.0
+
+    points = document.elements.get("elec_points", {})
+    start = points.get(str(cable.start_ap or ""))
+    end = points.get(str(cable.end_ap or ""))
+    start_height_cm = float(start.height_from_floor if start is not None else 0.0)
+    end_height_cm = float(end.height_from_floor if end is not None else 0.0)
+    vertical_length_m = (start_height_cm + end_height_cm) / 100.0
+
+    return {
+        "valid_scale": True,
+        "scale_mm_per_px": scale,
+        "path_length_m": path_length_m,
+        "vertical_length_m": vertical_length_m,
+        "length_m": path_length_m,
+        "installed_length_m": path_length_m + vertical_length_m,
+    }
 
 
 def _format_number(value: float, decimals: int, unit: str) -> str:
@@ -149,8 +209,8 @@ def _circuit_values(document: Document, circuit: Circuit) -> dict[str, str]:
 
 
 def _cable_values(document: Document, cable: ElecCable) -> dict[str, str]:
-    mm_per_px = mm_per_px_for(document, cable)
-    length_m = polyline_length_px(_points(cable.path)) * mm_per_px / 1000.0
+    length_info = cable_length_details(document, cable)
+    length_m = float(length_info["length_m"])
 
     def _ap_name(ap_id: str) -> str:
         if not ap_id:
@@ -257,6 +317,160 @@ def heating_length_overview(document: Document) -> tuple[list[dict[str, float | 
     return rows, t_supply, t_return
 
 
+def _point_in_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
+    """Ray-casting check for point inclusion in a polygon."""
+    if len(polygon) < 3:
+        return False
+    x, y = point
+    inside = False
+    j = len(polygon) - 1
+    for i in range(len(polygon)):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if (yi > y) != (yj > y):
+            x_intersect = (xj - xi) * (y - yi) / ((yj - yi) or 1e-12) + xi
+            if x < x_intersect:
+                inside = not inside
+        j = i
+    return inside
+
+
+def _electro_overview_data(document: Document) -> dict[str, Any]:
+    """Collect material, room and cable overview data for the elektro tab."""
+    points = document.elements.get("elec_points", {})
+    cables = document.elements.get("elec_cables", {})
+    rooms = document.elements.get("elec_rooms", {})
+
+    # Cable list + material sum by type.
+    cable_length_by_type: dict[str, float] = defaultdict(float)
+    cable_rows: list[dict[str, Any]] = []
+    ap_to_cables: dict[str, list[str]] = defaultdict(list)
+
+    def _ap_name(ap_id: str) -> str:
+        if not ap_id:
+            return "–"
+        ap = points.get(ap_id)
+        if ap is None:
+            return ap_id
+        return str(ap.name or ap_id)
+
+    for cable_id, cable in sorted(cables.items()):
+        cable_type = str(cable.cable_type or "Unbekannt")
+        length_info = cable_length_details(document, cable)
+        length_m = float(length_info["length_m"])
+        start_ap_id = str(cable.start_ap or "")
+        end_ap_id = str(cable.end_ap or "")
+        cable_name = str(cable.name or cable_id)
+
+        cable_rows.append(
+            {
+                "id": cable_id,
+                "name": cable_name,
+                "type": cable_type,
+                "length_m": length_m,
+                "valid_scale": bool(length_info["valid_scale"]),
+                "start_ap_id": start_ap_id,
+                "end_ap_id": end_ap_id,
+                "start_ap_name": _ap_name(start_ap_id),
+                "end_ap_name": _ap_name(end_ap_id),
+            }
+        )
+        cable_length_by_type[cable_type] += length_m
+
+        if start_ap_id:
+            ap_to_cables[start_ap_id].append(cable_name)
+        if end_ap_id and end_ap_id != start_ap_id:
+            ap_to_cables[end_ap_id].append(cable_name)
+
+    # AP count by type.
+    ap_count_by_type: dict[str, int] = defaultdict(int)
+    for point in points.values():
+        ap_type = str(point.builtin_symbol or point.ap_type or point.name or "Unbekannt")
+        ap_count_by_type[ap_type] += 1
+
+    # Prepare room polygons for assignment.
+    room_polygons: list[dict[str, Any]] = []
+    for room_id, room in sorted(rooms.items()):
+        room_polygons.append(
+            {
+                "room_id": room_id,
+                "room_name": str(room.name or room_id),
+                "floor_plan_id": str(room.floor_plan_id or ""),
+                "polygon": _points(room.polygon),
+            }
+        )
+
+    room_rows: dict[str, dict[str, Any]] = {}
+    for room_meta in room_polygons:
+        room_rows[room_meta["room_id"]] = {
+            "room_id": room_meta["room_id"],
+            "room_name": room_meta["room_name"],
+            "floor_plan_id": room_meta["floor_plan_id"],
+            "aps": [],
+            "ap_count": 0,
+        }
+
+    unassigned_key = "__unassigned__"
+    room_rows[unassigned_key] = {
+        "room_id": "",
+        "room_name": "Ohne Raum",
+        "floor_plan_id": "",
+        "aps": [],
+        "ap_count": 0,
+    }
+
+    # Assign APs to rooms and collect cable references per AP.
+    for point_id, point in sorted(points.items()):
+        pos = _points([point.pos])
+        if not pos:
+            continue
+        pt = pos[0]
+        point_floor = str(point.floor_plan_id or "")
+        assigned_room_id = ""
+
+        for room_meta in room_polygons:
+            room_floor = room_meta["floor_plan_id"]
+            if point_floor and room_floor and point_floor != room_floor:
+                continue
+            if _point_in_polygon(pt, room_meta["polygon"]):
+                assigned_room_id = room_meta["room_id"]
+                break
+
+        ap_entry = {
+            "point_id": point_id,
+            "name": str(point.name or point_id),
+            "ap_type": str(point.builtin_symbol or point.ap_type or "Unbekannt"),
+            "cables": sorted(set(ap_to_cables.get(point_id, []))),
+        }
+
+        key = assigned_room_id or unassigned_key
+        room_rows[key]["aps"].append(ap_entry)
+
+    # Finalize room rows.
+    finalized_room_rows: list[dict[str, Any]] = []
+    for room in room_rows.values():
+        room["aps"] = sorted(room["aps"], key=lambda ap: str(ap.get("name", "")).lower())
+        room["ap_count"] = len(room["aps"])
+        if room["room_id"] or room["ap_count"]:
+            finalized_room_rows.append(room)
+
+    finalized_room_rows.sort(key=lambda row: str(row.get("room_name", "")).lower())
+    cable_rows.sort(key=lambda row: str(row.get("name", "")).lower())
+
+    return {
+        "materials": {
+            "cable_length_by_type_m": {
+                key: round(value, 2) for key, value in sorted(cable_length_by_type.items())
+            },
+            "ap_count_by_type": {
+                key: value for key, value in sorted(ap_count_by_type.items())
+            },
+        },
+        "rooms": finalized_room_rows,
+        "cables": cable_rows,
+    }
+
+
 def project_overview_data(document: Document) -> dict:
     """Alle Übersichtsdaten für die Projektübersicht.
 
@@ -356,6 +570,7 @@ def project_overview_data(document: Document) -> dict:
         "heating_rows": heating_rows,
         "hkv_rows": hkv_rows,
         "materials": materials,
+        "electro": _electro_overview_data(document),
         "t_supply": t_supply,
         "t_return": t_return,
     }

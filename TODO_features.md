@@ -135,7 +135,12 @@ Hier soll die summer aller elemente nach ihmrem typ sortiert aufgeführt werden
   - Anzahl Fittings 
   - Anzahl HKV Kästen
 
-
+## Elektro
+- Materialliste 
+  - Gesamtlänge Kabel nach typ 
+  - Anzahl APs nach typ
+- Raumliste -> übersicht der APs nach Raum mit Verweis auf die angeschlossnen kabel
+- Kabelliste -> Übersicht der Kabel mit Name, Typ, Länge Start und End AP 
 
 
 

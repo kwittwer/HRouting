@@ -577,6 +577,16 @@ def _create_mcp(window: MainWindow, bridge):
         params = project_data.get("params", {})
         canvas = project_data.get("canvas", {})
 
+        def _strict_floor_scale(fp_id: str) -> float | None:
+            floorplans = params.get("floorplans", {})
+            if not isinstance(floorplans, dict):
+                return None
+            floor = floorplans.get(str(fp_id or "").strip())
+            if not isinstance(floor, dict):
+                return None
+            value = float(floor.get("mm_per_px", 0.0) or 0.0)
+            return value if value > 0 else None
+
         hk_by_diameter: dict[float, float] = {}
         for circuit_id, cdata in params.get("circuits", {}).items():
             diameter = float(cdata.get("diameter", 0.0) or 0.0)
@@ -599,8 +609,18 @@ def _create_mcp(window: MainWindow, bridge):
 
         cable_by_type: dict[str, float] = {}
         for cable_id, cdata in params.get("elec_cables", {}).items():
-            cable_type = str(cdata.get("cable_type", cdata.get("name", cable_id)) or "").strip() or "(unbekannt)"
-            length_m = _polyline_length_m(canvas.get("elec_cables", {}).get(cable_id, []), mm_per_px)
+            cable_type = str(
+                cdata.get("cable_type")
+                or cdata.get("type")
+                or cdata.get("name")
+                or cable_id
+            ).strip() or "(unbekannt)"
+
+            scale = _strict_floor_scale(str(cdata.get("floor_plan_id", "") or ""))
+            if scale is None:
+                length_m = 0.0
+            else:
+                length_m = _polyline_length_m(canvas.get("elec_cables", {}).get(cable_id, []), scale)
             cable_by_type[cable_type] = cable_by_type.get(cable_type, 0.0) + length_m
 
         cable_bom_rows = [
@@ -2584,8 +2604,13 @@ def _create_mcp(window: MainWindow, bridge):
     def list_elec_cables() -> list[dict]:
         """Liste aller Elektro-Kabel mit Parametern, Länge und AP-Verbindungen."""
         def _read():
+            from model.computed import cable_length_details  # noqa: PLC0415
+            from model.document import Document  # noqa: PLC0415
+            from model.elements import ElecCable  # noqa: PLC0415
+
             p = window.param_panel.to_dict()
             c = window.canvas.to_dict()
+            doc = Document.from_dict({"params": p, "canvas": c})
             result = []
             for kid, kdata in p.get("elec_cables", {}).items():
                 entry = dict(kdata)
@@ -2596,9 +2621,14 @@ def _create_mcp(window: MainWindow, bridge):
                 end_ap = c.get("cable_end_ap", {}).get(kid, "")
                 entry["start_ap_id"] = start_ap
                 entry["end_ap_id"] = end_ap
-                length_px = window.canvas.get_elec_cable_length_px(kid)
-                entry["length_mm"] = round(
-                    length_px * window.canvas.get_mm_per_px(), 1)
+                cable = doc.elements.get("elec_cables", {}).get(kid)
+                if not isinstance(cable, ElecCable):
+                    entry["length_mm"] = 0.0
+                    entry["valid_scale"] = False
+                else:
+                    length_info = cable_length_details(doc, cable)
+                    entry["length_mm"] = round(float(length_info["length_m"]) * 1000.0, 1)
+                    entry["valid_scale"] = bool(length_info["valid_scale"])
                 result.append(entry)
             return result
         return invoke(_read)
@@ -2638,6 +2668,9 @@ def _create_mcp(window: MainWindow, bridge):
         def _add():
             from PySide6.QtCore import QPointF
             from PySide6.QtGui import QColor as QC
+            from model.computed import cable_length_details  # noqa: PLC0415
+            from model.document import Document  # noqa: PLC0415
+            from model.elements import ElecCable  # noqa: PLC0415
 
             w = window
             w._elec_cable_counter += 1
@@ -2673,8 +2706,13 @@ def _create_mcp(window: MainWindow, bridge):
             panel._update_color_button()
 
             # Länge anzeigen
-            length_px = w.canvas.get_elec_cable_length_px(kid)
-            length_mm = length_px * w.canvas.get_mm_per_px()
+            doc = Document.from_dict({"params": w.param_panel.to_dict(), "canvas": w.canvas.to_dict()})
+            cable = doc.elements.get("elec_cables", {}).get(kid)
+            length_info = cable_length_details(doc, cable) if isinstance(cable, ElecCable) else {
+                "length_m": 0.0,
+                "valid_scale": False,
+            }
+            length_mm = float(length_info["length_m"]) * 1000.0
             w.param_panel.set_cable_length(kid, length_mm)
             w._update_cable_ap_labels(kid)
 
@@ -2686,6 +2724,7 @@ def _create_mcp(window: MainWindow, bridge):
                 "name": name,
                 "polyline_points": len(polyline),
                 "length_mm": round(length_mm, 1),
+                "valid_scale": bool(length_info["valid_scale"]),
                 "status": "created",
             }
 
@@ -2722,6 +2761,9 @@ def _create_mcp(window: MainWindow, bridge):
         def _modify():
             from PySide6.QtCore import QPointF
             from PySide6.QtGui import QColor as QC
+            from model.computed import cable_length_details  # noqa: PLC0415
+            from model.document import Document  # noqa: PLC0415
+            from model.elements import ElecCable  # noqa: PLC0415
 
             panel = window.param_panel.elec_cable_panels.get(cable_id)
             if not panel:
@@ -2744,9 +2786,6 @@ def _create_mcp(window: MainWindow, bridge):
                     return {"error": "Polylinie muss mindestens 2 Punkte haben."}
                 window.canvas._elec_cables[cable_id] = [
                     QPointF(p[0], p[1]) for p in polyline]
-                length_px = window.canvas.get_elec_cable_length_px(cable_id)
-                length_mm = length_px * window.canvas.get_mm_per_px()
-                window.param_panel.set_cable_length(cable_id, length_mm)
             if start_ap_id is not None:
                 if start_ap_id:
                     window.canvas._cable_start_ap[cable_id] = start_ap_id
@@ -2766,11 +2805,20 @@ def _create_mcp(window: MainWindow, bridge):
                 window.canvas.set_elec_cable_stroke_width(cable_id, stroke_width)
                 panel.sb_stroke_width.setValue(max(0.5, min(10.0, stroke_width)))
 
+            doc = Document.from_dict({"params": window.param_panel.to_dict(), "canvas": window.canvas.to_dict()})
+            cable = doc.elements.get("elec_cables", {}).get(cable_id)
+            length_info = cable_length_details(doc, cable) if isinstance(cable, ElecCable) else {
+                "length_m": 0.0,
+                "valid_scale": False,
+            }
+            window.param_panel.set_cable_length(cable_id, float(length_info["length_m"]) * 1000.0)
+
             window.canvas.update()
             _record_mutation(window)
             return {
                 "cable_id": cable_id,
                 "status": "modified",
+                "valid_scale": bool(length_info["valid_scale"]),
                 "params": panel.get_parameters(),
             }
 

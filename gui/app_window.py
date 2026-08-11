@@ -177,22 +177,47 @@ class AppWindow(QMainWindow):
         self.properties = PropertiesDock(self)
         self.tools = ToolsDock(self)
         self.log = LogDock(self)
-        self.overview = ProjectOverviewDock(self)
+        self.overview_general = ProjectOverviewDock(
+            self,
+            title="Projektübersicht: Allgemein",
+            object_name="dock_overview_general",
+            visible_tabs=("Allgemein",),
+        )
+        self.overview_heating = ProjectOverviewDock(
+            self,
+            title="Projektübersicht: Heizung",
+            object_name="dock_overview",
+            visible_tabs=("Heizung",),
+        )
+        self.overview_electro = ProjectOverviewDock(
+            self,
+            title="Projektübersicht: Elektro",
+            object_name="dock_overview_electro",
+            visible_tabs=("Elektro",),
+        )
+        # Backward compatibility for tests/extensions that still use `window.overview`.
+        self.overview = self.overview_heating
 
         self.addDockWidget(Qt.LeftDockWidgetArea, self.tools)
         self.addDockWidget(Qt.RightDockWidgetArea, self.navigator)
         self.addDockWidget(Qt.RightDockWidgetArea, self.properties)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log)
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.overview)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_general)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_heating)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro)
         self.log.hide()
-        self.overview.hide()
+        self.overview_general.hide()
+        self.overview_heating.hide()
+        self.overview_electro.hide()
 
         self._docks = {
             DockId.NAVIGATOR: self.navigator,
             DockId.PROPERTIES: self.properties,
             DockId.TOOLS: self.tools,
             DockId.LOG: self.log,
-            DockId.OVERVIEW: self.overview,
+            DockId.OVERVIEW_GENERAL: self.overview_general,
+            DockId.OVERVIEW_HEATING: self.overview_heating,
+            DockId.OVERVIEW_ELECTRO: self.overview_electro,
         }
 
     def _build_menus(self) -> None:
@@ -898,7 +923,9 @@ class AppWindow(QMainWindow):
 
         self.navigator.set_document(document)
         self.properties.set_document(document)
-        self.overview.set_document(document)
+        self.overview_general.set_document(document)
+        self.overview_heating.set_document(document)
+        self.overview_electro.set_document(document)
 
         # Globale Ansichtsdaten (Zoom, Raster, Grundriss-Transformationen,
         # Hilfslinien, Messungen) in den Canvas übertragen …
@@ -3381,7 +3408,7 @@ class AppWindow(QMainWindow):
             self.canvas._text_visible[tid] = show_text
 
     def _collect_pdf_electro_rows(self) -> tuple[list[list[str]], list[list[str]]]:
-        mm_per_px = max(float(self.canvas.get_mm_per_px()), 1e-9)
+        from model.computed import cable_length_details  # noqa: PLC0415
 
         ap_rows: list[list[str]] = []
         for pid, point in self._document.elements["elec_points"].items():
@@ -3399,7 +3426,7 @@ class AppWindow(QMainWindow):
             start_id, end_id = self.canvas.get_cable_ap(cid)
             start_name = self._document.elements["elec_points"].get(start_id).name if start_id in self._document.elements["elec_points"] else (start_id or "")
             end_name = self._document.elements["elec_points"].get(end_id).name if end_id in self._document.elements["elec_points"] else (end_id or "")
-            length_m = self.canvas.get_elec_cable_length_px(cid) * mm_per_px / 1000.0
+            length_m = float(cable_length_details(self._document, cable)["length_m"])
             cable_rows.append([
                 str(cable.name or cid),
                 str(cable.cable_type or ""),
@@ -3923,6 +3950,8 @@ class AppWindow(QMainWindow):
         }
 
     def _collect_export_data(self) -> dict:
+        from model.computed import cable_length_details  # noqa: PLC0415
+
         hk_rows, t_supply, t_return = self._collect_length_overview_rows()
 
         hkv_sum: dict[str, dict] = defaultdict(lambda: {"volume_flow": 0.0, "power": 0.0})
@@ -3935,11 +3964,7 @@ class AppWindow(QMainWindow):
         kv_rows: list[dict] = []
         kv_sum: dict[str, float] = defaultdict(float)
         for cable_id, cable in self._document.elements["elec_cables"].items():
-            mm_per_px = max(float(self.canvas.get_mm_per_px()), 1e-9)
-            fp = self._document.floorplans.get(cable.floor_plan_id or "")
-            if fp is not None and float(fp.mm_per_px) > 0:
-                mm_per_px = float(fp.mm_per_px)
-            length_m = self.canvas.get_elec_cable_length_px(cable_id) * mm_per_px / 1000.0
+            length_m = float(cable_length_details(self._document, cable)["length_m"])
 
             start_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "")
             end_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "")
@@ -3948,7 +3973,6 @@ class AppWindow(QMainWindow):
 
             start_height = float(start_point.height_from_floor if start_point else 0.0)
             end_height = float(end_point.height_from_floor if end_point else 0.0)
-            length_m += (start_height + end_height) / 100.0
 
             row = {
                 "name": str(cable.name or cable_id),

@@ -2293,7 +2293,7 @@ def test_repair_project_menu_action_dry_run_does_not_write(app, monkeypatch, tmp
 
 
 def test_project_overview_dock_set_document(app, monkeypatch):
-    """ProjectOverviewDock nimmt set_document entgegen und zeigt Heizkreise an."""
+    """Projektübersicht ist auf drei Docks aufgeteilt und wird befüllt."""
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
     monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
@@ -2312,6 +2312,16 @@ def test_project_overview_dock_set_document(app, monkeypatch):
                         "HK-1": [[0, 0], [100, 0], [100, 100], [0, 100]],
                     },
                     "manual_routes": {"HK-1": [[0, 0], [50, 0], [100, 50]]},
+                    "elec_rooms": {
+                        "ER-1": [[0, 0], [220, 0], [220, 220], [0, 220]],
+                    },
+                    "elec_points": {
+                        "AP-1": [40, 40],
+                        "AP-2": [160, 160],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[40, 40], [160, 160]],
+                    },
                 },
                 "params": {
                     "floorplans": {
@@ -2336,22 +2346,59 @@ def test_project_overview_dock_set_document(app, monkeypatch):
                             "floor_covering": "Fliesen / Keramik",
                         }
                     },
-                    "elec_points": {},
-                    "elec_cables": {},
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose Wohnen",
+                            "builtin_symbol": "Steckdose",
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "LAN Dose",
+                            "builtin_symbol": "LAN",
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Zuleitung Wohnen",
+                            "type": "NYM-J 3x1.5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        }
+                    },
                     "hkv_points": {},
                     "hkv_lines": {},
-                    "elec_rooms": {},
+                    "elec_rooms": {
+                        "ER-1": {
+                            "room_id": "ER-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnraum",
+                        }
+                    },
                     "text_annotations": {},
                     "furniture": {},
                 },
             }
         )
         window._set_document(doc)
-        overview = window.overview
-        assert overview is not None
-        assert overview._document is doc
-        assert overview._hk_table.rowCount() == 1
-        assert overview._hk_table.item(0, 0).text() == "Wohnzimmer"
+        assert window.overview_general is not None
+        assert window.overview_heating is not None
+        assert window.overview_electro is not None
+
+        assert window.overview_general._document is doc
+        assert window.overview_heating._document is doc
+        assert window.overview_electro._document is doc
+
+        assert window.overview_heating._hk_table.rowCount() == 1
+        assert window.overview_heating._hk_table.item(0, 0).text() == "Wohnzimmer"
+        assert window.overview_electro._elec_cable_mat_table.rowCount() >= 1
+        assert window.overview_electro._elec_ap_mat_table.rowCount() >= 1
+        assert window.overview_electro._elec_room_table.rowCount() >= 1
+        assert window.overview_electro._elec_cable_table.rowCount() >= 1
     finally:
         window.deleteLater()
 
@@ -2359,7 +2406,7 @@ def test_project_overview_dock_set_document(app, monkeypatch):
 
 
 def test_project_overview_dock_planung_linda(app, monkeypatch):
-    """Projektübersicht lädt Planung_Linda und zeigt mehrere Heizkreise."""
+    """Projektübersicht-Docks laden Planung_Linda und zeigen Inhalte."""
     from pathlib import Path  # noqa: PLC0415
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -2376,9 +2423,9 @@ def test_project_overview_dock_planung_linda(app, monkeypatch):
     window = AppWindow()
     try:
         assert window.open_project_file(example)
-        overview = window.overview
-        assert overview._document is not None
-        assert overview._hk_table.rowCount() > 0, "Keine Heizkreise in Tabelle"
+        assert window.overview_heating._document is not None
+        assert window.overview_heating._hk_table.rowCount() > 0, "Keine Heizkreise in Tabelle"
+        assert window.overview_electro._elec_cable_table.rowCount() > 0, "Keine Kabel in Elektro-Tabelle"
     finally:
         window.deleteLater()
 
