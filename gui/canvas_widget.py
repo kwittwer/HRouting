@@ -1475,13 +1475,15 @@ class CanvasWidget(QWidget):
         old_w = self.width()
         old_h = self.height()
         old_min_size = self.minimumSize()
+        old_parent = self.parentWidget()
 
         try:
             self._scale = s
             self._offset = off
-            # Keep the widget in its layout while exporting. Temporarily
-            # detaching it can remove it from the layout and make it disappear
-            # after export.
+            # Temporarily detach from the layout so resize() is not overridden
+            # by the parent's layout manager (same approach as grab_source_rect).
+            if old_parent is not None:
+                self.setParent(None)  # type: ignore[arg-type]
             self.setMinimumSize(0, 0)
             self.resize(output_w, output_h)
             pixmap = self.grab()
@@ -1490,6 +1492,8 @@ class CanvasWidget(QWidget):
             self._offset = old_offset
             self.resize(old_w, old_h)
             self.setMinimumSize(old_min_size)
+            if old_parent is not None:
+                self.setParent(old_parent)  # type: ignore[arg-type]
             self.update()
 
         return pixmap.toImage()
