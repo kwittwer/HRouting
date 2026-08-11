@@ -70,8 +70,50 @@ def mm_per_px_for(document: Document, element: Element) -> float:
         floor = document.floorplans.get(document.floorplan_order[0])
     if floor is None:
         return 1.0
-    value = float(floor.layer.get("mm_per_px", 1.0) or 1.0)
-    return value if value > 0 else 1.0
+    value = _effective_floor_mm_per_px(floor.layer, default=1.0)
+    return value if value is not None else 1.0
+
+
+def _effective_floor_mm_per_px(
+    floor_layer: dict[str, Any],
+    *,
+    default: float | None,
+    mismatch_rel_tol: float = 0.02,
+) -> float | None:
+    """Liefert den effektiven Maßstab eines Layers.
+
+    In Altprojekten kann ``mm_per_px`` inkonsistent zu ``ref_line``/
+    ``ref_length_mm`` sein. Bei deutlicher Abweichung wird der implizite
+    Referenzwert verwendet, um realistische Längen/Flächen zu erhalten.
+    """
+    stored = float(floor_layer.get("mm_per_px", 0.0) or 0.0)
+    implied = _implied_mm_per_px_from_ref_line(floor_layer)
+
+    if implied is not None and stored > 0.0:
+        rel_dev = abs(stored - implied) / implied
+        if rel_dev > mismatch_rel_tol:
+            return implied
+        return stored
+    if stored > 0.0:
+        return stored
+    if implied is not None:
+        return implied
+    return default
+
+
+def _implied_mm_per_px_from_ref_line(floor_layer: dict[str, Any]) -> float | None:
+    ref_line = _points(floor_layer.get("ref_line"))
+    if len(ref_line) != 2:
+        return None
+
+    ref_length_mm = float(floor_layer.get("ref_length_mm", 0.0) or 0.0)
+    if ref_length_mm <= 0.0:
+        return None
+
+    px_len = polyline_length_px(ref_line)
+    if px_len <= 1e-9:
+        return None
+    return ref_length_mm / px_len
 
 
 def cable_scale_mm_per_px_strict(document: Document, cable: ElecCable) -> float | None:
@@ -89,17 +131,16 @@ def cable_scale_mm_per_px_strict(document: Document, cable: ElecCable) -> float 
     if floor is None:
         return None
 
-    value = float(floor.layer.get("mm_per_px", 0.0) or 0.0)
-    return value if value > 0 else None
+    return _effective_floor_mm_per_px(floor.layer, default=None)
 
 
 def cable_length_details(document: Document, cable: ElecCable) -> dict[str, float | bool]:
     """Berechnet die standardisierte Kabellaenge fuer alle Ausgabepfade.
 
         Definition:
-        - ``length_m`` ist die 2D-Polylinie in Metern (wie Messfunktion im Plan).
-        - ``installed_length_m`` enthaelt optional den Hoehenaufschlag
-            (Start/End-Hoehe) als Zusatzinformation.
+        - ``path_length_m`` ist die 2D-Polylinie in Metern (Messfunktion im Plan).
+        - ``length_m`` enthaelt zusaetzliche Kabelaufschlaege am Anfang/Ende,
+            konfigurierbar im Eigenschaftenfeld des Kabels.
 
     Bei ungueltiger oder fehlender ``floor_plan_id`` wird 0.0 geliefert.
     """
@@ -109,27 +150,29 @@ def cable_length_details(document: Document, cable: ElecCable) -> dict[str, floa
             "valid_scale": False,
             "scale_mm_per_px": 0.0,
             "path_length_m": 0.0,
-            "vertical_length_m": 0.0,
+            "start_surcharge_m": 0.0,
+            "end_surcharge_m": 0.0,
             "length_m": 0.0,
             "installed_length_m": 0.0,
         }
 
     path_length_m = polyline_length_px(_points(cable.path)) * scale / 1000.0
-
-    points = document.elements.get("elec_points", {})
-    start = points.get(str(cable.start_ap or ""))
-    end = points.get(str(cable.end_ap or ""))
-    start_height_cm = float(start.height_from_floor if start is not None else 0.0)
-    end_height_cm = float(end.height_from_floor if end is not None else 0.0)
-    vertical_length_m = (start_height_cm + end_height_cm) / 100.0
+    start_surcharge_m = float(cable.start_length_surcharge_m or 0.0)
+    end_surcharge_m = float(cable.end_length_surcharge_m or 0.0)
+    if start_surcharge_m < 0:
+        start_surcharge_m = 0.0
+    if end_surcharge_m < 0:
+        end_surcharge_m = 0.0
+    surcharge_m = start_surcharge_m + end_surcharge_m
 
     return {
         "valid_scale": True,
         "scale_mm_per_px": scale,
         "path_length_m": path_length_m,
-        "vertical_length_m": vertical_length_m,
-        "length_m": path_length_m,
-        "installed_length_m": path_length_m + vertical_length_m,
+        "start_surcharge_m": start_surcharge_m,
+        "end_surcharge_m": end_surcharge_m,
+        "length_m": path_length_m + surcharge_m,
+        "installed_length_m": path_length_m + surcharge_m,
     }
 
 
@@ -210,6 +253,9 @@ def _circuit_values(document: Document, circuit: Circuit) -> dict[str, str]:
 
 def _cable_values(document: Document, cable: ElecCable) -> dict[str, str]:
     length_info = cable_length_details(document, cable)
+    path_length_m = float(length_info["path_length_m"])
+    start_surcharge_m = float(length_info["start_surcharge_m"])
+    end_surcharge_m = float(length_info["end_surcharge_m"])
     length_m = float(length_info["length_m"])
 
     def _ap_name(ap_id: str) -> str:
@@ -221,6 +267,9 @@ def _cable_values(document: Document, cable: ElecCable) -> dict[str, str]:
         return point.name or ap_id
 
     return {
+        "path_length_m": _format_number(path_length_m, 2, "m"),
+        "start_surcharge_m": _format_number(start_surcharge_m, 2, "m"),
+        "end_surcharge_m": _format_number(end_surcharge_m, 2, "m"),
         "length_m": _format_number(length_m, 2, "m"),
         "start_ap_name": _ap_name(cable.start_ap),
         "end_ap_name": _ap_name(cable.end_ap),

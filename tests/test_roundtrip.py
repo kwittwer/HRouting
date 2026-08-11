@@ -67,6 +67,64 @@ def test_saved_file_is_valid(example: Path, tmp_path: Path):
     assert not semantic_errors, semantic_errors
 
 
+def test_validate_semantic_warns_on_floorplan_mm_per_px_drift():
+    from validate_hrp import validate_semantic  # noqa: PLC0415
+
+    raw = {
+        "canvas": {
+            "floor_plans": [
+                {
+                    "fp_id": "grundriss-1",
+                    "mm_per_px": 40.0,
+                    "ref_length_mm": 1000.0,
+                    "ref_line": [[0.0, 0.0], [100.0, 0.0]],
+                }
+            ]
+        },
+        "params": {
+            "floorplans": {
+                "grundriss-1": {
+                    "floor_plan_id": "grundriss-1",
+                    "name": "Test",
+                }
+            }
+        },
+    }
+
+    semantic_errors, warnings = validate_semantic(raw)
+    assert not semantic_errors
+    assert any("[Calibration]" in w and "grundriss-1" in w for w in warnings)
+
+
+def test_validate_semantic_no_calibration_warning_when_values_match():
+    from validate_hrp import validate_semantic  # noqa: PLC0415
+
+    raw = {
+        "canvas": {
+            "floor_plans": [
+                {
+                    "fp_id": "grundriss-1",
+                    "mm_per_px": 10.0,
+                    "ref_length_mm": 1000.0,
+                    "ref_line": [[0.0, 0.0], [100.0, 0.0]],
+                }
+            ]
+        },
+        "params": {
+            "floorplans": {
+                "grundriss-1": {
+                    "floor_plan_id": "grundriss-1",
+                    "name": "Test",
+                }
+            }
+        },
+    }
+
+    semantic_errors, warnings = validate_semantic(raw)
+    assert not semantic_errors
+    assert not any("[Calibration]" in w for w in warnings)
+
+
 def test_migration_drops_legacy_ui_state():
     raw = migrate_raw({"params": {"_ui_state": {"main_window": {}}, "circuits": {}}})
     assert "_ui_state" not in raw["params"]
@@ -476,7 +534,7 @@ def test_project_overview_data_planung_linda():
         assert not missing, f"Fehlende Raum-Schlüssel: {missing}"
 
 
-def test_cable_length_uses_strict_floorplan_scale_and_height_surcharge():
+def test_cable_length_uses_strict_floorplan_scale_and_manual_surcharges():
     from model.computed import computed_values, project_overview_data  # noqa: PLC0415
 
     raw = {
@@ -533,6 +591,9 @@ def test_cable_length_uses_strict_floorplan_scale_and_height_surcharge():
     cable = doc.elements["elec_cables"]["EK-1"]
 
     values = computed_values(doc, cable)
+    assert values["path_length_m"] == "2.50 m"
+    assert values["start_surcharge_m"] == "0.00 m"
+    assert values["end_surcharge_m"] == "0.00 m"
     assert values["length_m"] == "2.50 m"
 
     overview = project_overview_data(doc)
@@ -542,6 +603,26 @@ def test_cable_length_uses_strict_floorplan_scale_and_height_surcharge():
 
     material_sum = overview["electro"]["materials"]["cable_length_by_type_m"]
     assert material_sum["NYM-J 3x1,5"] == pytest.approx(2.5, abs=1e-9)
+
+    cable.start_length_surcharge_m = 0.2
+    cable.end_length_surcharge_m = 0.5
+
+    values_with_surcharge = computed_values(doc, cable)
+    assert values_with_surcharge["path_length_m"] == "2.50 m"
+    assert values_with_surcharge["start_surcharge_m"] == "0.20 m"
+    assert values_with_surcharge["end_surcharge_m"] == "0.50 m"
+    assert values_with_surcharge["length_m"] == "3.20 m"
+
+    overview_with_surcharge = project_overview_data(doc)
+    cable_row_with_surcharge = next(
+        row for row in overview_with_surcharge["electro"]["cables"] if row["id"] == "EK-1"
+    )
+    assert cable_row_with_surcharge["length_m"] == pytest.approx(3.2, abs=1e-9)
+
+    material_sum_with_surcharge = overview_with_surcharge["electro"]["materials"][
+        "cable_length_by_type_m"
+    ]
+    assert material_sum_with_surcharge["NYM-J 3x1,5"] == pytest.approx(3.2, abs=1e-9)
 
     cable.floor_plan_id = "nicht-vorhanden"
     values_invalid = computed_values(doc, cable)
@@ -556,3 +637,49 @@ def test_cable_length_uses_strict_floorplan_scale_and_height_surcharge():
 
     invalid_material_sum = overview_invalid["electro"]["materials"]["cable_length_by_type_m"]
     assert invalid_material_sum["NYM-J 3x1,5"] == 0.0
+
+
+def test_cable_length_prefers_ref_line_scale_when_mm_per_px_is_stale():
+    from model.computed import cable_length_details  # noqa: PLC0415
+
+    raw = {
+        "canvas": {
+            "floor_plans": [
+                {
+                    "fp_id": "grundriss-1",
+                    "mm_per_px": 150.0,
+                    "ref_length_mm": 1000.0,
+                    "ref_line": [[0.0, 0.0], [100.0, 0.0]],
+                }
+            ],
+            "elec_cables": {
+                "EK-1": [[0.0, 0.0], [100.0, 0.0]],
+            },
+        },
+        "params": {
+            "floorplans": {
+                "grundriss-1": {
+                    "floor_plan_id": "grundriss-1",
+                    "name": "EG",
+                    "mm_per_px": 150.0,
+                }
+            },
+            "elec_cables": {
+                "EK-1": {
+                    "cable_id": "EK-1",
+                    "name": "Kabel 1",
+                    "type": "NYM-J 3x1,5",
+                    "floor_plan_id": "grundriss-1",
+                }
+            },
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    cable = doc.elements["elec_cables"]["EK-1"]
+    details = cable_length_details(doc, cable)
+
+    assert details["valid_scale"] is True
+    assert details["scale_mm_per_px"] == pytest.approx(10.0, abs=1e-9)
+    assert details["path_length_m"] == pytest.approx(1.0, abs=1e-9)
+    assert details["length_m"] == pytest.approx(1.0, abs=1e-9)

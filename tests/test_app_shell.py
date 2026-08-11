@@ -2048,6 +2048,32 @@ def test_canvas_rotate_floorplan_updates_rotation_and_ref_line(app):
         canvas.deleteLater()
 
 
+def test_set_floor_plan_transform_rotates_ref_line_with_layer(app):
+    from PySide6.QtCore import QPointF  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        layer = canvas.add_floor_plan("grundriss-1")
+        layer.size = (100.0, 100.0)
+        layer.ref_p1 = QPointF(60.0, 50.0)
+        layer.ref_p2 = QPointF(70.0, 50.0)
+        canvas._ref_floor_id = "grundriss-1"
+
+        canvas.set_floor_plan_transform("grundriss-1", 0.0, 0.0, 90.0)
+
+        assert abs(layer.rotation - 90.0) < 1e-9
+        assert abs(layer.ref_p1.x() - 50.0) < 1e-9
+        assert abs(layer.ref_p1.y() - 60.0) < 1e-9
+        assert abs(layer.ref_p2.x() - 50.0) < 1e-9
+        assert abs(layer.ref_p2.y() - 70.0) < 1e-9
+        assert canvas._ref_p1 == layer.ref_p1
+        assert canvas._ref_p2 == layer.ref_p2
+    finally:
+        canvas.deleteLater()
+
+
 def test_canvas_draw_ref_line_stores_points_on_floorplan(app):
     from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
 
@@ -2610,6 +2636,61 @@ def test_recompute_scale_on_active_floorplan_keeps_global_mpp(app, monkeypatch):
         assert abs(window.canvas._floor_plans["grundriss-1"].mm_per_px - 100.0) < 1e-9
         # Anderer Grundriss bleibt unverändert
         assert abs(window.canvas._floor_plans["grundriss-2"].mm_per_px - 50.0) < 1e-9
+    finally:
+        window.deleteLater()
+
+
+def test_sync_floorplan_scales_from_references_updates_all_valid_floors(app, monkeypatch):
+    from PySide6.QtCore import QPointF, QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "mm_per_px": 50.0,
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True, "mm_per_px": 50.0, "ref_length_mm": 5000.0},
+                        {"fp_id": "grundriss-2", "visible": True, "mm_per_px": 75.0, "ref_length_mm": 3000.0},
+                    ],
+                },
+                "params": {
+                    "floorplans_order": ["grundriss-1", "grundriss-2"],
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": "", "mm_per_px": 50.0, "ref_length_mm": 5000.0},
+                        "grundriss-2": {"name": "OG", "visible": True, "file_path": "", "mm_per_px": 75.0, "ref_length_mm": 3000.0},
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+
+        layer1 = window.canvas._floor_plans["grundriss-1"]
+        layer1.ref_p1 = QPointF(0.0, 0.0)
+        layer1.ref_p2 = QPointF(100.0, 0.0)
+        layer1.ref_length_mm = 5000.0
+
+        layer2 = window.canvas._floor_plans["grundriss-2"]
+        layer2.ref_p1 = QPointF(10.0, 10.0)
+        layer2.ref_p2 = QPointF(70.0, 10.0)
+        layer2.ref_length_mm = 3000.0
+
+        valid_count, changed_count = window._sync_floorplan_scales_from_references(show_feedback=False)
+
+        assert valid_count == 2
+        assert changed_count == 1
+        assert abs(layer1.mm_per_px - 50.0) < 1e-9
+        assert abs(layer2.mm_per_px - 50.0) < 1e-9
+        assert abs(window._document.floorplans["grundriss-2"].layer["mm_per_px"] - 50.0) < 1e-9
+        assert window._dirty is True
     finally:
         window.deleteLater()
 

@@ -669,6 +669,7 @@ class CanvasWidget(QWidget):
                                   rotation: float):
         layer = self._floor_plans.get(fp_id)
         if layer:
+            old_rotation = float(layer.rotation)
             # Move ref points by the offset delta
             dx = offset_x - layer.offset_x
             dy = offset_y - layer.offset_y
@@ -682,6 +683,34 @@ class CanvasWidget(QWidget):
                 if self._ref_floor_id == fp_id:
                     self._ref_p1 = layer.ref_p1
                     self._ref_p2 = layer.ref_p2
+
+            # Keep ref-line anchors aligned with the image when rotation changes
+            # via the properties panel (mouse-rotate already does this in drag path).
+            delta_rot = float(rotation) - old_rotation
+            if abs(delta_rot) > 1e-9 and (layer.ref_p1 or layer.ref_p2):
+                layer.offset_x = offset_x
+                layer.offset_y = offset_y
+                sw, sh = self._layer_render_size(layer)
+                cx = sw / 2 + layer.offset_x
+                cy = sh / 2 + layer.offset_y
+                rad = math.radians(delta_rot)
+                cos_r, sin_r = math.cos(rad), math.sin(rad)
+                for attr in ("ref_p1", "ref_p2"):
+                    pt = getattr(layer, attr)
+                    if pt is None:
+                        continue
+                    rx = pt.x() - cx
+                    ry = pt.y() - cy
+                    setattr(
+                        layer,
+                        attr,
+                        QPointF(cx + rx * cos_r - ry * sin_r,
+                                cy + rx * sin_r + ry * cos_r),
+                    )
+                if self._ref_floor_id == fp_id:
+                    self._ref_p1 = layer.ref_p1
+                    self._ref_p2 = layer.ref_p2
+
             layer.offset_x = offset_x
             layer.offset_y = offset_y
             layer.rotation = rotation

@@ -235,6 +235,11 @@ class AppWindow(QMainWindow):
         )
         file_menu.addSeparator()
         self._add_action(file_menu, "Projekt reparieren & bereinigen…", self._repair_project)
+        self._add_action(
+            file_menu,
+            "Grundriss-Skalierungen aus Referenzlinien synchronisieren",
+            self._sync_floorplan_scales_from_references,
+        )
         file_menu.addSeparator()
         self._add_action(file_menu, "Beenden", self.close, QKeySequence.Quit)
 
@@ -549,6 +554,8 @@ class AppWindow(QMainWindow):
 
     def _on_floor_plan_transform_updated(self, fp_id: str, _ox: float, _oy: float, _rot: float) -> None:
         """Synchronisiert Property-Ansicht und Undo bei Drag-Transformationen."""
+        # Keep per-floor scale synchronized with the current reference line.
+        self._recompute_floorplan_scale_from_reference(fp_id)
         self._record_canvas_change()
         self.properties.refresh_element(fp_id)
         self._refresh_schema_windows()
@@ -2412,6 +2419,88 @@ class AppWindow(QMainWindow):
             f"Reparatur abgeschlossen ({len(changes)} Aenderungen, Backup: {backup_text})"
         )
         return True
+
+    def _sync_floorplan_scales_from_references(self, *, show_feedback: bool = True) -> tuple[int, int]:
+        """Synchronisiert alle Grundriss-Skalierungen aus Referenzlinien.
+
+        Returns:
+            Tuple aus (valid_floor_count, changed_floor_count).
+        """
+
+        def _ref_implied_mpp(fp_id: str) -> float | None:
+            layer = self.canvas._floor_plans.get(fp_id)
+            if layer is None or layer.ref_p1 is None or layer.ref_p2 is None:
+                return None
+            ref_len = float(layer.ref_length_mm or 0.0)
+            if ref_len <= 0.0:
+                return None
+            px_len = math.hypot(layer.ref_p2.x() - layer.ref_p1.x(), layer.ref_p2.y() - layer.ref_p1.y())
+            if px_len <= 1e-9:
+                return None
+            return ref_len / px_len
+
+        ordered_ids: list[str] = []
+        seen: set[str] = set()
+        for fid in self._document.floorplan_order:
+            if fid in self._document.floorplans and fid not in seen:
+                ordered_ids.append(fid)
+                seen.add(fid)
+        for fid in self._document.floorplans.keys():
+            if fid not in seen:
+                ordered_ids.append(fid)
+
+        would_change = False
+        for fid in ordered_ids:
+            layer = self.canvas._floor_plans.get(fid)
+            implied = _ref_implied_mpp(fid)
+            if layer is None or implied is None:
+                continue
+            current = float(layer.mm_per_px or 0.0)
+            if current <= 0.0 or abs(implied - current) > 1e-9:
+                would_change = True
+                break
+
+        if would_change:
+            self._push_undo()
+
+        valid_count = 0
+        changed_count = 0
+        for fid in ordered_ids:
+            layer = self.canvas._floor_plans.get(fid)
+            if layer is None:
+                continue
+            before = float(layer.mm_per_px or 0.0)
+            if not self._recompute_floorplan_scale_from_reference(fid):
+                continue
+            valid_count += 1
+            after = float(layer.mm_per_px or 0.0)
+            if abs(after - before) > 1e-9:
+                changed_count += 1
+                self._document.element_changed.emit(fid)
+
+        if changed_count > 0:
+            self._mark_dirty()
+            self._refresh_schema_windows()
+
+        if show_feedback:
+            if valid_count == 0:
+                QMessageBox.information(
+                    self,
+                    "Skalierung synchronisieren",
+                    "Keine gültigen Referenzlinien mit Referenzlänge gefunden.",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Skalierung synchronisieren",
+                    (
+                        "Grundriss-Skalierungen wurden aus Referenzlinien geprüft.\n\n"
+                        f"Gültige Referenzen: {valid_count}\n"
+                        f"Aktualisierte Skalierungen: {changed_count}"
+                    ),
+                )
+
+        return valid_count, changed_count
 
     def _confirm_discard(self) -> bool:
         if not self._dirty:

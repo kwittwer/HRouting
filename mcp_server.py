@@ -620,7 +620,14 @@ def _create_mcp(window: MainWindow, bridge):
             if scale is None:
                 length_m = 0.0
             else:
-                length_m = _polyline_length_m(canvas.get("elec_cables", {}).get(cable_id, []), scale)
+                path_length_m = _polyline_length_m(canvas.get("elec_cables", {}).get(cable_id, []), scale)
+                start_surcharge_m = float(cdata.get("start_length_surcharge_m", 0.0) or 0.0)
+                end_surcharge_m = float(cdata.get("end_length_surcharge_m", 0.0) or 0.0)
+                if start_surcharge_m < 0:
+                    start_surcharge_m = 0.0
+                if end_surcharge_m < 0:
+                    end_surcharge_m = 0.0
+                length_m = path_length_m + start_surcharge_m + end_surcharge_m
             cable_by_type[cable_type] = cable_by_type.get(cable_type, 0.0) + length_m
 
         cable_bom_rows = [
@@ -2643,6 +2650,8 @@ def _create_mcp(window: MainWindow, bridge):
         comment: str = "",
         start_ap_id: str = "",
         end_ap_id: str = "",
+        start_length_surcharge_m: float = 0.0,
+        end_length_surcharge_m: float = 0.0,
         stroke_width: float = 2.0,
     ) -> dict:
         """Elektro-Kabel als Polylinie hinzufügen.
@@ -2659,6 +2668,10 @@ def _create_mcp(window: MainWindow, bridge):
                 leer = kein Start-AP
             end_ap_id: End-Anschlusspunkt-ID (z.B. 'AP-2'),
                 leer = kein End-AP
+            start_length_surcharge_m: Zusätzliche Kabellänge am Start in m
+                (>= 0, leer = 0)
+            end_length_surcharge_m: Zusätzliche Kabellänge am Ende in m
+                (>= 0, leer = 0)
             stroke_width: Strichstärke der Kabellinie in px (0.5–10.0,
                 Standard: 2.0)
         """
@@ -2705,6 +2718,15 @@ def _create_mcp(window: MainWindow, bridge):
             panel._color = QC(color)
             panel._update_color_button()
 
+            surcharge_start = max(0.0, float(start_length_surcharge_m or 0.0))
+            surcharge_end = max(0.0, float(end_length_surcharge_m or 0.0))
+            model_doc = getattr(w, "_document", None)
+            if isinstance(model_doc, Document):
+                cable_model = model_doc.elements.get("elec_cables", {}).get(kid)
+                if isinstance(cable_model, ElecCable):
+                    cable_model.start_length_surcharge_m = surcharge_start
+                    cable_model.end_length_surcharge_m = surcharge_end
+
             # Länge anzeigen
             doc = Document.from_dict({"params": w.param_panel.to_dict(), "canvas": w.canvas.to_dict()})
             cable = doc.elements.get("elec_cables", {}).get(kid)
@@ -2740,6 +2762,8 @@ def _create_mcp(window: MainWindow, bridge):
         polyline: list[list[float]] | None = None,
         start_ap_id: str | None = None,
         end_ap_id: str | None = None,
+        start_length_surcharge_m: float | None = None,
+        end_length_surcharge_m: float | None = None,
         visible: bool | None = None,
         stroke_width: float | None = None,
     ) -> dict:
@@ -2755,6 +2779,10 @@ def _create_mcp(window: MainWindow, bridge):
             polyline: Neue Kabelführung [[x,y], ...] (mind. 2 Punkte)
             start_ap_id: Neue Start-AP-ID (leer = entfernen)
             end_ap_id: Neue End-AP-ID (leer = entfernen)
+            start_length_surcharge_m: Neuer Längenaufschlag am Start in m
+                (leer = unverändert)
+            end_length_surcharge_m: Neuer Längenaufschlag am Ende in m
+                (leer = unverändert)
             visible: Sichtbarkeit
             stroke_width: Neue Strichstärke in px (0.5–10.0)
         """
@@ -2804,6 +2832,19 @@ def _create_mcp(window: MainWindow, bridge):
             if stroke_width is not None:
                 window.canvas.set_elec_cable_stroke_width(cable_id, stroke_width)
                 panel.sb_stroke_width.setValue(max(0.5, min(10.0, stroke_width)))
+
+            model_doc = getattr(window, "_document", None)
+            if isinstance(model_doc, Document):
+                cable_model_for_surcharge = model_doc.elements.get("elec_cables", {}).get(cable_id)
+                if isinstance(cable_model_for_surcharge, ElecCable):
+                    if start_length_surcharge_m is not None:
+                        cable_model_for_surcharge.start_length_surcharge_m = max(
+                            0.0, float(start_length_surcharge_m or 0.0)
+                        )
+                    if end_length_surcharge_m is not None:
+                        cable_model_for_surcharge.end_length_surcharge_m = max(
+                            0.0, float(end_length_surcharge_m or 0.0)
+                        )
 
             doc = Document.from_dict({"params": window.param_panel.to_dict(), "canvas": window.canvas.to_dict()})
             cable = doc.elements.get("elec_cables", {}).get(cable_id)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -309,6 +310,50 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
             warnings.append(
                 f"[Sync] Grundriss '{fid}' in params.floorplans vorhanden, "
                 f"aber nicht in floorplans_order."
+            )
+
+    # ── Kalibrierungs-Konsistenz (mm_per_px vs. ref_line/ref_length_mm) ──
+    floor_plan_layers = {}
+    for layer in canvas.get("floor_plans", []):
+        if isinstance(layer, dict):
+            fid = str(layer.get("fp_id", "") or "")
+            if fid:
+                floor_plan_layers[fid] = layer
+
+    # 2% Toleranz: robuste Warnung ohne False Positives durch Mess-/Rundungsrauschen.
+    mismatch_rel_tol = 0.02
+    for fid in fp_ids:
+        layer = floor_plan_layers.get(fid)
+        if not isinstance(layer, dict):
+            continue
+
+        ref_line = layer.get("ref_line")
+        if not (isinstance(ref_line, list) and len(ref_line) == 2):
+            continue
+
+        try:
+            x1, y1 = ref_line[0]
+            x2, y2 = ref_line[1]
+            ref_length_mm = float(layer.get("ref_length_mm", 0.0) or 0.0)
+            stored_mpp = float(layer.get("mm_per_px", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+
+        if ref_length_mm <= 0.0 or stored_mpp <= 0.0:
+            continue
+
+        px_len = math.hypot(float(x2) - float(x1), float(y2) - float(y1))
+        if px_len <= 1e-9:
+            continue
+
+        implied_mpp = ref_length_mm / px_len
+        rel_dev = abs(stored_mpp - implied_mpp) / implied_mpp
+        if rel_dev > mismatch_rel_tol:
+            ratio = stored_mpp / implied_mpp
+            warnings.append(
+                f"[Calibration] Grundriss '{fid}': gespeichertes mm_per_px ({stored_mpp:.6f}) "
+                f"weicht vom Referenzlinien-Wert ({implied_mpp:.6f}) ab "
+                f"(Abweichung {rel_dev * 100.0:.1f}%, Faktor {ratio:.2f}x)."
             )
 
     # ── floor_covering prüfen ──

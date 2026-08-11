@@ -228,6 +228,8 @@ class ElecCable(Element):
     comment = _param("comment", "")
     start_ap = _param("start_ap", "")
     end_ap = _param("end_ap", "")
+    start_length_surcharge_m = _param("start_length_surcharge_m", 0.0)
+    end_length_surcharge_m = _param("end_length_surcharge_m", 0.0)
 
     path = _geom("elec_cables")
 
