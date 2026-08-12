@@ -4040,6 +4040,7 @@ def test_kicad_textfield_import_creates_ap_and_links_cable(app, monkeypatch):
         assert point.name == "Flur Licht"
         assert point.floor_plan_id == fp_id
         assert point.pos == [123.0, 456.0]
+        assert window.canvas._label_map[point.id] == "Flur Licht"
         assert cable.start_ap == point.id
         assert cable.floor_plan_id == fp_id
         assert cable.cable_type == "3x1,5"
@@ -4249,6 +4250,71 @@ def test_kicad_ap_import_creates_ap_from_group_frame_center(app, monkeypatch):
         assert point.name == "AP_1"
         assert point.floor_plan_id == fp_id
         assert point.pos == [120.0, 230.0]
+        assert point.data["kicad_project_uuid"] == "proj-1"
+        assert point.data["kicad_group_uuid"] == "group-uuid-1"
+        assert point.data["kicad_frame_uuid"] == "frame-uuid-1"
+        assert window.canvas._label_map[point.id] == "AP_1"
+    finally:
+        window.deleteLater()
+
+
+def test_kicad_ap_import_reuses_ap_by_group_uuid_when_name_changes(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from logic.kicad_import import KiCadApGroupCandidate, KiCadScanResult  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Grundriss 1", True)))
+
+    window = AppWindow()
+    try:
+        window._add_floorplan()
+        fp_id = list(window._document.floorplans.keys())[0]
+
+        scan_result = KiCadScanResult(root_path=ROOT, project_uuid="proj-1")
+        group_key = "group::ap1"
+        scan_result.ap_group_candidates[group_key] = KiCadApGroupCandidate(
+            key=group_key,
+            group_name="AP_1",
+            group_uuid="group-uuid-1",
+            frame_uuid="frame-uuid-1",
+            frame_bounds=(100.0, 200.0, 140.0, 260.0),
+            bus_hits=[],
+        )
+
+        summary_first = window._apply_kicad_ap_import(
+            scan_result,
+            {group_key},
+            {group_key: {"floor_plan_id": fp_id, "room_id": ""}},
+        )
+        assert summary_first["created"] == 1
+        assert len(window._document.elements["elec_points"]) == 1
+        point_id = next(iter(window._document.elements["elec_points"].keys()))
+
+        # Re-import with changed AP name but identical KiCad UUID anchors.
+        scan_result.ap_group_candidates[group_key] = KiCadApGroupCandidate(
+            key=group_key,
+            group_name="AP_1_NEU",
+            group_uuid="group-uuid-1",
+            frame_uuid="frame-uuid-1",
+            frame_bounds=(100.0, 200.0, 140.0, 260.0),
+            bus_hits=[],
+        )
+        summary_second = window._apply_kicad_ap_import(
+            scan_result,
+            {group_key},
+            {group_key: {"floor_plan_id": fp_id, "room_id": ""}},
+        )
+
+        assert summary_second["created"] == 0
+        assert summary_second["reused"] == 1
+        assert len(window._document.elements["elec_points"]) == 1
+        point = window._document.elements["elec_points"][point_id]
+        assert point.name == "AP_1_NEU"
+        assert point.data["kicad_group_uuid"] == "group-uuid-1"
     finally:
         window.deleteLater()
 

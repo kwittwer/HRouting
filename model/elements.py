@@ -177,6 +177,12 @@ class ElecPoint(Element):
     smarthome_device_color = _param("smarthome_device_color", "")
     note = _param("note", "")
     ap_type = _param("ap_type", "standard")
+    kicad_project_uuid = _param("kicad_project_uuid", "")
+    kicad_group_uuid = _param("kicad_group_uuid", "")
+    kicad_frame_uuid = _param("kicad_frame_uuid", "")
+    kicad_sheet_path = _param("kicad_sheet_path", "")
+    kicad_last_import_hash = _param("kicad_last_import_hash", "")
+    kicad_last_imported_at = _param("kicad_last_imported_at", "")
 
     pos = _geom("elec_points")
     size_px = _geom("elec_point_size_px")

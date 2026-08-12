@@ -2587,6 +2587,8 @@ class CanvasWidget(QWidget):
 
     def _on_document_data_changed(self, element_id: str) -> None:
         """Wird von den Views bei jeder Datenänderung aufgerufen."""
+        if self._document is not None:
+            self._rebuild_label_map()
         self.document_data_changed.emit(element_id)
 
     def set_selectable_layers(self, layers) -> None:

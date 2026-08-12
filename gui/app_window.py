@@ -5355,6 +5355,16 @@ class AppWindow(QMainWindow):
                     selected_floor_plan_id or self._active_floorplan_id(),
                     [center_x, center_y],
                     room_id=selected_room_id,
+                    kicad_sync={
+                        "kicad_project_uuid": str(scan_result.project_uuid or ""),
+                        "kicad_group_uuid": str(ap_group_candidate.group_uuid or ""),
+                        "kicad_frame_uuid": str(ap_group_candidate.frame_uuid or ""),
+                        "kicad_sheet_path": str(
+                            ap_group_candidate.bus_hits[0].sheet_file if ap_group_candidate.bus_hits else ""
+                        ),
+                        "kicad_last_import_hash": "",
+                        "kicad_last_imported_at": "",
+                    },
                 )
                 if status == "created":
                     created += 1
@@ -5497,11 +5507,27 @@ class AppWindow(QMainWindow):
         floor_plan_id: str,
         pos: object,
         room_id: str = "",
+        kicad_sync: dict[str, str] | None = None,
     ) -> tuple[str, str, str]:
+        if kicad_sync:
+            existing_by_uuid = self._find_existing_ap_by_kicad_group_uuid(kicad_sync)
+            if existing_by_uuid is not None:
+                if ap_name and str(existing_by_uuid.name or "") != ap_name:
+                    existing_by_uuid.name = ap_name
+                self._apply_kicad_ap_sync_metadata(existing_by_uuid.data, kicad_sync)
+                self._document.element_changed.emit(existing_by_uuid.id)
+                return existing_by_uuid.id, str(existing_by_uuid.floor_plan_id or floor_plan_id or ""), "reused"
+
         same_floorplan_matches, exact_matches = self._find_existing_ap_matches(ap_name, floor_plan_id)
         if same_floorplan_matches:
+            if kicad_sync:
+                self._apply_kicad_ap_sync_metadata(same_floorplan_matches[0].data, kicad_sync)
+                self._document.element_changed.emit(same_floorplan_matches[0].id)
             return same_floorplan_matches[0].id, floor_plan_id, "reused"
         if exact_matches:
+            if kicad_sync:
+                self._apply_kicad_ap_sync_metadata(exact_matches[0].data, kicad_sync)
+                self._document.element_changed.emit(exact_matches[0].id)
             return exact_matches[0].id, str(exact_matches[0].floor_plan_id or floor_plan_id or ""), "reused"
 
         from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
@@ -5540,6 +5566,8 @@ class AppWindow(QMainWindow):
             point.geom["elec_points"] = [0.0, 0.0]
         point.geom["elec_point_size_px"] = [30.0, 30.0]
         point.geom["elec_visible"] = True
+        if kicad_sync:
+            self._apply_kicad_ap_sync_metadata(point.data, kicad_sync)
 
         self._document.add(point)
         self.canvas.register_element(point_id, True)
@@ -5547,6 +5575,19 @@ class AppWindow(QMainWindow):
         self.canvas.set_color(point_id, point.color)
         self._document.element_changed.emit(point_id)
         return point_id, floor_plan_id, "created"
+
+    def _find_existing_ap_by_kicad_group_uuid(self, sync: dict[str, str]) -> ElecPoint | None:
+        project_uuid = str(sync.get("kicad_project_uuid", "") or "").strip()
+        group_uuid = str(sync.get("kicad_group_uuid", "") or "").strip()
+        if not project_uuid or not group_uuid:
+            return None
+
+        for point in self._document.elements["elec_points"].values():
+            point_project_uuid = str(point.data.get("kicad_project_uuid", "") or "").strip()
+            point_group_uuid = str(point.data.get("kicad_group_uuid", "") or "").strip()
+            if point_project_uuid == project_uuid and point_group_uuid == group_uuid:
+                return point
+        return None
 
     def _find_room_id_by_name(self, room_name: str, floor_plan_id: str) -> str:
         room_name_norm = str(room_name or "").strip().casefold()
@@ -5571,6 +5612,15 @@ class AppWindow(QMainWindow):
         cx = sum(float(point[0]) for point in polygon) / len(polygon)
         cy = sum(float(point[1]) for point in polygon) / len(polygon)
         return [cx, cy]
+
+    @staticmethod
+    def _apply_kicad_ap_sync_metadata(data: dict, sync: dict[str, str]) -> None:
+        data["kicad_project_uuid"] = str(sync.get("kicad_project_uuid", "") or "")
+        data["kicad_group_uuid"] = str(sync.get("kicad_group_uuid", "") or "")
+        data["kicad_frame_uuid"] = str(sync.get("kicad_frame_uuid", "") or "")
+        data["kicad_sheet_path"] = str(sync.get("kicad_sheet_path", "") or "")
+        data["kicad_last_import_hash"] = str(sync.get("kicad_last_import_hash", "") or "")
+        data["kicad_last_imported_at"] = str(sync.get("kicad_last_imported_at", "") or "")
 
     def _resolve_sheet_candidate_ap(self, candidate: KiCadCableCandidate) -> str:
         matches = suggest_ap_matches(candidate, self._kicad_elec_points_payload())
