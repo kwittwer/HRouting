@@ -258,6 +258,58 @@ def test_global_settings_editor(app, document):
         editor.deleteLater()
 
 
+def test_multi_editor_applies_value_to_all_selected_elements(app, document):
+    from gui.properties import GenericMultiElementEditor  # noqa: PLC0415
+
+    point1 = document.elements["elec_points"]["AP-1"]
+    point2 = document.elements["elec_points"]["AP-2"]
+    schema = schema_for(point1)
+    editable_specs = [
+        spec for spec in schema.fields
+        if spec.key in {
+            "color",
+            "visible",
+            "label_visible",
+            "label_size",
+            "ap_type",
+            "builtin_symbol",
+            "width",
+            "height",
+        }
+    ]
+
+    editor = GenericMultiElementEditor(document, [point1, point2], schema, editable_specs)
+    try:
+        editor._on_field_changed("color", "#123456")
+        assert point1.data["color"] == "#123456"
+        assert point2.data["color"] == "#123456"
+
+        editor._on_field_changed("builtin_symbol", "Steckdose")
+        assert point1.data["builtin_symbol"] == "Steckdose"
+        assert point2.data["builtin_symbol"] == "Steckdose"
+    finally:
+        editor.deleteLater()
+
+
+def test_multi_editor_shows_mixed_placeholder_for_different_values(app, document):
+    from gui.properties import GenericMultiElementEditor  # noqa: PLC0415
+
+    point1 = document.elements["elec_points"]["AP-1"]
+    point2 = document.elements["elec_points"]["AP-2"]
+    point1.data["color"] = "#ff0000"
+    point2.data["color"] = "#00ff00"
+
+    schema = schema_for(point1)
+    editable_specs = [spec for spec in schema.fields if spec.key == "color"]
+
+    editor = GenericMultiElementEditor(document, [point1, point2], schema, editable_specs)
+    try:
+        color_widget = editor._widgets["color"]
+        assert "Verschiedene Werte" in color_widget._button.text()
+    finally:
+        editor.deleteLater()
+
+
 def test_properties_dock_shows_element(app, document):
     from gui.docks.properties_dock import PropertiesDock  # noqa: PLC0415
 

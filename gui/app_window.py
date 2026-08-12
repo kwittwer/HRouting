@@ -362,6 +362,7 @@ class AppWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self.navigator.element_selected.connect(self._on_element_selected)
+        self.navigator.selection_changed.connect(self._on_navigator_selection_changed)
         self.navigator.floorplan_activated.connect(self._on_floorplan_activated)
         self.navigator.visibility_changed.connect(self._on_visibility_changed)
         self.navigator.context_requested.connect(self._on_navigator_context)
@@ -396,6 +397,7 @@ class AppWindow(QMainWindow):
         self.canvas.supply_line_changed.connect(self._on_supply_line_changed)
         self.canvas.hkv_line_changed.connect(self._on_hkv_line_changed)
         self.properties.field_changed.connect(self._on_property_changed)
+        self.properties.batch_field_changed.connect(self._on_batch_property_changed)
         self.properties.action_triggered.connect(self._on_property_action)
         self.properties.setting_changed.connect(self._on_global_setting_changed)
         self.properties.pre_change.connect(self._push_undo)
@@ -433,17 +435,43 @@ class AppWindow(QMainWindow):
 
     def _on_property_changed(self, element_id: str, key: str, _value) -> None:
         """Ein Feld im Eigenschaften-Dock wurde geändert."""
-        self._apply_property_side_effects(element_id, key)
+        effects = self._apply_property_side_effects(element_id, key)
         self._document.element_changed.emit(element_id)
+        if effects.get("refresh_navigator"):
+            self.navigator.set_document(self._document)
         self.canvas.update()
         self._refresh_schema_windows()
         self._mark_dirty()
 
-    def _apply_property_side_effects(self, element_id: str, key: str) -> None:
+    def _on_batch_property_changed(self, element_ids: list[str], key: str, _value) -> None:
+        defer_updates = len(element_ids) >= 25
+        touched = 0
+        refresh_navigator = False
+        for element_id in element_ids:
+            if self._document.get(element_id) is None:
+                continue
+            effects = self._apply_property_side_effects(element_id, key, defer_updates=defer_updates)
+            refresh_navigator = refresh_navigator or bool(effects.get("refresh_navigator"))
+            self._document.element_changed.emit(element_id)
+            touched += 1
+        if touched:
+            if refresh_navigator:
+                self.navigator.set_document(self._document)
+            self.canvas.update()
+            self._refresh_schema_windows()
+            self._mark_dirty()
+
+    def _apply_property_side_effects(
+        self,
+        element_id: str,
+        key: str,
+        defer_updates: bool = False,
+    ) -> dict[str, bool]:
         """Sorgt dafür, dass Änderungen sofort im Canvas sichtbar werden."""
+        effects = {"refresh_navigator": False}
         element = self._document.get(element_id)
         if element is None:
-            return
+            return effects
 
         if key == "color" and element_id not in self._document.floorplans:
             color_value = str(element.data.get("color") or "").strip()
@@ -453,15 +481,23 @@ class AppWindow(QMainWindow):
         if key == "name":
             name = str(element.data.get("name") or "").strip()
             self.canvas._label_map[element_id] = name if name else element_id
-            self.canvas.update()
-            self.navigator.set_document(self._document)
+            if not defer_updates:
+                self.canvas.update()
+                self.navigator.set_document(self._document)
+            else:
+                effects["refresh_navigator"] = True
 
         if key in ("builtin_symbol", "icon_path") and element_id in self._document.elements.get("elec_points", {}):
             from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
-            icon_path = str(element.data.get("icon_path") or "").strip()
-            if not icon_path:
+            if key == "builtin_symbol":
                 symbol = str(element.data.get("builtin_symbol") or "").strip()
                 icon_path = str(BUILTIN_SYMBOLS.get(symbol, "") or "")
+                element.data["icon_path"] = icon_path
+            else:
+                icon_path = str(element.data.get("icon_path") or "").strip()
+                if not icon_path:
+                    symbol = str(element.data.get("builtin_symbol") or "").strip()
+                    icon_path = str(BUILTIN_SYMBOLS.get(symbol, "") or "")
             self.canvas.set_elec_point_icon(element_id, icon_path)
 
         if key in ("start_ap", "end_ap") and element_id in self._document.elements.get("elec_cables", {}):
@@ -478,7 +514,8 @@ class AppWindow(QMainWindow):
                 cable.geom["cable_start_ap"] = start_ap_id
                 cable.geom["cable_end_ap"] = end_ap_id
                 self._rebuild_schema_cable_geometry(cable, start_ap_id, end_ap_id)
-                self.canvas.update()
+                if not defer_updates:
+                    self.canvas.update()
 
         if key == "visible":
             self.canvas.set_element_visible(element_id, bool(element.visible))
@@ -524,6 +561,7 @@ class AppWindow(QMainWindow):
                 if layer is not None:
                     layer.ref_length_mm = float(element.data.get("ref_length_mm", 0.0) or 0.0)
                 # Neuberechnung nur beim expliziten 'Aktualisieren'-Button, nicht automatisch
+        return effects
 
     def _on_global_setting_changed(self, _key: str, _value) -> None:
         self.properties.refresh_current()
@@ -1342,6 +1380,31 @@ class AppWindow(QMainWindow):
         self.statusBar().showMessage(f"Dupliziert: {element_id} -> {new_id}", 2500)
 
     def _delete_selected(self) -> None:
+        selected_ids = self.navigator.selected_ids()
+        if len(selected_ids) > 1:
+            to_delete = [element_id for element_id in selected_ids if self._document.get(element_id) is not None]
+            if not to_delete:
+                self.statusBar().showMessage("Keine löschbaren Elemente ausgewählt", 2000)
+                return
+
+            self._push_undo()
+            deleted = 0
+            for element_id in to_delete:
+                element = self._document.get(element_id)
+                if element is None:
+                    continue
+                self._cleanup_references_before_delete(element_id)
+                self._document.remove(element_id)
+                self.properties.forget_element(element_id)
+                deleted += 1
+
+            if deleted:
+                self._emit_structure_changed()
+                self.canvas.update()
+                self._mark_dirty()
+                self.statusBar().showMessage(f"{deleted} Elemente gelöscht", 2500)
+            return
+
         element_id = self._current_selection_id()
         if not element_id:
             self.statusBar().showMessage("Kein Element ausgewählt", 2000)
@@ -1722,7 +1785,10 @@ class AppWindow(QMainWindow):
         ]
 
     def _run_context_action(self, action_id: str, element_id: str, kind: str) -> None:
-        if element_id:
+        selected_ids = self.navigator.selected_ids()
+        is_batch_selection = len(selected_ids) > 1 and element_id in selected_ids
+
+        if element_id and not (is_batch_selection and action_id == "delete"):
             self.navigator.select(element_id)
             self.canvas.set_selected_item(element_id)
             if self._document.get(element_id) is not None:
@@ -1763,6 +1829,32 @@ class AppWindow(QMainWindow):
 
         menu = QMenu(self)
         action_map: dict[QAction, str] = {}
+
+        selected_ids = self.navigator.selected_ids()
+        batch_ids = selected_ids if len(selected_ids) > 1 and element_id in selected_ids else []
+
+        if batch_ids:
+            batch_label = f"{len(batch_ids)} Elemente löschen"
+            delete_action = menu.addAction(batch_label)
+            delete_action.setEnabled(True)
+            action_map[delete_action] = "delete"
+
+            menu.addSeparator()
+            undo_action = menu.addAction("Rückgängig")
+            undo_action.setEnabled(bool(self._undo_stack))
+            action_map[undo_action] = "undo"
+            redo_action = menu.addAction("Wiederherstellen")
+            redo_action.setEnabled(bool(self._redo_stack))
+            action_map[redo_action] = "redo"
+
+            pos_for_exec = global_pos.toPoint() if hasattr(global_pos, "toPoint") else QPoint(global_pos)
+            chosen = menu.exec(pos_for_exec)
+            if chosen is None:
+                return
+            action_id = action_map.get(chosen)
+            if action_id:
+                self._run_context_action(action_id, element_id, kind)
+            return
 
         for action_id, label, enabled in self._workspace_context_action_specs(element_id, kind):
             action = menu.addAction(label)
@@ -1967,6 +2059,14 @@ class AppWindow(QMainWindow):
 
     def _on_element_selected(self, element_id: str) -> None:
         self._select_element_everywhere(element_id, update_navigator=False)
+
+    def _on_navigator_selection_changed(self, element_ids: list[str]) -> None:
+        if len(element_ids) <= 1:
+            return
+        self.properties.show_elements(element_ids)
+        first_id = element_ids[0]
+        self._sync_active_floorplan_for_selection(first_id)
+        self.canvas.set_selected_item(first_id)
 
     def _on_canvas_object_clicked(self, obj_type: str, obj_id: str) -> None:
         if not obj_id:

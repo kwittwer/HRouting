@@ -23,7 +23,18 @@ from model.elements import Element, FloorPlan
 from model.field_access import apply_display_value, display_value, get_field
 from model.schema import ElementSchema, FieldSpec, GLOBAL_FIELDS, groups_of
 
-from .field_widgets import FieldWidget, create_field_widget
+from .field_widgets import (
+    BoolFieldWidget,
+    ChoiceFieldWidget,
+    ColorFieldWidget,
+    FieldWidget,
+    FileFieldWidget,
+    MultilineFieldWidget,
+    NumberFieldWidget,
+    ReadOnlyFieldWidget,
+    TextFieldWidget,
+    create_field_widget,
+)
 
 
 class _RefLengthFieldWidget(FieldWidget):
@@ -299,6 +310,154 @@ class GenericElementEditor(QWidget):
     @property
     def element(self) -> Element:
         return self._element
+
+
+class GenericMultiElementEditor(QWidget):
+    """Formular für die gemeinsame Bearbeitung mehrerer Elemente desselben Typs."""
+
+    field_changed = Signal(list, str, object)  # (element_ids, key, wert)
+    pre_change = Signal()                      # fires BEFORE batch write (for undo)
+
+    _MIXED_TEXT = "Verschiedene Werte"
+    _MIXED_CHOICE = f"-- { _MIXED_TEXT } --"
+
+    def __init__(
+        self,
+        document: Document,
+        elements: list[Element],
+        schema: ElementSchema,
+        editable_specs: list[FieldSpec],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._document = document
+        self._elements = list(elements)
+        self._schema = schema
+        self._specs = list(editable_specs)
+        self._spec_by_key = {spec.key: spec for spec in self._specs}
+        self._widgets: dict[str, FieldWidget] = {}
+        self._mixed_keys: set[str] = set()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        category = str(getattr(type(self._elements[0]), "CATEGORY_LABEL", schema.title) or schema.title)
+        ids_preview = ", ".join(element.id for element in self._elements[:8])
+        if len(self._elements) > 8:
+            ids_preview = f"{ids_preview}, ..."
+
+        header = QLabel(
+            f"<b>{len(self._elements)}x {category}</b> · Gemeinsame Bearbeitung",
+            self,
+        )
+        header.setWordWrap(True)
+        header.setStyleSheet("font-size: 14px;")
+        layout.addWidget(header)
+
+        detail = QLabel(f"Auswahl: {ids_preview}", self)
+        detail.setWordWrap(True)
+        detail.setStyleSheet("color: #9aa5b1;")
+        layout.addWidget(detail)
+
+        box = QGroupBox("Gemeinsame Eigenschaften", self)
+        form = QFormLayout(box)
+        form.setContentsMargins(8, 8, 8, 8)
+        form.setSpacing(6)
+        for spec in self._specs:
+            options = (
+                spec.resolve_options(self._document)
+                if spec.document_options is not None
+                else None
+            )
+            widget = create_field_widget(spec, box, options)
+            widget.value_changed.connect(self._on_field_changed)
+            self._widgets[spec.key] = widget
+            form.addRow(f"{spec.label}:", widget)
+        layout.addWidget(box)
+        layout.addStretch(1)
+
+        self.refresh()
+
+    def _set_mixed_state(self, spec: FieldSpec, widget: FieldWidget) -> None:
+        self._mixed_keys.add(spec.key)
+        if isinstance(widget, BoolFieldWidget):
+            widget._box.blockSignals(True)
+            widget._box.setTristate(True)
+            widget._box.setCheckState(Qt.PartiallyChecked)
+            widget._box.blockSignals(False)
+            return
+        if isinstance(widget, ChoiceFieldWidget):
+            combo = widget._combo
+            combo.blockSignals(True)
+            idx = combo.findText(self._MIXED_CHOICE)
+            if idx < 0:
+                combo.insertItem(0, self._MIXED_CHOICE)
+                idx = 0
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+            return
+        if isinstance(widget, NumberFieldWidget):
+            line_edit = widget._spin.lineEdit()
+            if line_edit is not None:
+                line_edit.setPlaceholderText(self._MIXED_TEXT)
+                line_edit.clear()
+            return
+        if isinstance(widget, TextFieldWidget):
+            widget._edit.setPlaceholderText(self._MIXED_TEXT)
+            widget._edit.clear()
+            return
+        if isinstance(widget, FileFieldWidget):
+            widget._edit.setPlaceholderText(self._MIXED_TEXT)
+            widget._edit.clear()
+            return
+        if isinstance(widget, MultilineFieldWidget):
+            widget._edit.setPlaceholderText(self._MIXED_TEXT)
+            widget._edit.clear()
+            return
+        if isinstance(widget, ColorFieldWidget):
+            widget._button.setText(self._MIXED_TEXT)
+            widget._button.setStyleSheet("background-color: #6c757d; color: #ffffff;")
+            return
+        if isinstance(widget, ReadOnlyFieldWidget):
+            widget._label.setText(self._MIXED_TEXT)
+
+    def _clear_mixed_state(self, spec: FieldSpec, widget: FieldWidget) -> None:
+        self._mixed_keys.discard(spec.key)
+        if isinstance(widget, BoolFieldWidget):
+            widget._box.setTristate(False)
+            return
+        if isinstance(widget, ChoiceFieldWidget):
+            combo = widget._combo
+            idx = combo.findText(self._MIXED_CHOICE)
+            if idx >= 0:
+                combo.removeItem(idx)
+
+    def _on_field_changed(self, key: str, value: Any) -> None:
+        spec = self._spec_by_key.get(key)
+        if spec is None:
+            return
+        self.pre_change.emit()
+        for element in self._elements:
+            apply_display_value(element, spec, value)
+        self.field_changed.emit([element.id for element in self._elements], key, value)
+        self.refresh()
+
+    def refresh(self) -> None:
+        for spec in self._specs:
+            widget = self._widgets.get(spec.key)
+            if widget is None:
+                continue
+            values = [display_value(element, spec) for element in self._elements]
+            if values and all(value == values[0] for value in values):
+                self._clear_mixed_state(spec, widget)
+                widget.update_silently(values[0])
+            else:
+                self._set_mixed_state(spec, widget)
+
+    @property
+    def element_ids(self) -> list[str]:
+        return [element.id for element in self._elements]
 
 
 class GlobalSettingsEditor(QWidget):

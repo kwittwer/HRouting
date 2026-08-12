@@ -6232,6 +6232,115 @@ def test_delete_measurement_via_navigator_removes_element_and_canvas(app, monkey
         window.deleteLater()
 
 
+def test_delete_selected_batch_removes_multiple_navigator_elements(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {
+                        "AP-1": [100.0, 100.0],
+                        "AP-2": [200.0, 200.0],
+                    },
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Dose 1"},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Dose 2"},
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        item1 = window.navigator._find_item_by_id("AP-1")
+        item2 = window.navigator._find_item_by_id("AP-2")
+        assert item1 is not None and item2 is not None
+
+        item1.setSelected(True)
+        item2.setSelected(True)
+        window.navigator._on_selection_changed()
+
+        undo_before = len(window._undo_stack)
+        window._delete_selected()
+
+        assert document.get("AP-1") is None
+        assert document.get("AP-2") is None
+        assert len(window._undo_stack) == undo_before + 1
+    finally:
+        window.deleteLater()
+
+
+def test_batch_ap_symbol_change_updates_icon_path_for_all_selected_points(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    target_symbol = "Steckdose"
+    target_icon = str(BUILTIN_SYMBOLS.get(target_symbol, "") or "")
+    assert target_icon
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {
+                        "AP-1": [100.0, 100.0],
+                        "AP-2": [200.0, 200.0],
+                    },
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 1",
+                            "builtin_symbol": "Licht",
+                            "icon_path": "custom/icon1.png",
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 2",
+                            "builtin_symbol": "Licht",
+                            "icon_path": "custom/icon2.png",
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        for point_id in ("AP-1", "AP-2"):
+            point = document.elements["elec_points"][point_id]
+            point.data["builtin_symbol"] = target_symbol
+
+        window._on_batch_property_changed(["AP-1", "AP-2"], "builtin_symbol", target_symbol)
+
+        assert document.elements["elec_points"]["AP-1"].data["icon_path"] == target_icon
+        assert document.elements["elec_points"]["AP-2"].data["icon_path"] == target_icon
+    finally:
+        window.deleteLater()
+
+
 # ---------------------------------------------------------------------------
 # Workspace-Werkzeuge: Regressionstests für tool_activated → Element erzeugen
 # ---------------------------------------------------------------------------

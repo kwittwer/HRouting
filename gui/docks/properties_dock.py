@@ -23,9 +23,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.properties import GenericElementEditor, GlobalSettingsEditor
+from gui.properties import GenericElementEditor, GenericMultiElementEditor, GlobalSettingsEditor
 from model.document import Document
-from model.schema import schema_for
+from model.schema import FieldKind, schema_for
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +260,7 @@ class PropertiesDock(QDockWidget):
     """Zeigt die Eigenschaften des aktuell selektierten Elements."""
 
     field_changed = Signal(str, str, object)   # (element_id, key, wert)
+    batch_field_changed = Signal(list, str, object)  # (element_ids, key, wert)
     action_triggered = Signal(str, str)        # (element_id, action_id)
     setting_changed = Signal(str, object)      # (key, wert)
     pre_change = Signal()                      # fires before any write (for undo)
@@ -271,6 +272,7 @@ class PropertiesDock(QDockWidget):
         self._document: Document | None = None
         self._editors: dict[str, GenericElementEditor] = {}
         self._global_editor: GlobalSettingsEditor | None = None
+        self._multi_editor: GenericMultiElementEditor | None = None
         self._helper_editor: HelperLineEditor | None = None
         self._helper_draw_panel: HelperDrawPanel | None = None
         self._current_id: str = ""
@@ -292,8 +294,83 @@ class PropertiesDock(QDockWidget):
         self.clear()
         self._document = document
         self._global_editor = None
+        self._multi_editor = None
         if document is not None:
             self.show_global_settings()
+
+    def show_elements(self, element_ids: list[str]) -> None:
+        """Zeigt den Mehrfach-Editor für Elemente desselben Typs."""
+        document = self._document
+        if document is None:
+            self.show_placeholder()
+            return
+
+        ids = [element_id for element_id in element_ids if element_id and document.get(element_id) is not None]
+        if len(ids) <= 1:
+            self.show_element(ids[0] if ids else "")
+            return
+
+        elements = [document.get(element_id) for element_id in ids]
+        elements = [element for element in elements if element is not None]
+        if len(elements) <= 1:
+            self.show_element(elements[0].id if elements else "")
+            return
+
+        first_type = type(elements[0])
+        if any(type(element) is not first_type for element in elements):
+            counts: dict[str, int] = {}
+            for element in elements:
+                label = str(getattr(type(element), "CATEGORY_LABEL", type(element).__name__))
+                counts[label] = counts.get(label, 0) + 1
+            parts = [f"{count}x {label}" for label, count in sorted(counts.items())]
+            self.show_placeholder(
+                "Mehrfachbearbeitung nur für gleichen Elementtyp verfügbar\n"
+                f"Aktuelle Auswahl: {', '.join(parts)}"
+            )
+            return
+
+        schema = schema_for(elements[0])
+        if schema is None:
+            self.show_placeholder("Für diese Auswahl gibt es keine gemeinsamen Eigenschaften")
+            return
+
+        editable_keys = {
+            "color",
+            "visible",
+            "label_visible",
+            "label_size",
+            "type",
+            "ap_type",
+            "builtin_symbol",
+            "width",
+            "height",
+            "stroke_width",
+        }
+        editable_specs = [
+            spec
+            for spec in schema.fields
+            if spec.key in editable_keys and spec.kind is not FieldKind.READONLY
+        ]
+        if not editable_specs:
+            self.show_placeholder("Für diese Auswahl sind keine gemeinsamen Felder verfügbar")
+            return
+
+        if self._multi_editor is not None:
+            self._stack.removeWidget(self._multi_editor)
+            self._multi_editor.deleteLater()
+
+        self._multi_editor = GenericMultiElementEditor(
+            document,
+            elements,
+            schema,
+            editable_specs,
+            self._stack,
+        )
+        self._multi_editor.field_changed.connect(self.batch_field_changed)
+        self._multi_editor.pre_change.connect(self.pre_change)
+        self._stack.addWidget(self._multi_editor)
+        self._current_id = ""
+        self._stack.setCurrentWidget(self._multi_editor)
 
     def show_element(self, element_id: str) -> None:
         """Zeigt den Editor eines Elements; erzeugt ihn bei Bedarf."""
@@ -354,6 +431,8 @@ class PropertiesDock(QDockWidget):
     def refresh_current(self) -> None:
         if self._current_id:
             self.refresh_element(self._current_id)
+        elif self._multi_editor is not None and self._stack.currentWidget() is self._multi_editor:
+            self._multi_editor.refresh()
         elif self._global_editor is not None:
             self._global_editor.refresh()
 
@@ -364,6 +443,8 @@ class PropertiesDock(QDockWidget):
             self._stack.removeWidget(editor)
             editor.deleteLater()
         if self._current_id == element_id:
+            self.show_global_settings()
+        if self._multi_editor is not None and element_id in self._multi_editor.element_ids:
             self.show_global_settings()
 
     def show_placeholder(self, text: str = "Kein Element ausgewählt") -> None:
@@ -427,6 +508,10 @@ class PropertiesDock(QDockWidget):
             self._stack.removeWidget(self._global_editor)
             self._global_editor.deleteLater()
             self._global_editor = None
+        if self._multi_editor is not None:
+            self._stack.removeWidget(self._multi_editor)
+            self._multi_editor.deleteLater()
+            self._multi_editor = None
         if self._helper_editor is not None:
             self._stack.removeWidget(self._helper_editor)
             self._helper_editor.deleteLater()

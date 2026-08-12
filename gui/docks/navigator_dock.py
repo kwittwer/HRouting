@@ -198,6 +198,7 @@ class NavigatorDock(QDockWidget):
     """Zeigt Grundrisse mit ihren Elementen; leere Kategorien entfallen."""
 
     element_selected = Signal(str)
+    selection_changed = Signal(list)
     floorplan_activated = Signal(str)
     visibility_changed = Signal(str, bool)
     context_requested = Signal(str, str, object)
@@ -209,6 +210,7 @@ class NavigatorDock(QDockWidget):
         self._document: Document | None = None
         self._selectable_layers: set[LayerId] = set(LayerId)
         self._items: dict[str, QTreeWidgetItem] = {}
+        self._selected_ids: list[str] = []
         self._suspend_item_events = False
         self._expanded_state_key = "navigator/expanded_paths"
 
@@ -235,6 +237,7 @@ class NavigatorDock(QDockWidget):
         self._tree = _NavigatorTree(container)
         self._tree.setHeaderHidden(True)
         self._tree.setUniformRowHeights(True)
+        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._tree.setStyleSheet(
             "QTreeWidget::item:selected { background-color: #4fc3f7; color: #0b1d2a; }"
         )
@@ -278,6 +281,7 @@ class NavigatorDock(QDockWidget):
         self._tree.blockSignals(True)
         self._tree.clear()
         self._items.clear()
+        self._selected_ids = []
         document = self._document
         if document is None:
             self._tree.blockSignals(False)
@@ -737,13 +741,23 @@ class NavigatorDock(QDockWidget):
     def _on_selection_changed(self) -> None:
         items = self._tree.selectedItems()
         if not items:
+            self._selected_ids = []
+            self.selection_changed.emit([])
             return
-        kind = items[0].data(0, _KIND_ROLE)
-        if kind not in ("element", "floorplan", "helper_line"):
+        selected_ids: list[str] = []
+        for item in items:
+            kind = item.data(0, _KIND_ROLE)
+            if kind not in ("element", "floorplan", "helper_line"):
+                continue
+            element_id = item.data(0, _ID_ROLE)
+            if element_id:
+                selected_ids.append(element_id)
+
+        self._selected_ids = selected_ids
+        self.selection_changed.emit(list(selected_ids))
+        if len(selected_ids) != 1:
             return
-        element_id = items[0].data(0, _ID_ROLE)
-        if element_id:
-            self.element_selected.emit(element_id)
+        self.element_selected.emit(selected_ids[0])
 
     def _on_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         if item.data(0, _KIND_ROLE) == "floorplan":
@@ -773,6 +787,7 @@ class NavigatorDock(QDockWidget):
             self._tree.setCurrentItem(item)
             self._tree.blockSignals(False)
             self._tree.scrollToItem(item)
+            self._selected_ids = [element_id]
         except RuntimeError:
             # Item ungültig -> einmal aus frischem Tree auflösen und erneut versuchen.
             fresh = self._find_item_by_id(element_id)
@@ -782,6 +797,10 @@ class NavigatorDock(QDockWidget):
             self._tree.setCurrentItem(fresh)
             self._tree.blockSignals(False)
             self._tree.scrollToItem(fresh)
+            self._selected_ids = [element_id]
+
+    def selected_ids(self) -> list[str]:
+        return list(self._selected_ids)
 
     def _find_item_by_id(self, element_id: str) -> QTreeWidgetItem | None:
         root = self._tree.invisibleRootItem()
