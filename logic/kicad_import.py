@@ -534,36 +534,42 @@ def _scan_schematic_recursive(
             members=tuple(members),
         )
 
-    for label_node in _children(expr, "hierarchical_label"):
-        label_name_raw = _string_at(label_node, 1)
-        if not label_name_raw:
-            continue
-        label_uuid = _node_uuid(label_node)
-        parsed = _parse_pin_name(label_name_raw)
+    for label_head in ("hierarchical_label", "global_label", "label"):
+        for label_node in _children(expr, label_head):
+            label_name_raw = _string_at(label_node, 1)
+            if not label_name_raw:
+                continue
+            label_uuid = _node_uuid(label_node)
+            parsed = _parse_pin_name(label_name_raw)
 
-        candidate = result.candidates.get(label_name_raw)
-        if candidate is None:
-            candidate = KiCadCableCandidate(
-                key=label_name_raw,
-                base_name=parsed["base_name"],
-                pin_name_raw=label_name_raw,
-                spec_raw=parsed["spec_raw"],
-                normalized_spec=parsed["normalized_spec"],
-                spec_kind=parsed["spec_kind"],
-            )
-            result.candidates[label_name_raw] = candidate
+            # Plain labels can be very noisy; only import them as cable
+            # candidates when they include a typed spec in braces.
+            if label_head != "hierarchical_label" and not parsed["spec_raw"]:
+                continue
 
-        candidate.pin_refs.append(
-            KiCadSheetPinRef(
-                sheet_uuid=current_sheet_uuid,
-                sheet_name=current_sheet_name,
-                sheet_file=current_path.name,
-                pin_uuid=label_uuid,
-                pin_name_raw=label_name_raw,
-                pin_direction="hierarchical_label",
-                hierarchy_path=hierarchy_path,
+            candidate = result.candidates.get(label_name_raw)
+            if candidate is None:
+                candidate = KiCadCableCandidate(
+                    key=label_name_raw,
+                    base_name=parsed["base_name"],
+                    pin_name_raw=label_name_raw,
+                    spec_raw=parsed["spec_raw"],
+                    normalized_spec=parsed["normalized_spec"],
+                    spec_kind=parsed["spec_kind"],
+                )
+                result.candidates[label_name_raw] = candidate
+
+            candidate.pin_refs.append(
+                KiCadSheetPinRef(
+                    sheet_uuid=current_sheet_uuid,
+                    sheet_name=current_sheet_name,
+                    sheet_file=current_path.name,
+                    pin_uuid=label_uuid,
+                    pin_name_raw=label_name_raw,
+                    pin_direction=label_head,
+                    hierarchy_path=hierarchy_path,
+                )
             )
-        )
 
     for sheet in _children(expr, "sheet"):
         sheet_name = _sheet_property(sheet, "Sheetname")

@@ -3954,6 +3954,84 @@ def test_import_kicad_cables_hides_unresolved_candidates_in_phase_two(app, monke
         window.deleteLater()
 
 
+def test_import_kicad_cables_keeps_ambiguous_when_ap_groups_active(app, monkeypatch):
+    from PySide6.QtWidgets import QDialog, QMessageBox  # noqa: PLC0415
+    from logic.kicad_import import KiCadImportPreview  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    ap_group_preview = KiCadImportPreview(
+        candidate_key="group::ap1",
+        sync_key="proj::ap_group::AP_1",
+        cable_name="AP_1",
+        cable_type="",
+        status="create",
+        source="ap_group",
+        ap_match_status="unmatched",
+    )
+    ambiguous_sheet_preview = KiCadImportPreview(
+        candidate_key="HWR2{5x1_5}",
+        sync_key="proj::sheet::HWR2{5x1_5}",
+        cable_name="HWR2",
+        cable_type="5x1,5",
+        status="create",
+        source="sheet_pin",
+        ap_match_status="ambiguous",
+    )
+
+    class _DialogStub:
+        def __init__(self, _scan_result, previews, *_args, **kwargs):
+            self._phase = kwargs.get("phase")
+            self._previews = previews
+            if self._phase == "cables":
+                captured["cable_previews"] = previews
+
+        def exec(self):
+            if self._phase == "aps":
+                return QDialog.Accepted
+            return QDialog.Rejected
+
+        def selected_keys(self):
+            if self._phase == "aps":
+                return [preview.candidate_key for preview in self._previews]
+            return []
+
+        def selected_ap_assignments(self):
+            return {}
+
+    call_state = {"count": 0}
+
+    def _preview_stub(_scan_result, existing_cables=None, elec_points=None):
+        call_state["count"] += 1
+        if call_state["count"] == 1:
+            # Phase 1: AP group preview only.
+            return [ap_group_preview]
+        # Phase 2: expose ambiguous sheet cable candidate.
+        return [ambiguous_sheet_preview]
+
+    window = AppWindow()
+    try:
+        monkeypatch.setattr(
+            "gui.app_window.QFileDialog.getOpenFileName",
+            lambda *a, **k: (str(ROOT / "examples" / "KiCAD" / "HWR.kicad_sch"), ""),
+        )
+        monkeypatch.setattr("gui.app_window.KiCadImportDialog", _DialogStub)
+        monkeypatch.setattr("gui.app_window.build_import_preview", _preview_stub)
+        monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: QMessageBox.Ok))
+
+        window._import_kicad_cables()
+
+        previews = {preview.candidate_key: preview for preview in captured["cable_previews"]}
+        assert "HWR2{5x1_5}" in previews
+        assert previews["HWR2{5x1_5}"].ap_match_status == "ambiguous"
+    finally:
+        window.deleteLater()
+
+
 def test_kicad_import_dialog_shows_recursive_hierarchy_paths(app):
     from PySide6.QtCore import Qt  # noqa: PLC0415
     from gui.kicad_import_dialog import KiCadImportDialog  # noqa: PLC0415
@@ -4315,6 +4393,118 @@ def test_kicad_ap_import_reuses_ap_by_group_uuid_when_name_changes(app, monkeypa
         point = window._document.elements["elec_points"][point_id]
         assert point.name == "AP_1_NEU"
         assert point.data["kicad_group_uuid"] == "group-uuid-1"
+    finally:
+        window.deleteLater()
+
+
+def test_kicad_sheet_cable_creates_visible_line_between_two_matching_aps(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog, QInputDialog  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from logic.kicad_import import KiCadCableCandidate, KiCadScanResult, KiCadSheetPinRef  # noqa: PLC0415
+    from model.elements import ElecPoint  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Grundriss 1", True)))
+
+    window = AppWindow()
+    try:
+        window._add_floorplan()
+        fp_id = list(window._document.floorplans.keys())[0]
+
+        ap1_id = window._document.new_id(ElecPoint)
+        ap1 = ElecPoint.create(
+            ap1_id,
+            floor_plan_id=fp_id,
+            name="HWR2 AP Alpha",
+            color="#4fc3f7",
+            width=30.0,
+            height=30.0,
+            icon_path="",
+            builtin_symbol="Steckdose",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            position="Wand",
+            height_from_floor=30.0,
+            smarthome_device="",
+            smarthome_device_color="",
+            note="",
+            ap_type="standard",
+            uv_config={},
+            up_distribution_config={},
+            hak_config={},
+            zaehler_config={},
+        )
+        ap1.geom["elec_points"] = [100.0, 100.0]
+        ap1.geom["elec_point_size_px"] = [30.0, 30.0]
+        ap1.geom["elec_visible"] = True
+        window._document.add(ap1)
+        window.canvas.register_element(ap1_id)
+
+        ap2_id = window._document.new_id(ElecPoint)
+        ap2 = ElecPoint.create(
+            ap2_id,
+            floor_plan_id=fp_id,
+            name="HWR2 AP Beta",
+            color="#4fc3f7",
+            width=30.0,
+            height=30.0,
+            icon_path="",
+            builtin_symbol="Steckdose",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            position="Wand",
+            height_from_floor=30.0,
+            smarthome_device="",
+            smarthome_device_color="",
+            note="",
+            ap_type="standard",
+            uv_config={},
+            up_distribution_config={},
+            hak_config={},
+            zaehler_config={},
+        )
+        ap2.geom["elec_points"] = [300.0, 300.0]
+        ap2.geom["elec_point_size_px"] = [30.0, 30.0]
+        ap2.geom["elec_visible"] = True
+        window._document.add(ap2)
+        window.canvas.register_element(ap2_id)
+
+        scan_result = KiCadScanResult(root_path=ROOT, project_uuid="proj-1")
+        candidate = KiCadCableCandidate(
+            key="HWR2{5x1_5}",
+            base_name="HWR2",
+            pin_name_raw="HWR2{5x1_5}",
+            spec_raw="5x1_5",
+            normalized_spec="5x1,5",
+            spec_kind="count_x_spec",
+        )
+        candidate.pin_refs.append(
+            KiCadSheetPinRef(
+                sheet_uuid="sheet-1",
+                sheet_name="Sheet",
+                sheet_file="Sheet.kicad_sch",
+                pin_uuid="pin-1",
+                pin_name_raw="HWR2{5x1_5}",
+                pin_direction="output",
+                hierarchy_path=(),
+            )
+        )
+        scan_result.candidates[candidate.key] = candidate
+
+        summary = window._apply_kicad_cable_import(scan_result, [candidate.key], prepare_textfield_aps=False)
+
+        assert summary["created"] == 1
+        assert len(window._document.elements["elec_cables"]) == 1
+        cable = next(iter(window._document.elements["elec_cables"].values()))
+        assert cable.name == "HWR2"
+        assert cable.start_ap == ap1_id
+        assert cable.end_ap == ap2_id
+        assert cable.path == [[100.0, 100.0], [300.0, 300.0]]
     finally:
         window.deleteLater()
 

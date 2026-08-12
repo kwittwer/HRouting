@@ -69,6 +69,16 @@ def test_scan_kicad_project_detects_token_list_specs():
     assert candidate.spec_kind == "token_list"
 
 
+def test_scan_kicad_project_includes_spec_labels_as_candidates():
+    result = scan_kicad_project(KICAD_HWR)
+
+    assert "HWR2{5x1_5}" in result.candidates
+    candidate = result.candidates["HWR2{5x1_5}"]
+    assert candidate.base_name == "HWR2"
+    assert candidate.spec_raw == "5x1_5"
+    assert any(ref.pin_direction == "label" for ref in candidate.pin_refs)
+
+
 def test_suggest_ap_matches_marks_unique_exact_match():
     result = scan_kicad_project(KICAD_ROOT)
     candidate = result.candidates["Flur{3x1_5}"]

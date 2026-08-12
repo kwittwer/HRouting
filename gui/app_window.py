@@ -5039,7 +5039,7 @@ class AppWindow(QMainWindow):
 
             if ap_previews:
                 if ap_phase_uses_groups:
-                    if preview.existing_cable_id or preview.ap_match_status == "matched":
+                    if preview.existing_cable_id or preview.ap_match_status in ("matched", "ambiguous"):
                         cable_previews.append(preview)
                         continue
                 if preview_name and preview_name in approved_names_from_phase1:
@@ -5181,10 +5181,10 @@ class AppWindow(QMainWindow):
                 preferred_pin = self._preferred_kicad_pin_ref(candidate)
                 cable_type = candidate.normalized_spec or candidate.spec_raw
                 cable_name = candidate.base_name or candidate.pin_name_raw
-                resolved_ap_id = self._resolve_sheet_candidate_ap(candidate)
+                resolved_start_ap_id, resolved_end_ap_id = self._resolve_sheet_candidate_ap_pair(candidate)
                 existing_id = existing_by_sync_key.get(sync_key)
 
-                if not resolved_ap_id and not existing_id:
+                if not resolved_start_ap_id and not existing_id:
                     skipped += 1
                     continue
 
@@ -5195,8 +5195,14 @@ class AppWindow(QMainWindow):
                         continue
                     cable.name = cable_name
                     cable.data["type"] = cable_type
-                    if resolved_ap_id and not cable.start_ap and not cable.end_ap:
-                        cable.start_ap = resolved_ap_id
+                    if resolved_start_ap_id and not cable.start_ap:
+                        cable.start_ap = resolved_start_ap_id
+                    if resolved_end_ap_id and not cable.end_ap:
+                        cable.end_ap = resolved_end_ap_id
+                    if cable.start_ap and cable.end_ap:
+                        points = self._build_cable_points_from_ap_anchors(cable.start_ap, cable.end_ap)
+                        if len(points) >= 2:
+                            cable.geom["elec_cables"] = points
                     self._apply_kicad_sync_metadata(
                         cable.data, scan_result.project_uuid, preferred_pin, candidate, sync_key
                     )
@@ -5216,9 +5222,13 @@ class AppWindow(QMainWindow):
                     label_size=12.0,
                     type=cable_type,
                     comment="",
-                    start_ap=resolved_ap_id,
-                    end_ap="",
+                    start_ap=resolved_start_ap_id,
+                    end_ap=resolved_end_ap_id,
                 )
+                if cable.start_ap and cable.end_ap:
+                    points = self._build_cable_points_from_ap_anchors(cable.start_ap, cable.end_ap)
+                    if len(points) >= 2:
+                        cable.geom["elec_cables"] = points
                 self._apply_kicad_sync_metadata(
                     cable.data, scan_result.project_uuid, preferred_pin, candidate, sync_key
                 )
@@ -5622,16 +5632,40 @@ class AppWindow(QMainWindow):
         data["kicad_last_import_hash"] = str(sync.get("kicad_last_import_hash", "") or "")
         data["kicad_last_imported_at"] = str(sync.get("kicad_last_imported_at", "") or "")
 
-    def _resolve_sheet_candidate_ap(self, candidate: KiCadCableCandidate) -> str:
+    def _resolve_sheet_candidate_ap_pair(self, candidate: KiCadCableCandidate) -> tuple[str, str]:
         matches = suggest_ap_matches(candidate, self._kicad_elec_points_payload())
         if not matches:
-            return ""
+            return "", ""
         top = matches[0]
         if len(matches) == 1:
-            return top.point_id
+            return top.point_id, ""
         if top.score >= 90 and top.score - matches[1].score >= 15:
-            return top.point_id
-        return ""
+            return top.point_id, ""
+        second = matches[1]
+        if top.point_id != second.point_id:
+            return top.point_id, second.point_id
+        return top.point_id, ""
+
+    def _build_cable_points_from_ap_anchors(self, start_ap_id: str, end_ap_id: str) -> list[list[float]]:
+        if not start_ap_id or not end_ap_id:
+            return []
+        start_ap = self._document.elements["elec_points"].get(start_ap_id)
+        end_ap = self._document.elements["elec_points"].get(end_ap_id)
+        if start_ap is None or end_ap is None:
+            return []
+        start_pos = getattr(start_ap, "pos", None)
+        end_pos = getattr(end_ap, "pos", None)
+        if not (
+            isinstance(start_pos, (list, tuple))
+            and len(start_pos) >= 2
+            and isinstance(end_pos, (list, tuple))
+            and len(end_pos) >= 2
+        ):
+            return []
+        return [
+            [float(start_pos[0]), float(start_pos[1])],
+            [float(end_pos[0]), float(end_pos[1])],
+        ]
 
     @staticmethod
     def _preferred_kicad_pin_ref(candidate: KiCadCableCandidate) -> KiCadSheetPinRef | None:
