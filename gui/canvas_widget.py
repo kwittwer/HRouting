@@ -318,7 +318,7 @@ class CanvasWidget(QWidget):
         self._measure_label_positions: List[Tuple[float, float]] = []
         self._angle_measure_label_positions: List[Tuple[float, float]] = []
         self._debug_measure_last_store_idx: Optional[int] = None
-        self._debug_measure_pos_logs: bool = os.getenv("HROUTING_DEBUG_MEASURE_POS", "1") in {"1", "true", "True", "yes", "on"}
+        self._debug_measure_pos_logs: bool = os.getenv("HROUTING_DEBUG_MEASURE_POS", "0") in {"1", "true", "True", "yes", "on"}
         # Positions for helper line labels (persisted)
         self._helper_label_positions: Dict[str, Dict[str, Tuple[float, float]]] = {}
         # Currently dragging label index
@@ -391,8 +391,6 @@ class CanvasWidget(QWidget):
         self._dragging_multi: Set[Tuple[str, str]] = set()  # Aktuell verschobene Objekte
         self._drag_multi_start_positions: Dict[Tuple[str, str], QPointF] = {}  # Start-Positionen
         self._drag_multi_anchor: Optional[QPointF] = None  # Maus-Anchor beim Multi-Drag
-
-        self._debug_measure_pos("ENABLED", active=self._debug_measure_pos_logs)
 
     def _debug_measure_pos(self, tag: str, **values) -> None:
         """Emit optional debug logs for measurement position tracing."""
@@ -9138,7 +9136,7 @@ class CanvasWidget(QWidget):
         fill = QColor(color)
         fill.setAlpha(60)
         painter.setBrush(QBrush(fill))
-        painter.setPen(QPen(color, 2.0 / self._scale))
+        painter.setPen(QPen(QColor(color), 2.0 / self._scale))
         painter.drawRect(rect)
         svg_r = self._elec_point_svgs.get(point_id)
         if svg_r and svg_r.isValid():
