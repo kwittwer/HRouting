@@ -4,7 +4,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QByteArray
 from PySide6.QtGui import QColor, QPen, QBrush, QPainterPath, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.parameter_panel import BUILTIN_SYMBOLS, UvConfigDialog, UpDistributionDialog
+from storage.asset_data_uri import is_data_uri, is_svg_asset_ref, parse_data_uri
 
 
 @dataclass
@@ -1686,8 +1687,14 @@ class ElecSchemaWindow(QMainWindow):
         if not icon_path:
             return
 
-        if icon_path.lower().endswith(".svg"):
-            renderer = QSvgRenderer(icon_path)
+        if is_svg_asset_ref(icon_path):
+            if is_data_uri(icon_path):
+                parsed = parse_data_uri(icon_path)
+                if parsed is None:
+                    return
+                renderer = QSvgRenderer(QByteArray(parsed[1]))
+            else:
+                renderer = QSvgRenderer(icon_path)
             if renderer.isValid():
                 img = QPixmap(int(rect.width()), int(rect.height()))
                 img.fill(Qt.GlobalColor.transparent)
@@ -1703,7 +1710,13 @@ class ElecSchemaWindow(QMainWindow):
                 item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                 return
 
-        pix = QPixmap(icon_path)
+        pix = QPixmap()
+        if is_data_uri(icon_path):
+            parsed = parse_data_uri(icon_path)
+            if parsed is None or not pix.loadFromData(parsed[1]):
+                return
+        else:
+            pix = QPixmap(icon_path)
         if pix.isNull():
             return
         scaled = pix.scaled(

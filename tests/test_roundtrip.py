@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.document import Document  # noqa: E402
-from storage.hrp_io import load_raw, repair_and_save_hrp, save_raw  # noqa: E402
+from storage.hrp_io import load_raw, repair_and_save_hrp, save_document, save_raw  # noqa: E402
 from storage.migration import migrate_raw  # noqa: E402
 
 EXAMPLES = sorted((ROOT / "examples").glob("*.hrp"))
@@ -162,6 +162,116 @@ def test_migration_normalizes_absolute_icon_paths():
     assert raw["params"]["elec_points"]["AP-1"]["icon_path"] == "icons/Steckdose.png"
     assert raw["params"]["elec_points"]["AP-2"]["icon_path"] == "icons/LAN_2fach.png"
     assert raw["params"]["hkv_points"]["HKV-1"]["icon_path"] == "icons/Heizkreisverteiler.png"
+
+
+def test_migration_keeps_data_uri_icon_paths():
+    encoded = "data:image/png;base64,AAE="
+    raw = migrate_raw(
+        {
+            "params": {
+                "elec_points": {"AP-1": {"icon_path": encoded}},
+                "hkv_points": {"HKV-1": {"icon_path": encoded}},
+            }
+        }
+    )
+    assert raw["params"]["elec_points"]["AP-1"]["icon_path"] == encoded
+    assert raw["params"]["hkv_points"]["HKV-1"]["icon_path"] == encoded
+
+
+def test_migration_sets_current_format_version_for_legacy_files():
+    raw = migrate_raw(
+        {
+            "canvas": {"floor_plan_order": ["grundriss-1"]},
+            "params": {"floorplans": {"grundriss-1": {"name": "EG"}}},
+        }
+    )
+    assert raw["format_version"] == 2
+    assert raw["params"]["floorplans_order"] == ["grundriss-1"]
+
+
+def test_migration_upgrades_known_old_format_version():
+    raw = migrate_raw(
+        {
+            "format_version": 1,
+            "canvas": {},
+            "params": {},
+        }
+    )
+    assert raw["format_version"] == 2
+
+
+def test_migration_keeps_future_format_version_untouched():
+    raw = migrate_raw(
+        {
+            "format_version": 99,
+            "canvas": {},
+            "params": {},
+        }
+    )
+    assert raw["format_version"] == 99
+
+
+def test_save_document_embeds_asset_paths_as_data_uri(tmp_path: Path):
+    images_dir = tmp_path / "images"
+    icons_dir = tmp_path / "icons"
+    images_dir.mkdir()
+    icons_dir.mkdir()
+    (images_dir / "eg.png").write_bytes(b"fake-floorplan")
+    (icons_dir / "socket.png").write_bytes(b"fake-icon")
+
+    raw = {
+        "canvas": {
+            "floor_plans": [{"fp_id": "grundriss-1"}],
+            "elec_points": {"AP-1": [10.0, 10.0]},
+        },
+        "params": {
+            "floorplans_order": ["grundriss-1"],
+            "floorplans": {
+                "grundriss-1": {
+                    "floor_plan_id": "grundriss-1",
+                    "name": "EG",
+                    "file_path": "images/eg.png",
+                }
+            },
+            "elec_points": {
+                "AP-1": {
+                    "point_id": "AP-1",
+                    "name": "Dose",
+                    "color": "#4fc3f7",
+                    "width": 30.0,
+                    "height": 30.0,
+                    "icon_path": "icons/socket.png",
+                    "builtin_symbol": "Steckdose",
+                    "visible": True,
+                    "label_visible": True,
+                    "label_size": 12.0,
+                    "position": "Wand",
+                    "height_from_floor": 30.0,
+                    "smarthome_device": "",
+                    "smarthome_device_color": "",
+                    "note": "",
+                }
+            },
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    target = tmp_path / "embedded.hrp"
+    save_document(doc, target)
+
+    written = json.loads(target.read_text(encoding="utf-8"))
+    fp_path = written["params"]["floorplans"]["grundriss-1"]["file_path"]
+    icon_path = written["params"]["elec_points"]["AP-1"]["icon_path"]
+    assert fp_path.startswith("data:image/png;base64,")
+    assert icon_path.startswith("data:image/png;base64,")
+    assert written["format_version"] == 2
+
+
+def test_save_raw_writes_current_format_version(tmp_path: Path):
+    target = tmp_path / "versioned.hrp"
+    save_raw({"canvas": {}, "params": {}}, target)
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert written["format_version"] == 2
 
 
 def test_load_raw_planung_linda_has_no_absolute_icon_paths():

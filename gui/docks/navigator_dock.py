@@ -104,13 +104,15 @@ class _NavigatorTree(QTreeWidget):
     """
 
     drop_onto_floorplan = Signal(str, str)
+    reorder_floorplans = Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setDragEnabled(True)
         self.viewport().setAcceptDrops(True)
         self.setDropIndicatorShown(False)
-        self._drag_element_id: str = ""
+        self._drag_item_id: str = ""
+        self._drag_item_kind: str = ""
         self._drag_highlight_item: QTreeWidgetItem | None = None
 
     # -- highlight helpers --------------------------------------------
@@ -140,35 +142,50 @@ class _NavigatorTree(QTreeWidget):
             return
         item = items[0]
         kind = item.data(0, _KIND_ROLE)
-        if kind not in ("element", "helper_line"):
-            self._drag_element_id = ""
+        if kind not in ("element", "helper_line", "floorplan"):
+            self._drag_item_id = ""
+            self._drag_item_kind = ""
             return
         element_id = item.data(0, _ID_ROLE) or ""
         if not element_id:
-            self._drag_element_id = ""
+            self._drag_item_id = ""
+            self._drag_item_kind = ""
             return
-        self._drag_element_id = element_id
+        self._drag_item_id = element_id
+        self._drag_item_kind = str(kind)
         drag = QDrag(self)
         mime = QMimeData()
         mime.setText(element_id)
         drag.setMimeData(mime)
         drag.exec(Qt.MoveAction)
-        self._drag_element_id = ""
+        self._drag_item_id = ""
+        self._drag_item_kind = ""
         self._clear_highlight()
 
     def dragEnterEvent(self, event) -> None:
-        if self._drag_element_id:
+        if self._drag_item_id:
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:
-        if not self._drag_element_id:
+        if not self._drag_item_id:
             self._clear_highlight()
             event.ignore()
             return
         target = self.itemAt(event.position().toPoint())
-        if target is not None and target.data(0, _KIND_ROLE) == "floorplan":
+        if target is None or target.data(0, _KIND_ROLE) != "floorplan":
+            self._clear_highlight()
+            event.ignore()
+            return
+
+        target_id = target.data(0, _ID_ROLE) or ""
+        if self._drag_item_kind == "floorplan" and target_id == self._drag_item_id:
+            self._clear_highlight()
+            event.ignore()
+            return
+
+        if self._drag_item_kind in ("element", "helper_line", "floorplan"):
             self._set_highlight(target)
             event.acceptProposedAction()
         else:
@@ -181,15 +198,19 @@ class _NavigatorTree(QTreeWidget):
 
     def dropEvent(self, event) -> None:
         self._clear_highlight()
-        if not self._drag_element_id:
+        if not self._drag_item_id:
             event.ignore()
             return
         target = self.itemAt(event.position().toPoint())
         if target is not None and target.data(0, _KIND_ROLE) == "floorplan":
             fp_id = target.data(0, _ID_ROLE) or ""
             if fp_id:
-                self.drop_onto_floorplan.emit(self._drag_element_id, fp_id)
-        self._drag_element_id = ""
+                if self._drag_item_kind in ("element", "helper_line"):
+                    self.drop_onto_floorplan.emit(self._drag_item_id, fp_id)
+                elif self._drag_item_kind == "floorplan" and self._drag_item_id != fp_id:
+                    self.reorder_floorplans.emit(self._drag_item_id, fp_id)
+        self._drag_item_id = ""
+        self._drag_item_kind = ""
         event.accept()
         # Kein super().dropEvent() — verhindert das eingebaute Item-Verschieben.
 
@@ -203,6 +224,7 @@ class NavigatorDock(QDockWidget):
     visibility_changed = Signal(str, bool)
     context_requested = Signal(str, str, object)
     reassign_floorplan = Signal(str, str)  # element_id, new_fp_id
+    floorplan_order_changed = Signal(list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigator", parent)
@@ -249,6 +271,7 @@ class NavigatorDock(QDockWidget):
         self._tree.itemCollapsed.connect(self._on_item_expanded_changed)
         self._tree.customContextMenuRequested.connect(self._on_context_menu)
         self._tree.drop_onto_floorplan.connect(self.reassign_floorplan)
+        self._tree.reorder_floorplans.connect(self._on_floorplan_reordered)
         layout.addWidget(self._tree, 1)
 
         self.setWidget(container)
@@ -295,7 +318,12 @@ class NavigatorDock(QDockWidget):
             fp_item = QTreeWidgetItem(self._tree, [floorplan.name or fp_id])
             fp_item.setData(0, _ID_ROLE, fp_id)
             fp_item.setData(0, _KIND_ROLE, "floorplan")
-            fp_item.setFlags(fp_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDropEnabled)
+            fp_item.setFlags(
+                fp_item.flags()
+                | Qt.ItemIsUserCheckable
+                | Qt.ItemIsDropEnabled
+                | Qt.ItemIsDragEnabled
+            )
             fp_item.setCheckState(0, self._to_state(document.is_visible(fp_id)))
             self._items[fp_id] = fp_item
 
@@ -768,6 +796,8 @@ class NavigatorDock(QDockWidget):
     def _on_context_menu(self, pos) -> None:
         item = self._tree.itemAt(pos)
         if item is None:
+            global_pos = self._tree.viewport().mapToGlobal(pos)
+            self.context_requested.emit("", "navigator_root", global_pos)
             return
         kind = item.data(0, _KIND_ROLE)
         if kind not in ("element", "floorplan", "helper_line"):
@@ -777,6 +807,43 @@ class NavigatorDock(QDockWidget):
             return
         global_pos = self._tree.viewport().mapToGlobal(pos)
         self.context_requested.emit(element_id, kind, global_pos)
+
+    def _on_floorplan_reordered(self, source_fp_id: str, target_fp_id: str) -> None:
+        if not source_fp_id or not target_fp_id or source_fp_id == target_fp_id:
+            return
+        source_item = self._items.get(source_fp_id) or self._find_item_by_id(source_fp_id)
+        target_item = self._items.get(target_fp_id) or self._find_item_by_id(target_fp_id)
+        if source_item is None or target_item is None:
+            return
+        if source_item.parent() is not None or target_item.parent() is not None:
+            return
+
+        source_index = self._tree.indexOfTopLevelItem(source_item)
+        target_index = self._tree.indexOfTopLevelItem(target_item)
+        if source_index < 0 or target_index < 0 or source_index == target_index:
+            return
+
+        moved = self._tree.takeTopLevelItem(source_index)
+        if source_index < target_index:
+            target_index -= 1
+        self._tree.insertTopLevelItem(target_index, moved)
+        self._tree.setCurrentItem(moved)
+
+        order = self.get_floorplan_order()
+        self._selected_ids = [source_fp_id]
+        self.floorplan_order_changed.emit(order)
+
+    def get_floorplan_order(self) -> list[str]:
+        order: list[str] = []
+        root = self._tree.invisibleRootItem()
+        for index in range(root.childCount()):
+            item = root.child(index)
+            if item.data(0, _KIND_ROLE) != "floorplan":
+                continue
+            fp_id = item.data(0, _ID_ROLE) or ""
+            if fp_id:
+                order.append(fp_id)
+        return order
 
     def select(self, element_id: str) -> None:
         item = self._items.get(element_id) or self._find_item_by_id(element_id)

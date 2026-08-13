@@ -7,6 +7,12 @@
   "required": ["canvas", "params"],
   "additionalProperties": true,
   "properties": {
+    "format_version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 2,
+      "description": "Version des HRP-Dateiformats (top-level Projektformat)."
+    },
     "svg_path": {
       "type": "string",
       "default": "",

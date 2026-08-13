@@ -540,6 +540,26 @@ def test_floor_plan_image_data_stays_local(bound):
     assert "renderer" not in entry
 
 
+def test_floor_plan_can_load_embedded_svg_data_uri(bound):
+    canvas, document = bound
+    fp_id = document.floorplan_order[0]
+    data_uri = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPScxNicgaGVpZ2h0PSc4Jz48cmVjdCB3aWR0aD0nMTYnIGhlaWdodD0nOCcgZmlsbD0nI2NjYycvPjwvc3ZnPg=="
+
+    canvas.load_floor_plan_image(fp_id, data_uri)
+
+    layer = canvas._floor_plans[fp_id]
+    assert layer.renderer is not None
+
+
+def test_elec_point_icon_accepts_embedded_svg_data_uri(bound):
+    canvas, _document = bound
+    data_uri = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPScxNicgaGVpZ2h0PScxNic+PHJlY3Qgd2lkdGg9JzE2JyBoZWlnaHQ9JzE2JyBmaWxsPSdibGFjaycvPjwvc3ZnPg=="
+
+    canvas.set_elec_point_icon("AP-1", data_uri)
+
+    assert canvas._elec_point_svgs.get("AP-1") is not None
+
+
 # ---------------------------------------------------------------------------
 # A4.7 – Hilfslinien
 # ---------------------------------------------------------------------------

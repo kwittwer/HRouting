@@ -10,13 +10,19 @@ import copy
 import math
 import re
 
+from .asset_data_uri import is_data_uri
+
 #: Schlüssel, unter dem die alte UI ihren Fensterzustand in params ablegte.
 LEGACY_UI_STATE_KEY = "_ui_state"
+FORMAT_VERSION_KEY = "format_version"
+CURRENT_HRP_FORMAT_VERSION = 2
+LEGACY_HRP_FORMAT_VERSION = 1
 
 
 def migrate_raw(raw: dict) -> dict:
     """Normalisiert ein rohes .hrp-Dict. Gibt eine neue Struktur zurück."""
     raw = copy.deepcopy(raw or {})
+    detected_version = _read_format_version(raw)
     raw.setdefault("svg_path", "")
     raw.setdefault("canvas", {})
     raw.setdefault("params", {})
@@ -25,13 +31,30 @@ def migrate_raw(raw: dict) -> dict:
     canvas = raw["canvas"]
     params = raw["params"]
 
-    _migrate_global_helper_lines(canvas)
-    _migrate_elec_room_polygons(canvas)
-    _migrate_floorplan_order(canvas, params)
-    _migrate_legacy_electrical_ids(canvas, params)
-    _migrate_icon_paths(params)
-    _drop_legacy_ui_state(params)
+    # Bekannte Altversionen werden immer auf das aktuelle Format gehoben.
+    if detected_version <= LEGACY_HRP_FORMAT_VERSION:
+        _migrate_global_helper_lines(canvas)
+        _migrate_elec_room_polygons(canvas)
+        _migrate_floorplan_order(canvas, params)
+        _migrate_legacy_electrical_ids(canvas, params)
+        _migrate_icon_paths(params)
+        _drop_legacy_ui_state(params)
+
+    if detected_version <= CURRENT_HRP_FORMAT_VERSION:
+        raw[FORMAT_VERSION_KEY] = CURRENT_HRP_FORMAT_VERSION
+    else:
+        # Zukunftsversionen nicht herunterstufen.
+        raw[FORMAT_VERSION_KEY] = detected_version
     return raw
+
+
+def _read_format_version(raw: dict) -> int:
+    value = raw.get(FORMAT_VERSION_KEY, LEGACY_HRP_FORMAT_VERSION)
+    try:
+        version = int(value)
+    except (TypeError, ValueError):
+        return LEGACY_HRP_FORMAT_VERSION
+    return max(LEGACY_HRP_FORMAT_VERSION, version)
 
 
 def _migrate_global_helper_lines(canvas: dict) -> None:
@@ -83,6 +106,8 @@ def _normalize_icon_path(path_value: object) -> str:
     raw = str(path_value or "").strip()
     if not raw:
         return ""
+    if is_data_uri(raw):
+        return raw
 
     normalized = raw.replace("\\", "/")
     if _ABSOLUTE_PATH_RE.match(raw):

@@ -1004,6 +1004,175 @@ def test_context_menu_shows_workspace_actions_for_selected_element(app, monkeypa
         window.deleteLater()
 
 
+def test_context_menu_offers_add_floorplan_on_navigator_root(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+
+        action_ids = [
+            entry[0]
+            for entry in window._workspace_context_action_specs("", "navigator_root")
+        ]
+        assert "add_floorplan_empty" in action_ids
+    finally:
+        window.deleteLater()
+
+
+def test_navigator_root_action_adds_empty_floorplan(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+
+        before_ids = set(window._document.floorplans.keys())
+        window._run_context_action("add_floorplan_empty", "", "navigator_root")
+        after_ids = set(window._document.floorplans.keys())
+        added = list(after_ids - before_ids)
+
+        assert len(added) == 1
+        new_id = added[0]
+        assert window._document.floorplans[new_id].file_path == ""
+        assert new_id in window._document.floorplan_order
+        assert new_id in window.canvas._floor_plans
+    finally:
+        window.deleteLater()
+
+
+def test_navigator_floorplan_reorder_updates_document_and_canvas(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True},
+                        {"fp_id": "grundriss-2", "visible": True},
+                        {"fp_id": "grundriss-3", "visible": True},
+                    ],
+                },
+                "params": {
+                    "floorplans_order": ["grundriss-1", "grundriss-2", "grundriss-3"],
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                        "grundriss-2": {"name": "OG", "visible": True, "file_path": ""},
+                        "grundriss-3": {"name": "DG", "visible": True, "file_path": ""},
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        window.navigator._on_floorplan_reordered("grundriss-3", "grundriss-1")
+
+        assert window._document.floorplan_order == ["grundriss-3", "grundriss-1", "grundriss-2"]
+        assert window.canvas._floor_plan_order[:3] == ["grundriss-3", "grundriss-1", "grundriss-2"]
+        assert window._dirty is True
+    finally:
+        window.deleteLater()
+
+
+def test_navigator_floorplan_reorder_keeps_furniture_layers(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plan_order": ["grundriss-1", "einr-1", "grundriss-2"],
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True},
+                        {"fp_id": "grundriss-2", "visible": True},
+                        {"fp_id": "einr-1", "visible": True},
+                    ],
+                },
+                "params": {
+                    "floorplans_order": ["grundriss-1", "einr-1", "grundriss-2"],
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                        "grundriss-2": {"name": "OG", "visible": True, "file_path": ""},
+                    },
+                    "furniture": {
+                        "einr-1": {
+                            "name": "Möbel 1",
+                            "visible": True,
+                            "file_path": "",
+                            "floor_plan_id": "grundriss-1",
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        if "einr-1" not in window._document.floorplan_order:
+            window._document.floorplan_order.insert(1, "einr-1")
+            window.canvas.set_floor_plan_order(list(window._document.floorplan_order))
+
+        window.navigator._on_floorplan_reordered("grundriss-2", "grundriss-1")
+
+        assert window._document.floorplan_order[0:3] == ["grundriss-2", "grundriss-1", "einr-1"]
+        assert "einr-1" in window.canvas._floor_plan_order
+    finally:
+        window.deleteLater()
+
+
 def test_context_menu_offers_draw_cable_for_ap(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -2641,6 +2810,97 @@ def test_recompute_scale_on_active_floorplan_keeps_global_mpp(app, monkeypatch):
         window.deleteLater()
 
 
+def test_recompute_scale_is_idempotent_on_repeated_clicks(app, monkeypatch):
+    from PySide6.QtCore import QPointF, QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "mm_per_px": 50.0,
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True, "mm_per_px": 50.0, "ref_length_mm": 5000.0},
+                    ],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                            "mm_per_px": 50.0,
+                            "ref_length_mm": 5000.0,
+                        },
+                    }
+                },
+            }
+        )
+        window._set_document(document)
+
+        layer = window.canvas._floor_plans["grundriss-1"]
+        layer.ref_p1 = QPointF(100.0, 100.0)
+        layer.ref_p2 = QPointF(200.0, 100.0)  # 100 px
+        layer.ref_length_mm = 10000.0  # target 100 mm/px on first recompute
+
+        values = []
+        for _ in range(4):
+            ok = window._recompute_floorplan_scale_from_reference("grundriss-1")
+            assert ok
+            values.append(float(layer.mm_per_px))
+
+        first = values[0]
+        assert abs(first - 100.0) < 1e-9
+        assert all(abs(v - first) < 1e-9 for v in values)
+        assert abs(float(window._document.floorplans["grundriss-1"].layer["mm_per_px"]) - first) < 1e-9
+    finally:
+        window.deleteLater()
+
+
+def test_load_floor_plan_image_does_not_override_global_scale(app, tmp_path):
+    from PySide6.QtCore import QPointF  # noqa: PLC0415
+    from PySide6.QtGui import QPixmap  # noqa: PLC0415
+
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        image_path = tmp_path / "reloaded_floorplan.png"
+        reloaded = QPixmap(120, 80)
+        reloaded.fill()
+        assert reloaded.save(str(image_path))
+
+        canvas.add_floor_plan("grundriss-1")
+        canvas.add_floor_plan("grundriss-2")
+        canvas._mm_per_px = 50.0
+
+        layer1 = canvas._floor_plans["grundriss-1"]
+        layer2 = canvas._floor_plans["grundriss-2"]
+        layer1.mm_per_px = 100.0
+        layer2.mm_per_px = 50.0
+
+        # Simulate existing loaded image and reference line on layer1.
+        layer1.pixmap = QPixmap(100, 100)
+        layer1.size = (100.0, 100.0)
+        layer1.ref_p1 = QPointF(10.0, 10.0)
+        layer1.ref_p2 = QPointF(90.0, 10.0)
+        layer1.ref_length_mm = 8000.0
+
+        canvas.load_floor_plan_image("grundriss-1", str(image_path))
+
+        assert abs(canvas.get_mm_per_px() - 50.0) < 1e-9
+    finally:
+        canvas.deleteLater()
+
+
 def test_sync_floorplan_scales_from_references_updates_all_valid_floors(app, monkeypatch):
     from PySide6.QtCore import QPointF, QSettings  # noqa: PLC0415
 
@@ -2684,14 +2944,15 @@ def test_sync_floorplan_scales_from_references_updates_all_valid_floors(app, mon
         layer2.ref_p2 = QPointF(70.0, 10.0)
         layer2.ref_length_mm = 3000.0
 
+        dirty_before = window._dirty
         valid_count, changed_count = window._sync_floorplan_scales_from_references(show_feedback=False)
 
         assert valid_count == 2
-        assert changed_count == 1
+        assert changed_count == 0
         assert abs(layer1.mm_per_px - 50.0) < 1e-9
-        assert abs(layer2.mm_per_px - 50.0) < 1e-9
-        assert abs(window._document.floorplans["grundriss-2"].layer["mm_per_px"] - 50.0) < 1e-9
-        assert window._dirty is True
+        assert abs(layer2.mm_per_px - 75.0) < 1e-9
+        assert abs(window._document.floorplans["grundriss-2"].layer["mm_per_px"] - 75.0) < 1e-9
+        assert window._dirty is dirty_before
     finally:
         window.deleteLater()
 
@@ -4032,6 +4293,92 @@ def test_import_kicad_cables_keeps_ambiguous_when_ap_groups_active(app, monkeypa
         window.deleteLater()
 
 
+def test_import_hrp_elements_imports_selected_slice_with_dependencies(app, monkeypatch):
+    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from logic.hrp_import import selection_key  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+    from model.elements import ElecCable  # noqa: PLC0415
+
+    source_document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "elec_points": {"AP-1": [20, 20], "AP-2": [40, 40]},
+                "elec_cables": {"EK-1": [[20, 20], [40, 40]]},
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "Import-FP", "file_path": ""}},
+                "floorplans_order": ["grundriss-1"],
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "name": "Quelle 1", "floor_plan_id": "grundriss-1"},
+                    "AP-2": {"point_id": "AP-2", "name": "Quelle 2", "floor_plan_id": "grundriss-1"},
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "name": "Import-Kabel",
+                        "floor_plan_id": "grundriss-1",
+                        "start_ap": "AP-1",
+                        "end_ap": "AP-2",
+                    }
+                },
+            },
+        }
+    )
+
+    class _DialogStub:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def selected_keys(self):
+            return [selection_key(ElecCable, "EK-1")]
+
+    window = AppWindow()
+    try:
+        target_document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "Bestand", "file_path": ""}},
+                    "floorplans_order": ["grundriss-1"],
+                },
+            }
+        )
+        window._set_document(target_document)
+        window._project_path = ROOT / "examples" / "minimal.hrp"
+
+        monkeypatch.setattr(
+            "gui.app_window.QFileDialog.getOpenFileName",
+            lambda *a, **k: (str(ROOT / "examples" / "Planung_Linda.hrp"), ""),
+        )
+        monkeypatch.setattr("gui.app_window.load_document", lambda _path: source_document)
+        monkeypatch.setattr("gui.app_window.HrpImportDialog", _DialogStub)
+        monkeypatch.setattr("gui.app_window.QMessageBox.information", lambda *a, **k: None)
+
+        window._import_hrp_elements()
+
+        assert window._document.floorplan_order == ["grundriss-1", "grundriss-2"]
+        assert "AP-1" in window._document.elements["elec_points"]
+        assert "AP-2" in window._document.elements["elec_points"]
+        assert "EK-1" in window._document.elements["elec_cables"]
+
+        imported_cable = window._document.elements["elec_cables"]["EK-1"]
+        assert imported_cable.floor_plan_id == "grundriss-2"
+        assert imported_cable.start_ap == "AP-1"
+        assert imported_cable.end_ap == "AP-2"
+    finally:
+        window.deleteLater()
+
+
 def test_kicad_import_dialog_shows_recursive_hierarchy_paths(app):
     from PySide6.QtCore import Qt  # noqa: PLC0415
     from gui.kicad_import_dialog import KiCadImportDialog  # noqa: PLC0415
@@ -4052,13 +4399,79 @@ def test_kicad_import_dialog_shows_recursive_hierarchy_paths(app):
         assert target_item is not None
         dialog.tree.setCurrentItem(target_item)
         dialog._update_detail()
-
         # Column 4 now shows source ("Sheet Pin" or "Text Field"), not hierarchy
         assert target_item.text(4) in ("Sheet Pin", "Text Field")
         # Hierarchy information is now in the detail box
         detail = dialog.detail_box.toPlainText()
         assert "HWR > UV HWR" in detail
         assert "Flur_Ankleide" in detail
+    finally:
+        dialog.deleteLater()
+
+
+def test_hrp_import_dialog_supports_category_actions_and_grouped_dependency_preview(app):
+    from gui.hrp_import_dialog import HrpImportDialog  # noqa: PLC0415
+    from logic.hrp_import import iter_import_candidates, selection_key  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+    from model.elements import Circuit, ElecCable, ElecPoint  # noqa: PLC0415
+
+    source = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "elec_points": {"AP-1": [20, 20], "AP-2": [40, 40]},
+                "elec_cables": {"EK-1": [[20, 20], [40, 40]]},
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+                "polygons": {"HK-1": [[0, 0], [100, 0], [100, 100]]},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "file_path": ""}},
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "name": "Dose 1", "floor_plan_id": "grundriss-1"},
+                    "AP-2": {"point_id": "AP-2", "name": "Dose 2", "floor_plan_id": "grundriss-1"},
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "name": "Kabel 1",
+                        "floor_plan_id": "grundriss-1",
+                        "start_ap": "AP-1",
+                        "end_ap": "AP-2",
+                    }
+                },
+                "circuits": {
+                    "HK-1": {
+                        "circuit_id": "HK-1",
+                        "name": "Wohnen",
+                        "floor_plan_id": "grundriss-1",
+                    }
+                },
+            },
+        }
+    )
+
+    dialog = HrpImportDialog(source, iter_import_candidates(source), source_label="Quelle.hrp")
+    try:
+        cable_item = dialog._item_by_key[selection_key(ElecCable, "EK-1")]
+        dialog.tree.setCurrentItem(cable_item)
+        dialog._select_current_category()
+
+        selected = set(dialog.selected_keys())
+        assert selection_key(ElecCable, "EK-1") in selected
+        assert "Direkt ausgewählt:" in dialog.summary_label.text()
+        assert "Anschlusspunkte (2): Dose 1, Dose 2" in dialog.warning_box.toPlainText()
+        assert "Grundrisse (1): EG" in dialog.detail_box.toPlainText()
+
+        circuit_item = dialog._item_by_key[selection_key(Circuit, "HK-1")]
+        dialog.tree.setCurrentItem(circuit_item)
+        dialog._clear_current_category()
+        assert selection_key(Circuit, "HK-1") not in set(dialog.selected_keys())
+
+        dialog._select_all()
+        assert selection_key(ElecPoint, "AP-1") in set(dialog.selected_keys())
+        dialog._clear_all()
+        assert dialog.selected_keys() == []
     finally:
         dialog.deleteLater()
 

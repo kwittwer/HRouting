@@ -8,6 +8,8 @@ from pathlib import Path
 
 from model.document import Document
 
+from .asset_data_uri import encode_file_to_data_uri, is_data_uri
+from .migration import CURRENT_HRP_FORMAT_VERSION, FORMAT_VERSION_KEY
 from .migration import migrate_raw
 from .hrp_repair import repair_hrp_data
 
@@ -21,6 +23,8 @@ def load_raw(path: str | Path) -> dict:
 
 def save_raw(raw: dict, path: str | Path) -> None:
     """Schreibt ein rohes Projekt-Dict im HRouting-Format."""
+    raw = dict(raw or {})
+    raw[FORMAT_VERSION_KEY] = CURRENT_HRP_FORMAT_VERSION
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
@@ -34,8 +38,83 @@ def load_document(path: str | Path) -> Document:
 
 
 def save_document(doc: Document, path: str | Path) -> None:
-    save_raw(doc.to_dict(), path)
+    target = Path(path)
+    raw = _embed_assets_for_save(doc.to_dict(), target, doc)
+    save_raw(raw, target)
     doc.source_path = Path(path)  # type: ignore[attr-defined]
+
+
+def _embed_assets_for_save(raw: dict, target_path: Path, doc: Document | None = None) -> dict:
+    """Ersetzt referenzierte Bildpfade durch Data-URIs für portable .hrp-Dateien."""
+    params = raw.get("params")
+    if not isinstance(params, dict):
+        return raw
+
+    source_base: Path | None = None
+    if doc is not None:
+        source_path = getattr(doc, "source_path", None)
+        if source_path:
+            source_base = Path(source_path).parent
+    target_base = target_path.parent
+
+    _embed_bucket_path_field(
+        params,
+        bucket_names=("floorplans", "furniture"),
+        field_name="file_path",
+        target_base=target_base,
+        source_base=source_base,
+    )
+    _embed_bucket_path_field(
+        params,
+        bucket_names=("elec_points", "hkv_points"),
+        field_name="icon_path",
+        target_base=target_base,
+        source_base=source_base,
+    )
+    return raw
+
+
+def _embed_bucket_path_field(
+    params: dict,
+    *,
+    bucket_names: tuple[str, ...],
+    field_name: str,
+    target_base: Path,
+    source_base: Path | None,
+) -> None:
+    for bucket_name in bucket_names:
+        bucket = params.get(bucket_name)
+        if not isinstance(bucket, dict):
+            continue
+        for entry in bucket.values():
+            if not isinstance(entry, dict):
+                continue
+            raw_path = str(entry.get(field_name, "") or "").strip()
+            if not raw_path or is_data_uri(raw_path):
+                continue
+            resolved = _resolve_asset_path(raw_path, target_base, source_base)
+            if resolved is None:
+                continue
+            try:
+                entry[field_name] = encode_file_to_data_uri(resolved)
+            except OSError:
+                # Wenn die Datei nicht lesbar ist, Referenz unverändert lassen.
+                continue
+
+
+def _resolve_asset_path(raw_path: str, target_base: Path, source_base: Path | None) -> Path | None:
+    candidate = Path(raw_path)
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    candidates: list[Path] = []
+    if source_base is not None:
+        candidates.append(source_base / raw_path)
+    candidates.append(target_base / raw_path)
+    candidates.append(Path.cwd() / raw_path)
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
+    return None
 
 
 def create_hrp_backup(path: str | Path) -> Path:

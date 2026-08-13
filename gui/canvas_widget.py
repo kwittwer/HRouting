@@ -16,17 +16,20 @@
 
 import math
 import os
+import hashlib
 from enum import Enum, auto
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import Qt, QPointF, Signal, QRectF
+from PySide6.QtCore import Qt, QPointF, Signal, QRectF, QByteArray
 from PySide6.QtGui import (
     QPainter, QPen, QColor, QBrush, QPolygonF, QPainterPath, QPixmap, QFont,
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget, QApplication, QToolTip
+
+from storage.asset_data_uri import is_data_uri, is_svg_asset_ref, parse_data_uri
 
 Point = Tuple[float, float]
 
@@ -407,6 +410,31 @@ class CanvasWidget(QWidget):
         """Load an SVG, PNG, or JPG as the background floor plan (legacy)."""
         self._svg_renderer = None
         self._bg_pixmap = None
+        if is_data_uri(filepath):
+            parsed = parse_data_uri(filepath)
+            if parsed is None:
+                self._svg_size = (100, 100)
+                self.update()
+                return
+            mime, data = parsed
+            if mime.lower() == "image/svg+xml":
+                renderer = QSvgRenderer(QByteArray(data))
+                if renderer.isValid():
+                    self._svg_renderer = renderer
+                    vb = renderer.viewBox()
+                    self._svg_size = (float(vb.width()), float(vb.height()))
+                else:
+                    self._svg_size = (100, 100)
+            else:
+                pm = QPixmap()
+                if pm.loadFromData(data):
+                    self._bg_pixmap = pm
+                    self._svg_size = (float(pm.width()), float(pm.height()))
+                else:
+                    self._svg_size = (100, 100)
+            self._fit_to_window()
+            self.update()
+            return
         if not os.path.exists(filepath):
             self._svg_size = (100, 100)
             self.update()
@@ -524,26 +552,43 @@ class CanvasWidget(QWidget):
         saved_polygon = layer.polygon
         layer.renderer = None
         layer.pixmap = None
-        if not os.path.exists(filepath):
-            layer.size = (100.0, 100.0)
-            self.update()
-            return
-        ext = os.path.splitext(filepath)[1].lower()
-        if ext == ".svg":
-            renderer = self._get_cached_svg_renderer(filepath)
-            if renderer is not None:
-                layer.renderer = renderer
-                vb = renderer.viewBox()
-                layer.size = (float(vb.width()), float(vb.height()))
+        if is_data_uri(filepath):
+            if is_svg_asset_ref(filepath):
+                renderer = self._get_cached_svg_renderer(filepath)
+                if renderer is not None:
+                    layer.renderer = renderer
+                    vb = renderer.viewBox()
+                    layer.size = (float(vb.width()), float(vb.height()))
+                else:
+                    layer.size = (100.0, 100.0)
             else:
-                layer.size = (100.0, 100.0)
+                pm = self._get_cached_pixmap(filepath)
+                if pm is not None:
+                    layer.pixmap = QPixmap(pm)
+                    layer.size = (float(pm.width()), float(pm.height()))
+                else:
+                    layer.size = (100.0, 100.0)
         else:
-            pm = self._get_cached_pixmap(filepath)
-            if pm is not None:
-                layer.pixmap = QPixmap(pm)
-                layer.size = (float(pm.width()), float(pm.height()))
-            else:
+            if not os.path.exists(filepath):
                 layer.size = (100.0, 100.0)
+                self.update()
+                return
+            ext = os.path.splitext(filepath)[1].lower()
+            if ext == ".svg":
+                renderer = self._get_cached_svg_renderer(filepath)
+                if renderer is not None:
+                    layer.renderer = renderer
+                    vb = renderer.viewBox()
+                    layer.size = (float(vb.width()), float(vb.height()))
+                else:
+                    layer.size = (100.0, 100.0)
+            else:
+                pm = self._get_cached_pixmap(filepath)
+                if pm is not None:
+                    layer.pixmap = QPixmap(pm)
+                    layer.size = (float(pm.width()), float(pm.height()))
+                else:
+                    layer.size = (100.0, 100.0)
         # If this is the first floor plan, fit window to it
         if len(self._floor_plans) == 1:
             self._svg_size = layer.size
@@ -572,21 +617,6 @@ class CanvasWidget(QWidget):
                 if px_len > 1e-9 and layer.ref_length_mm > 0:
                     layer.mm_per_px = layer.ref_length_mm / px_len
 
-            new_global_mpp = old_global_mpp
-            if layer.mm_per_px > 0 and (
-                self._mm_per_px == 1.0
-                or (self._floor_plan_order and self._floor_plan_order[0] == fp_id)
-            ):
-                new_global_mpp = layer.mm_per_px
-
-            if abs(new_global_mpp - old_global_mpp) > 1e-9:
-                self.rescale_all_layer_ref_points(
-                    old_global_mpp,
-                    new_global_mpp,
-                    skip_fp_id=fp_id,
-                )
-                self._mm_per_px = new_global_mpp
-
             new_render_size = self._layer_render_size_for_scale(
                 layer,
                 self._mm_per_px,
@@ -608,6 +638,9 @@ class CanvasWidget(QWidget):
 
     @staticmethod
     def _cache_key(path: str) -> str:
+        if is_data_uri(path):
+            digest = hashlib.sha1(path.encode("utf-8")).hexdigest()
+            return f"data-uri:{digest}"
         return os.path.normcase(os.path.normpath(path or ""))
 
     def _resolve_icon_path(self, path: str) -> str:
@@ -618,6 +651,8 @@ class CanvasWidget(QWidget):
         """
         if not path:
             return ""
+        if is_data_uri(path):
+            return path
         p = Path(path)
         if p.is_absolute() and p.exists():
             return str(path)
@@ -640,7 +675,14 @@ class CanvasWidget(QWidget):
         cached = self._pixmap_cache.get(key)
         if cached is not None and not cached.isNull():
             return cached
-        pm = QPixmap(resolved_path)
+        pm = QPixmap()
+        if is_data_uri(resolved_path):
+            parsed = parse_data_uri(resolved_path)
+            if parsed is None or not pm.loadFromData(parsed[1]):
+                self._pixmap_cache.pop(key, None)
+                return None
+        else:
+            pm = QPixmap(resolved_path)
         if pm.isNull():
             self._pixmap_cache.pop(key, None)
             return None
@@ -655,7 +697,13 @@ class CanvasWidget(QWidget):
         cached = self._svg_renderer_cache.get(key)
         if cached is not None and cached.isValid():
             return cached
-        renderer = QSvgRenderer(resolved_path)
+        if is_data_uri(resolved_path):
+            parsed = parse_data_uri(resolved_path)
+            if parsed is None:
+                return None
+            renderer = QSvgRenderer(QByteArray(parsed[1]))
+        else:
+            renderer = QSvgRenderer(resolved_path)
         if not renderer.isValid():
             self._svg_renderer_cache.pop(key, None)
             return None
@@ -2183,7 +2231,7 @@ class CanvasWidget(QWidget):
         self.update()
 
     def set_elec_point_icon(self, point_id: str, path: str):
-        if path and path.lower().endswith(".svg"):
+        if path and is_svg_asset_ref(path):
             renderer = self._get_cached_svg_renderer(path)
             if renderer is not None:
                 self._elec_point_svgs[point_id] = renderer
@@ -3035,7 +3083,7 @@ class CanvasWidget(QWidget):
         self.update()
 
     def set_hkv_icon(self, hkv_id: str, path: str):
-        if path and path.lower().endswith(".svg"):
+        if path and is_svg_asset_ref(path):
             renderer = self._get_cached_svg_renderer(path)
             if renderer is not None:
                 self._hkv_svgs[hkv_id] = renderer

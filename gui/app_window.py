@@ -51,6 +51,7 @@ from model.elements import (
     TextAnnotation,
 )
 from model.schema import schema_for
+from storage.asset_data_uri import is_data_uri
 from storage.hrp_io import load_document, repair_and_save_hrp, save_document
 from logic.kicad_import import (
     KiCadCableCandidate,
@@ -60,7 +61,9 @@ from logic.kicad_import import (
     scan_kicad_project,
     suggest_ap_matches,
 )
+from logic.hrp_import import import_selected_elements, iter_import_candidates
 from .elec_schema_window import ApNode, CableEdge, ElecSchemaWindow
+from .hrp_import_dialog import HrpImportDialog
 from .kicad_import_dialog import KiCadImportDialog
 from .pdf_export_dialog import PdfExportConfigDialog
 from .schaltplan_window import SchaltplanWindow
@@ -293,6 +296,7 @@ class AppWindow(QMainWindow):
         self._add_action(self.export_menu, "Längen & Stückliste…", self._export_lengths)
 
         import_menu = bar.addMenu("&Import")
+        self._add_action(import_menu, "Aus HRP importieren…", self._import_hrp_elements)
         self._add_action(import_menu, "KiCad-Kabel aus Schaltplan…", self._import_kicad_cables)
 
         help_menu = bar.addMenu("&Hilfe")
@@ -367,6 +371,7 @@ class AppWindow(QMainWindow):
         self.navigator.visibility_changed.connect(self._on_visibility_changed)
         self.navigator.context_requested.connect(self._on_navigator_context)
         self.navigator.reassign_floorplan.connect(self._on_reassign_floorplan)
+        self.navigator.floorplan_order_changed.connect(self._on_navigator_floorplan_order_changed)
         self.tools.tool_activated.connect(self._on_tool_activated)
         self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
         self.canvas.context_menu_requested.connect(self._on_canvas_context_requested)
@@ -524,14 +529,19 @@ class AppWindow(QMainWindow):
                 element_id, float(element.data.get("width", 30.0)),
                 float(element.data.get("height", 30.0))
             )
-        elif key == "file_path" and element_id in self._document.floorplans:
+        elif key == "file_path" and (
+            element_id in self._document.floorplans or element_id in self._document.furniture
+        ):
             path = (element.data.get("file_path") or "").strip()
             if path:
-                resolved = Path(path)
-                if not resolved.is_absolute() and self._project_path is not None:
-                    resolved = (self._project_path.parent / resolved).resolve()
-                if resolved.exists():
-                    self.canvas.load_floor_plan_image(element_id, str(resolved))
+                if is_data_uri(path):
+                    self.canvas.load_floor_plan_image(element_id, path)
+                else:
+                    resolved = Path(path)
+                    if not resolved.is_absolute() and self._project_path is not None:
+                        resolved = (self._project_path.parent / resolved).resolve()
+                    if resolved.exists():
+                        self.canvas.load_floor_plan_image(element_id, str(resolved))
         elif element_id in self._document.floorplans:
             if key == "opacity":
                 self.canvas.set_floor_plan_opacity(
@@ -603,9 +613,12 @@ class AppWindow(QMainWindow):
                 self.properties.refresh_helper(floor_id, helper_id)
 
     def _on_floor_plan_transform_updated(self, fp_id: str, _ox: float, _oy: float, _rot: float) -> None:
-        """Synchronisiert Property-Ansicht und Undo bei Drag-Transformationen."""
-        # Keep per-floor scale synchronized with the current reference line.
-        self._recompute_floorplan_scale_from_reference(fp_id)
+        """Synchronisiert Property-Ansicht und Undo bei Drag-Transformationen.
+
+        Keine Neuskalierung hier – die Skalierung soll stabil bleiben.
+        _recompute_floorplan_scale_from_reference() darf nur beim expliziten
+        'Aktualisieren'-Button aufgerufen werden, nicht bei jedem Drag-Event.
+        """
         self._record_canvas_change()
         self.properties.refresh_element(fp_id)
         self._refresh_schema_windows()
@@ -621,7 +634,13 @@ class AppWindow(QMainWindow):
         )
 
     def _recompute_floorplan_scale_from_reference(self, fp_id: str) -> bool:
-        """Berechnet ``mm_per_px`` aus Referenzlinie und Referenzlänge."""
+        """Berechnet ``mm_per_px`` aus Referenzlinie und Referenzlänge.
+
+        Wichtig: Die Referenzlänge muss aus Bildpixeln (nicht Canvas-Welt)
+        berechnet werden. Nur so bleibt das Ergebnis unabhängig von einer
+        bereits gesetzten Layer-Skalierung und damit bei wiederholtem
+        "Aktualisieren" idempotent.
+        """
         layer = self.canvas._floor_plans.get(fp_id)
         floor = self._document.floorplans.get(fp_id)
         if layer is None or floor is None:
@@ -629,33 +648,40 @@ class AppWindow(QMainWindow):
         if layer.ref_p1 is None or layer.ref_p2 is None:
             return False
 
-        px_len = math.hypot(layer.ref_p2.x() - layer.ref_p1.x(), layer.ref_p2.y() - layer.ref_p1.y())
-        if px_len <= 1e-9:
-            return False
-
         ref_length_mm = float(layer.ref_length_mm or floor.data.get("ref_length_mm", 0.0) or 0.0)
         if ref_length_mm <= 0.0:
             return False
 
         old_global_mpp = float(self.canvas._mm_per_px or 1.0)
-        old_layer_mpp = float(layer.mm_per_px or old_global_mpp)
+        old_mpp = float(layer.mm_per_px or 1.0)
+        native_size = tuple(layer.size)
         old_render_size = self.canvas._layer_render_size_for_scale(
             layer,
             old_global_mpp,
-            layer_mm_per_px=old_layer_mpp,
+            layer_mm_per_px=old_mpp,
+            native_size=native_size,
         )
-        new_mpp = ref_length_mm / px_len
 
-        # Globaler Bildschirmmaßstab bleibt konstant – nur Layer skaliert.
-        # Die Referenzlinie wird mit dem Bild mit-skaliert (remap).
-        new_render_size = self.canvas._layer_render_size_for_scale(
+        p1_img = self.canvas._world_to_layer_image_point(
             layer,
-            old_global_mpp,
-            layer_mm_per_px=new_mpp,
+            layer.ref_p1,
+            old_render_size,
+            native_size,
         )
+        p2_img = self.canvas._world_to_layer_image_point(
+            layer,
+            layer.ref_p2,
+            old_render_size,
+            native_size,
+        )
+        px_len_img = math.hypot(p2_img.x() - p1_img.x(), p2_img.y() - p1_img.y())
+        if px_len_img <= 1e-9:
+            return False
 
-        # Referenzlinie mit dem Bild mitumrechnen: von alter zu neuer Render-Größe
-        self.canvas.remap_layer_ref_points(fp_id, old_render_size, new_render_size)
+        new_mpp = ref_length_mm / px_len_img
+
+        if abs(new_mpp - old_mpp) > 1e-9:
+            self.canvas.rescale_layer_ref_points(fp_id, old_mpp, new_mpp)
 
         layer.mm_per_px = new_mpp
         floor.layer["mm_per_px"] = new_mpp
@@ -1743,6 +1769,9 @@ class AppWindow(QMainWindow):
         specs: list[tuple[str, str, bool]] = []
         element = self._document.get(element_id) if element_id else None
 
+        if kind == "navigator_root":
+            specs.append(("add_floorplan_empty", "Neuen Grundriss einfügen", True))
+
         if kind == "floorplan" and element_id in self._document.floorplans:
             specs.append(("activate", "Als aktiv setzen", True))
 
@@ -1796,6 +1825,9 @@ class AppWindow(QMainWindow):
 
         if action_id == "activate":
             self._on_floorplan_activated(element_id)
+            return
+        if action_id == "add_floorplan_empty":
+            self._add_empty_floorplan()
             return
         if action_id == "undo":
             self._undo()
@@ -1880,6 +1912,57 @@ class AppWindow(QMainWindow):
 
     def _on_navigator_context(self, element_id: str, kind: str, global_pos) -> None:
         self._open_context_menu(element_id, kind, global_pos)
+
+    def _on_navigator_floorplan_order_changed(self, order: list[str]) -> None:
+        if self._document is None:
+            return
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for fp_id in order:
+            if fp_id in self._document.floorplans and fp_id not in seen:
+                cleaned.append(fp_id)
+                seen.add(fp_id)
+        for fp_id in self._document.floorplan_order:
+            if fp_id in self._document.floorplans and fp_id not in seen:
+                cleaned.append(fp_id)
+                seen.add(fp_id)
+        old_order = list(self._document.floorplan_order)
+        old_floor_order = [fid for fid in old_order if fid in self._document.floorplans]
+        if cleaned == old_floor_order:
+            return
+
+        # Reorder only top-level floor plans and keep dependent layers in order.
+        furniture_by_floor: dict[str, list[str]] = {}
+        loose_layer_ids: list[str] = []
+        for layer_id in old_order:
+            furniture = self._document.furniture.get(layer_id)
+            if furniture is None:
+                continue
+            parent_id = str(furniture.floor_plan_id or "").strip()
+            if parent_id in self._document.floorplans:
+                furniture_by_floor.setdefault(parent_id, []).append(layer_id)
+            else:
+                loose_layer_ids.append(layer_id)
+
+        new_order: list[str] = []
+        for fp_id in cleaned:
+            new_order.append(fp_id)
+            new_order.extend(furniture_by_floor.get(fp_id, []))
+
+        for layer_id in old_order:
+            if layer_id in self._document.floorplans:
+                continue
+            if layer_id not in new_order:
+                new_order.append(layer_id)
+        for layer_id in loose_layer_ids:
+            if layer_id not in new_order:
+                new_order.append(layer_id)
+
+        self._document.floorplan_order = new_order
+        self.canvas.set_floor_plan_order(new_order)
+        self.canvas.update()
+        self._emit_structure_changed()
+        self._mark_dirty()
 
     def _on_canvas_context_requested(self, obj_type: str, obj_id: str, _canvas_pt, global_pos) -> None:
         if obj_type == "helper_line" and obj_id:
@@ -2016,6 +2099,9 @@ class AppWindow(QMainWindow):
         for fp_id, floor in {**document.floorplans, **document.furniture}.items():
             file_path = (floor.file_path or "").strip()
             if not file_path:
+                continue
+            if is_data_uri(file_path):
+                self.canvas.load_floor_plan_image(fp_id, file_path)
                 continue
             resolved = Path(file_path)
             if not resolved.is_absolute() and base_dir is not None:
@@ -2266,6 +2352,53 @@ class AppWindow(QMainWindow):
         self._emit_structure_changed()
         self._mark_dirty()
         self.log.success(f"Grundriss hinzugefügt: {fp_id}")
+
+    def _add_empty_floorplan(self) -> None:
+        fp_id = self._document.new_id(FloorPlan)
+        default_name = f"Grundriss {len(self._document.floorplans) + 1}"
+        self._push_undo()
+
+        layer = {
+            "fp_id": fp_id,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+            "rotation": 0.0,
+            "opacity": 1.0,
+            "visible": True,
+            "mm_per_px": 1.0,
+            "ref_length_mm": 5000.0,
+            "fixed_width_mm": 0.0,
+            "fixed_height_mm": 0.0,
+            "polygon_color": "#8d99ae",
+            "polygon": [],
+        }
+        data = {
+            "name": default_name,
+            "visible": True,
+            "file_path": "",
+            "polygon_color": "#8d99ae",
+            "ref_line_visible": True,
+            "ref_line_color": "#ffdd00",
+            "opacity": 1.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+            "rotation": 0.0,
+            "ref_length_mm": 5000.0,
+            "fixed_width_mm": 0.0,
+            "fixed_height_mm": 0.0,
+        }
+        floor = FloorPlan(fp_id, data=data, layer=layer)
+        self._document.add(floor)
+        self._document.floorplan_order.append(fp_id)
+        self._document.active_floorplan_id = fp_id
+
+        self.canvas.add_floor_plan(fp_id)
+        self.canvas.set_floor_plan_visible(fp_id, True)
+        self.canvas.set_active_helper_floor(fp_id)
+
+        self._emit_structure_changed()
+        self._mark_dirty()
+        self.log.success(f"Leerer Grundriss hinzugefügt: {fp_id}")
 
     def _add_furniture(self) -> None:
         from model.elements import Furniture  # noqa: PLC0415
@@ -2583,6 +2716,78 @@ class AppWindow(QMainWindow):
         self._update_title()
         self.log.success(f"Gespeichert: {self._project_path}")
         return True
+
+    def _import_hrp_elements(self) -> None:
+        start_dir = str(self._project_path.parent) if self._project_path else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "HRP-Quelle wählen",
+            start_dir,
+            _FILE_FILTER,
+        )
+        if not path:
+            return
+
+        source_path = Path(path)
+        if self._project_path is not None:
+            try:
+                if source_path.resolve() == self._project_path.resolve():
+                    QMessageBox.information(self, "HRP-Import", "Die aktuell geöffnete Datei kann nicht in sich selbst importiert werden.")
+                    return
+            except OSError:
+                pass
+
+        try:
+            source_document = load_document(source_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "HRP-Import", f"Quelle konnte nicht geladen werden:\n{exc}")
+            return
+
+        candidates = iter_import_candidates(source_document)
+        if not candidates:
+            QMessageBox.information(self, "HRP-Import", "Die gewählte HRP enthält keine importierbaren Elemente.")
+            return
+
+        dialog = HrpImportDialog(
+            source_document,
+            candidates,
+            source_label=source_path.name,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_keys = dialog.selected_keys()
+        if not selected_keys:
+            QMessageBox.information(self, "HRP-Import", "Keine Elemente ausgewählt.")
+            return
+
+        self._push_undo()
+        result = import_selected_elements(source_document, self._document, selected_keys)
+        self._load_floor_plan_images(self._document)
+        self._reload_elec_points_to_canvas(self._document)
+        self.canvas._rebuild_label_map()
+        self.canvas.update()
+        self._emit_structure_changed()
+        self._mark_dirty()
+
+        self.statusBar().showMessage(
+            (
+                f"HRP-Import: direkt {len(result.selected_keys)}, "
+                f"automatisch {len(result.auto_included_keys)}, "
+                f"importiert {len(result.imported_keys)}"
+            ),
+            5000,
+        )
+        QMessageBox.information(
+            self,
+            "HRP-Import",
+            (
+                f"Direkt ausgewählt: {len(result.selected_keys)}\n"
+                f"Automatisch ergänzt: {len(result.auto_included_keys)}\n"
+                f"Importiert gesamt: {len(result.imported_keys)}"
+            ),
+        )
 
     def _save_project_as(self) -> bool:
         path, _ = QFileDialog.getSaveFileName(self, "Projekt speichern", "", _FILE_FILTER)

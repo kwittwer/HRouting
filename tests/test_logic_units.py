@@ -10,6 +10,9 @@ from logic.heating_calc import (
     calc_circuit,
     calc_specific_heat_output,
 )
+from logic.hrp_import import import_selected_elements, resolve_import_selection, selection_key
+from model.document import Document
+from model.elements import Circuit, ElecCable, ElecPoint, FloorPlan, Hkv, HkvLine
 from logic.svg_parser import parse_svg_dimensions
 from validate_hrp import validate_schema, validate_semantic
 
@@ -95,3 +98,160 @@ def test_validate_hrp_detects_invalid_ap_reference():
     errors, _warnings = validate_semantic(data)
 
     assert any("elec_cables.EK-1.start_ap" in msg for msg in errors)
+
+
+def test_resolve_import_selection_auto_includes_dependencies():
+    source = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "hkv_points": {"HKV-1": [10, 10]},
+                "elec_points": {"AP-1": [20, 20], "AP-2": [40, 40]},
+                "elec_cables": {"EK-1": [[20, 20], [40, 40]]},
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+                "polygons": {"HK-1": [[0, 0], [100, 0], [100, 100]]},
+                "supply_hkv": {"HK-1": "HKV-1"},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "file_path": ""}},
+                "hkv_points": {"HKV-1": {"hkv_id": "HKV-1", "name": "Verteiler", "floor_plan_id": "grundriss-1"}},
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "name": "Dose 1", "floor_plan_id": "grundriss-1"},
+                    "AP-2": {"point_id": "AP-2", "name": "Dose 2", "floor_plan_id": "grundriss-1"},
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "name": "Kabel 1",
+                        "floor_plan_id": "grundriss-1",
+                        "start_ap": "AP-1",
+                        "end_ap": "AP-2",
+                    }
+                },
+                "circuits": {
+                    "HK-1": {
+                        "circuit_id": "HK-1",
+                        "name": "Wohnen",
+                        "floor_plan_id": "grundriss-1",
+                    }
+                },
+            },
+        }
+    )
+
+    selection = resolve_import_selection(
+        source,
+        [selection_key(ElecCable, "EK-1"), selection_key(Circuit, "HK-1")],
+    )
+
+    assert selection.selected_keys == (
+        selection_key(ElecCable, "EK-1"),
+        selection_key(Circuit, "HK-1"),
+    )
+    assert selection_key(FloorPlan, "grundriss-1") in selection.auto_included_keys
+    assert selection_key(Hkv, "HKV-1") in selection.auto_included_keys
+    assert selection_key(ElecPoint, "AP-1") in selection.auto_included_keys
+    assert selection_key(ElecPoint, "AP-2") in selection.auto_included_keys
+
+
+def test_import_selected_elements_rewrites_ids_and_references():
+    source = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True, "mm_per_px": 25.0}],
+                "hkv_points": {"HKV-1": [10, 10]},
+                "hkv_lines": {"HKVL-1": [[10, 10], [20, 10]]},
+                "hkv_line_start": {"HKVL-1": "HKV-1"},
+                "hkv_line_end": {"HKVL-1": "HKV-1"},
+                "elec_points": {"AP-1": [20, 20], "AP-2": [40, 40]},
+                "elec_cables": {"EK-1": [[20, 20], [40, 40]]},
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+                "polygons": {"HK-1": [[0, 0], [100, 0], [100, 100]]},
+                "supply_hkv": {"HK-1": "HKV-1"},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "file_path": ""}},
+                "floorplans_order": ["grundriss-1"],
+                "hkv_points": {"HKV-1": {"hkv_id": "HKV-1", "name": "Verteiler", "floor_plan_id": "grundriss-1"}},
+                "hkv_lines": {
+                    "HKVL-1": {
+                        "line_id": "HKVL-1",
+                        "name": "Linie",
+                        "floor_plan_id": "grundriss-1",
+                        "start_hkv": "HKV-1",
+                        "end_hkv": "HKV-1",
+                    }
+                },
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "name": "Dose 1", "floor_plan_id": "grundriss-1"},
+                    "AP-2": {"point_id": "AP-2", "name": "Dose 2", "floor_plan_id": "grundriss-1"},
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "name": "Kabel 1",
+                        "floor_plan_id": "grundriss-1",
+                        "start_ap": "AP-1",
+                        "end_ap": "AP-2",
+                    }
+                },
+                "circuits": {
+                    "HK-1": {
+                        "circuit_id": "HK-1",
+                        "name": "Wohnen",
+                        "floor_plan_id": "grundriss-1",
+                    }
+                },
+            },
+        }
+    )
+    target = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "elec_points": {"AP-1": [1, 1]},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "Bestand", "file_path": ""}},
+                "floorplans_order": ["grundriss-1"],
+                "elec_points": {"AP-1": {"point_id": "AP-1", "name": "Alt", "floor_plan_id": "grundriss-1"}},
+            },
+        }
+    )
+
+    result = import_selected_elements(
+        source,
+        target,
+        [selection_key(ElecCable, "EK-1"), selection_key(Circuit, "HK-1"), selection_key(HkvLine, "HKVL-1")],
+    )
+
+    floor_id = result.id_map[selection_key(FloorPlan, "grundriss-1")]
+    hkv_id = result.id_map[selection_key(Hkv, "HKV-1")]
+    ap1_id = result.id_map[selection_key(ElecPoint, "AP-1")]
+    ap2_id = result.id_map[selection_key(ElecPoint, "AP-2")]
+    cable_id = result.id_map[selection_key(ElecCable, "EK-1")]
+    circuit_id = result.id_map[selection_key(Circuit, "HK-1")]
+    hkv_line_id = result.id_map[selection_key(HkvLine, "HKVL-1")]
+
+    assert floor_id == "grundriss-2"
+    assert target.floorplan_order == ["grundriss-1", "grundriss-2"]
+
+    imported_cable = target.elements["elec_cables"][cable_id]
+    assert imported_cable.floor_plan_id == floor_id
+    assert imported_cable.start_ap == ap1_id
+    assert imported_cable.end_ap == ap2_id
+    assert imported_cable.geom["cable_start_ap"] == ap1_id
+    assert imported_cable.geom["cable_end_ap"] == ap2_id
+
+    imported_circuit = target.elements["circuits"][circuit_id]
+    assert imported_circuit.floor_plan_id == floor_id
+    assert imported_circuit.hkv_id == hkv_id
+
+    imported_hkv_line = target.elements["hkv_lines"][hkv_line_id]
+    assert imported_hkv_line.floor_plan_id == floor_id
+    assert imported_hkv_line.start_hkv == hkv_id
+    assert imported_hkv_line.end_hkv == hkv_id
+    assert imported_hkv_line.geom["hkv_line_start"] == hkv_id
+    assert imported_hkv_line.geom["hkv_line_end"] == hkv_id

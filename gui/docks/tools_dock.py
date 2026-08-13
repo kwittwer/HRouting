@@ -8,10 +8,10 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QDockWidget,
     QToolButton,
-    QVBoxLayout,
     QWidget,
 )
 
+from gui.flow_layout import FlowLayout
 from gui.tool_registry import ToolSpec
 
 
@@ -25,10 +25,8 @@ class ToolsDock(QDockWidget):
         self.setObjectName("dock_tools")
 
         self._container = QWidget(self)
-        self._layout = QVBoxLayout(self._container)
-        self._layout.setContentsMargins(6, 6, 6, 6)
-        self._layout.setSpacing(4)
-        self._layout.addStretch(1)
+        self._layout = FlowLayout(self._container, margin=6, h_spacing=4, v_spacing=4)
+        self._container.setLayout(self._layout)
         self.setWidget(self._container)
 
         self._group = QButtonGroup(self)
@@ -39,16 +37,15 @@ class ToolsDock(QDockWidget):
     def set_tools(self, tools: list[ToolSpec]) -> None:
         for button in self._buttons.values():
             self._group.removeButton(button)
+            self._layout.removeWidget(button)
             button.setParent(None)
             button.deleteLater()
         self._buttons.clear()
 
-        for index, tool in enumerate(tools):
+        for tool in tools:
             button = QToolButton(self._container)
             button.setText(tool.label)
             button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-            button.setSizePolicy(button.sizePolicy().horizontalPolicy(),
-                                 button.sizePolicy().verticalPolicy())
             button.setCheckable(tool.checkable)
             button.setAutoRaise(True)
             if tool.icon:
@@ -60,7 +57,7 @@ class ToolsDock(QDockWidget):
                 lambda _checked=False, tool_id=tool.id: self.tool_activated.emit(tool_id)
             )
             self._group.addButton(button)
-            self._layout.insertWidget(index, button)
+            self._layout.addWidget(button)
             self._buttons[tool.id] = button
 
     def set_active_tool(self, tool_id: str) -> None:
