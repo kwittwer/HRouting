@@ -8448,7 +8448,7 @@ class _PdfContext:
         from main import VERSION
         now = QDateTime.currentDateTime().toString("dd.MM.yyyy  HH:mm")
         self.painter.save()
-        self.painter.setFont(QFont("Arial", 7))
+        self.painter.setFont(QFont("Arial", 9))
         self.painter.setPen(Qt.darkGray)
         txt = f"HRouting v{VERSION}  \u2013  {now}"
         tw, th = self.mm(80), self.mm(4)
@@ -8488,24 +8488,30 @@ class _PdfContext:
                    col_widths: list[float] | None = None) -> float:
         from PySide6.QtGui import QPen, QBrush
         n_cols = len(headers)
-        table_w = page.width()
+        side_margin = self.mm(4)
+        table_w = max(self.mm(40), page.width() - 2 * side_margin)
+        x0 = page.x() + side_margin
         if col_widths:
             total_w = sum(col_widths)
             widths = [w / total_w * table_w for w in col_widths]
         else:
             widths = [table_w / n_cols] * n_cols
 
-        header_h = self.mm(8)
-        min_row_h = self.mm(5.5)
-        cell_pad = self.mm(1.2)
-        x0 = page.x()
+        base_font_size = 9 if n_cols <= 6 else (8 if n_cols <= 8 else 7)
+        wide_table = n_cols >= 8
+        cell_pad = self.mm(0.8)
         top_margin = self.mm(6)
         bottom_margin = self.mm(6)
 
-        self.painter.setFont(QFont("Arial", 7))
+        self.painter.setFont(QFont("Arial", base_font_size))
         fm = self.painter.fontMetrics()
+        line_h = max(1, fm.lineSpacing())
+        header_h = max(self.mm(6), line_h + 2 * cell_pad)
+        min_row_h = max(self.mm(4.2), line_h + 2 * cell_pad)
 
         def _cell_height(text: str, col_w: float) -> float:
+            if wide_table:
+                return min_row_h
             inner_w = max(1, int(col_w - 2 * cell_pad))
             br = fm.boundingRect(0, 0, inner_w, 100000,
                                   Qt.TextWordWrap | Qt.AlignLeft, str(text))
@@ -8532,21 +8538,30 @@ class _PdfContext:
             return new_page
 
         def _draw_header(y_pos: float):
-            self.painter.setFont(QFont("Arial", 7, QFont.Bold))
+            self.painter.setFont(QFont("Arial", base_font_size, QFont.Bold))
             cx = x0
             for j, h in enumerate(headers):
                 r = QRectF(cx, y_pos, widths[j], header_h)
                 self.painter.fillRect(r, QBrush(QColor("#e0e0e0")))
                 self.painter.drawRect(r)
+                if wide_table:
+                    inner_w = max(1, int(widths[j] - 2 * cell_pad))
+                    header_text = fm.elidedText(str(h), Qt.ElideRight, inner_w)
+                    flags = Qt.AlignVCenter | Qt.AlignLeft | Qt.TextSingleLine
+                else:
+                    header_text = h
+                    flags = Qt.AlignCenter | Qt.TextWordWrap
                 self.painter.drawText(
                     r.adjusted(cell_pad, 0, -cell_pad, 0),
-                    Qt.AlignCenter | Qt.TextWordWrap, h)
+                    flags,
+                    header_text,
+                )
                 cx += widths[j]
 
         y = y_start
         if y + header_h > _page_bottom():
             page = _new_page()
-            x0 = page.x()
+            x0 = page.x() + side_margin
             y = page.y() + top_margin
 
         self.painter.save()
@@ -8557,16 +8572,16 @@ class _PdfContext:
         y += header_h
 
         # Data rows
-        self.painter.setFont(QFont("Arial", 7))
+        self.painter.setFont(QFont("Arial", base_font_size))
         for ri, row in enumerate(rows):
             rh = _row_height(row)
             if y + rh > _page_bottom():
                 page = _new_page()
-                x0 = page.x()
+                x0 = page.x() + side_margin
                 y = page.y() + top_margin
                 _draw_header(y)
                 y += header_h
-                self.painter.setFont(QFont("Arial", 7))
+            self.painter.setFont(QFont("Arial", base_font_size))
 
             if ri % 2 == 1:
                 cx = x0
@@ -8582,9 +8597,20 @@ class _PdfContext:
                 align = ((Qt.AlignRight | Qt.AlignTop)
                          if j >= 2
                          else (Qt.AlignLeft | Qt.AlignTop))
+                if wide_table:
+                    inner_w = max(1, int(widths[j] - 2 * cell_pad))
+                    txt = fm.elidedText(str(cell), Qt.ElideRight, inner_w)
+                    flags = ((Qt.AlignRight | Qt.AlignVCenter)
+                             if j >= 2
+                             else (Qt.AlignLeft | Qt.AlignVCenter)) | Qt.TextSingleLine
+                else:
+                    txt = str(cell)
+                    flags = align | Qt.TextWordWrap
                 self.painter.drawText(
                     r.adjusted(cell_pad, cell_pad, -cell_pad, -cell_pad),
-                    align | Qt.TextWordWrap, str(cell))
+                    flags,
+                    txt,
+                )
                 cx += widths[j]
             y += rh
 
@@ -8719,7 +8745,7 @@ class _PdfContext:
             QRectF(x0 + self.mm(2), y, avail_w * 0.5, header_h),
             Qt.AlignVCenter | Qt.AlignLeft, ap_name,
         )
-        self.painter.setFont(QFont("Arial", 7))
+        self.painter.setFont(QFont("Arial", 9))
         self.painter.drawText(
             QRectF(x0 + self.mm(2), y, avail_w - self.mm(4), header_h),
             Qt.AlignVCenter | Qt.AlignRight, subtitle,
@@ -8727,9 +8753,9 @@ class _PdfContext:
         y += header_h + gap_after_header
 
         # ── DIN-rail rows ───────────────────────────────────────── #
-        font_te = QFont("Arial", 5)
-        font_type = QFont("Arial", 6, QFont.Bold)
-        font_lbl = QFont("Arial", 5)
+        font_te = QFont("Arial", 9)
+        font_type = QFont("Arial", 9, QFont.Bold)
+        font_lbl = QFont("Arial", 9)
         te_global_offset = 0
 
         for row_idx in range(rows):
@@ -8741,7 +8767,7 @@ class _PdfContext:
                 x0 = cur_page.x()
 
             # row label
-            self.painter.setFont(QFont("Arial", 7, QFont.Bold))
+            self.painter.setFont(QFont("Arial", 9, QFont.Bold))
             self.painter.setPen(QColor("#555555"))
             self.painter.drawText(
                 QRectF(x0, y + te_num_h, left_margin - self.mm(1), slot_h + rail_h),
@@ -8790,7 +8816,7 @@ class _PdfContext:
                     )
                     spec = str(slot_data.get("spec", "") or "").strip()
                     if spec:
-                        self.painter.setFont(QFont("Arial", 5))
+                        self.painter.setFont(QFont("Arial", 9))
                         self.painter.setPen(QColor("#ffe08a"))
                         self.painter.drawText(
                             QRectF(sx + self.mm(0.3), sy + slot_h * 0.4,
@@ -8857,7 +8883,7 @@ class _PdfContext:
                                 QRectF(te_bx, bb_y, slot_w, bb_strip_h),
                                 QBrush(QColor(_3p_colors[ph])),
                             )
-                            self.painter.setFont(QFont("Arial", 3, QFont.Bold))
+                            self.painter.setFont(QFont("Arial", 9, QFont.Bold))
                             self.painter.setPen(QColor("#ffffff"))
                             self.painter.drawText(
                                 QRectF(te_bx + self.mm(0.2), bb_y,
@@ -8875,7 +8901,7 @@ class _PdfContext:
                                 QRectF(te_bx, bb_y, slot_w, bb_strip_h),
                                 QBrush(QColor(_3pn_colors[ph])),
                             )
-                            self.painter.setFont(QFont("Arial", 3, QFont.Bold))
+                            self.painter.setFont(QFont("Arial", 9, QFont.Bold))
                             self.painter.setPen(QColor("#ffffff"))
                             self.painter.drawText(
                                 QRectF(te_bx + self.mm(0.2), bb_y,
@@ -8902,7 +8928,7 @@ class _PdfContext:
                                 QRectF(te_bx, bb_y, slot_w, bb_strip_h),
                                 QBrush(QColor(_3pn4_colors[ph])),
                             )
-                            self.painter.setFont(QFont("Arial", 3, QFont.Bold))
+                            self.painter.setFont(QFont("Arial", 9, QFont.Bold))
                             self.painter.setPen(QColor("#ffffff"))
                             self.painter.drawText(
                                 QRectF(te_bx + self.mm(0.2), bb_y,
@@ -8919,7 +8945,7 @@ class _PdfContext:
                             QBrush(QColor(bb_col)),
                         )
                         if bb_phase:
-                            self.painter.setFont(QFont("Arial", 4, QFont.Bold))
+                            self.painter.setFont(QFont("Arial", 9, QFont.Bold))
                             self.painter.setPen(QColor("#ffffff"))
                             self.painter.drawText(
                                 QRectF(bx + self.mm(0.5), bb_y, bw_b - self.mm(1), bb_strip_h),
@@ -8942,7 +8968,7 @@ class _PdfContext:
             total_rel = sum(col_w_rel)
             col_ws = [r / total_rel * avail_w for r in col_w_rel]
 
-            self.painter.setFont(QFont("Arial", 7, QFont.Bold))
+            self.painter.setFont(QFont("Arial", 9, QFont.Bold))
             self.painter.setPen(QPen(Qt.black, max(1, self.mm(0.15))))
             cx = x0
             for hi, hdr in enumerate(tbl_headers):
@@ -8956,7 +8982,7 @@ class _PdfContext:
                 cx += col_ws[hi]
             y += tbl_header_h
 
-            self.painter.setFont(QFont("Arial", 7))
+            self.painter.setFont(QFont("Arial", 9))
             for ri, s in enumerate(
                 sorted(occupied, key=lambda x: (x.get("row", 0), x.get("slot", 0)))
             ):
@@ -8964,7 +8990,7 @@ class _PdfContext:
                     cur_page = _new_page()
                     y = cur_page.y() + self.mm(4)
                     x0 = cur_page.x()
-                    self.painter.setFont(QFont("Arial", 7, QFont.Bold))
+                    self.painter.setFont(QFont("Arial", 9, QFont.Bold))
                     cx2 = x0
                     for hi2, hdr2 in enumerate(tbl_headers):
                         r3 = QRectF(cx2, y, col_ws[hi2], tbl_header_h)
@@ -8976,7 +9002,7 @@ class _PdfContext:
                         )
                         cx2 += col_ws[hi2]
                     y += tbl_header_h
-                    self.painter.setFont(QFont("Arial", 7))
+                    self.painter.setFont(QFont("Arial", 9))
 
                 if ri % 2 == 1:
                     self.painter.fillRect(
@@ -9025,7 +9051,7 @@ class _PdfContext:
                 x0 = cur_page.x()
 
             # Legend header
-            self.painter.setFont(QFont("Arial", 7, QFont.Bold))
+            self.painter.setFont(QFont("Arial", 9, QFont.Bold))
             self.painter.setPen(QPen(Qt.black, max(1, self.mm(0.15))))
             hdr_rect = QRectF(x0, y, avail_w, self.mm(6))
             self.painter.fillRect(hdr_rect, QBrush(QColor("#e8eaf6")))
@@ -9058,7 +9084,7 @@ class _PdfContext:
                     self.painter.fillRect(swatch, QBrush(QColor(bb_col)))
                     self.painter.drawRect(swatch)
                 # Phase label
-                self.painter.setFont(QFont("Arial", 7, QFont.Bold))
+                self.painter.setFont(QFont("Arial", 9, QFont.Bold))
                 self.painter.setPen(Qt.black)
                 self.painter.drawText(
                     QRectF(x0 + self.mm(6), y, leg_col_phase, leg_h),
@@ -9066,7 +9092,7 @@ class _PdfContext:
                 )
                 # TE range
                 te_range = f"TE {bb_te_s}\u2013{bb_te_e}"
-                self.painter.setFont(QFont("Arial", 7))
+                self.painter.setFont(QFont("Arial", 9))
                 self.painter.drawText(
                     QRectF(x0 + self.mm(6) + leg_col_phase, y, leg_col_range, leg_h),
                     Qt.AlignVCenter | Qt.AlignLeft, te_range,

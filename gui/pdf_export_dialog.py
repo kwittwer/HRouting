@@ -1,10 +1,11 @@
 import copy
 import uuid
 
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, QDate
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QPlainTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -58,6 +60,8 @@ class PdfExportConfigDialog(QDialog):
         pages: list[dict],
         floor_plans: list[tuple[str, str]],
         svg_size: tuple[float, float],
+        export_meta: dict | None = None,
+        hrouting_version: str = "",
         canvas=None,
         parent=None,
     ):
@@ -69,10 +73,12 @@ class PdfExportConfigDialog(QDialog):
         self._floor_plans = list(floor_plans)
         self._svg_w = float(svg_size[0] if svg_size else 0.0)
         self._svg_h = float(svg_size[1] if svg_size else 0.0)
+        self._hrouting_version = str(hrouting_version or "")
         self._block_updates = False
         self._canvas = canvas
         self._element_checks: dict[str, QCheckBox] = {}
         self._table_checks: dict[str, QCheckBox] = {}
+        self._meta = self._normalize_meta(export_meta)
 
         self._build_ui()
         self._connect_canvas_signals()
@@ -120,6 +126,39 @@ class PdfExportConfigDialog(QDialog):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
+
+        meta_group = QGroupBox("Titelseite")
+        meta_form = QFormLayout(meta_group)
+        self.le_project = QLineEdit(self._meta.get("project", ""))
+        self.le_author = QLineEdit(self._meta.get("author", ""))
+        self.de_date = QDateEdit()
+        self.de_date.setCalendarPopup(True)
+        date_str = str(self._meta.get("date", ""))
+        date_val = QDate.fromString(date_str, "dd.MM.yyyy")
+        if not date_val.isValid():
+            date_val = QDate.currentDate()
+        self.de_date.setDate(date_val)
+        self.cb_status = QComboBox()
+        self.cb_status.addItems(["entwurf", "review", "final"])
+        status = str(self._meta.get("planning_status", "entwurf")).strip().lower()
+        idx_status = self.cb_status.findText(status, Qt.MatchFixedString)
+        self.cb_status.setCurrentIndex(max(0, idx_status))
+        self.le_page_count = QLineEdit()
+        self.le_page_count.setReadOnly(True)
+        self.le_version = QLineEdit(str(self._meta.get("hrouting_version", self._hrouting_version or "")))
+        self.le_version.setReadOnly(True)
+        self.te_notes = QPlainTextEdit(str(self._meta.get("notes", "")))
+        self.te_notes.setPlaceholderText("Optionale Notizen für die Titelseite")
+        self.te_notes.setFixedHeight(84)
+
+        meta_form.addRow("Projekt", self.le_project)
+        meta_form.addRow("Author", self.le_author)
+        meta_form.addRow("Datum", self.de_date)
+        meta_form.addRow("Planungsstand", self.cb_status)
+        meta_form.addRow("Seitenanzahl", self.le_page_count)
+        meta_form.addRow("HRouting Programmversion", self.le_version)
+        meta_form.addRow("Notizen", self.te_notes)
+        root.addWidget(meta_group)
 
         content = QHBoxLayout()
         root.addLayout(content, stretch=1)
@@ -229,6 +268,40 @@ class PdfExportConfigDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+        self._update_page_count_field()
+
+    def _normalize_meta(self, meta: dict | None) -> dict[str, str]:
+        src = meta if isinstance(meta, dict) else {}
+        out = {
+            "project": str(src.get("project", "")).strip(),
+            "author": str(src.get("author", "")).strip(),
+            "date": str(src.get("date", "")).strip(),
+            "planning_status": str(src.get("planning_status", "entwurf")).strip().lower() or "entwurf",
+            "page_count": str(src.get("page_count", "")),
+            "hrouting_version": str(src.get("hrouting_version", self._hrouting_version or "")).strip(),
+            "notes": str(src.get("notes", "")).rstrip(),
+        }
+        if out["planning_status"] not in {"entwurf", "review", "final"}:
+            out["planning_status"] = "entwurf"
+        if not out["date"]:
+            out["date"] = QDate.currentDate().toString("dd.MM.yyyy")
+        if not out["hrouting_version"]:
+            out["hrouting_version"] = str(self._hrouting_version or "")
+        return out
+
+    def _enabled_page_count(self) -> int:
+        enabled = 0
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item is not None and item.checkState(0) == Qt.Checked:
+                enabled += 1
+        return enabled
+
+    def _update_page_count_field(self):
+        # +1 for the generated title page
+        total = self._enabled_page_count() + 1
+        self.le_page_count.setText(str(total))
 
 
 
@@ -345,6 +418,7 @@ class PdfExportConfigDialog(QDialog):
             self.le_title.setText(title)
             self.cb_enabled.setChecked(page["enabled"])
             self._block_updates = False
+        self._update_page_count_field()
 
     def _on_tree_selection_changed(self):
         self._load_editor_from_current()
@@ -489,6 +563,7 @@ class PdfExportConfigDialog(QDialog):
         item.setCheckState(0, Qt.Checked)
         item.setData(0, Qt.UserRole, page)
         self.tree.setCurrentItem(item)
+        self._update_page_count_field()
 
     def _on_remove_selected(self):
         item = self._current_item()
@@ -500,6 +575,18 @@ class PdfExportConfigDialog(QDialog):
             self.tree.setCurrentItem(self.tree.topLevelItem(max(0, idx - 1)))
         else:
             self._load_editor_from_current()
+        self._update_page_count_field()
+
+    def get_export_meta(self) -> dict[str, str]:
+        return {
+            "project": self.le_project.text().strip(),
+            "author": self.le_author.text().strip(),
+            "date": self.de_date.date().toString("dd.MM.yyyy"),
+            "planning_status": self.cb_status.currentText().strip().lower(),
+            "page_count": self.le_page_count.text().strip(),
+            "hrouting_version": self.le_version.text().strip(),
+            "notes": self.te_notes.toPlainText().strip(),
+        }
 
     def get_pages(self) -> list[dict]:
         pages: list[dict] = []

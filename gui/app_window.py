@@ -1,4 +1,4 @@
-"""Neues Hauptfenster von HRouting.
+﻿"""Neues Hauptfenster von HRouting.
 
 Aufbau:
 
@@ -15,7 +15,7 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, QDateTime, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -85,6 +85,8 @@ _MAX_UNDO_STEPS = 80
 _UNDO_GROUP_IDLE_MS = 250
 _LAST_PROJECT_KEY = "last_project_path"
 _RECENT_KEY = "recent_projects"
+_LAST_PDF_EXPORT_KEY = "last_pdf_export_path"
+_LAST_SVG_EXPORT_KEY = "last_svg_export_path"
 _MAX_RECENT = 8
 
 _FILE_FILTER = "HRouting-Projekt (*.hrp);;Alle Dateien (*)"
@@ -148,6 +150,7 @@ class AppWindow(QMainWindow):
         self._schaltplan_window: SchaltplanWindow | None = None
         self._elec_schema_ap_positions: dict[str, list[float]] = {}
         self._pdf_export_pages: list[dict] = []
+        self._pdf_export_meta: dict[str, str] = {}
 
         self._build_central()
         self._build_docks()
@@ -2972,6 +2975,32 @@ class AppWindow(QMainWindow):
         self._settings().setValue(_LAST_PROJECT_KEY, str(filepath))
         self._add_to_recent(filepath)
 
+    def _default_export_path(self, settings_key: str, default_name: str) -> str:
+        raw = str(self._settings().value(settings_key, "") or "").strip()
+        if raw:
+            last_path = Path(raw)
+            parent = last_path.parent
+            if parent.exists():
+                return str(last_path)
+        if self._project_path is not None and self._project_path.parent.exists():
+            return str(self._project_path.parent / default_name)
+        return default_name
+
+    def _default_pdf_export_path(self) -> str:
+        return self._default_export_path(_LAST_PDF_EXPORT_KEY, "projektbericht.pdf")
+
+    def _default_svg_export_path(self) -> str:
+        return self._default_export_path(_LAST_SVG_EXPORT_KEY, "heizplan.svg")
+
+    def _remember_export_path(self, settings_key: str, filepath: Path) -> None:
+        self._settings().setValue(settings_key, str(filepath))
+
+    def _remember_pdf_export_path(self, filepath: Path) -> None:
+        self._remember_export_path(_LAST_PDF_EXPORT_KEY, filepath)
+
+    def _remember_svg_export_path(self, filepath: Path) -> None:
+        self._remember_export_path(_LAST_SVG_EXPORT_KEY, filepath)
+
     def _open_recent(self, filepath: Path) -> None:
         if not filepath.exists():
             QMessageBox.warning(self, "Datei fehlt", f"Projekt nicht gefunden:\n{filepath}")
@@ -3647,10 +3676,11 @@ class AppWindow(QMainWindow):
 
     def _export_svg(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Als SVG exportieren", "heizplan.svg", "SVG (*.svg)"
+            self, "Als SVG exportieren", self._default_svg_export_path(), "SVG (*.svg)"
         )
         if not path:
             return
+        self._remember_svg_export_path(Path(path))
         self._write_plan_svg(path)
         self.log.success(f"SVG exportiert: {path}")
         self.statusBar().showMessage(f"SVG exportiert: {path}", 4000)
@@ -3779,6 +3809,44 @@ class AppWindow(QMainWindow):
             },
         ]
 
+    def _hrouting_program_version(self) -> str:
+        try:
+            from main import VERSION  # noqa: PLC0415
+
+            return str(VERSION)
+        except Exception:
+            return ""
+
+    def _default_pdf_export_meta(self, pages: list[dict] | None = None) -> dict[str, str]:
+        use_pages = pages if pages is not None else self._normalize_pdf_export_pages(self._pdf_export_pages)
+        enabled = [p for p in use_pages if p.get("enabled", True)]
+        project_name = self._project_path.stem if self._project_path else ""
+        return {
+            "project": str(project_name),
+            "author": "",
+            "date": QDateTime.currentDateTime().toString("dd.MM.yyyy"),
+            "planning_status": "entwurf",
+            "page_count": str(len(enabled) + 1),
+            "hrouting_version": self._hrouting_program_version(),
+            "notes": "",
+        }
+
+    def _normalize_pdf_export_meta(self, meta: dict | None, pages: list[dict] | None = None) -> dict[str, str]:
+        defaults = self._default_pdf_export_meta(pages)
+        src = meta if isinstance(meta, dict) else {}
+        out = {
+            "project": str(src.get("project", defaults["project"])).strip(),
+            "author": str(src.get("author", defaults["author"])).strip(),
+            "date": str(src.get("date", defaults["date"])).strip() or defaults["date"],
+            "planning_status": str(src.get("planning_status", defaults["planning_status"])).strip().lower() or "entwurf",
+            "page_count": str(src.get("page_count", defaults["page_count"])).strip() or defaults["page_count"],
+            "hrouting_version": str(src.get("hrouting_version", defaults["hrouting_version"])).strip() or defaults["hrouting_version"],
+            "notes": str(src.get("notes", defaults["notes"])).strip(),
+        }
+        if out["planning_status"] not in {"entwurf", "review", "final"}:
+            out["planning_status"] = "entwurf"
+        return out
+
     def _normalize_pdf_export_pages(self, pages: list[dict] | None) -> list[dict]:
         if not pages:
             return self._default_pdf_export_pages()
@@ -3852,17 +3920,22 @@ class AppWindow(QMainWindow):
                 return nr
         return self.canvas.get_default_source_rect()
 
-    def _open_pdf_export_config_dialog(self) -> list[dict] | None:
+    def _open_pdf_export_config_dialog(self) -> tuple[list[dict], dict[str, str]] | None:
+        pages = self._normalize_pdf_export_pages(self._pdf_export_pages)
         dialog = PdfExportConfigDialog(
-            pages=self._normalize_pdf_export_pages(self._pdf_export_pages),
+            pages=pages,
             floor_plans=self._current_floor_plans_for_export_dialog(),
             svg_size=self.canvas._svg_size,
+            export_meta=self._normalize_pdf_export_meta(self._pdf_export_meta, pages),
+            hrouting_version=self._hrouting_program_version(),
             canvas=self.canvas,
             parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
             return None
-        return self._normalize_pdf_export_pages(dialog.get_pages())
+        out_pages = self._normalize_pdf_export_pages(dialog.get_pages())
+        out_meta = self._normalize_pdf_export_meta(dialog.get_export_meta(), out_pages)
+        return out_pages, out_meta
 
     def _save_all_visibility(self) -> dict:
         return {
@@ -4590,14 +4663,170 @@ class AppWindow(QMainWindow):
     def _draw_pdf_title(self, painter, page_rect: QRectF, title: str) -> tuple[QRectF, QRectF]:
         from PySide6.QtGui import QFont  # noqa: PLC0415
 
-        title_font = QFont(painter.font())
-        title_font.setPointSizeF(max(10.0, title_font.pointSizeF() + 4.0))
+        title_font = QFont("Arial", 14, QFont.Bold)
         painter.setFont(title_font)
         title_h = max(36.0, page_rect.height() * 0.06)
         title_rect = QRectF(page_rect.x(), page_rect.y(), page_rect.width(), title_h)
         painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, title)
-        content_rect = QRectF(page_rect.x(), title_rect.bottom() + 8.0, page_rect.width(), max(1.0, page_rect.bottom() - (title_rect.bottom() + 8.0)))
+        footer_reserved_h = self._pdf_footer_reserved_height(page_rect)
+        content_top = title_rect.bottom() + 8.0
+        content_bottom = page_rect.bottom() - footer_reserved_h
+        content_rect = QRectF(
+            page_rect.x(),
+            content_top,
+            page_rect.width(),
+            max(1.0, content_bottom - content_top),
+        )
         return title_rect, content_rect
+
+    def _pdf_footer_reserved_height(self, page_rect: QRectF) -> float:
+        footer_h = max(14.0, page_rect.height() * 0.022)
+        return footer_h + max(18.0, page_rect.height() * 0.02)
+
+    def _pdf_prepare_footer(self) -> None:
+        self._pdf_footer_date = QDateTime.currentDateTime().toString("dd.MM.yyyy")
+        self._pdf_footer_page_no = 1
+        self._pdf_counting_only = False
+
+    def _draw_pdf_footer(self, painter, writer) -> None:
+        if bool(getattr(self, "_pdf_counting_only", False)):
+            return
+        from PySide6.QtGui import QFont  # noqa: PLC0415
+
+        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        page_no = int(getattr(self, "_pdf_footer_page_no", 1))
+        date_text = str(getattr(self, "_pdf_footer_date", ""))
+        footer_font = QFont("Arial", 9)
+        footer_h = max(14.0, page_rect.height() * 0.022)
+
+        painter.save()
+        painter.setFont(footer_font)
+        painter.setPen(Qt.darkGray)
+        painter.drawText(
+            QRectF(page_rect.x(), page_rect.bottom() - footer_h, page_rect.width() * 0.4, footer_h),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            f"Datum: {date_text}",
+        )
+        painter.drawText(
+            QRectF(page_rect.x() + page_rect.width() * 0.3, page_rect.bottom() - footer_h, page_rect.width() * 0.4, footer_h),
+            Qt.AlignHCenter | Qt.AlignVCenter,
+            f"Seite {page_no}",
+        )
+        painter.restore()
+
+    def _pdf_new_page(self, painter, writer) -> None:
+        if not bool(getattr(self, "_pdf_counting_only", False)):
+            self._draw_pdf_footer(painter, writer)
+            writer.newPage()
+        self._pdf_footer_page_no = int(getattr(self, "_pdf_footer_page_no", 1)) + 1
+
+    def _pdf_finalize_footer(self, painter, writer) -> None:
+        self._draw_pdf_footer(painter, writer)
+
+    def _draw_pdf_cover_page(self, painter, writer, meta: dict[str, str]) -> None:
+        from PySide6.QtGui import QFont  # noqa: PLC0415
+
+        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        footer_reserved_h = self._pdf_footer_reserved_height(page_rect)
+        title_font = QFont("Arial", 22, QFont.Bold)
+        label_font = QFont("Arial", 11, QFont.Bold)
+        value_font = QFont("Arial", 11)
+        notes_font = QFont("Arial", 10)
+
+        y = page_rect.y() + max(36.0, page_rect.height() * 0.08)
+        painter.save()
+        painter.setPen(Qt.black)
+        painter.setFont(title_font)
+        painter.drawText(
+            QRectF(page_rect.x(), y, page_rect.width(), 42.0),
+            Qt.AlignHCenter | Qt.AlignVCenter,
+            "HRouting Projektbericht",
+        )
+        y += 62.0
+
+        line_h = max(24.0, page_rect.height() * 0.042)
+        left_x = page_rect.x() + page_rect.width() * 0.12
+        label_w = page_rect.width() * 0.22
+        value_w = page_rect.width() * 0.56
+
+        fields = [
+            ("Projekt", str(meta.get("project", ""))),
+            ("Author", str(meta.get("author", ""))),
+            ("Datum", str(meta.get("date", ""))),
+            ("Planungsstand", str(meta.get("planning_status", ""))),
+            ("Seitenanzahl", str(meta.get("page_count", ""))),
+            ("HRouting Programmversion", str(meta.get("hrouting_version", ""))),
+        ]
+
+        for label, value in fields:
+            painter.setFont(label_font)
+            painter.drawText(QRectF(left_x, y, label_w, line_h), Qt.AlignLeft | Qt.AlignVCenter, f"{label}:")
+            painter.setFont(value_font)
+            painter.drawText(QRectF(left_x + label_w, y, value_w, line_h), Qt.AlignLeft | Qt.AlignVCenter, value)
+            y += line_h
+
+        y += 10.0
+        painter.setFont(label_font)
+        painter.drawText(QRectF(left_x, y, page_rect.width() * 0.78, line_h), Qt.AlignLeft | Qt.AlignTop, "Notizen:")
+        y += line_h
+        painter.setFont(notes_font)
+        notes_rect = QRectF(
+            left_x,
+            y,
+            page_rect.width() * 0.78,
+            max(80.0, page_rect.bottom() - y - footer_reserved_h - 12.0),
+        )
+        painter.drawText(notes_rect, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, str(meta.get("notes", "")))
+        painter.restore()
+
+    def _estimate_pdf_total_pages(
+        self,
+        writer,
+        enabled_pages: list[dict],
+        hk_rows: list[dict],
+        t_supply: float,
+        t_return: float,
+        ap_rows: list[list[str]],
+        cable_rows: list[list[str]],
+        export_data: dict,
+    ) -> int:
+        from PySide6.QtGui import QPainter, QPicture  # noqa: PLC0415
+
+        saved_vis = self._save_all_visibility()
+        self._pdf_prepare_footer()
+        self._pdf_counting_only = True
+        dummy = QPicture()
+        painter = QPainter()
+        total = max(1, len(enabled_pages))
+        try:
+            if not painter.begin(dummy):
+                return max(1, len(enabled_pages)) + 1
+            for idx, page in enumerate(enabled_pages):
+                if idx > 0:
+                    self._pdf_new_page(painter, writer)
+                self._apply_page_visibility(page)
+                self._render_pdf_export_page(
+                    painter,
+                    writer,
+                    page,
+                    hk_rows,
+                    t_supply,
+                    t_return,
+                    ap_rows,
+                    cable_rows,
+                    export_data,
+                )
+            total = int(getattr(self, "_pdf_footer_page_no", 1))
+        finally:
+            try:
+                if painter.isActive():
+                    painter.end()
+            finally:
+                self._restore_all_visibility(saved_vis)
+                self._pdf_counting_only = False
+                self.canvas.update()
+        # +1 for generated title page
+        return max(2, total + 1)
 
     def _draw_pdf_table(
         self,
@@ -4613,42 +4842,60 @@ class AppWindow(QMainWindow):
         page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
         title_rect, content_rect = self._draw_pdf_title(painter, page_rect, title)
         _ = title_rect
-        body_font = QFont(painter.font())
-        body_font.setPointSizeF(max(7.0, body_font.pointSizeF() - 1.0))
+        side_margin = max(24.0, content_rect.width() * 0.02)
+        table_rect = QRectF(
+            content_rect.x() + side_margin,
+            content_rect.y(),
+            max(1.0, content_rect.width() - 2 * side_margin),
+            content_rect.height(),
+        )
+        n_cols = max(1, len(headers))
+        body_size = 9 if n_cols <= 6 else (8 if n_cols <= 8 else 7)
+        body_font = QFont("Arial", body_size)
         painter.setFont(body_font)
 
-        n_cols = max(1, len(headers))
         if col_widths and len(col_widths) == n_cols and sum(col_widths) > 0:
             total_w = float(sum(col_widths))
-            widths = [content_rect.width() * (w / total_w) for w in col_widths]
+            widths = [table_rect.width() * (w / total_w) for w in col_widths]
         else:
-            widths = [content_rect.width() / n_cols] * n_cols
+            widths = [table_rect.width() / n_cols] * n_cols
 
-        header_h = max(24.0, page_rect.height() * 0.036)
-        min_row_h = max(20.0, page_rect.height() * 0.030)
         cell_pad = 4.0
-        y = content_rect.y() + 6.0
-        bottom_margin = 6.0
         fm = painter.fontMetrics()
+        header_h = max(16.0, fm.lineSpacing() + 2 * cell_pad)
+        min_row_h = max(14.0, fm.lineSpacing() + 2 * cell_pad)
+        cell_pad = 4.0
+        y = table_rect.y() + 6.0
+        bottom_margin = 6.0
+        wide_table = n_cols >= 8
 
         def draw_header(_y: float):
-            x = content_rect.x()
+            x = table_rect.x()
             painter.save()
-            painter.setFont(QFont(body_font.family(), body_font.pointSize() + 1, QFont.Bold))
+            painter.setFont(QFont("Arial", body_size, QFont.Bold))
             painter.setPen(QPen(Qt.black, 1.0))
             for idx, header in enumerate(headers):
                 cell = QRectF(x, _y, widths[idx], header_h)
                 painter.fillRect(cell, QBrush(QColor("#e0e0e0")))
                 painter.drawRect(cell)
+                if wide_table:
+                    inner_w = max(1, int(widths[idx] - 2 * cell_pad))
+                    header_text = fm.elidedText(str(header), Qt.ElideRight, inner_w)
+                    flags = Qt.AlignVCenter | Qt.AlignLeft | Qt.TextSingleLine
+                else:
+                    header_text = header
+                    flags = Qt.AlignCenter | Qt.TextWordWrap
                 painter.drawText(
                     cell.adjusted(cell_pad, cell_pad, -cell_pad, -cell_pad),
-                    Qt.AlignCenter | Qt.TextWordWrap,
-                    header,
+                    flags,
+                    header_text,
                 )
                 x += widths[idx]
             painter.restore()
 
         def row_height(values: list[str]) -> float:
+            if wide_table:
+                return min_row_h
             height = min_row_h
             for idx, value in enumerate(values):
                 inner_w = max(1, int(widths[idx] - 2 * cell_pad))
@@ -4661,32 +4908,45 @@ class AppWindow(QMainWindow):
         for row_index, row in enumerate(rows):
             data_row = [str(row[idx]) if idx < len(row) else "" for idx in range(n_cols)]
             rh = row_height(data_row)
-            if y + rh > content_rect.bottom() - bottom_margin:
-                writer.newPage()
+            if y + rh > table_rect.bottom() - bottom_margin:
+                self._pdf_new_page(painter, writer)
                 page_rect2 = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
                 _, content_rect2 = self._draw_pdf_title(painter, page_rect2, f"{title} (Fortsetzung)")
-                content_rect = content_rect2
-                y = content_rect.y() + 6.0
+                table_rect = QRectF(
+                    content_rect2.x() + side_margin,
+                    content_rect2.y(),
+                    max(1.0, content_rect2.width() - 2 * side_margin),
+                    content_rect2.height(),
+                )
+                y = table_rect.y() + 6.0
                 if col_widths and len(col_widths) == n_cols and sum(col_widths) > 0:
                     total_w = float(sum(col_widths))
-                    widths = [content_rect.width() * (w / total_w) for w in col_widths]
+                    widths = [table_rect.width() * (w / total_w) for w in col_widths]
                 else:
-                    widths = [content_rect.width() / n_cols] * n_cols
+                    widths = [table_rect.width() / n_cols] * n_cols
                 painter.setFont(body_font)
                 draw_header(y)
                 y += header_h
 
-            x = content_rect.x()
+            x = table_rect.x()
             if row_index % 2 == 1:
-                painter.fillRect(QRectF(content_rect.x(), y, content_rect.width(), rh), QBrush(QColor("#f5f5f5")))
+                painter.fillRect(QRectF(table_rect.x(), y, table_rect.width(), rh), QBrush(QColor("#f5f5f5")))
             for idx, value in enumerate(data_row):
                 cell = QRectF(x, y, widths[idx], rh)
                 painter.drawRect(cell)
-                align = (Qt.AlignRight | Qt.AlignTop) if idx >= 2 else (Qt.AlignLeft | Qt.AlignTop)
+                if wide_table:
+                    inner_w = max(1, int(widths[idx] - 2 * cell_pad))
+                    value_text = fm.elidedText(value, Qt.ElideRight, inner_w)
+                    align = (Qt.AlignRight | Qt.AlignVCenter) if idx >= 2 else (Qt.AlignLeft | Qt.AlignVCenter)
+                    flags = align | Qt.TextSingleLine
+                else:
+                    value_text = value
+                    align = (Qt.AlignRight | Qt.AlignTop) if idx >= 2 else (Qt.AlignLeft | Qt.AlignTop)
+                    flags = align | Qt.TextWordWrap
                 painter.drawText(
                     cell.adjusted(cell_pad, cell_pad, -cell_pad, -cell_pad),
-                    align | Qt.TextWordWrap,
-                    value,
+                    flags,
+                    value_text,
                 )
                 x += widths[idx]
             y += rh
@@ -4752,18 +5012,26 @@ class AppWindow(QMainWindow):
         page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
         _, content_rect = self._draw_pdf_title(painter, page_rect, title)
         source_rect = self._effective_pdf_source_rect(page)
+        image_side_margin = max(28.0, content_rect.width() * 0.03)
+        image_top_bottom_margin = max(8.0, content_rect.height() * 0.01)
+        image_rect = content_rect.adjusted(
+            image_side_margin,
+            image_top_bottom_margin,
+            -image_side_margin,
+            -image_top_bottom_margin,
+        )
 
         img = self.canvas.render_for_export(
             source_rect=source_rect,
-            output_w=int(content_rect.width()),
-            output_h=int(content_rect.height()),
+            output_w=max(1, int(image_rect.width())),
+            output_h=max(1, int(image_rect.height())),
         )
-        painter.drawImage(content_rect, img)
+        painter.drawImage(image_rect, img)
 
         sections = set(page.get("table_sections") or [])
         if ptype == "heating":
             if "hk_lengths" in sections and hk_rows:
-                writer.newPage()
+                self._pdf_new_page(painter, writer)
                 rows = [
                     [
                         str(r.get("id", "")),
@@ -4774,7 +5042,7 @@ class AppWindow(QMainWindow):
                 ]
                 self._draw_pdf_table(painter, writer, "Heizkreise – Einzellängen", ["ID", "Name", "Gesamt"], rows)
             if "hk_hydraulics" in sections and hk_rows:
-                writer.newPage()
+                self._pdf_new_page(painter, writer)
                 rows = [
                     [
                         str(r.get("id", "")),
@@ -4787,7 +5055,7 @@ class AppWindow(QMainWindow):
                 ]
                 self._draw_pdf_table(painter, writer, "Hydraulische Übersicht", ["ID", "Name", "Leistung", "Vol.-Strom", "Δp"], rows)
             if "hk_hkv_lines" in sections and export_data and export_data.get("hl_rows"):
-                writer.newPage()
+                self._pdf_new_page(painter, writer)
                 rows = [
                     [
                         str(r.get("name", "")),
@@ -4809,7 +5077,7 @@ class AppWindow(QMainWindow):
 
         if ptype == "elektro":
             if "el_ap_infos" in sections and ap_rows:
-                writer.newPage()
+                self._pdf_new_page(painter, writer)
                 self._draw_pdf_table(
                     painter,
                     writer,
@@ -4818,7 +5086,7 @@ class AppWindow(QMainWindow):
                     ap_rows,
                 )
             if "el_kabel" in sections and cable_rows:
-                writer.newPage()
+                self._pdf_new_page(painter, writer)
                 self._draw_pdf_table(
                     painter,
                     writer,
@@ -4829,7 +5097,7 @@ class AppWindow(QMainWindow):
                 )
             if export_data:
                 if "el_ap_types" in sections and export_data.get("ap_type_counts"):
-                    writer.newPage()
+                    self._pdf_new_page(painter, writer)
                     rows = [
                         [str(k), str(v)]
                         for k, v in sorted(export_data.get("ap_type_counts", {}).items(), key=lambda item: str(item[0]).lower())
@@ -4843,7 +5111,7 @@ class AppWindow(QMainWindow):
                     )
 
                 if "el_ap_connections" in sections and export_data.get("ap_cables"):
-                    writer.newPage()
+                    self._pdf_new_page(painter, writer)
                     ap_rows_ext: list[list[str]] = []
                     for ap_name in sorted(export_data.get("ap_cables", {}).keys()):
                         for conn in export_data["ap_cables"][ap_name]:
@@ -4870,7 +5138,7 @@ class AppWindow(QMainWindow):
                     )
 
                 if "el_rooms" in sections and export_data.get("room_ap_connections"):
-                    writer.newPage()
+                    self._pdf_new_page(painter, writer)
                     rows = [
                         [
                             str(r.get("room", "")),
@@ -4896,7 +5164,7 @@ class AppWindow(QMainWindow):
                     )
 
                 if "el_uv" in sections and export_data.get("uv_rows"):
-                    writer.newPage()
+                    self._pdf_new_page(painter, writer)
                     rows = [
                         [
                             str(r.get("ap", "")),
@@ -4922,7 +5190,7 @@ class AppWindow(QMainWindow):
                     )
 
                 if "el_up_distribution" in sections and export_data.get("up_distribution_rows"):
-                    writer.newPage()
+                    self._pdf_new_page(painter, writer)
                     rows = [
                         [
                             str(r.get("ap", "")),
@@ -4976,7 +5244,7 @@ class AppWindow(QMainWindow):
                                 ]
                             )
                     if bom_rows:
-                        writer.newPage()
+                        self._pdf_new_page(painter, writer)
                         self._draw_pdf_table(
                             painter,
                             writer,
@@ -4987,7 +5255,7 @@ class AppWindow(QMainWindow):
                         )
 
                 if "el_uv_busbars" in sections and export_data.get("uv_busbar_bom_rows"):
-                    writer.newPage()
+                    self._pdf_new_page(painter, writer)
                     rows = [
                         [
                             str(r.get("phase", "")),
@@ -5014,7 +5282,7 @@ class AppWindow(QMainWindow):
                     uv_data = export_data.get("uv_data", [])
 
                     if "schaltplan_uv" in sections and uv_data:
-                        writer.newPage()
+                        self._pdf_new_page(painter, writer)
                         rows = [
                             [
                                 str(uv.get("ap_name", "")),
@@ -5054,7 +5322,7 @@ class AppWindow(QMainWindow):
                                     ]
                                 )
                         if circuits_rows:
-                            writer.newPage()
+                            self._pdf_new_page(painter, writer)
                             self._draw_pdf_table(
                                 painter,
                                 writer,
@@ -5082,7 +5350,7 @@ class AppWindow(QMainWindow):
                             return out
 
                         rows = _flatten_edges(hierarchy)
-                        writer.newPage()
+                        self._pdf_new_page(painter, writer)
                         self._draw_pdf_table(
                             painter,
                             writer,
@@ -5091,17 +5359,21 @@ class AppWindow(QMainWindow):
                             rows or [["", "Keine Hierarchie-Verbindungen vorhanden.", "", ""]],
                         )
 
-    def _continue_export_pdf(self, pages: list[dict]) -> None:
+    def _continue_export_pdf(self, pages: list[dict], export_meta: dict[str, str]) -> None:
         enabled_pages = [p for p in pages if p.get("enabled", True)]
         if not enabled_pages:
             QMessageBox.information(self, "PDF-Export", "Keine aktive Exportseite ausgewählt.")
             return
 
         path, _ = QFileDialog.getSaveFileName(
-            self, "Als PDF exportieren", "projektbericht.pdf", "PDF (*.pdf)"
+            self,
+            "Als PDF exportieren",
+            self._default_pdf_export_path(),
+            "PDF (*.pdf)",
         )
         if not path:
             return
+        self._remember_pdf_export_path(Path(path))
 
         from PySide6.QtGui import QPageLayout, QPageSize, QPainter, QPdfWriter  # noqa: PLC0415
 
@@ -5125,18 +5397,35 @@ class AppWindow(QMainWindow):
 
         saved_vis = self._save_all_visibility()
         cancelled = False
+        self._pdf_prepare_footer()
         try:
             export_data = self._collect_export_data()
             hk_rows = export_data.get("hk_rows", [])
             t_supply = float(export_data.get("t_supply", self._document.settings.get("t_supply", 35.0)))
             t_return = float(export_data.get("t_return", self._document.settings.get("t_return", 30.0)))
             ap_rows, cable_rows = self._collect_pdf_electro_rows()
+
+            meta = self._normalize_pdf_export_meta(export_meta, pages)
+            total_pages = self._estimate_pdf_total_pages(
+                writer,
+                enabled_pages,
+                hk_rows,
+                t_supply,
+                t_return,
+                ap_rows,
+                cable_rows,
+                export_data,
+            )
+            meta["page_count"] = str(total_pages)
+
+            # Reset footer state after dry-run counting so the real export starts at page 1.
+            self._pdf_prepare_footer()
+            self._draw_pdf_cover_page(painter, writer, meta)
             for idx, page in enumerate(enabled_pages):
                 if progress.wasCanceled():
                     cancelled = True
                     break
-                if idx > 0:
-                    writer.newPage()
+                self._pdf_new_page(painter, writer)
                 self._apply_page_visibility(page)
                 self._render_pdf_export_page(
                     painter,
@@ -5152,10 +5441,16 @@ class AppWindow(QMainWindow):
                 progress.setValue(idx + 1)
                 QApplication.processEvents()
         finally:
-            painter.end()
-            self._restore_all_visibility(saved_vis)
-            self.canvas.update()
-            progress.close()
+            try:
+                self._pdf_finalize_footer(painter, writer)
+            except Exception:
+                pass
+            try:
+                painter.end()
+            finally:
+                self._restore_all_visibility(saved_vis)
+                self.canvas.update()
+                progress.close()
 
         if cancelled:
             try:
@@ -5166,15 +5461,17 @@ class AppWindow(QMainWindow):
             return
 
         self._pdf_export_pages = pages
+        self._pdf_export_meta = self._normalize_pdf_export_meta(export_meta, pages)
         self._mark_dirty()
         self.log.success(f"PDF exportiert: {path}")
         self.statusBar().showMessage(f"PDF exportiert: {path}", 4000)
 
     def _export_pdf(self) -> None:
-        pages = self._open_pdf_export_config_dialog()
-        if pages is None:
+        config = self._open_pdf_export_config_dialog()
+        if config is None:
             return
-        self._continue_export_pdf(pages)
+        pages, export_meta = config
+        self._continue_export_pdf(pages, export_meta)
 
     def _collect_length_overview_rows(self) -> tuple[list[dict], float, float]:
         """Collect heating rows for the length / hydraulics overview."""
@@ -6033,3 +6330,4 @@ class AppWindow(QMainWindow):
         layout_store.save_geometry(self)
         layout_store.save_last_workspace(self._workspace.id)
         event.accept()
+
