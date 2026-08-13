@@ -4315,11 +4315,14 @@ class CanvasWidget(QWidget):
                     actual_cm = d_right * self._mm_per_px / 10
                     return (seg, f"Randabstand {actual_cm:.1f}/{wall_dist_cm:.1f} cm") if seg else None
 
-        # Check inter-segment distance: center-to-center >= 2*line_dist
+        # Check inter-segment distance based on the configured loop spacing.
+        # line_dist is the Vorlauf↔Ruecklauf distance of one loop.
+        # For route-center lines this results in a required half-band of
+        # (line_dist / 2 + line_dist) on each side.
         if line_dist <= 0.0:
             return None
 
-        min_center_dist = 2.0 * line_dist
+        min_center_dist = 1.5 * line_dist
         line_dist_cm = line_dist * self._mm_per_px / 10
         ignore = ignore_segment_indices or set()
         for s0, s1, seg_idx in self._route_segments(cid, include_current=True):
@@ -9868,7 +9871,10 @@ class CanvasWidget(QWidget):
 
         # ── 2. Pipe-spacing zone (around existing segments) ────────────
         if line_dist > 1e-3:
-            min_center_dist = 2.0 * line_dist
+            # Visualise the spacing exactly like the route constraints:
+            # configured loop spacing between Vorlauf/Ruecklauf and the
+            # same spacing to the left and right of the loop.
+            min_center_dist = 1.5 * line_dist
             # Use in-progress points during route drawing, otherwise committed route
             if (self._mode == ToolMode.DRAW_ROUTE
                     and self._current_route_cid == cid
