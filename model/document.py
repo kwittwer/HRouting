@@ -44,6 +44,7 @@ _PARAMS_NON_ELEMENT_KEYS = {"floorplans_order"}
 
 #: canvas-Schlüssel, die separat behandelt werden
 _CANVAS_STRUCTURAL_KEYS = {"floor_plans", "floor_plan_order"}
+_TOP_LEVEL_KNOWN_KEYS = {"svg_path", "canvas", "params", "pdf_export_pages", "format_version"}
 
 
 def _all_geom_keys() -> set[str]:
@@ -60,6 +61,8 @@ class Document:
     def __init__(self) -> None:
         self.svg_path: str = ""
         self.pdf_export_pages: list = []
+        self.format_version: int | None = None
+        self.top_level_extras: dict[str, Any] = {}
 
         #: globale Heizungs-/Projektparameter und sonstige params-Skalare
         self.settings: dict[str, Any] = {
@@ -231,6 +234,13 @@ class Document:
 
         doc.svg_path = raw.get("svg_path", "")
         doc.pdf_export_pages = raw.get("pdf_export_pages", []) or []
+        try:
+            doc.format_version = int(raw["format_version"]) if "format_version" in raw else None
+        except (TypeError, ValueError):
+            doc.format_version = None
+        doc.top_level_extras = {
+            k: v for k, v in raw.items() if k not in _TOP_LEVEL_KNOWN_KEYS
+        }
 
         geom_keys = _all_geom_keys()
 
@@ -363,12 +373,16 @@ class Document:
                 continue
             canvas.setdefault(key, {}).update(values)
 
-        return {
+        result = {
             "svg_path": self.svg_path,
             "canvas": canvas,
             "params": params,
             "pdf_export_pages": copy.deepcopy(self.pdf_export_pages),
         }
+        if self.format_version is not None:
+            result["format_version"] = int(self.format_version)
+        result.update(copy.deepcopy(self.top_level_extras))
+        return result
 
     # ------------------------------------------------------------------
     def snapshot(self) -> dict:

@@ -3231,10 +3231,39 @@ def _create_mcp(window: MainWindow, bridge):
             text_id: ID der zu löschenden Annotation (z.B. 'Text-1')
         """
         def _delete():
-            if text_id not in window.param_panel.text_panels:
-                return {"error": f"Text '{text_id}' nicht gefunden."}
-            window._delete_text(text_id)
-            return {"text_id": text_id, "status": "deleted"}
+            wanted = str(text_id or "").strip()
+            if not wanted:
+                return {"error": "text_id ist leer."}
+
+            resolved_id = wanted
+            doc = getattr(window, "_document", None)
+            if doc is not None:
+                text_bucket = getattr(doc, "elements", {}).get("text_annotations", {})
+                if isinstance(text_bucket, dict) and resolved_id not in text_bucket:
+                    for existing_id in text_bucket:
+                        if str(existing_id).lower() == resolved_id.lower():
+                            resolved_id = str(existing_id)
+                            break
+
+            if hasattr(window, "_delete_text"):
+                deleted = bool(window._delete_text(resolved_id))
+                if not deleted:
+                    return {"error": f"Text '{wanted}' nicht gefunden."}
+                return {"text_id": resolved_id, "status": "deleted"}
+
+            if hasattr(window, "_delete_element"):
+                deleted = bool(window._delete_element(resolved_id))
+                if not deleted:
+                    return {"error": f"Text '{wanted}' nicht gefunden."}
+                return {"text_id": resolved_id, "status": "deleted"}
+
+            panel = getattr(window, "param_panel", None)
+            text_panels = getattr(panel, "text_panels", {}) if panel is not None else {}
+            if isinstance(text_panels, dict) and resolved_id in text_panels and hasattr(window, "_delete_text"):
+                window._delete_text(resolved_id)
+                return {"text_id": resolved_id, "status": "deleted"}
+
+            return {"error": "Kein kompatibler Löschpfad für Text-Annotationen verfügbar."}
 
         return invoke(_delete)
 

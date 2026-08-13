@@ -887,6 +887,17 @@ def _is_ap_group_name(name: str) -> bool:
     return str(name or "").strip().upper().startswith("AP_")
 
 
+def _canonical_ap_group_name(name: str) -> str:
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    match = re.search(r"(?:^|_)AP_(?:[A-Z0-9]+_)*(\d+)$", upper)
+    if match:
+        return f"AP_{match.group(1)}"
+    return text
+
+
 def _build_ap_group_candidates(result: KiCadScanResult) -> None:
     result.ap_group_candidates.clear()
 
@@ -923,7 +934,7 @@ def _build_ap_group_candidates(result: KiCadScanResult) -> None:
         key = f"group::{group.uuid}"
         result.ap_group_candidates[key] = KiCadApGroupCandidate(
             key=key,
-            group_name=group.name,
+            group_name=_canonical_ap_group_name(group.name),
             group_uuid=group.uuid,
             frame_uuid=frame.uuid,
             frame_bounds=frame_rect,

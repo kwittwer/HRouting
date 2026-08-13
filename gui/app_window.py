@@ -1411,8 +1411,22 @@ class AppWindow(QMainWindow):
     def _delete_selected(self) -> None:
         selected_ids = self.navigator.selected_ids()
         if len(selected_ids) > 1:
-            to_delete = [element_id for element_id in selected_ids if self._document.get(element_id) is not None]
-            if not to_delete:
+            to_delete: list[str] = []
+            dist_indices: list[int] = []
+            angle_indices: list[int] = []
+            for element_id in selected_ids:
+                meas_ref = _parse_measurement_nav_id(element_id)
+                if meas_ref is not None:
+                    prefix, idx = meas_ref
+                    if prefix == "MSRD":
+                        dist_indices.append(idx)
+                    else:
+                        angle_indices.append(idx)
+                    continue
+                if self._document.get(element_id) is not None:
+                    to_delete.append(element_id)
+
+            if not to_delete and not dist_indices and not angle_indices:
                 self.statusBar().showMessage("Keine löschbaren Elemente ausgewählt", 2000)
                 return
 
@@ -1426,6 +1440,18 @@ class AppWindow(QMainWindow):
                 self._document.remove(element_id)
                 self.properties.forget_element(element_id)
                 deleted += 1
+
+            # Messungen leben primär in Canvas-Laufzeitlisten; in absteigender
+            # Reihenfolge löschen, damit Indizes stabil bleiben.
+            for idx in sorted(set(dist_indices), reverse=True):
+                if self.canvas.delete_measurement_at(idx):
+                    deleted += 1
+            for idx in sorted(set(angle_indices), reverse=True):
+                if self.canvas.delete_angle_measurement_at(idx):
+                    deleted += 1
+
+            for element_id in selected_ids:
+                self.properties.forget_element(element_id)
 
             if deleted:
                 self._emit_structure_changed()
@@ -1458,7 +1484,7 @@ class AppWindow(QMainWindow):
         # Distanz- oder Winkelmessungen werden im Canvas (nicht im Dokument) gelöscht.
         meas_ref = _parse_measurement_nav_id(element_id)
         if meas_ref is not None:
-            prefix, idx = meas_ref
+            prefix, _idx = meas_ref
             kind_label = "Distanzmessung" if prefix == "MSRD" else "Winkelmessung"
             answer = QMessageBox.question(
                 self,
@@ -1468,15 +1494,10 @@ class AppWindow(QMainWindow):
             )
             if answer != QMessageBox.Yes:
                 return
-            self._push_undo()
-            if prefix == "MSRD":
-                self.canvas.delete_measurement_at(idx)
-            else:
-                self.canvas.delete_angle_measurement_at(idx)
-            # measure_changed wurde bereits von der canvas-Methode emittiert;
-            # _on_measure_changed synchronisiert die Elements und triggert den Navigator.
-            self._mark_dirty()
-            self.statusBar().showMessage(f"{kind_label} gelöscht: {element_id}", 2500)
+            if self._delete_element(element_id):
+                # measure_changed wurde bereits von der canvas-Methode emittiert;
+                # _on_measure_changed synchronisiert die Elements und triggert den Navigator.
+                self.statusBar().showMessage(f"{kind_label} gelöscht: {element_id}", 2500)
             return
         self._delete_element_with_confirm(element_id)
 
@@ -1501,6 +1522,26 @@ class AppWindow(QMainWindow):
         self._delete_element(element_id)
 
     def _delete_element(self, element_id: str) -> bool:
+        meas_ref = _parse_measurement_nav_id(element_id)
+        if meas_ref is not None:
+            prefix, idx = meas_ref
+            self._push_undo()
+            if prefix == "MSRD":
+                deleted = self.canvas.delete_measurement_at(idx)
+            else:
+                deleted = self.canvas.delete_angle_measurement_at(idx)
+            if not deleted:
+                return False
+
+            # measure_changed synchronisiert die Document-Elemente bereits,
+            # deshalb hier nur UI/Dirty-State nachziehen.
+            self.properties.forget_element(element_id)
+            self._emit_structure_changed()
+            self.canvas.update()
+            self._mark_dirty()
+            self.log.info(f"Gelöscht: {element_id}")
+            return True
+
         element = self._document.get(element_id)
         if element is None:
             return False
@@ -1519,6 +1560,10 @@ class AppWindow(QMainWindow):
         self._mark_dirty()
         self.log.info(f"Gelöscht: {element_id}")
         return True
+
+    def _delete_text(self, text_id: str) -> bool:
+        """Kompatibler Löschpfad für Text-Annotationen (ohne Dialog)."""
+        return self._delete_element(text_id)
 
     def _cleanup_references_before_delete(self, element_id: str) -> None:
         document = self._document
@@ -5470,7 +5515,14 @@ class AppWindow(QMainWindow):
         config = self._open_pdf_export_config_dialog()
         if config is None:
             return
-        pages, export_meta = config
+        if isinstance(config, tuple):
+            pages = config[0] if len(config) >= 1 else []
+            export_meta = config[1] if len(config) >= 2 else self._pdf_export_meta
+        else:
+            pages = config
+            export_meta = self._pdf_export_meta
+        pages = self._normalize_pdf_export_pages(pages)
+        export_meta = self._normalize_pdf_export_meta(export_meta, pages)
         self._continue_export_pdf(pages, export_meta)
 
     def _collect_length_overview_rows(self) -> tuple[list[dict], float, float]:

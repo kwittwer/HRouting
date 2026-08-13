@@ -3806,6 +3806,31 @@ def test_render_for_export_returns_image(app):
         window.deleteLater()
 
 
+def test_delete_text_annotation_persists_after_save_and_reload(app, tmp_path, monkeypatch):
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from storage.hrp_io import load_document  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(EXAMPLE)
+        assert "TEXT-1" in window._document.elements.get("text_annotations", {})
+
+        deleted = window._delete_text("TEXT-1")
+        assert deleted is True
+        assert "TEXT-1" not in window._document.elements.get("text_annotations", {})
+
+        target = tmp_path / "text_delete_roundtrip.hrp"
+        window._project_path = target
+        assert window._save_project() is True
+
+        reloaded = load_document(target)
+        assert "TEXT-1" not in reloaded.elements.get("text_annotations", {})
+    finally:
+        window.deleteLater()
+
+
 def test_x1_draw_export_frame_persists_in_project_dict(app, monkeypatch):
     from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
 
@@ -6641,6 +6666,118 @@ def test_delete_measurement_via_navigator_removes_element_and_canvas(app, monkey
         assert document.get("MSRD-1") is None, "Element noch im Dokument"
         # Navigator-Baum darf es nicht mehr zeigen
         assert window.navigator._find_item_by_id("MSRD-1") is None, "Item noch im Navigator"
+    finally:
+        window.deleteLater()
+
+
+def test_delete_measurement_via_generic_delete_path_persists_after_save_reload(app, tmp_path, monkeypatch):
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+    from storage.hrp_io import load_document  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "distance_measurements": {
+                        "MSRD-1": [[0.0, 0.0], [100.0, 0.0]],
+                    },
+                    "distance_label_positions": {
+                        "MSRD-1": [50.0, -10.0],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "distance_measurements": {
+                        "MSRD-1": {
+                            "measurement_id": "MSRD-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Distanz 1",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        assert len(window.canvas._measure_lines) == 1
+        assert document.get("MSRD-1") is not None
+
+        assert window._delete_element("MSRD-1") is True
+        assert len(window.canvas._measure_lines) == 0
+        assert document.get("MSRD-1") is None
+
+        target = tmp_path / "msrd_delete_roundtrip.hrp"
+        window._project_path = target
+        assert window._save_project() is True
+
+        reloaded = load_document(target)
+        assert "MSRD-1" not in reloaded.elements.get("distance_measurements", {})
+        assert "MSRD-1" not in reloaded.view.get("distance_measurements", {})
+    finally:
+        window.deleteLater()
+
+
+def test_delete_selected_batch_removes_multiple_measurements_persistently(app, tmp_path, monkeypatch):
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+    from storage.hrp_io import load_document  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "distance_measurements": {
+                        "MSRD-1": [[0.0, 0.0], [100.0, 0.0]],
+                        "MSRD-2": [[0.0, 10.0], [100.0, 10.0]],
+                        "MSRD-3": [[0.0, 20.0], [100.0, 20.0]],
+                        "MSRD-4": [[0.0, 30.0], [100.0, 30.0]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "distance_measurements": {
+                        "MSRD-1": {"measurement_id": "MSRD-1", "floor_plan_id": "grundriss-1", "visible": True},
+                        "MSRD-2": {"measurement_id": "MSRD-2", "floor_plan_id": "grundriss-1", "visible": True},
+                        "MSRD-3": {"measurement_id": "MSRD-3", "floor_plan_id": "grundriss-1", "visible": True},
+                        "MSRD-4": {"measurement_id": "MSRD-4", "floor_plan_id": "grundriss-1", "visible": True},
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        for measurement_id in ("MSRD-1", "MSRD-2", "MSRD-3", "MSRD-4"):
+            item = window.navigator._find_item_by_id(measurement_id)
+            assert item is not None
+            item.setSelected(True)
+        window.navigator._on_selection_changed()
+
+        window._delete_selected()
+
+        assert len(window.canvas._measure_lines) == 0
+        assert len(document.elements.get("distance_measurements", {})) == 0
+
+        target = tmp_path / "msrd_batch_delete_roundtrip.hrp"
+        window._project_path = target
+        assert window._save_project() is True
+
+        reloaded = load_document(target)
+        assert len(reloaded.elements.get("distance_measurements", {})) == 0
+        assert len(reloaded.view.get("distance_measurements", {})) == 0
     finally:
         window.deleteLater()
 

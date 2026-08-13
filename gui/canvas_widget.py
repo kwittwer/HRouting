@@ -1534,8 +1534,11 @@ class CanvasWidget(QWidget):
             self.resize(old_w, old_h)
             self.setMinimumSize(old_min_size)
             self.update()
-
-        return pixmap.toImage()
+        img = pixmap.toImage()
+        if img.width() != output_w or img.height() != output_h:
+            # Offscreen Qt plugins may ignore widget resize constraints.
+            img = img.scaled(output_w, output_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        return img
 
     def start_move_floor_plan(self, fp_id: str):
         """Enter mode to drag-move a floor plan with the mouse."""
@@ -1689,17 +1692,16 @@ class CanvasWidget(QWidget):
         if cached and cached[0] == key:
             return cached[1]
         import math
-        sw, sh = self._floor_polygon_render_size(layer)
-        cx = sw / 2 + layer.offset_x
-        cy = sh / 2 + layer.offset_y
+        ox = float(layer.offset_x)
+        oy = float(layer.offset_y)
         rad = math.radians(layer.rotation)
         cos_r, sin_r = math.cos(rad), math.sin(rad)
         out: List[QPointF] = []
         for p in layer.polygon:
-            rx = p.x() - sw / 2
-            ry = p.y() - sh / 2
-            wx = cx + rx * cos_r - ry * sin_r
-            wy = cy + rx * sin_r + ry * cos_r
+            lx = p.x()
+            ly = p.y()
+            wx = ox + lx * cos_r - ly * sin_r
+            wy = oy + lx * sin_r + ly * cos_r
             out.append(QPointF(wx, wy))
         self._floor_polygon_world_cache[fp_id] = (key, out, QPolygonF(out))
         return out
@@ -1721,15 +1723,12 @@ class CanvasWidget(QWidget):
         if not layer:
             return QPointF(world_pt)
         import math
-        sw, sh = self._floor_polygon_render_size(layer)
-        cx = sw / 2 + layer.offset_x
-        cy = sh / 2 + layer.offset_y
-        dx = world_pt.x() - cx
-        dy = world_pt.y() - cy
+        dx = world_pt.x() - float(layer.offset_x)
+        dy = world_pt.y() - float(layer.offset_y)
         rad = math.radians(-layer.rotation)
         cos_r, sin_r = math.cos(rad), math.sin(rad)
-        lx = dx * cos_r - dy * sin_r + sw / 2
-        ly = dx * sin_r + dy * cos_r + sh / 2
+        lx = dx * cos_r - dy * sin_r
+        ly = dx * sin_r + dy * cos_r
         return QPointF(lx, ly)
 
     def _hit_floor_polygon_point(self, canvas_pt: QPointF, fp_id: str) -> Optional[int]:
