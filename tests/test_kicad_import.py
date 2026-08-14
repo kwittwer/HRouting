@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 from logic.kicad_import import (
     KiCadCableCandidate,
     KiCadSheetPinRef,
+    build_kicad_bus_cable_key,
     build_import_preview,
     build_kicad_cable_key,
     build_textfield_candidate_from_scan,
@@ -393,3 +394,76 @@ def test_scan_kicad_project_ap1_group_contains_expected_bus_overlaps():
     hit_uuids = {bus.uuid for bus in ap1.bus_hits}
     assert "4cd5369a-ca39-4bcf-ba8a-257cc9153321" in hit_uuids
     assert "66f63aa4-fb92-4c51-9c47-439693eb87d5" in hit_uuids
+
+
+def test_scan_kicad_project_extracts_case_insensitive_kbl_bus_candidates(tmp_path):
+    root = tmp_path / "kbl_case_test.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid \"project-kbl\")
+    (rectangle (start 0 0) (end 10 10) (uuid \"rect-a\"))
+    (rectangle (start 90 0) (end 100 10) (uuid \"rect-b\"))
+    (bus
+        (pts (xy 5 5) (xy 95 5))
+        (uuid \"bus-1\")
+    )
+    (group \"AP_1\" (uuid \"group-ap-1\") (members \"rect-a\"))
+    (group \"AP_2\" (uuid \"group-ap-2\") (members \"rect-b\"))
+    (group \"kbl_MainFeed{5x10}\" (uuid \"group-kbl\") (members \"bus-1\"))
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+
+    assert len(result.kbl_bus_candidates) == 1
+    candidate = next(iter(result.kbl_bus_candidates.values()))
+    assert candidate.group_name_raw == "kbl_MainFeed{5x10}"
+    assert candidate.base_name == "MainFeed"
+    assert candidate.spec_raw == "5x10"
+    assert candidate.normalized_spec == "5x10"
+    assert candidate.points[0] == (5.0, 5.0)
+    assert candidate.points[-1] == (95.0, 5.0)
+    assert build_kicad_bus_cable_key(result.project_uuid, candidate) == "project-kbl::kbl_bus::group-kbl::bus-1"
+
+
+def test_build_import_preview_maps_kbl_bus_endpoints_to_ap_names(tmp_path):
+    root = tmp_path / "kbl_preview_test.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid \"project-kbl-preview\")
+    (rectangle (start 0 0) (end 10 10) (uuid \"rect-a\"))
+    (rectangle (start 90 0) (end 100 10) (uuid \"rect-b\"))
+    (bus
+        (pts (xy 5 5) (xy 95 5))
+        (uuid \"bus-1\")
+    )
+    (group \"AP_1\" (uuid \"group-ap-1\") (members \"rect-a\"))
+    (group \"AP_2\" (uuid \"group-ap-2\") (members \"rect-b\"))
+    (group \"KBL_MainFeed{5x10}\" (uuid \"group-kbl\") (members \"bus-1\"))
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "AP_1", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "AP_2", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    kbl_previews = [preview for preview in previews if preview.source == "kbl_bus"]
+    assert len(kbl_previews) == 1
+    preview = kbl_previews[0]
+    assert preview.cable_name == "MainFeed"
+    assert preview.cable_type == "5x10"
+    assert preview.ap_match_status == "matched"
+    assert preview.start_ap_group == "AP_1"
+    assert preview.end_ap_group == "AP_2"
+    assert preview.start_ap_status == "matched"
+    assert preview.end_ap_status == "matched"
+    assert preview.start_ap_id == "AP-1"
+    assert preview.end_ap_id == "AP-2"

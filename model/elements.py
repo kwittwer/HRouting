@@ -176,6 +176,7 @@ class ElecPoint(Element):
     smarthome_device = _param("smarthome_device", "")
     smarthome_device_color = _param("smarthome_device_color", "")
     note = _param("note", "")
+    room_id = _param("room_id", "")
     ap_type = _param("ap_type", "standard")
     kicad_project_uuid = _param("kicad_project_uuid", "")
     kicad_group_uuid = _param("kicad_group_uuid", "")

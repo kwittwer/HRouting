@@ -91,7 +91,9 @@ class KiCadApGroupCandidate:
     group_name: str
     group_uuid: str
     frame_uuid: str
-    frame_bounds: tuple[float, float, float, float]
+    frame_bounds: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    sheet_file: str = ""
+    hierarchy_path: tuple[str, ...] = ()
     bus_hits: list[KiCadBusSegment] = field(default_factory=list)
 
 
@@ -105,6 +107,22 @@ class KiCadCableCandidate:
     spec_kind: str
     pin_refs: list[KiCadSheetPinRef] = field(default_factory=list)
     local_labels: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class KiCadBusCableCandidate:
+    key: str
+    group_uuid: str
+    group_name_raw: str
+    base_name: str
+    spec_raw: str
+    normalized_spec: str
+    spec_kind: str
+    bus_uuid: str
+    sheet_name: str
+    sheet_file: str
+    hierarchy_path: tuple[str, ...]
+    points: tuple[tuple[float, float], ...]
 
 
 @dataclass(frozen=True)
@@ -138,6 +156,12 @@ class KiCadImportPreview:
     ap_import_action: str = ""
     ap_match_status: str = "unmatched"
     ap_matches: list[KiCadApMatch] = field(default_factory=list)
+    start_ap_group: str = ""
+    end_ap_group: str = ""
+    start_ap_id: str = ""
+    end_ap_id: str = ""
+    start_ap_status: str = ""
+    end_ap_status: str = ""
     diffs: list[KiCadFieldDiff] = field(default_factory=list)
 
 
@@ -146,6 +170,7 @@ class KiCadScanResult:
     root_path: Path
     project_uuid: str
     candidates: dict[str, KiCadCableCandidate] = field(default_factory=dict)
+    kbl_bus_candidates: dict[str, KiCadBusCableCandidate] = field(default_factory=dict)
     textfield_candidates: dict[str, KiCadTextFieldCandidate] = field(default_factory=dict)
     ap_group_candidates: dict[str, KiCadApGroupCandidate] = field(default_factory=dict)
     rectangles: dict[str, KiCadRectFrame] = field(default_factory=dict)
@@ -169,6 +194,8 @@ def build_import_preview(
     
     # Process KiCad sheet pin candidates
     for candidate in scan_result.candidates.values():
+        if _is_kbl_candidate_name(candidate.pin_name_raw):
+            continue
         sync_key = build_kicad_cable_key(scan_result.project_uuid, candidate)
         existing = existing_by_sync_key.get(sync_key)
         cable_name = candidate.base_name or candidate.pin_name_raw
@@ -230,6 +257,195 @@ def build_import_preview(
                 ap_import_action=ap_action,
                 ap_match_status=ap_match_status,
                 ap_matches=ap_matches,
+                diffs=diffs,
+            )
+        )
+
+    # Process KBL_* hierarchical label / pin-name candidates
+    for candidate in scan_result.candidates.values():
+        if not _is_kbl_candidate_name(candidate.pin_name_raw):
+            continue
+        if not str(candidate.spec_raw or "").strip():
+            continue
+
+        sync_key = build_kicad_cable_key(scan_result.project_uuid, candidate)
+        existing = existing_by_sync_key.get(sync_key)
+        cable_name = _strip_kbl_prefix(candidate.base_name or candidate.pin_name_raw)
+        cable_type = candidate.normalized_spec or candidate.spec_raw
+
+        start_ap_id, start_ap_status, start_ap_matches = _resolve_kbl_label_endpoint_ap(cable_name, elec_points)
+        end_ap_id = ""
+        end_ap_status = "unmatched"
+        ap_matches = start_ap_matches
+
+        if start_ap_status == "matched":
+            ap_match_status = "ambiguous"
+            ap_action = "Start/Ziel-AP prüfen"
+        elif start_ap_status == "ambiguous":
+            ap_match_status = "ambiguous"
+            ap_action = "Start/Ziel-AP prüfen"
+        else:
+            ap_match_status = "unmatched"
+            ap_action = "Start/Ziel-AP prüfen"
+
+        if existing is None:
+            previews.append(
+                KiCadImportPreview(
+                    candidate_key=candidate.key,
+                    sync_key=sync_key,
+                    cable_name=cable_name,
+                    cable_type=cable_type,
+                    status="create",
+                    source="kbl_label",
+                    ap_import_action=ap_action,
+                    ap_match_status=ap_match_status,
+                    ap_matches=ap_matches,
+                    start_ap_group="",
+                    end_ap_group="",
+                    start_ap_id=start_ap_id,
+                    end_ap_id=end_ap_id,
+                    start_ap_status=start_ap_status,
+                    end_ap_status=end_ap_status,
+                    diffs=[
+                        KiCadFieldDiff("name", "", cable_name, bool(cable_name)),
+                        KiCadFieldDiff("type", "", cable_type, bool(cable_type)),
+                    ],
+                )
+            )
+            continue
+
+        diffs = [
+            KiCadFieldDiff(
+                "name",
+                str(existing.get("name", "") or ""),
+                cable_name,
+                str(existing.get("name", "") or "") != cable_name,
+            ),
+            KiCadFieldDiff(
+                "type",
+                str(existing.get("type", "") or ""),
+                cable_type,
+                str(existing.get("type", "") or "") != cable_type,
+            ),
+        ]
+        changed = any(diff.changed for diff in diffs)
+        previews.append(
+            KiCadImportPreview(
+                candidate_key=candidate.key,
+                sync_key=sync_key,
+                cable_name=cable_name,
+                cable_type=cable_type,
+                status="update" if changed else "unchanged",
+                source="kbl_label",
+                existing_cable_id=str(existing.get("id", "") or ""),
+                existing_name=str(existing.get("name", "") or ""),
+                existing_type=str(existing.get("type", "") or ""),
+                ap_import_action=ap_action,
+                ap_match_status=ap_match_status,
+                ap_matches=ap_matches,
+                start_ap_group="",
+                end_ap_group="",
+                start_ap_id=start_ap_id,
+                end_ap_id=end_ap_id,
+                start_ap_status=start_ap_status,
+                end_ap_status=end_ap_status,
+                diffs=diffs,
+            )
+        )
+
+    # Process KBL_* bus group candidates
+    for candidate in scan_result.kbl_bus_candidates.values():
+        sync_key = build_kicad_bus_cable_key(scan_result.project_uuid, candidate)
+        existing = existing_by_sync_key.get(sync_key)
+        cable_name = candidate.base_name or candidate.group_name_raw
+        cable_type = candidate.normalized_spec or candidate.spec_raw
+        start_ap_group, start_ap_group_status = _resolve_kbl_endpoint_group(
+            scan_result,
+            candidate.sheet_file,
+            candidate.hierarchy_path,
+            candidate.points[0],
+        )
+        end_ap_group, end_ap_group_status = _resolve_kbl_endpoint_group(
+            scan_result,
+            candidate.sheet_file,
+            candidate.hierarchy_path,
+            candidate.points[-1],
+        )
+        start_ap_id, start_ap_status, start_ap_matches = _resolve_kbl_endpoint_ap(start_ap_group, elec_points)
+        end_ap_id, end_ap_status, end_ap_matches = _resolve_kbl_endpoint_ap(end_ap_group, elec_points)
+        ap_matches = _merge_unique_ap_matches(start_ap_matches, end_ap_matches)
+
+        if start_ap_status == "matched" and end_ap_status == "matched":
+            ap_match_status = "matched"
+            ap_action = "AP wiederverwenden"
+        elif "ambiguous" in (start_ap_status, end_ap_status):
+            ap_match_status = "ambiguous"
+            ap_action = "Start/Ziel-AP prüfen"
+        else:
+            ap_match_status = "unmatched"
+            ap_action = "Start/Ziel-AP prüfen"
+
+        if existing is None:
+            previews.append(
+                KiCadImportPreview(
+                    candidate_key=candidate.key,
+                    sync_key=sync_key,
+                    cable_name=cable_name,
+                    cable_type=cable_type,
+                    status="create",
+                    source="kbl_bus",
+                    ap_import_action=ap_action,
+                    ap_match_status=ap_match_status,
+                    ap_matches=ap_matches,
+                    start_ap_group=start_ap_group,
+                    end_ap_group=end_ap_group,
+                    start_ap_id=start_ap_id,
+                    end_ap_id=end_ap_id,
+                    start_ap_status=start_ap_status,
+                    end_ap_status=end_ap_status,
+                    diffs=[
+                        KiCadFieldDiff("name", "", cable_name, bool(cable_name)),
+                        KiCadFieldDiff("type", "", cable_type, bool(cable_type)),
+                    ],
+                )
+            )
+            continue
+
+        diffs = [
+            KiCadFieldDiff(
+                "name",
+                str(existing.get("name", "") or ""),
+                cable_name,
+                str(existing.get("name", "") or "") != cable_name,
+            ),
+            KiCadFieldDiff(
+                "type",
+                str(existing.get("type", "") or ""),
+                cable_type,
+                str(existing.get("type", "") or "") != cable_type,
+            ),
+        ]
+        changed = any(diff.changed for diff in diffs)
+        previews.append(
+            KiCadImportPreview(
+                candidate_key=candidate.key,
+                sync_key=sync_key,
+                cable_name=cable_name,
+                cable_type=cable_type,
+                status="update" if changed else "unchanged",
+                source="kbl_bus",
+                existing_cable_id=str(existing.get("id", "") or ""),
+                existing_name=str(existing.get("name", "") or ""),
+                existing_type=str(existing.get("type", "") or ""),
+                ap_import_action=ap_action,
+                ap_match_status=ap_match_status,
+                ap_matches=ap_matches,
+                start_ap_group=start_ap_group,
+                end_ap_group=end_ap_group,
+                start_ap_id=start_ap_id,
+                end_ap_id=end_ap_id,
+                start_ap_status=start_ap_status,
+                end_ap_status=end_ap_status,
                 diffs=diffs,
             )
         )
@@ -463,6 +679,10 @@ def build_kicad_cable_key(project_uuid: str, candidate: KiCadCableCandidate) -> 
     return f"{project_uuid}::{preferred.sheet_uuid}::{candidate.pin_name_raw}"
 
 
+def build_kicad_bus_cable_key(project_uuid: str, candidate: KiCadBusCableCandidate) -> str:
+    return f"{project_uuid}::kbl_bus::{candidate.group_uuid}::{candidate.bus_uuid}"
+
+
 def scan_kicad_project(root_path: str | Path) -> KiCadScanResult:
     """Scan a KiCad root schematic and aggregate cable candidates by pin name."""
     root = Path(root_path).resolve()
@@ -478,6 +698,7 @@ def scan_kicad_project(root_path: str | Path) -> KiCadScanResult:
         recursion_stack=(root,),
     )
     _build_ap_group_candidates(result)
+    _build_kbl_bus_candidates(result)
     return result
 
 
@@ -898,6 +1119,42 @@ def _canonical_ap_group_name(name: str) -> str:
     return text
 
 
+def _is_kbl_group_name(name: str) -> bool:
+    return str(name or "").strip().upper().startswith("KBL_")
+
+
+def _is_kbl_candidate_name(name: str) -> bool:
+    return str(name or "").strip().upper().startswith("KBL_")
+
+
+def _strip_kbl_prefix(name: str) -> str:
+    raw = str(name or "").strip()
+    if raw[:4].upper() == "KBL_":
+        return raw[4:]
+    return raw
+
+
+def _parse_kbl_group_name(name: str) -> dict[str, str]:
+    raw = str(name or "").strip()
+    if not raw:
+        return {
+            "group_name_raw": "",
+            "base_name": "",
+            "spec_raw": "",
+            "normalized_spec": "",
+            "spec_kind": "empty",
+        }
+    stripped = raw[4:] if raw[:4].upper() == "KBL_" else raw
+    parsed = _parse_pin_name(stripped)
+    return {
+        "group_name_raw": raw,
+        "base_name": parsed["base_name"],
+        "spec_raw": parsed["spec_raw"],
+        "normalized_spec": parsed["normalized_spec"],
+        "spec_kind": parsed["spec_kind"],
+    }
+
+
 def _build_ap_group_candidates(result: KiCadScanResult) -> None:
     result.ap_group_candidates.clear()
 
@@ -937,9 +1194,165 @@ def _build_ap_group_candidates(result: KiCadScanResult) -> None:
             group_name=_canonical_ap_group_name(group.name),
             group_uuid=group.uuid,
             frame_uuid=frame.uuid,
+            sheet_file=frame.sheet_file,
+            hierarchy_path=frame.hierarchy_path,
             frame_bounds=frame_rect,
             bus_hits=bus_hits,
         )
+
+
+def _build_kbl_bus_candidates(result: KiCadScanResult) -> None:
+    result.kbl_bus_candidates.clear()
+
+    for group in result.groups.values():
+        if not _is_kbl_group_name(group.name):
+            continue
+
+        parsed = _parse_kbl_group_name(group.name)
+        if not parsed["spec_raw"]:
+            result.warnings.append(
+                KiCadImportWarning(
+                    code="kbl-group-missing-spec",
+                    message=(
+                        f"KBL-Gruppe '{group.name}' hat keine Typdefinition {{...}} "
+                        f"und wird übersprungen."
+                    ),
+                    source_path=str(result.root_path),
+                )
+            )
+            continue
+        members: list[KiCadBusSegment] = []
+        for member_id in group.members:
+            bus = result.bus_segments.get(member_id)
+            if bus is None:
+                continue
+            if bus.sheet_file != group.sheet_file or bus.hierarchy_path != group.hierarchy_path:
+                continue
+            members.append(bus)
+
+        if not members:
+            result.warnings.append(
+                KiCadImportWarning(
+                    code="kbl-group-missing-bus",
+                    message=f"KBL-Gruppe '{group.name}' enthält keine Bus-Member auf derselben Seite.",
+                    source_path=str(result.root_path),
+                )
+            )
+            continue
+
+        for bus in members:
+            key = f"kbl_bus::{group.uuid}::{bus.uuid}"
+            result.kbl_bus_candidates[key] = KiCadBusCableCandidate(
+                key=key,
+                group_uuid=group.uuid,
+                group_name_raw=parsed["group_name_raw"],
+                base_name=parsed["base_name"],
+                spec_raw=parsed["spec_raw"],
+                normalized_spec=parsed["normalized_spec"],
+                spec_kind=parsed["spec_kind"],
+                bus_uuid=bus.uuid,
+                sheet_name=bus.sheet_name,
+                sheet_file=bus.sheet_file,
+                hierarchy_path=bus.hierarchy_path,
+                points=bus.points,
+            )
+
+
+def _resolve_kbl_endpoint_group(
+    scan_result: KiCadScanResult,
+    sheet_file: str,
+    hierarchy_path: tuple[str, ...],
+    point: tuple[float, float],
+) -> tuple[str, str]:
+    hits: list[str] = []
+    for ap_candidate in scan_result.ap_group_candidates.values():
+        if ap_candidate.sheet_file != sheet_file or ap_candidate.hierarchy_path != hierarchy_path:
+            continue
+        if _point_in_rect(point, ap_candidate.frame_bounds):
+            hits.append(ap_candidate.group_name)
+    unique_hits = sorted(set(hits))
+    if not unique_hits:
+        return "", "unmatched"
+    if len(unique_hits) == 1:
+        return unique_hits[0], "matched"
+    return "", "ambiguous"
+
+
+def _resolve_kbl_endpoint_ap(
+    group_name: str,
+    elec_points: Iterable[dict[str, Any]],
+) -> tuple[str, str, list[KiCadApMatch]]:
+    if not group_name:
+        return "", "unmatched", []
+    target = str(group_name or "").strip().casefold()
+    matches: list[KiCadApMatch] = []
+    for point in elec_points:
+        point_id = str(point.get("id", "") or point.get("point_id", "") or "").strip()
+        point_name = str(point.get("name", "") or "").strip()
+        floor_plan_id = str(point.get("floor_plan_id", "") or "").strip()
+        if not point_id or point_name.casefold() != target:
+            continue
+        matches.append(
+            KiCadApMatch(
+                point_id=point_id,
+                point_name=point_name or point_id,
+                floor_plan_id=floor_plan_id,
+                score=100,
+                reason="AP-Group Endpoint",
+            )
+        )
+    if not matches:
+        return "", "unmatched", []
+    if len(matches) == 1:
+        return matches[0].point_id, "matched", matches
+    return "", "ambiguous", matches
+
+
+def _resolve_kbl_label_endpoint_ap(
+    cable_name: str,
+    elec_points: Iterable[dict[str, Any]],
+) -> tuple[str, str, list[KiCadApMatch]]:
+    base = str(cable_name or "").strip()
+    if not base:
+        return "", "unmatched", []
+    base_norm = base.casefold()
+    ap_norm = f"AP_{base}".casefold()
+    matches: list[KiCadApMatch] = []
+    for point in elec_points:
+        point_id = str(point.get("id", "") or point.get("point_id", "") or "").strip()
+        point_name = str(point.get("name", "") or "").strip()
+        floor_plan_id = str(point.get("floor_plan_id", "") or "").strip()
+        if not point_id:
+            continue
+        point_norm = point_name.casefold()
+        if point_norm not in (base_norm, ap_norm):
+            continue
+        matches.append(
+            KiCadApMatch(
+                point_id=point_id,
+                point_name=point_name or point_id,
+                floor_plan_id=floor_plan_id,
+                score=100,
+                reason="KBL Label Endpoint",
+            )
+        )
+    if not matches:
+        return "", "unmatched", []
+    if len(matches) == 1:
+        return matches[0].point_id, "matched", matches
+    return "", "ambiguous", matches
+
+
+def _merge_unique_ap_matches(
+    first: list[KiCadApMatch],
+    second: list[KiCadApMatch],
+) -> list[KiCadApMatch]:
+    merged: dict[str, KiCadApMatch] = {}
+    for match in (*first, *second):
+        merged[match.point_id] = match
+    values = list(merged.values())
+    values.sort(key=lambda item: (-item.score, item.point_name.lower(), item.point_id.lower()))
+    return values
 
 
 def _polyline_intersects_rect(

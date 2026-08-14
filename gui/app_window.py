@@ -54,9 +54,11 @@ from model.schema import schema_for
 from storage.asset_data_uri import is_data_uri
 from storage.hrp_io import load_document, repair_and_save_hrp, save_document
 from logic.kicad_import import (
+    KiCadBusCableCandidate,
     KiCadCableCandidate,
     KiCadSheetPinRef,
     KiCadScanResult,
+    build_kicad_bus_cable_key,
     build_import_preview,
     scan_kicad_project,
     suggest_ap_matches,
@@ -3117,9 +3119,22 @@ class AppWindow(QMainWindow):
         return sorted(choices, key=lambda entry: entry[1].lower())
 
     def _collect_floorplan_choices(self) -> list[tuple[str, str]]:
-        choices: list[tuple[str, str]] = []
+        names_by_id: dict[str, str] = {}
         for fp_id, floorplan in self._document.floorplans.items():
-            choices.append((fp_id, str(floorplan.name or fp_id)))
+            names_by_id[str(fp_id)] = str(floorplan.name or fp_id)
+
+        # Fallback for migrated/legacy projects where floorplan references exist
+        # on elements but no explicit floorplan objects are present.
+        for point in self._document.elements["elec_points"].values():
+            fp_id = str(point.floor_plan_id or "").strip()
+            if fp_id and fp_id not in names_by_id:
+                names_by_id[fp_id] = fp_id
+        for room in self._document.elements["elec_rooms"].values():
+            fp_id = str(room.floor_plan_id or "").strip()
+            if fp_id and fp_id not in names_by_id:
+                names_by_id[fp_id] = fp_id
+
+        choices = list(names_by_id.items())
         return sorted(choices, key=lambda entry: entry[1].lower())
 
     def _collect_room_choices_by_floorplan(self) -> dict[str, list[tuple[str, str]]]:
@@ -5635,13 +5650,17 @@ class AppWindow(QMainWindow):
             QMessageBox.critical(self, "KiCad-Import", f"Scan fehlgeschlagen:\n{exc}")
             return
 
-        # Add text field candidates from HRouting document
-        self._add_textfield_candidates_to_scan(scan_result)
+        if hasattr(self, "_update_elec_point_room_assignments"):
+            self._update_elec_point_room_assignments()
 
         if (
-            not scan_result.candidates
-            and not scan_result.textfield_candidates
-            and not scan_result.ap_group_candidates
+            not scan_result.ap_group_candidates
+            and not scan_result.kbl_bus_candidates
+            and not any(
+                str(getattr(c, "pin_name_raw", "") or "").strip().upper().startswith("KBL_")
+                and str(getattr(c, "spec_raw", "") or "").strip()
+                for c in scan_result.candidates.values()
+            )
         ):
             QMessageBox.information(self, "KiCad-Import", "Keine importierbaren Kabelkandidaten gefunden.")
             return
@@ -5701,51 +5720,46 @@ class AppWindow(QMainWindow):
             elec_points=self._kicad_elec_points_payload(),
         )
 
-        cable_previews: list[object] = []
-        cable_warnings: list[str] = []
-        approved_names_from_phase1 = set(ap_summary["approved_ap_names"])
-        ap_phase_uses_groups = any(getattr(preview, "source", "") == "ap_group" for preview in ap_previews)
-        for preview in phase_two_previews:
-            if preview.source == "ap_group":
-                # AP groups are handled only in phase 1.
-                continue
-            preview_name = preview.cable_name.strip().casefold()
-            if preview.source == "text_field":
-                if not ap_previews or preview.candidate_key in approved_ap_keys:
-                    cable_previews.append(preview)
-                continue
-
-            if ap_previews:
-                if ap_phase_uses_groups:
-                    if preview.existing_cable_id or preview.ap_match_status in ("matched", "ambiguous"):
-                        cable_previews.append(preview)
-                        continue
-                if preview_name and preview_name in approved_names_from_phase1:
-                    cable_previews.append(preview)
-                    continue
-            else:
-                if preview.existing_cable_id or preview.ap_match_status == "matched":
-                    cable_previews.append(preview)
-                    continue
-
-            if preview.existing_cable_id:
-                cable_warnings.append(
-                    f"Kabel '{preview.cable_name}' wurde ausgeblendet: zugehöriger AP wurde in Schritt 1 nicht freigegeben."
-                )
-            elif preview.ap_match_status == "ambiguous":
-                cable_warnings.append(
-                    f"Kabel '{preview.cable_name}' wurde ausgeblendet: AP-Zuordnung mehrdeutig."
-                )
-            else:
-                cable_warnings.append(
-                    f"Kabel '{preview.cable_name}' wurde ausgeblendet: kein AP-Anker aus Schritt 1 verfügbar."
-                )
+        # Cable phase: KBL buses and KBL hierarchical labels with type definition
+        cable_previews: list[object] = [
+            p for p in phase_two_previews if p.source in {"kbl_bus", "kbl_label"}
+        ]
+        cable_warnings: list[str] = [
+            f"KBL-Kabel '{p.cable_name}': Start/Ziel-AP nicht eindeutig erkannt, bitte manuell wählen."
+            for p in cable_previews
+            if p.start_ap_status != "matched" or p.end_ap_status != "matched"
+        ]
 
         if not cable_previews:
+            typed_candidates = [
+                c
+                for c in scan_result.candidates.values()
+                if str(getattr(c, "spec_raw", "") or "").strip()
+            ]
+            sample_names = sorted(
+                {
+                    str(getattr(c, "base_name", "") or getattr(c, "pin_name_raw", "") or "").strip()
+                    for c in typed_candidates
+                    if str(getattr(c, "base_name", "") or getattr(c, "pin_name_raw", "") or "").strip()
+                }
+            )
+            sample_text = ", ".join(sample_names[:5])
+            detail_lines = ["Keine KBL-Kabel mit Typdefinition für Schritt 2 verfügbar."]
+            if not scan_result.kbl_bus_candidates:
+                detail_lines.append("In der Datei wurden keine KBL_-Busgruppen erkannt.")
+            if typed_candidates:
+                detail_lines.append(
+                    (
+                        f"Hinweis: {len(typed_candidates)} klassische Pin/Label-Kandidaten mit Typ wurden erkannt"
+                        " (z. B. "
+                        f"{sample_text})."
+                    )
+                )
+                detail_lines.append("Schritt 2 importiert aktuell nur KBL_-Busgruppen.")
             QMessageBox.information(
                 self,
                 "KiCad-Import",
-                "Keine Kabel mit freigegebenem AP-Anker für Schritt 2 verfügbar.",
+                "\n".join(detail_lines),
             )
             return
 
@@ -5754,6 +5768,15 @@ class AppWindow(QMainWindow):
             cable_previews,
             phase="cables",
             extra_warnings=cable_warnings,
+            cable_ap_choices=self._kicad_elec_point_choices_with_rooms(),
+            cable_type_choices=self._kicad_existing_cable_types(),
+            initial_cable_endpoints={
+                str(p.candidate_key): {
+                    "start_ap_id": str(getattr(p, "start_ap_id", "") or ""),
+                    "end_ap_id": str(getattr(p, "end_ap_id", "") or ""),
+                }
+                for p in cable_previews
+            },
             parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
@@ -5764,7 +5787,27 @@ class AppWindow(QMainWindow):
             QMessageBox.information(self, "KiCad-Import", "Keine Kabelkandidaten ausgewählt.")
             return
 
-        summary = self._apply_kicad_cable_import(scan_result, selected_keys, prepare_textfield_aps=False)
+        preview_by_key = {str(p.candidate_key): p for p in cable_previews}
+
+        # Apply user edits (name, type, start/end AP) to previews
+        cable_data = dialog.selected_cable_data() if hasattr(dialog, "selected_cable_data") else {}
+        for key, edits in cable_data.items():
+            preview = preview_by_key.get(str(key))
+            if preview is None:
+                continue
+            if edits.get("name"):
+                preview.cable_name = edits["name"]
+            if edits.get("type") is not None:
+                preview.cable_type = edits["type"]
+            preview.start_ap_id = str(edits.get("start_ap_id") or "")
+            preview.end_ap_id = str(edits.get("end_ap_id") or "")
+
+        summary = self._apply_kicad_cable_import(
+            scan_result,
+            selected_keys,
+            selected_preview_map=preview_by_key,
+            prepare_textfield_aps=False,
+        )
         self.statusBar().showMessage(
             (
                 f"KiCad-Import: AP neu {ap_summary['created']}, AP wiederverwendet {ap_summary['reused']}, "
@@ -5817,6 +5860,7 @@ class AppWindow(QMainWindow):
         self,
         scan_result: KiCadScanResult,
         selected_keys: list[str],
+        selected_preview_map: dict[str, object] | None = None,
         prepare_textfield_aps: bool = True,
     ) -> dict[str, int]:
         created = 0
@@ -5831,6 +5875,7 @@ class AppWindow(QMainWindow):
         }
         default_floor_plan_id = self._active_floorplan_id()
         first_touched_id = ""
+        preview_by_key = dict(selected_preview_map or {})
 
         # Optional safety net: prepare/reuse APs for selected text fields
         ap_assignments: dict[str, tuple[str, str]] = {}
@@ -5852,14 +5897,28 @@ class AppWindow(QMainWindow):
 
         # Phase 2: Import/update cables
         for key in selected_keys:
+            preview = preview_by_key.get(key)
             # Try sheet pin candidate first
             candidate = scan_result.candidates.get(key)
             if candidate:
-                sync_key = self._build_kicad_cable_key(scan_result.project_uuid, candidate)
+                sync_key = str(getattr(preview, "sync_key", "") or "") or self._build_kicad_cable_key(
+                    scan_result.project_uuid, candidate
+                )
                 preferred_pin = self._preferred_kicad_pin_ref(candidate)
-                cable_type = candidate.normalized_spec or candidate.spec_raw
-                cable_name = candidate.base_name or candidate.pin_name_raw
-                resolved_start_ap_id, resolved_end_ap_id = self._resolve_sheet_candidate_ap_pair(candidate)
+                is_kbl_label = str(getattr(preview, "source", "") or "") == "kbl_label"
+                if is_kbl_label:
+                    cable_name = str(getattr(preview, "cable_name", "") or "").strip() or (
+                        candidate.base_name or candidate.pin_name_raw
+                    )
+                    cable_type = str(getattr(preview, "cable_type", "") or "").strip() or (
+                        candidate.normalized_spec or candidate.spec_raw
+                    )
+                    resolved_start_ap_id = str(getattr(preview, "start_ap_id", "") or "")
+                    resolved_end_ap_id = str(getattr(preview, "end_ap_id", "") or "")
+                else:
+                    cable_type = candidate.normalized_spec or candidate.spec_raw
+                    cable_name = candidate.base_name or candidate.pin_name_raw
+                    resolved_start_ap_id, resolved_end_ap_id = self._resolve_sheet_candidate_ap_pair(candidate)
                 existing_id = existing_by_sync_key.get(sync_key)
 
                 if not resolved_start_ap_id and not existing_id:
@@ -5910,6 +5969,69 @@ class AppWindow(QMainWindow):
                 self._apply_kicad_sync_metadata(
                     cable.data, scan_result.project_uuid, preferred_pin, candidate, sync_key
                 )
+                self._document.add(cable)
+                self.canvas.register_element(eid)
+                existing_by_sync_key[sync_key] = eid
+                created += 1
+                first_touched_id = first_touched_id or eid
+                continue
+
+            # Try KBL bus candidate
+            kbl_candidate = scan_result.kbl_bus_candidates.get(key)
+            if kbl_candidate:
+                sync_key = build_kicad_bus_cable_key(scan_result.project_uuid, kbl_candidate)
+                preview = preview_by_key.get(key)
+                # Name and type may have been edited by the user in the dialog
+                cable_name = str(getattr(preview, "cable_name", "") or "").strip() or (
+                    kbl_candidate.base_name or kbl_candidate.group_name_raw
+                )
+                cable_type = str(getattr(preview, "cable_type", "") or "").strip() or (
+                    kbl_candidate.normalized_spec or kbl_candidate.spec_raw
+                )
+                resolved_start_ap_id = str(getattr(preview, "start_ap_id", "") or "")
+                resolved_end_ap_id = str(getattr(preview, "end_ap_id", "") or "")
+                existing_id = existing_by_sync_key.get(sync_key)
+
+                if existing_id:
+                    cable = self._document.elements["elec_cables"].get(existing_id)
+                    if cable is None:
+                        skipped += 1
+                        continue
+                    cable.name = cable_name
+                    cable.data["type"] = cable_type
+                    if resolved_start_ap_id:
+                        cable.start_ap = resolved_start_ap_id
+                    if resolved_end_ap_id:
+                        cable.end_ap = resolved_end_ap_id
+                    if cable.start_ap and cable.end_ap:
+                        points = self._build_cable_points_from_ap_anchors(cable.start_ap, cable.end_ap)
+                        if len(points) >= 2:
+                            cable.geom["elec_cables"] = points
+                    self._apply_kicad_bus_sync_metadata(cable.data, scan_result.project_uuid, kbl_candidate, sync_key)
+                    self._document.element_changed.emit(existing_id)
+                    updated += 1
+                    first_touched_id = first_touched_id or existing_id
+                    continue
+
+                eid = self._document.new_id(ElecCable)
+                cable = ElecCable.create(
+                    eid,
+                    floor_plan_id=default_floor_plan_id,
+                    name=cable_name,
+                    color="#ffb300",
+                    visible=True,
+                    label_visible=True,
+                    label_size=12.0,
+                    type=cable_type,
+                    comment="",
+                    start_ap=resolved_start_ap_id,
+                    end_ap=resolved_end_ap_id,
+                )
+                if cable.start_ap and cable.end_ap:
+                    points = self._build_cable_points_from_ap_anchors(cable.start_ap, cable.end_ap)
+                    if len(points) >= 2:
+                        cable.geom["elec_cables"] = points
+                self._apply_kicad_bus_sync_metadata(cable.data, scan_result.project_uuid, kbl_candidate, sync_key)
                 self._document.add(cable)
                 self.canvas.register_element(eid)
                 existing_by_sync_key[sync_key] = eid
@@ -6009,14 +6131,53 @@ class AppWindow(QMainWindow):
             points.extend(extra_points)
         return points
 
+    def _kicad_elec_point_choices(self) -> list[tuple[str, str]]:
+        choices: list[tuple[str, str]] = []
+        for point_id, point in self._document.elements["elec_points"].items():
+            point_name = str(point.name or "").strip() or point_id
+            floor_plan_id = str(point.floor_plan_id or "").strip()
+            if floor_plan_id:
+                label = f"{point_name} [{floor_plan_id}] ({point_id})"
+            else:
+                label = f"{point_name} ({point_id})"
+            choices.append((point_id, label))
+        choices.sort(key=lambda item: item[1].lower())
+        return choices
+
     @staticmethod
     def _build_kicad_ap_phase_previews(previews: list[object]) -> list[object]:
-        ap_group_previews = [
+        return [
             preview for preview in previews if getattr(preview, "source", "") == "ap_group"
         ]
-        if ap_group_previews:
-            return ap_group_previews
-        return [preview for preview in previews if getattr(preview, "source", "") == "text_field"]
+
+    def _kicad_elec_point_choices_with_rooms(self) -> list[tuple[str, str]]:
+        room_names: dict[str, str] = {
+            rid: str(room.name or rid)
+            for rid, room in self._document.elements["elec_rooms"].items()
+        }
+        choices: list[tuple[str, str]] = []
+        for point_id, point in self._document.elements["elec_points"].items():
+            point_name = str(point.name or "").strip() or point_id
+            room_id = self._resolve_existing_ap_room_id(point)
+            room_name = room_names.get(room_id, room_id) if room_id else ""
+            label = (
+                f"{room_name} / {point_name} ({point_id})"
+                if room_name
+                else f"(kein Raum) / {point_name} ({point_id})"
+            )
+            choices.append((point_id, label))
+        choices.sort(key=lambda item: item[1].lower())
+        return choices
+
+    def _kicad_existing_cable_types(self) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for cable in self._document.elements["elec_cables"].values():
+            t = str(cable.data.get("type", "") or "").strip()
+            if t and t not in seen:
+                seen.add(t)
+                result.append(t)
+        return sorted(result)
 
     def _apply_kicad_ap_import(
         self,
@@ -6032,6 +6193,7 @@ class AppWindow(QMainWindow):
         for key in selected_ap_keys:
             ap_group_candidate = scan_result.ap_group_candidates.get(key)
             if ap_group_candidate is not None:
+                ap_name = self._ap_import_name_from_group_name(ap_group_candidate.group_name)
                 assignment = ap_assignments.get(key, {})
                 selected_floor_plan_id = str(assignment.get("floor_plan_id", "") or "")
                 selected_room_id = str(assignment.get("room_id", "") or "")
@@ -6039,7 +6201,7 @@ class AppWindow(QMainWindow):
                 center_x = (frame_bounds[0] + frame_bounds[2]) / 2.0
                 center_y = (frame_bounds[1] + frame_bounds[3]) / 2.0
                 ap_id, _floor_plan_id, status = self._resolve_or_create_ap_by_name(
-                    ap_group_candidate.group_name,
+                    ap_name,
                     selected_floor_plan_id or self._active_floorplan_id(),
                     [center_x, center_y],
                     room_id=selected_room_id,
@@ -6059,7 +6221,7 @@ class AppWindow(QMainWindow):
                 elif status == "reused":
                     reused += 1
                 if ap_id:
-                    approved_ap_names.add(str(ap_group_candidate.group_name or "").strip().casefold())
+                    approved_ap_names.add(str(ap_name or "").strip().casefold())
                     first_touched_id = first_touched_id or ap_id
                 continue
 
@@ -6102,6 +6264,33 @@ class AppWindow(QMainWindow):
         assignments: dict[str, dict[str, str]] = {}
         room_choices_by_floorplan = self._collect_room_choices_by_floorplan()
         for preview in ap_previews:
+            key = str(getattr(preview, "candidate_key", "") or "")
+            ap_group_candidate = scan_result.ap_group_candidates.get(key)
+            if ap_group_candidate is not None:
+                floor_plan_id = self._active_floorplan_id()
+                room_id = ""
+
+                existing_ap = self._find_existing_ap_by_kicad_group_uuid(
+                    {
+                        "kicad_project_uuid": str(scan_result.project_uuid or ""),
+                        "kicad_group_uuid": str(ap_group_candidate.group_uuid or ""),
+                    }
+                )
+                if existing_ap is None:
+                    existing_ap = self._find_existing_ap_by_name(str(ap_group_candidate.group_name or ""))
+                if existing_ap is not None:
+                    floor_plan_id = str(existing_ap.floor_plan_id or floor_plan_id or "")
+                    room_id = self._resolve_existing_ap_room_id(existing_ap)
+
+                if not floor_plan_id:
+                    floor_plan_id = self._active_floorplan_id()
+                assignments[key] = {
+                    "floor_plan_id": floor_plan_id,
+                    "room_id": room_id,
+                    "room_locked": existing_ap is not None,
+                }
+                continue
+
             tf_candidate = scan_result.textfield_candidates.get(str(getattr(preview, "candidate_key", "") or ""))
             if tf_candidate is None:
                 continue
@@ -6120,11 +6309,59 @@ class AppWindow(QMainWindow):
                 choices = room_choices_by_floorplan.get(floor_plan_id, [])
                 if len(choices) == 1:
                     room_id = choices[0][0]
-            assignments[str(preview.candidate_key)] = {
+            assignments[key] = {
                 "floor_plan_id": floor_plan_id,
                 "room_id": room_id,
             }
         return assignments
+
+    def _resolve_existing_ap_room_id(self, point: ElecPoint) -> str:
+        # Prefer the active navigator mapping first.
+        room_map = getattr(self, "_elec_point_room_map", None)
+        if isinstance(room_map, dict):
+            mapped_room_id = str(room_map.get(point.id, "") or "").strip()
+            if mapped_room_id:
+                return mapped_room_id
+
+        explicit_room_id = str(point.data.get("room_id", "") or "").strip()
+        if explicit_room_id:
+            return explicit_room_id
+
+        return self._find_room_id_for_point(point)
+
+    def _find_existing_ap_by_name(self, ap_name: str) -> ElecPoint | None:
+        target = self._normalize_ap_lookup_name(ap_name)
+        if not target:
+            return None
+        matches: list[ElecPoint] = []
+        for point in self._document.elements["elec_points"].values():
+            point_name = self._normalize_ap_lookup_name(point.name)
+            if point_name == target:
+                matches.append(point)
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    @staticmethod
+    def _normalize_ap_lookup_name(value: object) -> str:
+        text = str(value or "").strip()
+        if text[:3].upper() == "AP_":
+            text = text[3:]
+        return text.casefold()
+
+    def _find_room_id_for_point(self, point: ElecPoint) -> str:
+        pos = getattr(point, "pos", None)
+        if not (isinstance(pos, (list, tuple)) and len(pos) >= 2):
+            return ""
+        floor_plan_id = str(point.floor_plan_id or "")
+        point_xy = [float(pos[0]), float(pos[1])]
+        for room_id, room in self._document.elements["elec_rooms"].items():
+            if floor_plan_id and str(room.floor_plan_id or "") != floor_plan_id:
+                continue
+            polygon = room.geom.get("elec_rooms") or room.geom.get("elec_room_polygons")
+            if isinstance(polygon, list) and self._poly_contains(point_xy, polygon):
+                return room_id
+        return ""
 
     def _resolve_or_create_textfield_ap(
         self,
@@ -6177,17 +6414,28 @@ class AppWindow(QMainWindow):
         return "", floor_plan_id
 
     def _find_existing_ap_matches(self, ap_name: str, floor_plan_id: str) -> tuple[list[ElecPoint], list[ElecPoint]]:
-        candidate_name = ap_name.casefold()
+        candidate_name = self._normalize_ap_lookup_name(ap_name)
         exact_matches: list[ElecPoint] = []
         same_floorplan_matches: list[ElecPoint] = []
         for point in self._document.elements["elec_points"].values():
-            point_name = str(point.name or "").strip()
-            if not point_name or point_name.casefold() != candidate_name:
+            point_name = self._normalize_ap_lookup_name(point.name)
+            if not point_name or point_name != candidate_name:
                 continue
             exact_matches.append(point)
             if floor_plan_id and str(point.floor_plan_id or "") == floor_plan_id:
                 same_floorplan_matches.append(point)
         return same_floorplan_matches, exact_matches
+
+    @staticmethod
+    def _ap_import_name_from_group_name(group_name: str) -> str:
+        text = str(group_name or "").strip()
+        if text[:3].upper() == "AP_":
+            rest = text[3:]
+            # Keep AP_ for technical ID-style names like AP_1 / AP_1_NEU.
+            if rest[:1].isdigit():
+                return text
+            return rest
+        return text
 
     def _resolve_or_create_ap_by_name(
         self,
@@ -6202,6 +6450,8 @@ class AppWindow(QMainWindow):
             if existing_by_uuid is not None:
                 if ap_name and str(existing_by_uuid.name or "") != ap_name:
                     existing_by_uuid.name = ap_name
+                if room_id:
+                    existing_by_uuid.data["room_id"] = room_id
                 self._apply_kicad_ap_sync_metadata(existing_by_uuid.data, kicad_sync)
                 self._document.element_changed.emit(existing_by_uuid.id)
                 return existing_by_uuid.id, str(existing_by_uuid.floor_plan_id or floor_plan_id or ""), "reused"
@@ -6209,12 +6459,22 @@ class AppWindow(QMainWindow):
         same_floorplan_matches, exact_matches = self._find_existing_ap_matches(ap_name, floor_plan_id)
         if same_floorplan_matches:
             if kicad_sync:
+                if room_id:
+                    same_floorplan_matches[0].data["room_id"] = room_id
                 self._apply_kicad_ap_sync_metadata(same_floorplan_matches[0].data, kicad_sync)
+                self._document.element_changed.emit(same_floorplan_matches[0].id)
+            elif room_id:
+                same_floorplan_matches[0].data["room_id"] = room_id
                 self._document.element_changed.emit(same_floorplan_matches[0].id)
             return same_floorplan_matches[0].id, floor_plan_id, "reused"
         if exact_matches:
             if kicad_sync:
+                if room_id:
+                    exact_matches[0].data["room_id"] = room_id
                 self._apply_kicad_ap_sync_metadata(exact_matches[0].data, kicad_sync)
+                self._document.element_changed.emit(exact_matches[0].id)
+            elif room_id:
+                exact_matches[0].data["room_id"] = room_id
                 self._document.element_changed.emit(exact_matches[0].id)
             return exact_matches[0].id, str(exact_matches[0].floor_plan_id or floor_plan_id or ""), "reused"
 
@@ -6254,6 +6514,7 @@ class AppWindow(QMainWindow):
             point.geom["elec_points"] = [0.0, 0.0]
         point.geom["elec_point_size_px"] = [30.0, 30.0]
         point.geom["elec_visible"] = True
+        point.data["room_id"] = room_id
         if kicad_sync:
             self._apply_kicad_ap_sync_metadata(point.data, kicad_sync)
 
@@ -6372,6 +6633,22 @@ class AppWindow(QMainWindow):
         data["kicad_pin_uuid"] = preferred_pin.pin_uuid if preferred_pin else ""
         data["kicad_pin_name"] = candidate.pin_name_raw
         data["kicad_sheet_path"] = preferred_pin.sheet_file if preferred_pin else ""
+        data["kicad_cable_key"] = sync_key
+        data["kicad_last_import_hash"] = ""
+        data["kicad_last_imported_at"] = ""
+
+    @staticmethod
+    def _apply_kicad_bus_sync_metadata(
+        data: dict,
+        project_uuid: str,
+        candidate: KiCadBusCableCandidate,
+        sync_key: str,
+    ) -> None:
+        data["kicad_project_uuid"] = project_uuid
+        data["kicad_group_uuid"] = candidate.group_uuid
+        data["kicad_bus_uuid"] = candidate.bus_uuid
+        data["kicad_sheet_path"] = candidate.sheet_file
+        data["kicad_pin_name"] = candidate.group_name_raw
         data["kicad_cable_key"] = sync_key
         data["kicad_last_import_hash"] = ""
         data["kicad_last_imported_at"] = ""

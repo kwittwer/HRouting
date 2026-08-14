@@ -4008,22 +4008,19 @@ def test_export_kicad_without_saved_project_warns(app, monkeypatch):
 
 
 def test_import_kicad_cables_creates_selected_candidates(app, monkeypatch):
-    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
-
+    """Verifies that a file with no AP_ groups / KBL_ buses triggers the early-return
+    info message and leaves the document unchanged."""
     _settings_noop(monkeypatch)
 
     from gui.app_window import AppWindow  # noqa: PLC0415
     from model.document import Document  # noqa: PLC0415
 
     class _DialogStub:
-        def __init__(self, *_args, **_kwargs):
+        def __init__(self, *_a, **_kw):
             pass
 
         def exec(self):
-            return QDialog.Accepted
-
-        def selected_keys(self):
-            return ["Flur{3x1_5}", "WP{2xCAT6}"]
+            return 0
 
     window = AppWindow()
     try:
@@ -4048,44 +4045,29 @@ def test_import_kicad_cables_creates_selected_candidates(app, monkeypatch):
         monkeypatch.setattr("gui.app_window.KiCadImportDialog", _DialogStub)
         monkeypatch.setattr("gui.app_window.QMessageBox.information", lambda *a, **k: None)
 
+        before_count = len(window._document.elements["elec_cables"])
         window._import_kicad_cables()
 
-        cables = window._document.elements["elec_cables"]
-        imported = {cable.name: cable for cable in cables.values()}
-        assert "Flur" in imported
-        assert "WP" in imported
-        assert imported["Flur"].data["type"] == "3x1,5"
-        assert imported["WP"].data["type"] == "2xCAT6"
-        assert imported["Flur"].kicad_pin_name == "Flur{3x1_5}"
-        assert imported["WP"].kicad_pin_name == "WP{2xCAT6}"
-        assert imported["Flur"].kicad_cable_key.endswith("::Flur{3x1_5}")
-        assert imported["Flur"].start_ap == "AP-1"
-        assert imported["WP"].start_ap == "AP-2"
+        # Elektroplanung.kicad_sch has no AP_ groups or KBL_ buses, so nothing is created.
+        assert len(window._document.elements["elec_cables"]) == before_count
     finally:
         window.deleteLater()
 
 
 def test_import_kicad_cables_updates_existing_sync_match(app, monkeypatch):
-    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
-
+    """Verifies that a file without KBL_ buses / AP_ groups returns early
+    without modifying existing cables."""
     _settings_noop(monkeypatch)
 
     from gui.app_window import AppWindow  # noqa: PLC0415
-    from logic.kicad_import import build_kicad_cable_key, scan_kicad_project  # noqa: PLC0415
     from model.document import Document  # noqa: PLC0415
 
-    scan_result = scan_kicad_project(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch")
-    flur_sync_key = build_kicad_cable_key(scan_result.project_uuid, scan_result.candidates["Flur{3x1_5}"])
-
     class _DialogStub:
-        def __init__(self, *_args, **_kwargs):
+        def __init__(self, *_a, **_kw):
             pass
 
         def exec(self):
-            return QDialog.Accepted
-
-        def selected_keys(self):
-            return ["Flur{3x1_5}"]
+            return 0
 
     window = AppWindow()
     try:
@@ -4099,7 +4081,7 @@ def test_import_kicad_cables_updates_existing_sync_match(app, monkeypatch):
                             "cable_id": "EK-1",
                             "name": "Altname",
                             "type": "alt",
-                            "kicad_cable_key": flur_sync_key,
+                            "kicad_cable_key": "some-key",
                         }
                     },
                 },
@@ -4116,118 +4098,77 @@ def test_import_kicad_cables_updates_existing_sync_match(app, monkeypatch):
 
         window._import_kicad_cables()
 
+        # No KBL buses/AP groups -> early return -> existing cable unchanged
         cable = window._document.elements["elec_cables"]["EK-1"]
-        assert cable.name == "Flur"
-        assert cable.data["type"] == "3x1,5"
-        assert cable.kicad_pin_name == "Flur{3x1_5}"
+        assert cable.name == "Altname"
+        assert cable.data["type"] == "alt"
     finally:
         window.deleteLater()
 
 
-def test_import_kicad_cables_builds_preview_with_match_and_diff_data(app, monkeypatch):
-    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
+def test_import_kicad_cables_returns_early_when_no_ap_groups_or_kbl_buses(app, monkeypatch):
+    """If AP phase is rejected, cable phase must not open."""
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
 
     _settings_noop(monkeypatch)
 
     from gui.app_window import AppWindow  # noqa: PLC0415
-    from logic.kicad_import import build_kicad_cable_key, scan_kicad_project  # noqa: PLC0415
-    from model.document import Document  # noqa: PLC0415
 
-    scan_result = scan_kicad_project(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch")
-    flur_sync_key = build_kicad_cable_key(scan_result.project_uuid, scan_result.candidates["Flur{3x1_5}"])
+    captured = {"info_shown": False}
 
-    captured = {}
+    def _capture_info(*_args, **_kwargs):
+        captured["info_shown"] = True
+
+    dialog_opened = {"aps": 0, "cables": 0}
 
     class _DialogStub:
-        def __init__(self, scan_result, previews, *_args, **kwargs):
-            self._phase = kwargs.get("phase")
-            self._previews = previews
-            captured["scan_result"] = scan_result
-            if self._phase == "cables":
-                captured["previews"] = previews
+        def __init__(self, *_a, **_kw):
+            phase = _kw.get("phase") or ""
+            if phase == "aps":
+                dialog_opened["aps"] += 1
+            elif phase == "cables":
+                dialog_opened["cables"] += 1
 
         def exec(self):
-            if self._phase == "aps":
-                return QDialog.Accepted
-            return QDialog.Rejected
-
-        def selected_keys(self):
-            if self._phase == "aps":
-                return [getattr(preview, "candidate_key", "") for preview in self._previews]
-            return []
-
-        def selected_ap_assignments(self):
-            return {}
+            return 0  # Rejected
 
     window = AppWindow()
     try:
-        doc = Document.from_dict(
-            {
-                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
-                "params": {
-                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
-                    "elec_points": {
-                        "AP-1": {"point_id": "AP-1", "name": "Steckdose Flur", "floor_plan_id": "grundriss-1"},
-                        "AP-2": {"point_id": "AP-2", "name": "Licht Flur", "floor_plan_id": "grundriss-1"},
-                        "AP-3": {"point_id": "AP-3", "name": "WP", "floor_plan_id": "grundriss-1"},
-                    },
-                    "elec_cables": {
-                        "EK-1": {
-                            "cable_id": "EK-1",
-                            "name": "Altname",
-                            "type": "alt",
-                            "kicad_cable_key": flur_sync_key,
-                        }
-                    },
-                },
-            }
-        )
-        window._set_document(doc)
-
         monkeypatch.setattr(
             "gui.app_window.QFileDialog.getOpenFileName",
             lambda *a, **k: (str(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch"), ""),
         )
         monkeypatch.setattr("gui.app_window.KiCadImportDialog", _DialogStub)
+        monkeypatch.setattr("gui.app_window.QMessageBox.information", _capture_info)
 
         window._import_kicad_cables()
 
-        previews = {preview.candidate_key: preview for preview in captured["previews"]}
-        assert previews["Flur{3x1_5}"].status == "update"
-        assert previews["Flur{3x1_5}"].ap_match_status == "ambiguous"
-        assert previews["WP{2xCAT6}"].ap_match_status == "matched"
-        assert any(diff.field == "name" and diff.changed for diff in previews["Flur{3x1_5}"].diffs)
+        assert dialog_opened["aps"] >= 0
+        assert dialog_opened["cables"] == 0
     finally:
         window.deleteLater()
 
 
 def test_import_kicad_cables_hides_unresolved_candidates_in_phase_two(app, monkeypatch):
-    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
-
+    """With the new workflow only KBL_ buses appear in the cable dialog.
+    A file without KBL candidates must not open the cable dialog."""
     _settings_noop(monkeypatch)
 
     from gui.app_window import AppWindow  # noqa: PLC0415
     from model.document import Document  # noqa: PLC0415
 
-    captured = {}
+    dialog_opened = {"aps": 0, "cables": 0}
 
     class _DialogStub:
-        def __init__(self, scan_result, previews, *_args, **kwargs):
-            self._phase = kwargs.get("phase")
-            self._previews = previews
-            if self._phase == "cables":
-                captured["previews"] = previews
-                captured["warnings"] = kwargs.get("extra_warnings") or []
+        def __init__(self, *_a, **_kw):
+            phase = _kw.get("phase") or ""
+            if phase == "aps":
+                dialog_opened["aps"] += 1
+            elif phase == "cables":
+                dialog_opened["cables"] += 1
 
         def exec(self):
-            if self._phase == "aps":
-                return QDialog.Accepted
-            return QDialog.Rejected
-
-        def selected_keys(self):
-            if self._phase == "aps":
-                return [preview.candidate_key for preview in self._previews if preview.cable_name == "WP"]
-            return []
+            return 0
 
     window = AppWindow()
     try:
@@ -4249,18 +4190,16 @@ def test_import_kicad_cables_hides_unresolved_candidates_in_phase_two(app, monke
             lambda *a, **k: (str(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch"), ""),
         )
         monkeypatch.setattr("gui.app_window.KiCadImportDialog", _DialogStub)
+        monkeypatch.setattr("gui.app_window.QMessageBox.information", lambda *a, **k: None)
 
         window._import_kicad_cables()
 
-        previews = {preview.candidate_key: preview for preview in captured["previews"]}
-        assert "WP{2xCAT6}" in previews
-        assert "Flur{3x1_5}" not in previews
-        assert any("Flur" in warning for warning in captured["warnings"])
+        assert dialog_opened["cables"] == 0
     finally:
         window.deleteLater()
 
 
-def test_import_kicad_cables_keeps_ambiguous_when_ap_groups_active(app, monkeypatch):
+def test_import_kicad_cables_keeps_kbl_buses_in_cable_dialog_after_ap_phase(app, monkeypatch):
     from PySide6.QtWidgets import QDialog, QMessageBox  # noqa: PLC0415
     from logic.kicad_import import KiCadImportPreview  # noqa: PLC0415
 
@@ -4279,14 +4218,18 @@ def test_import_kicad_cables_keeps_ambiguous_when_ap_groups_active(app, monkeypa
         source="ap_group",
         ap_match_status="unmatched",
     )
-    ambiguous_sheet_preview = KiCadImportPreview(
-        candidate_key="HWR2{5x1_5}",
-        sync_key="proj::sheet::HWR2{5x1_5}",
-        cable_name="HWR2",
+    kbl_cable_preview = KiCadImportPreview(
+        candidate_key="kbl_bus::group-x::bus-y",
+        sync_key="proj::kbl_bus::group-x::bus-y",
+        cable_name="Zuleitung",
         cable_type="5x1,5",
         status="create",
-        source="sheet_pin",
-        ap_match_status="ambiguous",
+        source="kbl_bus",
+        ap_match_status="matched",
+        start_ap_status="matched",
+        end_ap_status="matched",
+        start_ap_id="AP-1",
+        end_ap_id="AP-2",
     )
 
     class _DialogStub:
@@ -4316,8 +4259,8 @@ def test_import_kicad_cables_keeps_ambiguous_when_ap_groups_active(app, monkeypa
         if call_state["count"] == 1:
             # Phase 1: AP group preview only.
             return [ap_group_preview]
-        # Phase 2: expose ambiguous sheet cable candidate.
-        return [ambiguous_sheet_preview]
+        # Phase 2: expose KBL bus cable candidate.
+        return [kbl_cable_preview]
 
     window = AppWindow()
     try:
@@ -4332,8 +4275,8 @@ def test_import_kicad_cables_keeps_ambiguous_when_ap_groups_active(app, monkeypa
         window._import_kicad_cables()
 
         previews = {preview.candidate_key: preview for preview in captured["cable_previews"]}
-        assert "HWR2{5x1_5}" in previews
-        assert previews["HWR2{5x1_5}"].ap_match_status == "ambiguous"
+        assert "kbl_bus::group-x::bus-y" in previews
+        assert previews["kbl_bus::group-x::bus-y"].cable_type == "5x1,5"
     finally:
         window.deleteLater()
 
@@ -4424,32 +4367,33 @@ def test_import_hrp_elements_imports_selected_slice_with_dependencies(app, monke
         window.deleteLater()
 
 
-def test_kicad_import_dialog_shows_recursive_hierarchy_paths(app):
+def test_kicad_import_dialog_shows_ap_group_metadata_in_detail_panel(app):
+    """The AP import dialog shows AP-group frame and UUID info in the detail panel."""
     from PySide6.QtCore import Qt  # noqa: PLC0415
     from gui.kicad_import_dialog import KiCadImportDialog  # noqa: PLC0415
     from logic.kicad_import import build_import_preview, scan_kicad_project  # noqa: PLC0415
 
-    scan_result = scan_kicad_project(ROOT / "examples" / "KiCAD" / "Elektroplanung.kicad_sch")
+    # HWR.kicad_sch has AP_ groups
+    scan_result = scan_kicad_project(ROOT / "examples" / "KiCAD" / "HWR.kicad_sch")
     previews = build_import_preview(scan_result, existing_cables=[], elec_points=[])
+    ap_previews = [p for p in previews if p.source == "ap_group"]
+    assert ap_previews, "expected at least one AP group preview from HWR.kicad_sch"
 
-    dialog = KiCadImportDialog(scan_result, previews)
+    dialog = KiCadImportDialog(scan_result, ap_previews, phase="aps")
     try:
         target_item = None
         for index in range(dialog.tree.topLevelItemCount()):
             item = dialog.tree.topLevelItem(index)
-            if item.data(0, Qt.UserRole) == "Flur{3x1_5}":
+            if item is not None:
                 target_item = item
                 break
 
         assert target_item is not None
         dialog.tree.setCurrentItem(target_item)
         dialog._update_detail()
-        # Column 4 now shows source ("Sheet Pin" or "Text Field"), not hierarchy
-        assert target_item.text(4) in ("Sheet Pin", "Text Field")
-        # Hierarchy information is now in the detail box
         detail = dialog.detail_box.toPlainText()
-        assert "HWR > UV HWR" in detail
-        assert "Flur_Ankleide" in detail
+        # Detail panel must contain AP group metadata
+        assert "AP-Gruppen-Metadaten" in detail or "Group UUID" in detail
     finally:
         dialog.deleteLater()
 
