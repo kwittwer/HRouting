@@ -138,7 +138,7 @@ Die Zuordnung wird als strukturierte Daten im Projekt gespeichert und kann über
 ## Kabelverbindung zeichnen
 
 1. Klicken Sie auf **➕ Kabel** in der Seitenleiste.
-2. Eine neue Kabelverbindung (z.B. „KV-1") erscheint unter **🔌 Kabelverbindungen**.
+2. Eine neue Kabelverbindung (z.B. „EK-1") erscheint unter **🔌 Kabelverbindungen**.
 3. Klicken Sie auf **✏️ Kabel zeichnen** und setzen Sie Punkte für den Kabelverlauf.
 4. Beenden Sie per **Rechtsklick**.
 

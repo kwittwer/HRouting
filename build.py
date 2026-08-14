@@ -242,7 +242,7 @@ def build_exe(version: str) -> Path:
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
-        "--onefile",
+        "--onedir",
         "--windowed",
         "--name", exe_name,
         # Nur benötigte PySide6-Module — spart ~200 MB
@@ -354,7 +354,7 @@ def build_exe(version: str) -> Path:
     cmd.append(str(MAIN_PY))
 
     print(f"\n{'='*60}")
-    print(f"Baue {exe_name}.exe …")
+    print(f"Baue {exe_name} (onedir) …")
     print(f"{'='*60}\n")
 
     result = subprocess.run(cmd, cwd=str(ROOT))
@@ -362,7 +362,7 @@ def build_exe(version: str) -> Path:
         print(f"\nFEHLER: PyInstaller beendet mit Code {result.returncode}")
         sys.exit(result.returncode)
 
-    exe_path = DIST / f"{exe_name}.exe"
+    exe_path = DIST / exe_name / f"{exe_name}.exe"
     if exe_path.exists():
         size_mb = exe_path.stat().st_size / (1024 * 1024)
         print(f"\n✓ Fertig: {exe_path}  ({size_mb:.1f} MB)")
@@ -576,6 +576,10 @@ def build_installer(version: str, exe_path: Path) -> Path | None:
     include_wiki = "1" if wiki_pdf.exists() else "0"
     installer_path = DIST / f"setup_HRouting_{version}.msi"
 
+    bundle_dir = ""
+    if exe_path.parent != DIST:
+        bundle_dir = exe_path.parent.name
+
     print(f"\n{'='*60}")
     print("Baue Windows Installer (WiX Toolset) …")
     print(f"  Version: {version}")
@@ -590,6 +594,7 @@ def build_installer(version: str, exe_path: Path) -> Path | None:
         "-arch", "x64",
         "-d", f"Version={version}",
         "-d", f"ExeName={exe_path.name}",
+        "-d", f"BundleDir={bundle_dir}",
         "-d", f"WikiPdfName={wiki_pdf.name}",
         "-d", f"IncludeWiki={include_wiki}",
         "-o", str(installer_path),
@@ -653,6 +658,7 @@ def build_installer(version: str, exe_path: Path) -> Path | None:
                     "-arch", "x64",
                     f"-dVersion={version}",
                     f"-dExeName={exe_path.name}",
+                    f"-dBundleDir={bundle_dir}",
                     f"-dWikiPdfName={wiki_pdf.name}",
                     f"-dIncludeWiki={include_wiki}",
                     "-out", str(wixobj),

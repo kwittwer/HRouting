@@ -19,6 +19,7 @@ Nach dem Splash Screen öffnet sich das Hauptfenster mit:
 | Argument | Beschreibung |
 |----------|-------------|
 | `--mcp` | MCP-Server starten (KI-Agenten-Anbindung, siehe [MCP-Server](10-MCP-Server.md)) |
+| `--mcpstdio` | MCP-Server über Stdio starten (für MCP-Hosts ohne HTTP-Bridge) |
 | `<datei.hrp>` | Projektdatei direkt öffnen (z.B. per Doppelklick im Explorer) |
 
 Beispiele:
@@ -29,6 +30,9 @@ python main.py
 
 # Mit MCP-Server für KI-Agenten
 python main.py --mcp
+
+# Mit MCP-Server über Stdio
+python main.py --mcpstdio
 
 # Projekt direkt öffnen
 python main.py mein_projekt.hrp
@@ -43,7 +47,7 @@ Unter Windows können `.hrp`-Projektdateien mit HRouting verknüpft werden. Nach
 
 ```bash
 # Registrieren
-python register_filetype.py install dist\HRouting_0.1.34.exe
+python register_filetype.py install dist\HRouting_<VERSION>.exe
 
 # Entfernen
 python register_filetype.py uninstall

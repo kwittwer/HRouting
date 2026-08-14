@@ -30,7 +30,7 @@
     </StandardDirectory>
 
     <Feature Id="MainFeature" Title="HRouting" Level="1">
-      <ComponentRef Id="cmpMainExe" />
+      <ComponentGroupRef Id="cmpAppBundle" />
       <ComponentRef Id="cmpReadme" />
       <ComponentRef Id="cmpLicense" />
       <?if $(var.IncludeWiki) = 1 ?>
@@ -43,9 +43,9 @@
       <ComponentRef Id="cmpAppPaths" />
     </Feature>
 
-    <Component Id="cmpMainExe" Guid="{9E8607B7-A5D0-4C68-A540-C64BB81DFE51}" Directory="INSTALLFOLDER">
-      <File Id="filMainExe" Source="dist\$(var.ExeName)" KeyPath="yes" />
-    </Component>
+    <ComponentGroup Id="cmpAppBundle" Directory="INSTALLFOLDER">
+      <Files Include="dist\$(var.BundleDir)\**" />
+    </ComponentGroup>
 
     <Component Id="cmpReadme" Guid="{6AF50CDA-770D-4CB6-82A8-D21A84E95E72}" Directory="INSTALLFOLDER">
       <File Id="filReadme" Source="README.md" KeyPath="yes" />

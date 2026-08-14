@@ -85,6 +85,6 @@ Um korrekte Maße zu erhalten, muss ein Maßstab gesetzt werden:
 
 1. Im Feld **② Reale Länge** den tatsächlichen Abstand in Metern eingeben.
 2. Auf **✔ Anwenden** klicken.
-3. Der berechnete Maßstab (m/px) wird angezeigt.
+3. Der berechnete Maßstab (`mm_per_px`) wird angezeigt.
 
 > **Hinweis**: Der Maßstab wird für alle Berechnungen verwendet (Flächen, Rohrlängen, Kabellängen). Eine korrekte Kalibrierung ist daher wichtig.

@@ -30,7 +30,7 @@ Heizkreisverteiler sind zentrale Verteiler, an die mehrere Heizkreise über Zule
 HKV-Leitungen verbinden zwei Heizkreisverteiler:
 
 1. Klicken Sie auf **➕ HKV-Leitung** in der Seitenleiste.
-2. Eine neue Leitung (z.B. „HL-1") erscheint unter **🔥 HKV-Leitungen**.
+2. Eine neue Leitung (z.B. „HKVL-1") erscheint unter **🔥 HKV-Leitungen**.
 3. Klicken Sie auf **✏️ Zeichnen** und setzen Sie Punkte.
 4. Beenden Sie per **Rechtsklick**.
 
