@@ -73,6 +73,26 @@ def test_app_window_builds_and_switches_workspaces(app, tmp_path, monkeypatch):
         window.deleteLater()
 
 
+def test_app_window_floating_docks_have_min_max_hints(app, monkeypatch):
+    from PySide6.QtCore import QSettings, Qt  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        for dock in window._docks.values():
+            flags = dock.windowFlags()
+            assert flags & Qt.WindowMinimizeButtonHint
+            assert flags & Qt.WindowMaximizeButtonHint
+    finally:
+        window.deleteLater()
+
+
 def test_navigator_hides_empty_categories(app):
     from gui.docks.navigator_dock import NavigatorDock  # noqa: PLC0415
     from model.document import Document  # noqa: PLC0415

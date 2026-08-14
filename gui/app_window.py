@@ -235,6 +235,28 @@ class AppWindow(QMainWindow):
             DockId.OVERVIEW_ELECTRO: self.overview_electro,
         }
 
+        for dock in self._docks.values():
+            self._configure_floating_dock_window_hints(dock)
+
+    def _configure_floating_dock_window_hints(self, dock) -> None:
+        """Erlaubt Min/Max auf frei schwebenden Docks (v. a. unter Windows)."""
+        dock.setWindowFlag(Qt.Tool, False)
+        dock.setWindowFlag(Qt.Window, True)
+        dock.setWindowFlag(Qt.CustomizeWindowHint, True)
+        dock.setWindowFlag(Qt.WindowTitleHint, True)
+        dock.setWindowFlag(Qt.WindowCloseButtonHint, True)
+        dock.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
+        dock.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+
+    def _on_dock_top_level_changed(self, floating: bool) -> None:
+        if not floating:
+            return
+        dock = self.sender()
+        if dock is None:
+            return
+        self._configure_floating_dock_window_hints(dock)
+        dock.show()
+
     def _build_menus(self) -> None:
         bar = self.menuBar()
 
@@ -368,6 +390,8 @@ class AppWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self._tabs.currentChanged.connect(self._on_tab_changed)
+        for dock in self._docks.values():
+            dock.topLevelChanged.connect(self._on_dock_top_level_changed)
         self.navigator.element_selected.connect(self._on_element_selected)
         self.navigator.selection_changed.connect(self._on_navigator_selection_changed)
         self.navigator.floorplan_activated.connect(self._on_floorplan_activated)
