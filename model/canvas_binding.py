@@ -18,6 +18,12 @@ from typing import Any, Callable
 from .document import Document
 from .elements import (
         AngleMeasurement,
+        AnnotationCircle,
+        AnnotationEllipse,
+        AnnotationLine,
+        AnnotationPolyline,
+        AnnotationRectangle,
+        AnnotationPolygon,
     Circuit,
         DistanceMeasurement,
     ElecCable,
@@ -190,10 +196,24 @@ BINDINGS: tuple[Binding, ...] = (
             element_cls=AngleMeasurement, converters=POINT_LIST),
     Binding("_persisted_angle_label_positions", "A4.8", "geom", "angle_label_positions",
             element_cls=AngleMeasurement, converters=POINT),
+
+    # -- A4.9  Zeichnungs-Annotations ------------------------------------
+    Binding("_annotation_lines", "A4.9", "geom", "annotation_lines",
+            element_cls=AnnotationLine, converters=RAW),
+    Binding("_annotation_rectangles", "A4.9", "geom", "annotation_rectangles",
+            element_cls=AnnotationRectangle, converters=RAW),
+    Binding("_annotation_polylines", "A4.9", "geom", "annotation_polylines",
+            element_cls=AnnotationPolyline, converters=RAW),
+    Binding("_annotation_circles", "A4.9", "geom", "annotation_circles",
+            element_cls=AnnotationCircle, converters=RAW),
+    Binding("_annotation_ellipses", "A4.9", "geom", "annotation_ellipses",
+            element_cls=AnnotationEllipse, converters=RAW),
+    Binding("_annotation_polygons", "A4.9", "geom", "annotation_polygons",
+            element_cls=AnnotationPolygon, converters=RAW),
 )
 
 #: Reihenfolge der Umstellungsstufen
-STAGES: tuple[str, ...] = ("A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6", "A4.7", "A4.8")
+STAGES: tuple[str, ...] = ("A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6", "A4.7", "A4.8", "A4.9")
 
 #: ``document.view``-Schlüssel, die bereits über Views gebunden sind
 BOUND_VIEW_KEYS: frozenset[str] = frozenset(

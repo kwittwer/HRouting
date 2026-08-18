@@ -18,6 +18,12 @@ from typing import Any, Callable
 
 from .elements import (
     AngleMeasurement,
+    AnnotationCircle,
+    AnnotationEllipse,
+    AnnotationLine,
+    AnnotationPolyline,
+    AnnotationRectangle,
+    AnnotationPolygon,
     Circuit,
     DistanceMeasurement,
     ElecCable,
@@ -182,6 +188,7 @@ AP_TYPES = ("standard", "uv", "up_distribution", "hak", "zaehler")
 SMARTHOME_DEVICES = ("", "Shelly", "Sonoff ZBMINIR2")
 SMARTHOME_COLORS = ("", "weiß", "schwarz")
 CABLE_TYPES = ("3x1,5", "5x1,5", "3x2,5", "5x2,5", "NYM-J 3x1,5", "NYM-J 5x2,5")
+LINE_STYLES = ("solid", "dash", "dot", "dashdot")
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +214,58 @@ def _label_fields() -> tuple[FieldSpec, ...]:
                   maximum=999.0, step=1.0, decimals=1, unit="pt", default=12.0,
                   group="Beschriftung"),
     )
+
+
+def _annotation_shape_fields(
+    default_color: str,
+    *,
+    fill: bool = False,
+    radius: bool = False,
+    dimensions: bool = False,
+) -> tuple[FieldSpec, ...]:
+    fields: list[FieldSpec] = [
+        FieldSpec("color", "Farbe", FieldKind.COLOR, default=default_color,
+                  group="Allgemein"),
+        FieldSpec("visible", "Sichtbar", FieldKind.BOOL, default=True,
+                  group="Allgemein"),
+        FieldSpec("line_style", "Linientyp", FieldKind.CHOICE,
+                  options=LINE_STYLES, default="solid", group="Darstellung"),
+        FieldSpec("stroke_width", "Strichstärke", FieldKind.NUMBER,
+                  minimum=0.1, maximum=9999.0, step=0.5, decimals=1, unit="px",
+                  default=2.0, group="Darstellung"),
+    ]
+    if fill:
+        fields.append(
+            FieldSpec("fill_color", "Füllungsfarbe", FieldKind.COLOR,
+                      default="#ffffff", group="Darstellung")
+        )
+    if radius:
+        fields.append(
+            FieldSpec("size_unit", "Einheit", FieldKind.CHOICE,
+                      options=("cm", "m"), default="cm", group="Geometrie")
+        )
+        fields.append(
+            FieldSpec("corner_radius_value", "Eckenradius", FieldKind.NUMBER,
+                      minimum=0.0, maximum=9999.0, step=0.5, decimals=1,
+                      unit="", default=0.0, group="Geometrie")
+        )
+    if dimensions:
+        if not radius:
+            fields.append(
+                FieldSpec("size_unit", "Einheit", FieldKind.CHOICE,
+                          options=("cm", "m"), default="cm", group="Geometrie")
+            )
+        fields.extend(
+            (
+                FieldSpec("width_value", "Breite", FieldKind.NUMBER,
+                          minimum=0.0, maximum=999999.0, step=0.5, decimals=1,
+                          unit="", default=0.0, group="Geometrie"),
+                FieldSpec("height_value", "Höhe", FieldKind.NUMBER,
+                          minimum=0.0, maximum=999999.0, step=0.5, decimals=1,
+                          unit="", default=0.0, group="Geometrie"),
+            )
+        )
+    return tuple(fields)
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +652,78 @@ FURNITURE_SCHEMA = ElementSchema(
 )
 
 
+ANNOTATION_LINE_SCHEMA = ElementSchema(
+    element_cls=AnnotationLine,
+    title="Linie",
+    fields=_annotation_shape_fields("#00e5ff"),
+    actions=(
+        ActionSpec("draw_line", "Linie zeichnen"),
+        ActionSpec("edit_line", "Linie bearbeiten", requires_geom="annotation_lines"),
+        ActionSpec("delete", "Löschen", destructive=True),
+    ),
+)
+
+
+ANNOTATION_RECTANGLE_SCHEMA = ElementSchema(
+    element_cls=AnnotationRectangle,
+    title="Rechteck",
+    fields=_annotation_shape_fields("#00e5ff", fill=True, radius=True, dimensions=True),
+    actions=(
+        ActionSpec("draw_rectangle", "Rechteck zeichnen"),
+        ActionSpec("edit_rectangle", "Rechteck bearbeiten", requires_geom="annotation_rectangles"),
+        ActionSpec("delete", "Löschen", destructive=True),
+    ),
+)
+
+
+ANNOTATION_POLYLINE_SCHEMA = ElementSchema(
+    element_cls=AnnotationPolyline,
+    title="Polylinie",
+    fields=_annotation_shape_fields("#00e5ff"),
+    actions=(
+        ActionSpec("draw_polyline", "Polylinie zeichnen"),
+        ActionSpec("edit_polyline", "Polylinie bearbeiten", requires_geom="annotation_polylines"),
+        ActionSpec("delete", "Löschen", destructive=True),
+    ),
+)
+
+
+ANNOTATION_CIRCLE_SCHEMA = ElementSchema(
+    element_cls=AnnotationCircle,
+    title="Kreis",
+    fields=_annotation_shape_fields("#00e5ff", fill=True, dimensions=True),
+    actions=(
+        ActionSpec("draw_circle", "Kreis zeichnen"),
+        ActionSpec("edit_circle", "Kreis bearbeiten", requires_geom="annotation_circles"),
+        ActionSpec("delete", "Löschen", destructive=True),
+    ),
+)
+
+
+ANNOTATION_ELLIPSE_SCHEMA = ElementSchema(
+    element_cls=AnnotationEllipse,
+    title="Ellipse",
+    fields=_annotation_shape_fields("#00e5ff", fill=True, dimensions=True),
+    actions=(
+        ActionSpec("draw_ellipse", "Ellipse zeichnen"),
+        ActionSpec("edit_ellipse", "Ellipse bearbeiten", requires_geom="annotation_ellipses"),
+        ActionSpec("delete", "Löschen", destructive=True),
+    ),
+)
+
+
+ANNOTATION_POLYGON_SCHEMA = ElementSchema(
+    element_cls=AnnotationPolygon,
+    title="Polygon",
+    fields=_annotation_shape_fields("#00e5ff", fill=True),
+    actions=(
+        ActionSpec("draw_annotation_polygon", "Polygon zeichnen"),
+        ActionSpec("edit_annotation_polygon", "Polygon bearbeiten", requires_geom="annotation_polygons"),
+        ActionSpec("delete", "Löschen", destructive=True),
+    ),
+)
+
+
 #: Globale Projektparameter (angezeigt, wenn nichts selektiert ist)
 GLOBAL_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("t_supply", "Vorlauftemperatur", FieldKind.NUMBER, minimum=-50.0,
@@ -615,6 +746,12 @@ SCHEMAS: tuple[ElementSchema, ...] = (
     HKV_SCHEMA,
     HKV_LINE_SCHEMA,
     TEXT_SCHEMA,
+    ANNOTATION_LINE_SCHEMA,
+    ANNOTATION_RECTANGLE_SCHEMA,
+    ANNOTATION_POLYLINE_SCHEMA,
+    ANNOTATION_CIRCLE_SCHEMA,
+    ANNOTATION_ELLIPSE_SCHEMA,
+    ANNOTATION_POLYGON_SCHEMA,
     DISTANCE_MEASUREMENT_SCHEMA,
     ANGLE_MEASUREMENT_SCHEMA,
     FLOOR_PLAN_SCHEMA,

@@ -27,7 +27,7 @@ _LAYER_LABELS: dict[LayerId, str] = {
     LayerId.HEATING: "Heizung",
     LayerId.ELECTRICAL: "Elektro",
     LayerId.FURNITURE: "Einrichtung",
-    LayerId.ANNOTATION: "Vermessung & Text",
+    LayerId.ANNOTATION: "Annotationen",
     LayerId.EXPORT: "Export & Layout",
 }
 
@@ -43,6 +43,12 @@ PREFIX_LAYERS: dict[str, LayerId] = {
     "ER": LayerId.ELECTRICAL,
     "EK": LayerId.ELECTRICAL,
     "TEXT": LayerId.ANNOTATION,
+    "ANL": LayerId.ANNOTATION,
+    "ANR": LayerId.ANNOTATION,
+    "ANP": LayerId.ANNOTATION,
+    "ANC": LayerId.ANNOTATION,
+    "ANE": LayerId.ANNOTATION,
+    "ANPG": LayerId.ANNOTATION,
     "MSRD": LayerId.ANNOTATION,
     "MSRA": LayerId.ANNOTATION,
 }

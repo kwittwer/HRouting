@@ -72,13 +72,19 @@ TOOLS: tuple[ToolSpec, ...] = (
              needs_selection=True),
     ToolSpec("furn.move", "Möbel verschieben", LayerId.FURNITURE, "MOVE_FLOOR_PLAN"),
 
-    # --- Vermessung & Annotation --------------------------------------
+    # --- Zeichnen & Messen --------------------------------------------
     ToolSpec("ann.select", "Auswählen", LayerId.ANNOTATION, "NONE", "Esc"),
     ToolSpec("ann.measure", "Distanz messen", LayerId.ANNOTATION, "MEASURE", "D"),
     ToolSpec("ann.measure_angle", "Winkel messen", LayerId.ANNOTATION, "MEASURE_ANGLE"),
     ToolSpec("ann.helper", "Hilfslinie zeichnen", LayerId.ANNOTATION, "DRAW_HELPER_LINE"),
     ToolSpec("ann.edit_helper", "Hilfslinie bearbeiten", LayerId.ANNOTATION, "EDIT_HELPER_LINE"),
     ToolSpec("ann.text", "Text platzieren", LayerId.ANNOTATION, "PLACE_TEXT", "T"),
+    ToolSpec("ann.line", "Linie zeichnen", LayerId.ANNOTATION, "DRAW_ANNOTATION_LINE"),
+    ToolSpec("ann.rectangle", "Rechteck zeichnen", LayerId.ANNOTATION, "DRAW_ANNOTATION_RECTANGLE"),
+    ToolSpec("ann.polyline", "Polylinie zeichnen", LayerId.ANNOTATION, "DRAW_ANNOTATION_POLYLINE"),
+    ToolSpec("ann.circle", "Kreis zeichnen", LayerId.ANNOTATION, "DRAW_ANNOTATION_CIRCLE"),
+    ToolSpec("ann.ellipse", "Ellipse zeichnen", LayerId.ANNOTATION, "DRAW_ANNOTATION_ELLIPSE"),
+    ToolSpec("ann.polygon", "Polygon zeichnen", LayerId.ANNOTATION, "DRAW_ANNOTATION_POLYGON"),
 
     # --- Export & Layout ----------------------------------------------
     ToolSpec("exp.select", "Auswählen", LayerId.EXPORT, "NONE", "Esc"),

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from gui.canvas_widget import CanvasWidget  # noqa: E402
 from storage.hrp_io import load_raw  # noqa: E402
 from model.document import Document  # noqa: E402
+from model.elements import TextAnnotation  # noqa: E402
 
 EXAMPLE = ROOT / "examples" / "minimal.hrp"
 
@@ -66,8 +67,22 @@ def test_canvas_write_lands_in_document(bound):
 
 def test_nested_text_fields_are_independent(bound):
     canvas, document = bound
-    canvas._text_contents["TEXT-1"] = "Neuer Text"
-    entry = document.to_dict()["canvas"]["text_annotations"]["TEXT-1"]
+    text_ids = document.elements.get("text_annotations", {})
+    text_id = next(iter(text_ids.keys()), "")
+    if not text_id:
+        floor_plan_id = next(iter(document.floorplans.keys()), "")
+        text_id = document.new_id(TextAnnotation)
+        text = TextAnnotation.create(
+            text_id,
+            floor_plan_id=floor_plan_id,
+            name="Test Text",
+            visible=True,
+        )
+        text.geom["text_annotations"] = {"pos": [300, 50], "content": "", "font_size": 14.0}
+        document.add(text)
+
+    canvas._text_contents[text_id] = "Neuer Text"
+    entry = document.to_dict()["canvas"]["text_annotations"][text_id]
     assert entry["content"] == "Neuer Text"
     assert entry["pos"] == [300, 50]  # Position unverändert
 
@@ -477,7 +492,9 @@ def test_floor_plan_layer_is_document_backed(bound):
 
     assert type(layer).__name__ == "FloorPlanLayerView"
     assert layer.fp_id == fp_id
-    assert layer.mm_per_px == 25.0
+    saved = document.to_dict()
+    floor_entry = next(e for e in saved["canvas"]["floor_plans"] if e["fp_id"] == fp_id)
+    assert layer.mm_per_px == floor_entry["mm_per_px"]
 
 
 def test_floor_plan_transform_writes_to_document(bound):

@@ -599,6 +599,11 @@ def project_overview_data(document: Document) -> dict:
         "hkv_points": "Heizkreisverteiler",
         "hkv_lines": "HKV-Leitungen",
         "text_annotations": "Texte",
+        "annotation_lines": "Linien",
+        "annotation_rectangles": "Rechtecke",
+        "annotation_polylines": "Polylinien",
+        "annotation_circles": "Kreise",
+        "annotation_ellipses": "Ellipsen",
         "distance_measurements": "Distanzmessungen",
         "angle_measurements": "Winkelmessungen",
     }

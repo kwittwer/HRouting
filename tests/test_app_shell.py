@@ -233,6 +233,14 @@ def test_navigator_shows_measurement_categories(app):
                         "visible": True,
                     }
                 },
+                "annotation_polygons": {
+                    "ANPG-1": {
+                        "polygon_id": "ANPG-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Polygon 1",
+                        "visible": True,
+                    }
+                },
             },
         }
     )
@@ -253,6 +261,7 @@ def test_navigator_shows_measurement_categories(app):
         ]
         assert "Distanz 1" in category_labels or "MSRD-1" in category_labels
         assert "Winkel 1" in category_labels or "MSRA-1" in category_labels
+        assert "Polygon 1" in category_labels or "ANPG-1" in category_labels
 
         dist_item = dock._find_item_by_id("MSRD-1")
         angle_item = dock._find_item_by_id("MSRA-1")
@@ -639,6 +648,105 @@ def test_annotation_text_tool_creates_and_places_text(app, monkeypatch):
         assert after == before + 1
         assert window.canvas._mode == ToolMode.PLACE_TEXT
         assert window.canvas._placing_text_id is not None
+    finally:
+        window.deleteLater()
+
+
+def test_annotation_polygon_tool_creates_and_enters_draw_mode(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    }
+                },
+            }
+        )
+        document.active_floorplan_id = "grundriss-1"
+        window._set_document(document)
+        window._apply_workspace("annotation")
+
+        before = len(window._document.elements["annotation_polygons"])
+        window._on_tool_activated("ann.polygon")
+        after = len(window._document.elements["annotation_polygons"])
+
+        assert after == before + 1
+        assert window.canvas._mode == ToolMode.DRAW_ANNOTATION_POLYGON
+        assert window.canvas._placing_annotation_id is not None
+        assert window.canvas._placing_annotation_kind == "annotation_polygon"
+    finally:
+        window.deleteLater()
+
+
+def test_annotation_polygon_draw_interaction_finishes_on_double_click_start(app, monkeypatch):
+    from PySide6.QtCore import QPointF, QSettings, Qt  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    }
+                },
+            }
+        )
+        document.active_floorplan_id = "grundriss-1"
+        window._set_document(document)
+        window._apply_workspace("annotation")
+        window._on_tool_activated("ann.polygon")
+
+        polygon_id = window.canvas._placing_annotation_id
+        assert polygon_id is not None
+        assert window.canvas.tool_mode() == ToolMode.DRAW_ANNOTATION_POLYGON
+
+        p1 = QPointF(20.0, 20.0)
+        p2 = QPointF(120.0, 20.0)
+        p3 = QPointF(80.0, 100.0)
+        window.canvas.mousePressEvent(_MouseEventStub(p1, button=Qt.LeftButton))
+        window.canvas.mousePressEvent(_MouseEventStub(p2, button=Qt.LeftButton))
+        window.canvas.mousePressEvent(_MouseEventStub(p3, button=Qt.LeftButton))
+        window.canvas.mouseDoubleClickEvent(_MouseEventStub(p1, button=Qt.LeftButton))
+
+        assert window.canvas.tool_mode() == ToolMode.NONE
+        assert window.canvas._placing_annotation_id is None
+        assert window.canvas._placing_annotation_kind == ""
+
+        polygon = window._document.to_dict()["canvas"]["annotation_polygons"][polygon_id]
+        points = polygon["points"]
+        assert len(points) == 3
+        assert points[0] == pytest.approx([20.0, 20.0])
+        assert points[1] == pytest.approx([120.0, 20.0])
+        assert points[2] == pytest.approx([80.0, 100.0])
     finally:
         window.deleteLater()
 
@@ -3828,6 +3936,7 @@ def test_render_for_export_returns_image(app):
 
 def test_delete_text_annotation_persists_after_save_and_reload(app, tmp_path, monkeypatch):
     from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.elements import TextAnnotation  # noqa: PLC0415
     from storage.hrp_io import load_document  # noqa: PLC0415
 
     _settings_noop(monkeypatch)
@@ -3835,18 +3944,28 @@ def test_delete_text_annotation_persists_after_save_and_reload(app, tmp_path, mo
     window = AppWindow()
     try:
         assert window.open_project_file(EXAMPLE)
-        assert "TEXT-1" in window._document.elements.get("text_annotations", {})
 
-        deleted = window._delete_text("TEXT-1")
+        floor_plan_id = next(iter(window._document.floorplans.keys()), "")
+        text_id = window._document.new_id(TextAnnotation)
+        text = TextAnnotation.create(
+            text_id,
+            floor_plan_id=floor_plan_id,
+            name="Test Text",
+            visible=True,
+        )
+        window._document.add(text)
+        assert text_id in window._document.elements.get("text_annotations", {})
+
+        deleted = window._delete_text(text_id)
         assert deleted is True
-        assert "TEXT-1" not in window._document.elements.get("text_annotations", {})
+        assert text_id not in window._document.elements.get("text_annotations", {})
 
         target = tmp_path / "text_delete_roundtrip.hrp"
         window._project_path = target
         assert window._save_project() is True
 
         reloaded = load_document(target)
-        assert "TEXT-1" not in reloaded.elements.get("text_annotations", {})
+        assert text_id not in reloaded.elements.get("text_annotations", {})
     finally:
         window.deleteLater()
 

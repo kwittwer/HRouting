@@ -314,6 +314,107 @@ class TextAnnotation(Element):
         return self._entry.get("font_size", self.data.get("font_size", 14.0))
 
 
+class AnnotationLine(Element):
+    """Zeichnungslinie (ANL)."""
+
+    PREFIX = "ANL"
+    PARAMS_KEY = "annotation_lines"
+    ID_FIELD = "line_id"
+    LAYER = LayerId.ANNOTATION
+    CATEGORY_LABEL = "Annotations"
+    GEOM_KEYS = ("annotation_lines",)
+
+    line_style = _param("line_style", "solid")
+    stroke_width = _param("stroke_width", 2.0)
+
+    geometry = _geom("annotation_lines")
+
+
+class AnnotationRectangle(Element):
+    """Zeichnungsrechteck (ANR)."""
+
+    PREFIX = "ANR"
+    PARAMS_KEY = "annotation_rectangles"
+    ID_FIELD = "rectangle_id"
+    LAYER = LayerId.ANNOTATION
+    CATEGORY_LABEL = "Annotations"
+    GEOM_KEYS = ("annotation_rectangles",)
+
+    line_style = _param("line_style", "solid")
+    stroke_width = _param("stroke_width", 2.0)
+    fill_color = _param("fill_color", "#ffffff")
+    corner_radius = _param("corner_radius", 0.0)
+
+    geometry = _geom("annotation_rectangles")
+
+
+class AnnotationPolyline(Element):
+    """Zeichnungspolylinie (ANP)."""
+
+    PREFIX = "ANP"
+    PARAMS_KEY = "annotation_polylines"
+    ID_FIELD = "polyline_id"
+    LAYER = LayerId.ANNOTATION
+    CATEGORY_LABEL = "Annotations"
+    GEOM_KEYS = ("annotation_polylines",)
+
+    line_style = _param("line_style", "solid")
+    stroke_width = _param("stroke_width", 2.0)
+
+    geometry = _geom("annotation_polylines")
+
+
+class AnnotationCircle(Element):
+    """Zeichnungskreis (ANC)."""
+
+    PREFIX = "ANC"
+    PARAMS_KEY = "annotation_circles"
+    ID_FIELD = "circle_id"
+    LAYER = LayerId.ANNOTATION
+    CATEGORY_LABEL = "Annotations"
+    GEOM_KEYS = ("annotation_circles",)
+
+    line_style = _param("line_style", "solid")
+    stroke_width = _param("stroke_width", 2.0)
+    fill_color = _param("fill_color", "#ffffff")
+
+    geometry = _geom("annotation_circles")
+
+
+class AnnotationEllipse(Element):
+    """Zeichnungellipse (ANE)."""
+
+    PREFIX = "ANE"
+    PARAMS_KEY = "annotation_ellipses"
+    ID_FIELD = "ellipse_id"
+    LAYER = LayerId.ANNOTATION
+    CATEGORY_LABEL = "Annotations"
+    GEOM_KEYS = ("annotation_ellipses",)
+
+    line_style = _param("line_style", "solid")
+    stroke_width = _param("stroke_width", 2.0)
+    fill_color = _param("fill_color", "#ffffff")
+
+    geometry = _geom("annotation_ellipses")
+
+
+class AnnotationPolygon(Element):
+    """Zeichnungspolygon (ANPG)."""
+
+    PREFIX = "ANPG"
+    PARAMS_KEY = "annotation_polygons"
+    ID_FIELD = "polygon_id"
+    LAYER = LayerId.ANNOTATION
+    CATEGORY_LABEL = "Annotations"
+    GEOM_KEYS = ("annotation_polygons",)
+
+    line_style = _param("line_style", "solid")
+    stroke_width = _param("stroke_width", 2.0)
+    fill_color = _param("fill_color", "#ffffff")
+
+    geometry = _geom("annotation_polygons")
+
+
 class DistanceMeasurement(Element):
     """Persistente Distanzmessung (MSRD)."""
 
@@ -423,6 +524,12 @@ ELEMENT_TYPES: tuple[type[Element], ...] = (
     ElecRoom,
     ElecCable,
     TextAnnotation,
+    AnnotationLine,
+    AnnotationRectangle,
+    AnnotationPolyline,
+    AnnotationCircle,
+    AnnotationEllipse,
+    AnnotationPolygon,
     DistanceMeasurement,
     AngleMeasurement,
 )

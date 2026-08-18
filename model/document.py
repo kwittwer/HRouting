@@ -76,6 +76,7 @@ class Document:
         self.floorplans: dict[str, FloorPlan] = {}
         self.furniture: dict[str, Furniture] = {}
         self.floorplan_order: list[str] = []
+        self.params_keys_seen: list[str] = []
 
         #: PARAMS_KEY -> {element_id: Element}
         self.elements: dict[str, dict[str, Element]] = {
@@ -158,6 +159,7 @@ class Document:
         return used
 
     def add(self, element: Element) -> Element:
+        setattr(element, "_document", self)
         self.container(type(element))[element.id] = element
         self.ids.observe(element.id)
         self.element_added.emit(element.id)
@@ -263,6 +265,7 @@ class Document:
                     if isinstance(values, dict) and fp_id in values
                 }
                 element = klass(fp_id, data, geom, layer_entries.pop(fp_id, {}))
+                setattr(element, "_document", doc)
                 doc.container(klass)[fp_id] = element
                 doc.ids.observe(fp_id)
 
@@ -288,7 +291,9 @@ class Document:
                     if isinstance(values, dict) and element_id in values:
                         geom[key] = values[element_id]
                         consumed.setdefault(key, set()).add(element_id)
-                bucket[element_id] = element_cls(element_id, data, geom)
+                element = element_cls(element_id, data, geom)
+                setattr(element, "_document", doc)
+                bucket[element_id] = element
                 doc.ids.observe(element_id)
 
         # --- verwaiste canvas-Einträge ----------------------------------
@@ -309,6 +314,7 @@ class Document:
             FloorPlan.PARAMS_KEY,
             Furniture.PARAMS_KEY,
         }
+        doc.params_keys_seen = [k for k in params.keys() if k in element_param_keys]
         doc.settings = {
             k: v
             for k, v in params.items()
@@ -361,9 +367,10 @@ class Document:
         # übrige Elemente
         for element_cls in ELEMENT_TYPES:
             bucket = self.elements[element_cls.PARAMS_KEY]
-            params[element_cls.PARAMS_KEY] = {
-                eid: element.to_params() for eid, element in bucket.items()
-            }
+            if bucket or element_cls.PARAMS_KEY in self.params_keys_seen:
+                params[element_cls.PARAMS_KEY] = {
+                    eid: element.to_params() for eid, element in bucket.items()
+                }
             for element in bucket.values():
                 _merge_geom(element)
 

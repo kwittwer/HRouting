@@ -30,6 +30,12 @@ def repair_hrp_data(raw: dict[str, Any], *, aggressive: bool = True) -> tuple[di
         "floorplans",
         "furniture",
         "text_annotations",
+        "annotation_lines",
+        "annotation_rectangles",
+        "annotation_polylines",
+        "annotation_polygons",
+        "annotation_circles",
+        "annotation_ellipses",
     ):
         if not isinstance(params.get(key), dict):
             params[key] = {}
@@ -49,6 +55,12 @@ def repair_hrp_data(raw: dict[str, Any], *, aggressive: bool = True) -> tuple[di
     hkv_ids = set(params["hkv_points"].keys())
     hkvl_ids = set(params["hkv_lines"].keys())
     text_ids = set(params["text_annotations"].keys())
+    ann_line_ids = set(params["annotation_lines"].keys())
+    ann_rect_ids = set(params["annotation_rectangles"].keys())
+    ann_poly_ids = set(params["annotation_polylines"].keys())
+    ann_polygon_ids = set(params["annotation_polygons"].keys())
+    ann_circle_ids = set(params["annotation_circles"].keys())
+    ann_ellipse_ids = set(params["annotation_ellipses"].keys())
 
     _repair_cable_refs(params["elec_cables"], ap_ids, changes)
     _repair_hkv_line_refs(params["hkv_lines"], hkv_ids, changes)
@@ -86,6 +98,12 @@ def repair_hrp_data(raw: dict[str, Any], *, aggressive: bool = True) -> tuple[di
     _drop_unknown_keys(canvas, "hkv_line_visible", hkvl_ids, changes)
 
     _drop_unknown_keys(canvas, "text_annotations", text_ids, changes)
+    _drop_unknown_keys(canvas, "annotation_lines", ann_line_ids, changes)
+    _drop_unknown_keys(canvas, "annotation_rectangles", ann_rect_ids, changes)
+    _drop_unknown_keys(canvas, "annotation_polylines", ann_poly_ids, changes)
+    _drop_unknown_keys(canvas, "annotation_polygons", ann_polygon_ids, changes)
+    _drop_unknown_keys(canvas, "annotation_circles", ann_circle_ids, changes)
+    _drop_unknown_keys(canvas, "annotation_ellipses", ann_ellipse_ids, changes)
 
     _repair_supply_hkv(canvas, circuit_ids, hkv_ids, changes)
     _repair_canvas_cable_endpoints(canvas, ek_ids, ap_ids, changes)
@@ -108,6 +126,12 @@ def _repair_floor_references(params: dict[str, Any], all_layer_ids: set[str], ch
         "hkv_points",
         "hkv_lines",
         "text_annotations",
+        "annotation_lines",
+        "annotation_rectangles",
+        "annotation_polylines",
+        "annotation_polygons",
+        "annotation_circles",
+        "annotation_ellipses",
     )
     for section in sections:
         bucket = params.get(section)

@@ -90,7 +90,7 @@ WORKSPACES: tuple[WorkspaceDefinition, ...] = (
     ),
     WorkspaceDefinition(
         id="annotation",
-        label="Vermessung",
+        label="Zeichen & Messen",
         layer=LayerId.ANNOTATION,
     ),
     WorkspaceDefinition(

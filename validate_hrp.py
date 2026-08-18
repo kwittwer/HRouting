@@ -83,7 +83,10 @@ def _validate_schema_basic(data: dict) -> list[str]:
             errors.append("[Schema] canvas.view_scale muss zwischen 0.1 und 50.0 liegen.")
 
         for field in ["polygons", "start_points", "manual_routes", "elec_points",
-                       "elec_rooms", "elec_cables", "hkv_points", "hkv_lines"]:
+                       "elec_rooms", "elec_cables", "hkv_points", "hkv_lines",
+                       "annotation_lines", "annotation_rectangles",
+                       "annotation_polylines", "annotation_polygons", "annotation_circles",
+                       "annotation_ellipses"]:
             v = canvas.get(field)
             if v is not None and not isinstance(v, dict):
                 errors.append(f"[Schema] canvas.{field} muss ein Objekt sein.")
@@ -92,7 +95,10 @@ def _validate_schema_basic(data: dict) -> list[str]:
     params = data.get("params", {})
     if isinstance(params, dict):
         for field in ["circuits", "elec_points", "elec_rooms", "elec_cables",
-                       "hkv_points", "hkv_lines", "floorplans", "text_annotations"]:
+                       "hkv_points", "hkv_lines", "floorplans", "text_annotations",
+                       "annotation_lines", "annotation_rectangles",
+                       "annotation_polylines", "annotation_polygons", "annotation_circles",
+                       "annotation_ellipses"]:
             v = params.get(field)
             if v is not None and not isinstance(v, dict):
                 errors.append(f"[Schema] params.{field} muss ein Objekt sein.")
@@ -123,6 +129,12 @@ _ID_PATTERNS = {
     "HKV": re.compile(r"^HKV-\d+$"),
     "HKVL": re.compile(r"^HKVL-\d+$"),
     "TEXT": re.compile(r"^TEXT-\d+$"),
+    "ANL": re.compile(r"^ANL-\d+$"),
+    "ANR": re.compile(r"^ANR-\d+$"),
+    "ANP": re.compile(r"^ANP-\d+$"),
+    "ANPG": re.compile(r"^ANPG-\d+$"),
+    "ANC": re.compile(r"^ANC-\d+$"),
+    "ANE": re.compile(r"^ANE-\d+$"),
     "grundriss": re.compile(r"^grundriss-\d+$"),
     "einrichtung": re.compile(r"^einrichtung-\d+$"),
 }
@@ -162,6 +174,12 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
     hkv_ids = set(params.get("hkv_points", {}).keys())
     hkvl_ids = set(params.get("hkv_lines", {}).keys())
     text_ids = set(params.get("text_annotations", {}).keys())
+    ann_line_ids = set(params.get("annotation_lines", {}).keys())
+    ann_rect_ids = set(params.get("annotation_rectangles", {}).keys())
+    ann_poly_ids = set(params.get("annotation_polylines", {}).keys())
+    ann_polygon_ids = set(params.get("annotation_polygons", {}).keys())
+    ann_circle_ids = set(params.get("annotation_circles", {}).keys())
+    ann_ellipse_ids = set(params.get("annotation_ellipses", {}).keys())
 
     # Furniture-IDs (leben auch als floor_plan layer)
     fur_ids = set(params.get("furniture", {}).keys())
@@ -186,6 +204,24 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
     for lid in hkvl_ids:
         if not _ID_PATTERNS["HKVL"].match(lid):
             errors.append(f"[ID] HKV-Leitungs-ID '{lid}' entspricht nicht dem Muster HKVL-N.")
+    for aid in ann_line_ids:
+        if not _ID_PATTERNS["ANL"].match(aid):
+            errors.append(f"[ID] Linien-ID '{aid}' entspricht nicht dem Muster ANL-N.")
+    for aid in ann_rect_ids:
+        if not _ID_PATTERNS["ANR"].match(aid):
+            errors.append(f"[ID] Rechteck-ID '{aid}' entspricht nicht dem Muster ANR-N.")
+    for aid in ann_poly_ids:
+        if not _ID_PATTERNS["ANP"].match(aid):
+            errors.append(f"[ID] Polylinien-ID '{aid}' entspricht nicht dem Muster ANP-N.")
+    for aid in ann_polygon_ids:
+        if not _ID_PATTERNS["ANPG"].match(aid):
+            errors.append(f"[ID] Polygon-ID '{aid}' entspricht nicht dem Muster ANPG-N.")
+    for aid in ann_circle_ids:
+        if not _ID_PATTERNS["ANC"].match(aid):
+            errors.append(f"[ID] Kreis-ID '{aid}' entspricht nicht dem Muster ANC-N.")
+    for aid in ann_ellipse_ids:
+        if not _ID_PATTERNS["ANE"].match(aid):
+            errors.append(f"[ID] Ellipsen-ID '{aid}' entspricht nicht dem Muster ANE-N.")
 
     # ── floor_plan_id Referenzen prüfen ──
     def _check_fp_ref(section_name: str, items: dict, key: str = "floor_plan_id"):
@@ -204,6 +240,12 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
     _check_fp_ref("hkv_points", params.get("hkv_points", {}))
     _check_fp_ref("hkv_lines", params.get("hkv_lines", {}))
     _check_fp_ref("text_annotations", params.get("text_annotations", {}))
+    _check_fp_ref("annotation_lines", params.get("annotation_lines", {}))
+    _check_fp_ref("annotation_rectangles", params.get("annotation_rectangles", {}))
+    _check_fp_ref("annotation_polylines", params.get("annotation_polylines", {}))
+    _check_fp_ref("annotation_polygons", params.get("annotation_polygons", {}))
+    _check_fp_ref("annotation_circles", params.get("annotation_circles", {}))
+    _check_fp_ref("annotation_ellipses", params.get("annotation_ellipses", {}))
     _check_fp_ref("furniture", params.get("furniture", {}), "parent_fp_id")
 
     # ── Kabel Start/End AP prüfen ──
@@ -277,6 +319,39 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
                 f"[Geo] canvas.elec_rooms.{rid}: Polygon hat {len(poly)} Punkte "
                 f"(mindestens 3 erforderlich)."
             )
+    for lid, shape in canvas.get("annotation_lines", {}).items():
+        if isinstance(shape, dict):
+            start = shape.get("start")
+            end = shape.get("end")
+            if not (isinstance(start, list) and len(start) == 2 and isinstance(end, list) and len(end) == 2):
+                errors.append(f"[Geo] canvas.annotation_lines.{lid}: Linie benötigt start/end-Punkte.")
+    for rid, shape in canvas.get("annotation_rectangles", {}).items():
+        if isinstance(shape, dict):
+            start = shape.get("start")
+            end = shape.get("end")
+            if not (isinstance(start, list) and len(start) == 2 and isinstance(end, list) and len(end) == 2):
+                errors.append(f"[Geo] canvas.annotation_rectangles.{rid}: Rechteck benötigt start/end-Punkte.")
+    for pid, shape in canvas.get("annotation_polylines", {}).items():
+        if isinstance(shape, dict):
+            points = shape.get("points", [])
+            if isinstance(points, list) and len(points) < 2:
+                errors.append(f"[Geo] canvas.annotation_polylines.{pid}: Polylinie hat {len(points)} Punkte (mindestens 2 erforderlich).")
+    for pid, shape in canvas.get("annotation_polygons", {}).items():
+        if isinstance(shape, dict):
+            points = shape.get("points", [])
+            if isinstance(points, list) and len(points) < 3:
+                errors.append(f"[Geo] canvas.annotation_polygons.{pid}: Polygon hat {len(points)} Punkte (mindestens 3 erforderlich).")
+    for cid, shape in canvas.get("annotation_circles", {}).items():
+        if isinstance(shape, dict):
+            radius = shape.get("radius", 0.0)
+            if not isinstance(radius, (int, float)) or float(radius) <= 0.0:
+                errors.append(f"[Geo] canvas.annotation_circles.{cid}: Kreis benötigt einen positiven Radius.")
+    for eid, shape in canvas.get("annotation_ellipses", {}).items():
+        if isinstance(shape, dict):
+            rx = shape.get("radius_x", 0.0)
+            ry = shape.get("radius_y", 0.0)
+            if not isinstance(rx, (int, float)) or not isinstance(ry, (int, float)) or float(rx) <= 0.0 or float(ry) <= 0.0:
+                errors.append(f"[Geo] canvas.annotation_ellipses.{eid}: Ellipse benötigt positive Halbachsen.")
 
     # ── Canvas ↔ Params Konsistenz ──
     canvas_circuit_ids = set(canvas.get("polygons", {}).keys())

@@ -38,8 +38,15 @@ from PySide6.QtWidgets import (
 )
 
 from model.document import Document
+from model.field_access import get_field
 from model.elements import (
     AngleMeasurement,
+    AnnotationCircle,
+    AnnotationEllipse,
+    AnnotationLine,
+    AnnotationPolygon,
+    AnnotationPolyline,
+    AnnotationRectangle,
     Circuit,
     DistanceMeasurement,
     ElecCable,
@@ -153,6 +160,14 @@ class AppWindow(QMainWindow):
         self._elec_schema_ap_positions: dict[str, list[float]] = {}
         self._pdf_export_pages: list[dict] = []
         self._pdf_export_meta: dict[str, str] = {}
+        self._annotation_live_value_cache: dict[str, tuple] = {}
+        self._pending_annotation_refresh_id: str = ""
+        self._annotation_live_refresh_timer = QTimer(self)
+        self._annotation_live_refresh_timer.setSingleShot(True)
+        self._annotation_live_refresh_timer.setInterval(33)
+        self._annotation_live_refresh_timer.timeout.connect(
+            self._flush_annotation_live_refresh
+        )
 
         self._build_central()
         self._build_docks()
@@ -403,6 +418,7 @@ class AppWindow(QMainWindow):
         self.navigator.floorplan_order_changed.connect(self._on_navigator_floorplan_order_changed)
         self.tools.tool_activated.connect(self._on_tool_activated)
         self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
+        self.canvas.object_double_clicked.connect(self._on_canvas_object_double_clicked)
         self.canvas.context_menu_requested.connect(self._on_canvas_context_requested)
         self.canvas.document_data_changed.connect(self._on_document_data_changed)
         self.canvas.polygon_finished.connect(self._on_canvas_mutation_signal)
@@ -424,6 +440,7 @@ class AppWindow(QMainWindow):
         self.canvas.label_moved.connect(self._on_canvas_mutation_signal)
         self.canvas.measure_changed.connect(self._on_canvas_mutation_signal)
         self.canvas.measure_changed.connect(self._on_measure_changed)
+        self.canvas.annotation_shape_changed.connect(self._on_annotation_shape_changed)
         self.canvas.multi_objects_moved.connect(self._on_canvas_mutation_signal)
         self.canvas.will_move_multi_objects.connect(self._push_undo)
         self.canvas.ref_line_set.connect(self._on_ref_line_set)
@@ -621,6 +638,49 @@ class AppWindow(QMainWindow):
         if not self._dirty:
             self._dirty = True
             self._update_title()
+
+    def _on_annotation_shape_changed(self, element_id: str) -> None:
+        """Aktualisiert Eigenschaften nach Annotation-Resize/Drag via Canvas."""
+        if not element_id:
+            return
+        self._record_canvas_change()
+        if self._document is not None:
+            element = self._document.get(element_id)
+            if isinstance(element, (AnnotationRectangle, AnnotationCircle, AnnotationEllipse)):
+                schema = schema_for(element)
+                if schema is not None:
+                    signature_items: list[tuple[str, object]] = []
+                    for key in ("size_unit", "width_value", "height_value", "corner_radius_value"):
+                        spec = next((field for field in schema.fields if field.key == key), None)
+                        if spec is None:
+                            continue
+                        value = get_field(element, spec)
+                        if isinstance(value, float):
+                            value = round(value, 3)
+                        signature_items.append((key, value))
+                    signature = tuple(signature_items)
+                    if signature and self._annotation_live_value_cache.get(element_id) == signature:
+                        if not self._dirty:
+                            self._dirty = True
+                            self._update_title()
+                        return
+                    if signature:
+                        self._annotation_live_value_cache[element_id] = signature
+        self._pending_annotation_refresh_id = element_id
+        self._annotation_live_refresh_timer.start()
+        if not self._dirty:
+            self._dirty = True
+            self._update_title()
+
+    def _flush_annotation_live_refresh(self) -> None:
+        element_id = self._pending_annotation_refresh_id
+        self._pending_annotation_refresh_id = ""
+        if not element_id or self._document is None:
+            return
+        self._document.element_changed.emit(element_id)
+        self.properties.refresh_element(element_id)
+        self._refresh_schema_windows()
+        self.canvas.update()
 
     def _on_measure_changed(self, *_args) -> None:
         """Synchronisiert Messungen in Document-Elemente und aktualisiert den Navigator."""
@@ -1017,6 +1077,10 @@ class AppWindow(QMainWindow):
             self._add_text()
             self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
             return
+        if tool_id in {"ann.line", "ann.rectangle", "ann.polyline", "ann.circle", "ann.ellipse", "ann.polygon"}:
+            self._add_annotation_shape(tool_id)
+            self.statusBar().showMessage(tool.tooltip or tool.label, 3000)
+            return
         if tool_id == "ann.helper":
             fp_id = self._active_floorplan_id() or ""
             layer = self.canvas._floor_plans.get(fp_id) if fp_id else None
@@ -1118,6 +1182,9 @@ class AppWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _set_document(self, document: Document) -> None:
         self._document = document
+        self._annotation_live_value_cache.clear()
+        self._pending_annotation_refresh_id = ""
+        self._annotation_live_refresh_timer.stop()
         # Neues Dokument = frische Undo/Redo-Stacks.
         self._undo_group_timer.stop()
         self._undo_group_open = False
@@ -1164,8 +1231,18 @@ class AppWindow(QMainWindow):
             "edit_supply": lambda eid: self.canvas.start_edit_supply_line(eid),
             "draw_cable": lambda eid: self.canvas.start_draw_elec_cable(eid),
             "edit_cable": lambda eid: self.canvas.start_edit_elec_cable(eid),
-            "draw_line": lambda eid: self.canvas.start_draw_hkv_line(eid),
-            "edit_line": lambda eid: self.canvas.start_edit_hkv_line(eid),
+            "draw_line": self._action_draw_line,
+            "edit_line": self._action_edit_line,
+            "draw_rectangle": lambda eid: self._action_draw_annotation(eid, "annotation_rectangle"),
+            "edit_rectangle": lambda eid: self._action_edit_annotation(eid, "annotation_rectangle"),
+            "draw_polyline": lambda eid: self._action_draw_annotation(eid, "annotation_polyline"),
+            "edit_polyline": lambda eid: self._action_edit_annotation(eid, "annotation_polyline"),
+            "draw_circle": lambda eid: self._action_draw_annotation(eid, "annotation_circle"),
+            "edit_circle": lambda eid: self._action_edit_annotation(eid, "annotation_circle"),
+            "draw_ellipse": lambda eid: self._action_draw_annotation(eid, "annotation_ellipse"),
+            "edit_ellipse": lambda eid: self._action_edit_annotation(eid, "annotation_ellipse"),
+            "draw_annotation_polygon": lambda eid: self._action_draw_annotation(eid, "annotation_polygon"),
+            "edit_annotation_polygon": lambda eid: self._action_edit_annotation(eid, "annotation_polygon"),
             "place": self._action_place,
             "draw_ref_line": lambda eid: self.canvas.start_ref_line_for_floor(eid),
             "move": self._action_move,
@@ -1190,6 +1267,9 @@ class AppWindow(QMainWindow):
             "draw_polygon", "edit_polygon", "remove_polygon", "draw_route", "edit_route",
             "draw_supply", "edit_supply", "draw_cable", "edit_cable",
             "draw_line", "edit_line", "place", "draw_ref_line",
+            "draw_rectangle", "edit_rectangle", "draw_polyline", "edit_polyline",
+            "draw_circle", "edit_circle", "draw_ellipse", "edit_ellipse",
+            "draw_annotation_polygon", "edit_annotation_polygon",
             "configure_uv", "configure_up", "configure_hak", "configure_zaehler",
             "move", "rotate", "choose_image", "recompute_scale",
         }
@@ -1295,6 +1375,41 @@ class AppWindow(QMainWindow):
             self.canvas.start_draw_floor_plan_polygon(element_id)
         else:
             self.canvas.start_drawing(element_id)
+
+    def _action_draw_line(self, element_id: str) -> None:
+        element = self._document.get(element_id)
+        if isinstance(element, AnnotationLine):
+            self._action_draw_annotation(element_id, "annotation_line")
+            return
+        self.canvas.start_draw_hkv_line(element_id)
+
+    def _action_edit_line(self, element_id: str) -> None:
+        element = self._document.get(element_id)
+        if isinstance(element, AnnotationLine):
+            self._action_edit_annotation(element_id, "annotation_line")
+            return
+        self.canvas.start_edit_hkv_line(element_id)
+
+    def _action_draw_annotation(self, element_id: str, kind: str) -> None:
+        element = self._document.get(element_id)
+        if element is None:
+            return
+        fill_color = str(element.data.get("fill_color", "#ffffff") or "#ffffff")
+        corner_radius = float(element.data.get("corner_radius", 0.0) or 0.0)
+        self.canvas.start_place_annotation_shape(
+            kind,
+            element_id,
+            color=str(element.data.get("color", "#00e5ff") or "#00e5ff"),
+            line_style=str(element.data.get("line_style", "solid") or "solid"),
+            stroke_width=float(element.data.get("stroke_width", 2.0) or 2.0),
+            fill_color=fill_color,
+            corner_radius=corner_radius,
+        )
+
+    def _action_edit_annotation(self, element_id: str, kind: str) -> None:
+        if self._document.get(element_id) is None:
+            return
+        self.canvas.start_edit_annotation_shape(kind, element_id)
 
     def _action_edit_polygon(self, element_id: str) -> None:
         if element_id in self._document.elements["circuits"]:
@@ -2236,6 +2351,16 @@ class AppWindow(QMainWindow):
             obj_id = f"{_HELPER_NAV_ID_PREFIX}{helper_floor}::{obj_id}"
         self._select_element_everywhere(obj_id, update_navigator=True)
 
+    def _on_canvas_object_double_clicked(self, obj_type: str, obj_id: str) -> None:
+        if not obj_id:
+            return
+        if obj_type.startswith("annotation_"):
+            self._select_element_everywhere(obj_id, update_navigator=True)
+            self.canvas.start_edit_annotation_shape(obj_type, obj_id)
+            self.statusBar().showMessage(f"{obj_id} bearbeiten", 2500)
+            return
+        self._on_canvas_object_clicked(obj_type, obj_id)
+
     def _select_element_everywhere(self, element_id: str, *, update_navigator: bool) -> None:
         if not element_id:
             return
@@ -2257,6 +2382,26 @@ class AppWindow(QMainWindow):
             self.navigator.select(element_id)
         self.canvas.set_selected_item(element_id)
         self.properties.show_element(element_id)
+        annotation_kind = self._annotation_kind_for_element(element_id)
+        if annotation_kind:
+            self.canvas.start_edit_annotation_shape(annotation_kind, element_id)
+        elif self.canvas.tool_mode() == ToolMode.EDIT_ANNOTATION:
+            self.canvas.set_tool_mode(ToolMode.NONE)
+
+    def _annotation_kind_for_element(self, element_id: str) -> str:
+        if element_id in self._document.elements.get("annotation_lines", {}):
+            return "annotation_line"
+        if element_id in self._document.elements.get("annotation_rectangles", {}):
+            return "annotation_rectangle"
+        if element_id in self._document.elements.get("annotation_polylines", {}):
+            return "annotation_polyline"
+        if element_id in self._document.elements.get("annotation_circles", {}):
+            return "annotation_circle"
+        if element_id in self._document.elements.get("annotation_ellipses", {}):
+            return "annotation_ellipse"
+        if element_id in self._document.elements.get("annotation_polygons", {}):
+            return "annotation_polygon"
+        return ""
 
     def _sync_active_floorplan_for_selection(self, element_id: str) -> None:
         if self._document is None:
@@ -2620,6 +2765,48 @@ class AppWindow(QMainWindow):
         self._emit_structure_changed()
         self.navigator.select(tid)
         self.canvas.start_place_text(tid, "Text")
+        self._mark_dirty()
+
+    def _add_annotation_shape(self, tool_id: str) -> None:
+        fp_id = self._require_floorplan()
+        if not fp_id:
+            return
+        shape_map = {
+            "ann.line": (AnnotationLine, "annotation_line", "Linie"),
+            "ann.rectangle": (AnnotationRectangle, "annotation_rectangle", "Rechteck"),
+            "ann.polyline": (AnnotationPolyline, "annotation_polyline", "Polylinie"),
+            "ann.circle": (AnnotationCircle, "annotation_circle", "Kreis"),
+            "ann.ellipse": (AnnotationEllipse, "annotation_ellipse", "Ellipse"),
+            "ann.polygon": (AnnotationPolygon, "annotation_polygon", "Polygon"),
+        }
+        model_cls, kind, label = shape_map[tool_id]
+        self._push_undo()
+        aid = self._document.new_id(model_cls)
+        fields: dict[str, object] = {
+            "floor_plan_id": fp_id,
+            "visible": True,
+            "color": "#00e5ff",
+            "line_style": "solid",
+            "stroke_width": 2.0,
+        }
+        if kind in {"annotation_rectangle", "annotation_circle", "annotation_ellipse", "annotation_polygon"}:
+            fields["fill_color"] = "#ffffff"
+        if kind == "annotation_rectangle":
+            fields["corner_radius"] = 0.0
+        element = model_cls.create(aid, **fields)
+        self._document.add(element)
+        self.canvas.register_element(aid)
+        self._emit_structure_changed()
+        self.navigator.select(aid)
+        self.canvas.start_place_annotation_shape(
+            kind,
+            aid,
+            color="#00e5ff",
+            line_style="solid",
+            stroke_width=2.0,
+            fill_color="#ffffff",
+            corner_radius=0.0,
+        )
         self._mark_dirty()
 
     def _add_elec_cable(self) -> None:

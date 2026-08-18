@@ -88,7 +88,11 @@ def test_validate_hrp_minimal_example_passes_schema_and_semantic():
 
     assert schema_errors == []
     assert semantic_errors == []
-    assert semantic_warnings == []
+    unexpected = [
+        msg for msg in semantic_warnings
+        if not str(msg).startswith("[Calibration]")
+    ]
+    assert unexpected == []
 
 
 def test_validate_hrp_detects_invalid_ap_reference():

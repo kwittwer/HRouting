@@ -14,12 +14,13 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import copy
 import math
 import os
 import hashlib
 from enum import Enum, auto
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import Qt, QPointF, Signal, QRectF, QByteArray
@@ -82,6 +83,12 @@ class ToolMode(Enum):
     DRAW_REF   = auto()
     DRAW_POLY  = auto()
     DRAW_FURNITURE_POLY = auto()
+    DRAW_ANNOTATION_LINE = auto()
+    DRAW_ANNOTATION_RECTANGLE = auto()
+    DRAW_ANNOTATION_POLYLINE = auto()
+    DRAW_ANNOTATION_POLYGON = auto()
+    DRAW_ANNOTATION_CIRCLE = auto()
+    DRAW_ANNOTATION_ELLIPSE = auto()
     MOVE_START = auto()
     DRAW_ROUTE = auto()
     MOVE_ROUTE_POINT = auto()
@@ -109,6 +116,7 @@ class ToolMode(Enum):
     PLACE_TEXT       = auto()
     MOVE_TEXT        = auto()
     MOVE_MEASURE_LABEL = auto()
+    EDIT_ANNOTATION = auto()
 
 class CanvasWidget(QWidget):
     polygon_finished  = Signal(str, list)
@@ -123,6 +131,7 @@ class CanvasWidget(QWidget):
     hkv_placed         = Signal(str)
     hkv_line_changed   = Signal(str)
     text_placed        = Signal(str)
+    annotation_shape_changed = Signal(str)
     object_clicked     = Signal(str, str)  # (object_type, object_id) – single click selection
     object_switched_from_edit = Signal(str, str)  # (object_type, object_id)
     object_double_clicked = Signal(str, str)  # (object_type, object_id)
@@ -267,6 +276,14 @@ class CanvasWidget(QWidget):
         self._hkv_line_end:       Dict[str, str]                  = {}
         self._hkv_line_visible:   Dict[str, bool]                  = {}
 
+        # Zeichnungs-Annotations
+        self._annotation_lines: Dict[str, dict] = {}
+        self._annotation_rectangles: Dict[str, dict] = {}
+        self._annotation_polylines: Dict[str, dict] = {}
+        self._annotation_polygons: Dict[str, dict] = {}
+        self._annotation_circles: Dict[str, dict] = {}
+        self._annotation_ellipses: Dict[str, dict] = {}
+
         # Text annotations
         self._text_annotations:   Dict[str, QPointF]              = {}  # id → position
         self._text_contents:      Dict[str, str]                  = {}  # id → text content
@@ -275,6 +292,18 @@ class CanvasWidget(QWidget):
         self._text_comments:      Dict[str, str]                  = {}  # id → tooltip comment
         self._text_visible:       Dict[str, bool]                 = {}
         self._text_rects:         Dict[str, QRectF]               = {}  # transient hit rects
+
+        # Zeichnungs-Annotations edit state
+        self._placing_annotation_id: Optional[str] = None
+        self._placing_annotation_kind: str = ""
+        self._annotation_preview: Optional[QPointF] = None
+        self._annotation_edit_id: Optional[str] = None
+        self._annotation_edit_kind: str = ""
+        self._annotation_edit_handle: int = -1
+        self._dragging_annotation_whole_id: Optional[str] = None
+        self._dragging_annotation_whole_kind: str = ""
+        self._dragging_annotation_whole_anchor: Optional[QPointF] = None
+        self._dragging_annotation_whole_origin: dict[str, Any] = {}
 
         # MCP planning metadata
         self._planning_context:   Dict[str, object]               = {}
@@ -2505,6 +2534,12 @@ class CanvasWidget(QWidget):
         "supply_line": "heating",
         "route": "heating",
         "polygon": "heating",
+        "annotation_line": "annotation",
+        "annotation_rectangle": "annotation",
+        "annotation_polyline": "annotation",
+        "annotation_polygon": "annotation",
+        "annotation_circle": "annotation",
+        "annotation_ellipse": "annotation",
         "helper_line": "annotation",
         "text": "annotation",
         "distance_measure": "annotation",
@@ -2515,6 +2550,23 @@ class CanvasWidget(QWidget):
         """Setzt den Werkzeugmodus (wird von der Werkzeugpalette genutzt)."""
         if mode is self._mode:
             return
+        if mode not in {
+            ToolMode.DRAW_ANNOTATION_LINE,
+            ToolMode.DRAW_ANNOTATION_RECTANGLE,
+            ToolMode.DRAW_ANNOTATION_POLYLINE,
+            ToolMode.DRAW_ANNOTATION_POLYGON,
+            ToolMode.DRAW_ANNOTATION_CIRCLE,
+            ToolMode.DRAW_ANNOTATION_ELLIPSE,
+            ToolMode.EDIT_ANNOTATION,
+        }:
+            self._cancel_annotation_placement()
+            self._annotation_edit_id = None
+            self._annotation_edit_kind = ""
+            self._annotation_edit_handle = -1
+            self._dragging_annotation_whole_id = None
+            self._dragging_annotation_whole_kind = ""
+            self._dragging_annotation_whole_anchor = None
+            self._dragging_annotation_whole_origin = {}
         self._mode = mode
         self.mode_changed.emit()
         self.update()
@@ -2552,6 +2604,12 @@ class CanvasWidget(QWidget):
             self._document.elements.get("elec_cables", {}),
             self._document.elements.get("hkv_points", {}),
             self._document.elements.get("hkv_lines", {}),
+            self._document.elements.get("annotation_lines", {}),
+            self._document.elements.get("annotation_rectangles", {}),
+            self._document.elements.get("annotation_polylines", {}),
+            self._document.elements.get("annotation_polygons", {}),
+            self._document.elements.get("annotation_circles", {}),
+            self._document.elements.get("annotation_ellipses", {}),
         ):
             for eid, element in group.items():
                 name = str(getattr(element, "name", "") or "").strip()
@@ -2587,6 +2645,19 @@ class CanvasWidget(QWidget):
             if element_id in mapping:
                 mapping[element_id] = visible
 
+        for mapping in (
+            self._annotation_lines,
+            self._annotation_rectangles,
+            self._annotation_polylines,
+            self._annotation_polygons,
+            self._annotation_circles,
+            self._annotation_ellipses,
+        ):
+            if element_id in mapping:
+                shape = mapping.get(element_id)
+                if isinstance(shape, dict):
+                    shape["visible"] = visible
+
         self.update()
 
     def set_helper_line_item_visible(self, floor_id: str, helper_id: str, visible: bool) -> None:
@@ -2615,6 +2686,20 @@ class CanvasWidget(QWidget):
         ):
             if element_id in mapping:
                 return bool(mapping.get(element_id, True))
+
+        for mapping in (
+            self._annotation_lines,
+            self._annotation_rectangles,
+            self._annotation_polylines,
+            self._annotation_polygons,
+            self._annotation_circles,
+            self._annotation_ellipses,
+        ):
+            if element_id in mapping:
+                shape = mapping.get(element_id)
+                if isinstance(shape, dict):
+                    return bool(shape.get("visible", True))
+                return True
         return True
 
     def register_element(self, element_id: str, visible: bool = True) -> None:
@@ -2866,6 +2951,38 @@ class CanvasWidget(QWidget):
             if hit is not None:
                 return ("angle_measure", f"MSRA-{hit + 1}")
 
+        # 6d. Annotation shapes
+        for aid, shape in self._annotation_lines.items():
+            if not self._is_object_visible("annotation_line", aid):
+                continue
+            if selectable("annotation_line", aid) and self._hit_annotation_line(canvas_pt, shape):
+                return ("annotation_line", aid)
+        for aid, shape in self._annotation_rectangles.items():
+            if not self._is_object_visible("annotation_rectangle", aid):
+                continue
+            if selectable("annotation_rectangle", aid) and self._hit_annotation_rect(canvas_pt, shape):
+                return ("annotation_rectangle", aid)
+        for aid, shape in self._annotation_polylines.items():
+            if not self._is_object_visible("annotation_polyline", aid):
+                continue
+            if selectable("annotation_polyline", aid) and self._hit_annotation_polyline(canvas_pt, shape):
+                return ("annotation_polyline", aid)
+        for aid, shape in self._annotation_polygons.items():
+            if not self._is_object_visible("annotation_polygon", aid):
+                continue
+            if selectable("annotation_polygon", aid) and self._hit_annotation_polygon(canvas_pt, shape):
+                return ("annotation_polygon", aid)
+        for aid, shape in self._annotation_circles.items():
+            if not self._is_object_visible("annotation_circle", aid):
+                continue
+            if selectable("annotation_circle", aid) and self._hit_annotation_circle(canvas_pt, shape):
+                return ("annotation_circle", aid)
+        for aid, shape in self._annotation_ellipses.items():
+            if not self._is_object_visible("annotation_ellipse", aid):
+                continue
+            if selectable("annotation_ellipse", aid) and self._hit_annotation_ellipse(canvas_pt, shape):
+                return ("annotation_ellipse", aid)
+
         # 7. Heating circuits polygons
         for cid, poly in self._polygons.items():
             if not self._circuit_visible.get(cid, True) or not selectable("polygon", cid):
@@ -2915,6 +3032,10 @@ class CanvasWidget(QWidget):
             return ("hkv_line", self._edit_hkv_line_id)
         if self._mode == ToolMode.EDIT_ROUTE and self._edit_route_cid:
             return ("route", self._edit_route_cid)
+        if self._mode == ToolMode.EDIT_ANNOTATION and self._annotation_edit_id:
+            kind = self._annotation_edit_kind
+            if kind:
+                return (kind, self._annotation_edit_id)
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
             return ("polygon", self._edit_polygon_cid)
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_elec_room_id:
@@ -2935,6 +3056,13 @@ class CanvasWidget(QWidget):
         self._edit_polygon_cid = None
         self._edit_elec_room_id = None
         self._edit_floor_polygon_id = None
+        self._annotation_edit_id = None
+        self._annotation_edit_kind = ""
+        self._annotation_edit_handle = -1
+        self._dragging_annotation_whole_id = None
+        self._dragging_annotation_whole_kind = ""
+        self._dragging_annotation_whole_anchor = None
+        self._dragging_annotation_whole_origin = {}
         self._edit_selected_owner = None
         self._edit_selected_indices.clear()
         self._edit_selection_rect_start = None
@@ -2947,6 +3075,7 @@ class CanvasWidget(QWidget):
             ToolMode.EDIT_HKV_LINE,
             ToolMode.EDIT_ROUTE,
             ToolMode.EDIT_POLYGON,
+            ToolMode.EDIT_ANNOTATION,
         ):
             self._mode = ToolMode.NONE
             self.setCursor(Qt.ArrowCursor)
@@ -2968,11 +3097,23 @@ class CanvasWidget(QWidget):
             return self._hkv_line_visible.get(obj_id, True)
         elif obj_type == "text":
             return self._text_visible.get(obj_id, True)
+        elif obj_type.startswith("annotation_"):
+            if self._document is not None:
+                element = self._document.get(obj_id)
+                if element is not None:
+                    return bool(getattr(element, "visible", True))
+            shape = self._annotation_shape_store(obj_type, obj_id)
+            if isinstance(shape, dict):
+                return bool(shape.get("visible", True))
+            return True
         return True
 
     def _is_multi_selectable_type(self, obj_type: str) -> bool:
         """Only these object types participate in multi-selection and Alt-drag."""
-        return obj_type in {"elec_point", "hkv", "text", "elec_cable"}
+        return obj_type in {"elec_point", "hkv", "text", "elec_cable",
+                    "annotation_line", "annotation_rectangle",
+                    "annotation_polyline", "annotation_polygon", "annotation_circle",
+                    "annotation_ellipse"}
 
     def _get_all_selectable_objects(self) -> List[Tuple[str, str]]:
         """Get list of all selectable (visible) objects on canvas."""
@@ -2989,6 +3130,24 @@ class CanvasWidget(QWidget):
         for text_id in self._text_annotations.keys():
             if self._is_object_visible("text", text_id) and self._is_selectable("text", text_id):
                 result.append(("text", text_id))
+        for ann_id in self._annotation_lines.keys():
+            if self._is_selectable("annotation_line", ann_id):
+                result.append(("annotation_line", ann_id))
+        for ann_id in self._annotation_rectangles.keys():
+            if self._is_selectable("annotation_rectangle", ann_id):
+                result.append(("annotation_rectangle", ann_id))
+        for ann_id in self._annotation_polylines.keys():
+            if self._is_selectable("annotation_polyline", ann_id):
+                result.append(("annotation_polyline", ann_id))
+        for ann_id in self._annotation_polygons.keys():
+            if self._is_selectable("annotation_polygon", ann_id):
+                result.append(("annotation_polygon", ann_id))
+        for ann_id in self._annotation_circles.keys():
+            if self._is_selectable("annotation_circle", ann_id):
+                result.append(("annotation_circle", ann_id))
+        for ann_id in self._annotation_ellipses.keys():
+            if self._is_selectable("annotation_ellipse", ann_id):
+                result.append(("annotation_ellipse", ann_id))
         # Electrical cables
         for cable_id in self._elec_cables.keys():
             if self._is_object_visible("elec_cable", cable_id) and self._is_selectable("elec_cable", cable_id):
@@ -3278,6 +3437,390 @@ class CanvasWidget(QWidget):
             d.pop(text_id, None)
         self.update()
 
+    # ── Annotation shapes API ─────────────────────────────────────── #
+
+    def start_place_annotation_shape(self, kind: str, element_id: str,
+                                     *, color: str = "#00e5ff",
+                                     line_style: str = "solid",
+                                     stroke_width: float = 2.0,
+                                     fill_color: str = "#ffffff",
+                                     corner_radius: float = 0.0) -> None:
+        kind = str(kind or "").strip().lower()
+        if kind not in {
+            "annotation_line",
+            "annotation_rectangle",
+            "annotation_polyline",
+            "annotation_polygon",
+            "annotation_circle",
+            "annotation_ellipse",
+        }:
+            return
+        if kind == "annotation_line":
+            self._annotation_lines.setdefault(element_id, {})
+        elif kind == "annotation_rectangle":
+            self._annotation_rectangles.setdefault(element_id, {})
+        elif kind == "annotation_polyline":
+            self._annotation_polylines.setdefault(element_id, {})
+        elif kind == "annotation_polygon":
+            self._annotation_polygons.setdefault(element_id, {})
+        elif kind == "annotation_circle":
+            self._annotation_circles.setdefault(element_id, {})
+        elif kind == "annotation_ellipse":
+            self._annotation_ellipses.setdefault(element_id, {})
+        shape = self._annotation_shape_store(kind, element_id)
+        shape.update({
+            "color": str(color or "#00e5ff"),
+            "line_style": str(line_style or "solid"),
+            "stroke_width": max(0.1, float(stroke_width)),
+        })
+        if kind in {"annotation_rectangle", "annotation_circle", "annotation_ellipse"}:
+            shape["fill_color"] = str(fill_color or "#ffffff")
+        if kind == "annotation_polygon":
+            shape["fill_color"] = str(fill_color or "#ffffff")
+        if kind == "annotation_rectangle":
+            shape["corner_radius"] = max(0.0, float(corner_radius))
+        self._placing_annotation_id = element_id
+        self._placing_annotation_kind = kind
+        self._annotation_preview = None
+        self._annotation_edit_id = None
+        self._annotation_edit_kind = ""
+        self._annotation_edit_handle = -1
+        self._mode = {
+            "annotation_line": ToolMode.DRAW_ANNOTATION_LINE,
+            "annotation_rectangle": ToolMode.DRAW_ANNOTATION_RECTANGLE,
+            "annotation_polyline": ToolMode.DRAW_ANNOTATION_POLYLINE,
+            "annotation_polygon": ToolMode.DRAW_ANNOTATION_POLYGON,
+            "annotation_circle": ToolMode.DRAW_ANNOTATION_CIRCLE,
+            "annotation_ellipse": ToolMode.DRAW_ANNOTATION_ELLIPSE,
+        }[kind]
+        self._ghost_preview_pos = None
+        self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
+        self.update()
+
+    def start_edit_annotation_shape(self, kind: str, element_id: str) -> None:
+        kind = str(kind or "").strip().lower()
+        shape = self._annotation_shape_store(kind, element_id)
+        if not shape:
+            return
+        self._annotation_edit_id = element_id
+        self._annotation_edit_kind = kind
+        self._annotation_edit_handle = -1
+        self._placing_annotation_id = None
+        self._placing_annotation_kind = ""
+        self._annotation_preview = None
+        self._mode = ToolMode.EDIT_ANNOTATION
+        self.setCursor(Qt.CrossCursor)
+        self.mode_changed.emit()
+        self.update()
+
+    def delete_annotation_shape(self, kind: str, element_id: str) -> None:
+        shape = self._annotation_shape_store(kind, element_id)
+        if shape is None:
+            return
+        if kind == "annotation_line":
+            self._annotation_lines.pop(element_id, None)
+        elif kind == "annotation_rectangle":
+            self._annotation_rectangles.pop(element_id, None)
+        elif kind == "annotation_polyline":
+            self._annotation_polylines.pop(element_id, None)
+        elif kind == "annotation_polygon":
+            self._annotation_polygons.pop(element_id, None)
+        elif kind == "annotation_circle":
+            self._annotation_circles.pop(element_id, None)
+        elif kind == "annotation_ellipse":
+            self._annotation_ellipses.pop(element_id, None)
+        self.update()
+
+    def _cancel_annotation_placement(self) -> None:
+        if not self._placing_annotation_id:
+            self._placing_annotation_kind = ""
+            self._annotation_preview = None
+            return
+        element_id = self._placing_annotation_id
+        kind = self._placing_annotation_kind
+        document = self.document()
+        if document is not None:
+            document.remove(element_id)
+        self.delete_annotation_shape(kind, element_id)
+        self._placing_annotation_id = None
+        self._placing_annotation_kind = ""
+        self._annotation_preview = None
+
+    def set_annotation_visible(self, kind: str, element_id: str, visible: bool) -> None:
+        shape = self._annotation_shape_store(kind, element_id)
+        if shape is None:
+            return
+        shape["visible"] = bool(visible)
+        self.update()
+
+    def _annotation_shape_store(self, kind: str, element_id: str) -> dict | None:
+        if kind == "annotation_line":
+            return self._annotation_lines.get(element_id)
+        if kind == "annotation_rectangle":
+            return self._annotation_rectangles.get(element_id)
+        if kind == "annotation_polyline":
+            return self._annotation_polylines.get(element_id)
+        if kind == "annotation_polygon":
+            return self._annotation_polygons.get(element_id)
+        if kind == "annotation_circle":
+            return self._annotation_circles.get(element_id)
+        if kind == "annotation_ellipse":
+            return self._annotation_ellipses.get(element_id)
+        return None
+
+    def _annotation_points_from_shape(self, shape: dict) -> list[QPointF]:
+        points = shape.get("points")
+        if isinstance(points, list) and points:
+            return [self._coerce_canvas_point(p) or QPointF(0.0, 0.0) for p in points]
+        start = shape.get("start")
+        end = shape.get("end")
+        if isinstance(start, list) and isinstance(end, list):
+            return [QPointF(start[0], start[1]), QPointF(end[0], end[1])]
+        return []
+
+    def _annotation_handle_points(self, kind: str, shape: dict) -> list[QPointF]:
+        points = self._annotation_points_from_shape(shape)
+        if kind in {"annotation_line", "annotation_polyline", "annotation_polygon"}:
+            return points
+        if kind in {"annotation_rectangle", "annotation_circle", "annotation_ellipse"} and len(points) >= 2:
+            rect = QRectF(points[0], points[1]).normalized()
+            return [
+                rect.topLeft(),
+                rect.topRight(),
+                rect.bottomRight(),
+                rect.bottomLeft(),
+            ]
+        return points
+
+    def _annotation_mm_per_px(self, element_id: str) -> float:
+        mpp = max(float(self._mm_per_px or 1.0), 1e-9)
+        if self._document is None:
+            return mpp
+        element = self._document.get(element_id)
+        if element is None:
+            return mpp
+        floor_id = str(getattr(element, "floor_plan_id", "") or "").strip()
+        if not floor_id:
+            return mpp
+        floor = self._document.floorplans.get(floor_id)
+        if floor is None:
+            return mpp
+        try:
+            layer_mpp = float(floor.layer.get("mm_per_px") or 0.0)
+        except (TypeError, ValueError):
+            layer_mpp = 0.0
+        return max(layer_mpp, mpp, 1e-9)
+
+    def _annotation_shape_color(self, shape: dict, default: str = "#00e5ff") -> QColor:
+        return QColor(str(shape.get("color", default) or default))
+
+    def _annotation_pen(self, shape: dict) -> QPen:
+        pen = QPen(self._annotation_shape_color(shape))
+        pen.setWidthF(max(0.1, float(shape.get("stroke_width", 2.0))) / self._scale)
+        style = str(shape.get("line_style", "solid") or "solid").strip().lower()
+        pen.setStyle({
+            "solid": Qt.SolidLine,
+            "dash": Qt.DashLine,
+            "dot": Qt.DotLine,
+            "dashdot": Qt.DashDotLine,
+        }.get(style, Qt.SolidLine))
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        return pen
+
+    def _annotation_brush(self, shape: dict) -> QBrush:
+        fill_color = str(shape.get("fill_color", "") or "")
+        if not fill_color:
+            return QBrush(Qt.NoBrush)
+        color = QColor(fill_color)
+        if color.alpha() == 255:
+            color.setAlpha(90)
+        return QBrush(color)
+
+    def _annotation_rect(self, shape: dict) -> QRectF | None:
+        points = self._annotation_points_from_shape(shape)
+        if len(points) < 2:
+            return None
+        return QRectF(points[0], points[1]).normalized()
+
+    def _annotation_circle_geometry(self, shape: dict) -> tuple[QPointF, float] | None:
+        rect = self._annotation_rect(shape)
+        if rect is None:
+            return None
+        radius = min(rect.width(), rect.height()) / 2.0
+        if radius <= 0.0:
+            return None
+        return QPointF(rect.center()), radius
+
+    def _annotation_ellipse_geometry(self, shape: dict) -> tuple[QPointF, float, float] | None:
+        rect = self._annotation_rect(shape)
+        if rect is None:
+            return None
+        rx = rect.width() / 2.0
+        ry = rect.height() / 2.0
+        if rx <= 0.0 or ry <= 0.0:
+            return None
+        return QPointF(rect.center()), rx, ry
+
+    def _annotation_hit_threshold(self) -> float:
+        return self._px_to_canvas_units(max(HIT_POINT_RADIUS_PX, 8.0))
+
+    def _hit_annotation_line(self, canvas_pt: QPointF, shape: dict) -> bool:
+        points = self._annotation_points_from_shape(shape)
+        if len(points) < 2:
+            return False
+        threshold = self._annotation_hit_threshold()
+        return _qdist(canvas_pt, _project_on_segment(canvas_pt, points[0], points[1])) <= threshold
+
+    def _hit_annotation_polyline(self, canvas_pt: QPointF, shape: dict) -> bool:
+        points = self._annotation_points_from_shape(shape)
+        if len(points) < 2:
+            return False
+        threshold = self._annotation_hit_threshold()
+        for idx in range(len(points) - 1):
+            if _qdist(canvas_pt, _project_on_segment(canvas_pt, points[idx], points[idx + 1])) <= threshold:
+                return True
+        return False
+
+    def _hit_annotation_polygon(self, canvas_pt: QPointF, shape: dict) -> bool:
+        points = self._annotation_points_from_shape(shape)
+        if len(points) < 3:
+            return False
+        threshold = self._annotation_hit_threshold()
+        for idx in range(len(points)):
+            next_idx = (idx + 1) % len(points)
+            if _qdist(canvas_pt, _project_on_segment(canvas_pt, points[idx], points[next_idx])) <= threshold:
+                return True
+        polygon = QPolygonF(points)
+        return polygon.containsPoint(canvas_pt, Qt.OddEvenFill)
+
+    def _hit_annotation_rect(self, canvas_pt: QPointF, shape: dict) -> bool:
+        rect = self._annotation_rect(shape)
+        if rect is None:
+            return False
+        threshold = self._annotation_hit_threshold()
+        expanded = rect.adjusted(-threshold, -threshold, threshold, threshold)
+        return expanded.contains(canvas_pt)
+
+    def _hit_annotation_circle(self, canvas_pt: QPointF, shape: dict) -> bool:
+        geometry = self._annotation_circle_geometry(shape)
+        if geometry is None:
+            return False
+        center, radius = geometry
+        threshold = self._annotation_hit_threshold()
+        return abs(_qdist(canvas_pt, center) - radius) <= threshold or _qdist(canvas_pt, center) <= radius
+
+    def _hit_annotation_ellipse(self, canvas_pt: QPointF, shape: dict) -> bool:
+        geometry = self._annotation_ellipse_geometry(shape)
+        if geometry is None:
+            return False
+        center, rx, ry = geometry
+        if rx <= 0.0 or ry <= 0.0:
+            return False
+        dx = (canvas_pt.x() - center.x()) / rx
+        dy = (canvas_pt.y() - center.y()) / ry
+        value = dx * dx + dy * dy
+        threshold = self._annotation_hit_threshold()
+        return value <= 1.0 or abs(value - 1.0) <= max(0.1, threshold / max(rx, ry))
+
+    def _hit_annotation_handle(self, canvas_pt: QPointF, kind: str, element_id: str) -> int:
+        shape = self._annotation_shape_store(kind, element_id)
+        if not shape:
+            return -1
+        points = self._annotation_handle_points(kind, shape)
+        if not points:
+            return -1
+        threshold = self._annotation_hit_threshold()
+        for idx, point in enumerate(points):
+            if _qdist(canvas_pt, point) <= threshold:
+                return idx
+        if kind == "annotation_polyline":
+            for idx in range(len(points) - 1):
+                projected = _project_on_segment(canvas_pt, points[idx], points[idx + 1])
+                if _qdist(canvas_pt, projected) <= threshold:
+                    return idx + 1
+        if kind == "annotation_polygon":
+            for idx in range(len(points)):
+                next_idx = (idx + 1) % len(points)
+                projected = _project_on_segment(canvas_pt, points[idx], points[next_idx])
+                if _qdist(canvas_pt, projected) <= threshold:
+                    return next_idx
+        return -1
+
+    def _set_annotation_shape_point(self, kind: str, element_id: str, index: int, pt: QPointF) -> None:
+        shape = self._annotation_shape_store(kind, element_id)
+        if not shape:
+            return
+        if kind == "annotation_line":
+            points = self._annotation_points_from_shape(shape)
+            if len(points) < 2:
+                points = [QPointF(pt), QPointF(pt)]
+            points[index] = QPointF(pt)
+            shape["start"] = [points[0].x(), points[0].y()]
+            shape["end"] = [points[1].x(), points[1].y()]
+        elif kind in {"annotation_rectangle", "annotation_circle", "annotation_ellipse"}:
+            points = self._annotation_points_from_shape(shape)
+            if len(points) < 2:
+                points = [QPointF(pt), QPointF(pt)]
+            rect = QRectF(points[0], points[1]).normalized()
+            corners = [
+                rect.topLeft(),
+                rect.topRight(),
+                rect.bottomRight(),
+                rect.bottomLeft(),
+            ]
+            if index < 0 or index >= len(corners):
+                return
+            corners[index] = QPointF(pt)
+            opposite = {0: 2, 1: 3, 2: 0, 3: 1}[index]
+            a = corners[index]
+            b = corners[opposite]
+            tl = QPointF(min(a.x(), b.x()), min(a.y(), b.y()))
+            br = QPointF(max(a.x(), b.x()), max(a.y(), b.y()))
+            shape["start"] = [tl.x(), tl.y()]
+            shape["end"] = [br.x(), br.y()]
+        elif kind == "annotation_polyline":
+            points = self._annotation_points_from_shape(shape)
+            while len(points) <= index:
+                points.append(QPointF(pt))
+            points[index] = QPointF(pt)
+            shape["points"] = [[p.x(), p.y()] for p in points]
+        elif kind == "annotation_polygon":
+            points = self._annotation_points_from_shape(shape)
+            while len(points) <= index:
+                points.append(QPointF(pt))
+            points[index] = QPointF(pt)
+            shape["points"] = [[p.x(), p.y()] for p in points]
+
+    def _finalize_annotation_shape(self, kind: str, element_id: str) -> None:
+        shape = self._annotation_shape_store(kind, element_id)
+        if not shape:
+            return
+        points = self._annotation_points_from_shape(shape)
+        if kind == "annotation_line" and len(points) >= 2:
+            shape["start"] = [points[0].x(), points[0].y()]
+            shape["end"] = [points[1].x(), points[1].y()]
+        elif kind == "annotation_rectangle" and len(points) >= 2:
+            shape["start"] = [points[0].x(), points[0].y()]
+            shape["end"] = [points[1].x(), points[1].y()]
+        elif kind == "annotation_polyline" and len(points) >= 2:
+            shape["points"] = [[p.x(), p.y()] for p in points]
+        elif kind == "annotation_polygon" and len(points) >= 3:
+            shape["points"] = [[p.x(), p.y()] for p in points]
+        elif kind == "annotation_circle" and len(points) >= 2:
+            rect = QRectF(points[0], points[1]).normalized()
+            shape["start"] = [rect.left(), rect.top()]
+            shape["end"] = [rect.right(), rect.bottom()]
+            shape["radius"] = min(rect.width(), rect.height()) / 2.0
+        elif kind == "annotation_ellipse" and len(points) >= 2:
+            rect = QRectF(points[0], points[1]).normalized()
+            shape["start"] = [rect.left(), rect.top()]
+            shape["end"] = [rect.right(), rect.bottom()]
+            shape["radius_x"] = rect.width() / 2.0
+            shape["radius_y"] = rect.height() / 2.0
+        self.update()
+
     def _hit_text_annotation(self, canvas_pt: QPointF) -> Optional[str]:
         """Return the id of a text annotation hit at canvas_pt."""
         for tid, rect in self._text_rects.items():
@@ -3410,6 +3953,12 @@ class CanvasWidget(QWidget):
         self._hkv_line_start.clear()
         self._hkv_line_end.clear()
         self._hkv_line_visible.clear()
+        self._annotation_lines.clear()
+        self._annotation_rectangles.clear()
+        self._annotation_polylines.clear()
+        self._annotation_polygons.clear()
+        self._annotation_circles.clear()
+        self._annotation_ellipses.clear()
         self._text_annotations.clear()
         self._text_contents.clear()
         self._text_font_sizes.clear()
@@ -3478,6 +4027,18 @@ class CanvasWidget(QWidget):
                 self._selected_item_type = "route"
             elif item_id in self._text_annotations:
                 self._selected_item_type = "text"
+            elif item_id in self._annotation_lines:
+                self._selected_item_type = "annotation_line"
+            elif item_id in self._annotation_rectangles:
+                self._selected_item_type = "annotation_rectangle"
+            elif item_id in self._annotation_polylines:
+                self._selected_item_type = "annotation_polyline"
+            elif item_id in self._annotation_polygons:
+                self._selected_item_type = "annotation_polygon"
+            elif item_id in self._annotation_circles:
+                self._selected_item_type = "annotation_circle"
+            elif item_id in self._annotation_ellipses:
+                self._selected_item_type = "annotation_ellipse"
             elif self._measurement_obj_to_index(item_id, "MSRD") is not None:
                 idx = self._measurement_obj_to_index(item_id, "MSRD")
                 self._selected_item_type = "distance_measure" if idx is not None and idx < len(self._measure_lines) else None
@@ -4678,6 +5239,62 @@ class CanvasWidget(QWidget):
                 self.update()
             return
 
+        # In Draw-Annotation-Polyline mode: double-click on last point finishes the polyline
+        if (
+            self._mode == ToolMode.DRAW_ANNOTATION_POLYLINE
+            and self._placing_annotation_id
+            and self._placing_annotation_kind == "annotation_polyline"
+        ):
+            shape = self._annotation_shape_store("annotation_polyline", self._placing_annotation_id)
+            if isinstance(shape, dict):
+                points = self._annotation_points_from_shape(shape)
+                if points:
+                    last_pt = points[-1]
+                    if _qdist(canvas_pt, last_pt) < threshold:
+                        if len(points) >= 2 and _qdist(points[-1], points[-2]) < 1e-6:
+                            points = points[:-1]
+                            shape["points"] = [[p.x(), p.y()] for p in points]
+                        ann_id = self._placing_annotation_id
+                        self._finalize_annotation_shape("annotation_polyline", ann_id)
+                        self._placing_annotation_id = None
+                        self._placing_annotation_kind = ""
+                        self._annotation_preview = None
+                        self._mode = ToolMode.NONE
+                        self._ghost_preview_pos = None
+                        self.setCursor(Qt.ArrowCursor)
+                        self.mode_changed.emit()
+                        if len(points) >= 2:
+                            self.annotation_shape_changed.emit(ann_id)
+                        self.update()
+            return
+
+        # In Draw-Annotation-Polygon mode: double-click on first point closes the polygon
+        if (
+            self._mode == ToolMode.DRAW_ANNOTATION_POLYGON
+            and self._placing_annotation_id
+            and self._placing_annotation_kind == "annotation_polygon"
+        ):
+            shape = self._annotation_shape_store("annotation_polygon", self._placing_annotation_id)
+            if isinstance(shape, dict):
+                points = self._annotation_points_from_shape(shape)
+                if points and _qdist(canvas_pt, points[0]) < threshold:
+                    if len(points) >= 3 and _qdist(points[-1], points[0]) < 1e-6:
+                        points = points[:-1]
+                        shape["points"] = [[p.x(), p.y()] for p in points]
+                    ann_id = self._placing_annotation_id
+                    self._finalize_annotation_shape("annotation_polygon", ann_id)
+                    self._placing_annotation_id = None
+                    self._placing_annotation_kind = ""
+                    self._annotation_preview = None
+                    self._mode = ToolMode.NONE
+                    self._ghost_preview_pos = None
+                    self.setCursor(Qt.ArrowCursor)
+                    self.mode_changed.emit()
+                    if len(points) >= 3:
+                        self.annotation_shape_changed.emit(ann_id)
+                    self.update()
+            return
+
         # In Edit-Route mode: snap route point on double-click
         if self._mode == ToolMode.EDIT_ROUTE and self._edit_route_cid:
             hit = self._hit_route_point_in_circuit(canvas_pt, self._edit_route_cid)
@@ -4819,7 +5436,45 @@ class CanvasWidget(QWidget):
             self.object_double_clicked.emit("hkv", hkv_hit)
             return
 
-        # 3. Elektro-Kabel – Doppelklick auf Anfang oder Ende → Zeichenmodus fortsetzen
+        # 3. Annotation shapes
+        for aid, shape in self._annotation_lines.items():
+            if not self._is_object_visible("annotation_line", aid):
+                continue
+            if self._hit_annotation_line(canvas_pt, shape):
+                self.object_double_clicked.emit("annotation_line", aid)
+                return
+        for aid, shape in self._annotation_rectangles.items():
+            if not self._is_object_visible("annotation_rectangle", aid):
+                continue
+            if self._hit_annotation_rect(canvas_pt, shape):
+                self.object_double_clicked.emit("annotation_rectangle", aid)
+                return
+        for aid, shape in self._annotation_polylines.items():
+            if not self._is_object_visible("annotation_polyline", aid):
+                continue
+            if self._hit_annotation_polyline(canvas_pt, shape):
+                self.object_double_clicked.emit("annotation_polyline", aid)
+                return
+        for aid, shape in self._annotation_polygons.items():
+            if not self._is_object_visible("annotation_polygon", aid):
+                continue
+            if self._hit_annotation_polygon(canvas_pt, shape):
+                self.object_double_clicked.emit("annotation_polygon", aid)
+                return
+        for aid, shape in self._annotation_circles.items():
+            if not self._is_object_visible("annotation_circle", aid):
+                continue
+            if self._hit_annotation_circle(canvas_pt, shape):
+                self.object_double_clicked.emit("annotation_circle", aid)
+                return
+        for aid, shape in self._annotation_ellipses.items():
+            if not self._is_object_visible("annotation_ellipse", aid):
+                continue
+            if self._hit_annotation_ellipse(canvas_pt, shape):
+                self.object_double_clicked.emit("annotation_ellipse", aid)
+                return
+
+        # 4. Elektro-Kabel – Doppelklick auf Anfang oder Ende → Zeichenmodus fortsetzen
         for kid, pts in self._elec_cables.items():
             if not self._elec_visible.get(kid, True):
                 continue
@@ -4853,7 +5508,7 @@ class CanvasWidget(QWidget):
                         self.object_double_clicked.emit("elec_cable", kid)
                         return
 
-        # 4. HKV-Leitung – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
+        # 5. HKV-Leitung – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
         for lid, pts in self._hkv_lines.items():
             if not self._hkv_line_visible.get(lid, True):
                 continue
@@ -4875,7 +5530,7 @@ class CanvasWidget(QWidget):
                         self.object_double_clicked.emit("hkv_line", lid)
                         return
 
-        # 5. Zuleitung – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
+        # 6. Zuleitung – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
         for cid, pts in self._supply_lines.items():
             if not self._circuit_visible.get(cid, True):
                 continue
@@ -4897,7 +5552,7 @@ class CanvasWidget(QWidget):
                         self.object_double_clicked.emit("supply_line", cid)
                         return
 
-        # 6. Rohrverlauf – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
+        # 7. Rohrverlauf – Doppelklick auf letzten Punkt → Zeichenmodus fortsetzen
         for cid, pts in self._manual_routes.items():
             if not self._circuit_visible.get(cid, True):
                 continue
@@ -4922,7 +5577,7 @@ class CanvasWidget(QWidget):
                         self.object_double_clicked.emit("route", cid)
                         return
 
-        # 7. Polygon (point inside)
+        # 8. Polygon (point inside)
         for fid in reversed(self._floor_plan_order):
             layer = self._floor_plans.get(fid)
             if not layer or not layer.visible or not layer.polygon:
@@ -4932,7 +5587,7 @@ class CanvasWidget(QWidget):
                 self.object_double_clicked.emit("floor_polygon", fid)
                 return
 
-        # 8. Polygon (point inside)
+        # 9. Polygon (point inside)
         for cid, poly in self._polygons.items():
             if not self._circuit_visible.get(cid, True):
                 continue
@@ -4940,7 +5595,7 @@ class CanvasWidget(QWidget):
                 self.object_double_clicked.emit("polygon", cid)
                 return
 
-        # 9. Elektro-Raum Polygon (point inside)
+        # 10. Elektro-Raum Polygon (point inside)
         for rid, poly in self._elec_room_polygons.items():
             if not self._elec_room_visible.get(rid, True):
                 continue
@@ -5783,6 +6438,110 @@ class CanvasWidget(QWidget):
                 self.update()
                 return
 
+        if self._mode in (
+            ToolMode.DRAW_ANNOTATION_LINE,
+            ToolMode.DRAW_ANNOTATION_RECTANGLE,
+            ToolMode.DRAW_ANNOTATION_POLYLINE,
+            ToolMode.DRAW_ANNOTATION_POLYGON,
+            ToolMode.DRAW_ANNOTATION_CIRCLE,
+            ToolMode.DRAW_ANNOTATION_ELLIPSE,
+        ) and self._placing_annotation_id:
+            kind = self._placing_annotation_kind
+            shape = self._annotation_shape_store(kind, self._placing_annotation_id)
+            if shape is None:
+                return
+            if event.button() == Qt.LeftButton:
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                snapped = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+                if kind in {"annotation_polyline", "annotation_polygon"}:
+                    points = self._annotation_points_from_shape(shape)
+                    points.append(QPointF(snapped))
+                    shape["points"] = [[p.x(), p.y()] for p in points]
+                    self._annotation_preview = QPointF(snapped)
+                    self.update()
+                    return
+                points = self._annotation_points_from_shape(shape)
+                if not points:
+                    shape["start"] = [snapped.x(), snapped.y()]
+                    shape["end"] = [snapped.x(), snapped.y()]
+                    self._annotation_preview = QPointF(snapped)
+                    self.update()
+                    return
+                shape["start"] = [points[0].x(), points[0].y()]
+                shape["end"] = [snapped.x(), snapped.y()]
+                self._finalize_annotation_shape(kind, self._placing_annotation_id)
+                ann_id = self._placing_annotation_id
+                self._placing_annotation_id = None
+                self._placing_annotation_kind = ""
+                self._annotation_preview = None
+                self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                self.annotation_shape_changed.emit(ann_id)
+                self.update()
+                return
+            if event.button() == Qt.RightButton:
+                if kind in {"annotation_polyline", "annotation_polygon"}:
+                    # Polylinie/Polygon werden per Doppelklick abgeschlossen.
+                    return
+                ann_id = self._placing_annotation_id
+                self._finalize_annotation_shape(kind, ann_id)
+                self._placing_annotation_id = None
+                self._placing_annotation_kind = ""
+                self._annotation_preview = None
+                self._mode = ToolMode.NONE
+                self._ghost_preview_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                self.annotation_shape_changed.emit(ann_id)
+                self.update()
+                return
+
+        if self._mode == ToolMode.EDIT_ANNOTATION and self._annotation_edit_id:
+            if event.button() == Qt.LeftButton:
+                hit = self._hit_annotation_handle(canvas_pt, self._annotation_edit_kind, self._annotation_edit_id)
+                if hit >= 0:
+                    self._dragging_route_point = (self._annotation_edit_id, hit)
+                    self._annotation_edit_handle = hit
+                    self.setCursor(Qt.ClosedHandCursor)
+                    return
+                shape = self._annotation_shape_store(self._annotation_edit_kind, self._annotation_edit_id)
+                if shape is not None and self._is_object_visible(self._annotation_edit_kind, self._annotation_edit_id):
+                    hit_shape = False
+                    if self._annotation_edit_kind == "annotation_line":
+                        hit_shape = self._hit_annotation_line(canvas_pt, shape)
+                    elif self._annotation_edit_kind == "annotation_rectangle":
+                        hit_shape = self._hit_annotation_rect(canvas_pt, shape)
+                    elif self._annotation_edit_kind == "annotation_polyline":
+                        hit_shape = self._hit_annotation_polyline(canvas_pt, shape)
+                    elif self._annotation_edit_kind == "annotation_polygon":
+                        hit_shape = self._hit_annotation_polygon(canvas_pt, shape)
+                    elif self._annotation_edit_kind == "annotation_circle":
+                        hit_shape = self._hit_annotation_circle(canvas_pt, shape)
+                    elif self._annotation_edit_kind == "annotation_ellipse":
+                        hit_shape = self._hit_annotation_ellipse(canvas_pt, shape)
+                    if hit_shape:
+                        self._dragging_annotation_whole_id = self._annotation_edit_id
+                        self._dragging_annotation_whole_kind = self._annotation_edit_kind
+                        self._dragging_annotation_whole_anchor = QPointF(canvas_pt)
+                        self._dragging_annotation_whole_origin = copy.deepcopy(shape)
+                        self.setCursor(Qt.ClosedHandCursor)
+                return
+            elif event.button() == Qt.MiddleButton:
+                self._mode = ToolMode.NONE
+                self._annotation_edit_id = None
+                self._annotation_edit_kind = ""
+                self._annotation_edit_handle = -1
+                self._dragging_annotation_whole_id = None
+                self._dragging_annotation_whole_kind = ""
+                self._dragging_annotation_whole_anchor = None
+                self._dragging_annotation_whole_origin = {}
+                self.setCursor(Qt.ArrowCursor)
+                self.mode_changed.emit()
+                self.update()
+                return
+
         # ── Polygon bearbeiten ──
         if self._mode == ToolMode.EDIT_POLYGON and self._edit_polygon_cid:
             cid = self._edit_polygon_cid
@@ -5966,6 +6725,65 @@ class CanvasWidget(QWidget):
             self.update()
         elif self._ghost_preview_pos is not None:
             self._ghost_preview_pos = None
+
+        if self._mode in (
+            ToolMode.DRAW_ANNOTATION_LINE,
+            ToolMode.DRAW_ANNOTATION_RECTANGLE,
+            ToolMode.DRAW_ANNOTATION_POLYLINE,
+            ToolMode.DRAW_ANNOTATION_POLYGON,
+            ToolMode.DRAW_ANNOTATION_CIRCLE,
+            ToolMode.DRAW_ANNOTATION_ELLIPSE,
+        ) and self._placing_annotation_id:
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            preview = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+            self._annotation_preview = preview
+            if self._placing_annotation_kind in {"annotation_polyline", "annotation_polygon"}:
+                shape = self._annotation_shape_store(self._placing_annotation_kind, self._placing_annotation_id)
+                if shape is not None:
+                    points = self._annotation_points_from_shape(shape)
+                    if points:
+                        shape["points"] = [[p.x(), p.y()] for p in points[:-1]] + [[preview.x(), preview.y()]]
+            self.update()
+            return
+
+        if self._mode == ToolMode.EDIT_ANNOTATION and self._annotation_edit_id and self._dragging_route_point:
+            owner_id, idx = self._dragging_route_point
+            ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+            new_pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
+            self._set_annotation_shape_point(self._annotation_edit_kind, owner_id, idx, new_pt)
+            self.annotation_shape_changed.emit(owner_id)
+            self.update()
+            return
+
+        if (
+            self._mode == ToolMode.EDIT_ANNOTATION
+            and self._annotation_edit_id
+            and self._dragging_annotation_whole_id
+            and self._dragging_annotation_whole_anchor is not None
+        ):
+            shape = self._annotation_shape_store(
+                self._dragging_annotation_whole_kind,
+                self._dragging_annotation_whole_id,
+            )
+            if shape is None:
+                return
+            dx = canvas_pt.x() - self._dragging_annotation_whole_anchor.x()
+            dy = canvas_pt.y() - self._dragging_annotation_whole_anchor.y()
+            origin = self._dragging_annotation_whole_origin
+            if self._dragging_annotation_whole_kind in {"annotation_polyline", "annotation_polygon"}:
+                base_points = origin.get("points") if isinstance(origin, dict) else None
+                if isinstance(base_points, list):
+                    shape["points"] = [[float(p[0]) + dx, float(p[1]) + dy] for p in base_points if isinstance(p, list) and len(p) >= 2]
+            else:
+                start = origin.get("start") if isinstance(origin, dict) else None
+                end = origin.get("end") if isinstance(origin, dict) else None
+                if isinstance(start, list) and len(start) >= 2:
+                    shape["start"] = [float(start[0]) + dx, float(start[1]) + dy]
+                if isinstance(end, list) and len(end) >= 2:
+                    shape["end"] = [float(end[0]) + dx, float(end[1]) + dy]
+            self.annotation_shape_changed.emit(self._dragging_annotation_whole_id)
+            self.update()
+            return
 
         if self._mode == ToolMode.NONE:
             hover_obj = self._hit_any_object(canvas_pt)
@@ -7168,6 +7986,22 @@ class CanvasWidget(QWidget):
                 self._edit_drag_last_pos = None
                 self.route_changed.emit(cid)
                 return
+            if self._dragging_route_point and self._mode == ToolMode.EDIT_ANNOTATION:
+                ann_id, _ = self._dragging_route_point
+                self._dragging_route_point = None
+                self._annotation_edit_handle = -1
+                self.annotation_shape_changed.emit(ann_id)
+                return
+            if self._dragging_annotation_whole_id and self._mode == ToolMode.EDIT_ANNOTATION:
+                ann_id = self._dragging_annotation_whole_id
+                self._dragging_annotation_whole_id = None
+                self._dragging_annotation_whole_kind = ""
+                self._dragging_annotation_whole_anchor = None
+                self._dragging_annotation_whole_origin = {}
+                self.annotation_shape_changed.emit(ann_id)
+                self.setCursor(Qt.CrossCursor)
+                self.update()
+                return
             if self._mode == ToolMode.MOVE_ELEC_POINT and self._dragging_elec_point:
                 pid = self._dragging_elec_point
                 self._dragging_elec_point = None
@@ -7491,6 +8325,11 @@ class CanvasWidget(QWidget):
             # Text annotations
             self._placing_text_id = None
             self._dragging_text = None
+            # Annotation shapes
+            self._cancel_annotation_placement()
+            self._annotation_edit_id = None
+            self._annotation_edit_kind = ""
+            self._annotation_edit_handle = -1
             # Floor plan move/rotate
             self._active_floor_id = None
             self._floor_drag_start = None
@@ -7760,6 +8599,23 @@ class CanvasWidget(QWidget):
         elif self._mode == ToolMode.EDIT_HKV_LINE and self._edit_hkv_line_id:
             self._draw_edit_hkv_line_overlay(painter, self._edit_hkv_line_id)
 
+        if (
+            self._selected_item_id
+            and self._selected_item_type in {
+                "annotation_line",
+                "annotation_rectangle",
+                "annotation_polyline",
+                "annotation_polygon",
+                "annotation_circle",
+                "annotation_ellipse",
+            }
+        ):
+            self._draw_edit_annotation_overlay(
+                painter,
+                self._selected_item_type,
+                self._selected_item_id,
+            )
+
         # Heizkreisverteiler
         for hid in self._hkv_points:
             if self._hkv_visible.get(hid, True):
@@ -7901,6 +8757,9 @@ class CanvasWidget(QWidget):
             text = self._label_map.get(lid, lid)
             col = self._color_map.get(lid, QColor("#e53935"))
             self._draw_item_label(painter, lid, mid, text, col)
+
+        # ── Annotation shapes ─────────────────────────────────────
+        self._draw_annotation_shapes(painter)
 
         # ── Text-Annotationen ─────────────────────────────────────
         self._draw_text_annotations(painter)
@@ -8610,6 +9469,38 @@ class CanvasWidget(QWidget):
                 r = 8.0 / self._scale
                 painter.drawEllipse(pos, r, r)
 
+        elif item_type == "annotation_line" and item_id in self._annotation_lines:
+            points = self._annotation_points_from_shape(self._annotation_lines[item_id])
+            if len(points) >= 2:
+                painter.drawLine(points[0], points[1])
+
+        elif item_type == "annotation_rectangle" and item_id in self._annotation_rectangles:
+            rect = self._annotation_rect(self._annotation_rectangles[item_id])
+            if rect is not None:
+                painter.drawRect(rect)
+
+        elif item_type == "annotation_polyline" and item_id in self._annotation_polylines:
+            points = self._annotation_points_from_shape(self._annotation_polylines[item_id])
+            if len(points) >= 2:
+                painter.drawPolyline(QPolygonF(points))
+
+        elif item_type == "annotation_polygon" and item_id in self._annotation_polygons:
+            points = self._annotation_points_from_shape(self._annotation_polygons[item_id])
+            if len(points) >= 3:
+                painter.drawPolygon(QPolygonF(points))
+
+        elif item_type == "annotation_circle" and item_id in self._annotation_circles:
+            geometry = self._annotation_circle_geometry(self._annotation_circles[item_id])
+            if geometry is not None:
+                center, radius = geometry
+                painter.drawEllipse(center, radius, radius)
+
+        elif item_type == "annotation_ellipse" and item_id in self._annotation_ellipses:
+            geometry = self._annotation_ellipse_geometry(self._annotation_ellipses[item_id])
+            if geometry is not None:
+                center, rx, ry = geometry
+                painter.drawEllipse(center, rx, ry)
+
         elif item_type == "distance_measure":
             idx = self._measurement_obj_to_index(item_id, "MSRD")
             if idx is not None and 0 <= idx < len(self._measure_lines):
@@ -8850,6 +9741,124 @@ class CanvasWidget(QWidget):
                        tw, th),
                 Qt.AlignCenter, text)
 
+        painter.restore()
+
+    def _draw_annotation_shapes(self, painter: QPainter):
+        def draw_shape(kind: str, aid: str, shape: dict) -> None:
+            style_shape = dict(shape)
+            if self._document is not None:
+                element = self._document.get(aid)
+                if element is None:
+                    return
+                if not bool(getattr(element, "visible", True)):
+                    return
+                style_shape["color"] = str(getattr(element, "color", "") or style_shape.get("color", "#00e5ff"))
+                style_shape["line_style"] = str(getattr(element, "line_style", "") or style_shape.get("line_style", "solid"))
+                try:
+                    style_shape["stroke_width"] = float(getattr(element, "stroke_width", style_shape.get("stroke_width", 2.0)) or 2.0)
+                except (TypeError, ValueError):
+                    style_shape["stroke_width"] = float(style_shape.get("stroke_width", 2.0) or 2.0)
+                if hasattr(element, "fill_color"):
+                    style_shape["fill_color"] = str(getattr(element, "fill_color", "") or style_shape.get("fill_color", ""))
+                if hasattr(element, "corner_radius"):
+                    try:
+                        style_shape["corner_radius"] = float(getattr(element, "corner_radius", style_shape.get("corner_radius", 0.0)) or 0.0)
+                    except (TypeError, ValueError):
+                        style_shape["corner_radius"] = float(style_shape.get("corner_radius", 0.0) or 0.0)
+            elif not bool(style_shape.get("visible", True)):
+                return
+            painter.save()
+            painter.setPen(self._annotation_pen(style_shape))
+            painter.setBrush(self._annotation_brush(style_shape))
+            if kind == "annotation_line":
+                points = self._annotation_points_from_shape(shape)
+                if len(points) >= 2:
+                    painter.drawLine(points[0], points[1])
+                    if aid == self._placing_annotation_id and self._annotation_preview is not None:
+                        painter.drawLine(points[0], self._annotation_preview)
+            elif kind == "annotation_rectangle":
+                rect = self._annotation_rect(shape)
+                if rect is not None:
+                    radius = max(0.0, float(style_shape.get("corner_radius", 0.0)))
+                    if radius > 0.0:
+                        painter.drawRoundedRect(rect, radius, radius)
+                    else:
+                        painter.drawRect(rect)
+                    if aid == self._placing_annotation_id and self._annotation_preview is not None:
+                        preview_rect = QRectF(rect.topLeft(), self._annotation_preview).normalized()
+                        if radius > 0.0:
+                            painter.drawRoundedRect(preview_rect, radius, radius)
+                        else:
+                            painter.drawRect(preview_rect)
+            elif kind == "annotation_polyline":
+                points = self._annotation_points_from_shape(shape)
+                if len(points) >= 2:
+                    painter.drawPolyline(QPolygonF(points))
+                    if aid == self._placing_annotation_id and self._annotation_preview is not None:
+                        painter.drawLine(points[-1], self._annotation_preview)
+                elif len(points) == 1 and aid == self._placing_annotation_id and self._annotation_preview is not None:
+                    painter.drawLine(points[0], self._annotation_preview)
+            elif kind == "annotation_polygon":
+                points = self._annotation_points_from_shape(shape)
+                if len(points) >= 3:
+                    painter.drawPolygon(QPolygonF(points))
+                elif len(points) >= 2:
+                    painter.drawPolyline(QPolygonF(points))
+                if points and aid == self._placing_annotation_id and self._annotation_preview is not None:
+                    painter.drawLine(points[-1], self._annotation_preview)
+                    painter.drawLine(self._annotation_preview, points[0])
+            elif kind == "annotation_circle":
+                geometry = self._annotation_circle_geometry(shape)
+                if geometry is not None:
+                    center, radius = geometry
+                    painter.drawEllipse(center, radius, radius)
+                    if aid == self._placing_annotation_id and self._annotation_preview is not None:
+                        rect = QRectF(points[0], self._annotation_preview).normalized() if (points := self._annotation_points_from_shape(shape)) else None
+                        if rect is not None:
+                            radius = min(rect.width(), rect.height()) / 2.0
+                            painter.drawEllipse(rect.center(), radius, radius)
+            elif kind == "annotation_ellipse":
+                geometry = self._annotation_ellipse_geometry(shape)
+                if geometry is not None:
+                    center, rx, ry = geometry
+                    painter.drawEllipse(center, rx, ry)
+                    if aid == self._placing_annotation_id and self._annotation_preview is not None:
+                        rect = QRectF(points[0], self._annotation_preview).normalized() if (points := self._annotation_points_from_shape(shape)) else None
+                        if rect is not None:
+                            painter.drawEllipse(rect)
+            painter.restore()
+
+        for aid, shape in self._annotation_lines.items():
+            draw_shape("annotation_line", aid, shape)
+        for aid, shape in self._annotation_rectangles.items():
+            draw_shape("annotation_rectangle", aid, shape)
+        for aid, shape in self._annotation_polylines.items():
+            draw_shape("annotation_polyline", aid, shape)
+        for aid, shape in self._annotation_polygons.items():
+            draw_shape("annotation_polygon", aid, shape)
+        for aid, shape in self._annotation_circles.items():
+            draw_shape("annotation_circle", aid, shape)
+        for aid, shape in self._annotation_ellipses.items():
+            draw_shape("annotation_ellipse", aid, shape)
+
+    def _draw_edit_annotation_overlay(self, painter: QPainter, kind: str, element_id: str):
+        shape = self._annotation_shape_store(kind, element_id)
+        if not isinstance(shape, dict):
+            return
+        points = self._annotation_handle_points(kind, shape)
+        if not points:
+            return
+        painter.save()
+        r = 5.0 / self._scale
+        for idx, point in enumerate(points):
+            active = (
+                self._mode == ToolMode.EDIT_ANNOTATION
+                and self._annotation_edit_id == element_id
+                and self._annotation_edit_handle == idx
+            )
+            painter.setBrush(QBrush(QColor("#ff6b6b") if active else QColor("#00e5ff")))
+            painter.setPen(QPen(QColor("#ffffff"), 1.0 / self._scale))
+            painter.drawEllipse(point, r, r)
         painter.restore()
 
     # ── Label helpers ──────────────────────────────────────────────── #

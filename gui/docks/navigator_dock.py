@@ -27,6 +27,12 @@ from model.elements import (
     HkvLine,
     Furniture,
     TextAnnotation,
+    AnnotationLine,
+    AnnotationRectangle,
+    AnnotationPolyline,
+    AnnotationPolygon,
+    AnnotationCircle,
+    AnnotationEllipse,
     DistanceMeasurement,
     AngleMeasurement,
 )
@@ -57,6 +63,12 @@ _ELECTRICAL_GROUP = (
 _ANNOTATION_GROUP = (
     "Annotationen",
     (
+        "AnnotationLine",
+        "AnnotationRectangle",
+        "AnnotationPolyline",
+        "AnnotationPolygon",
+        "AnnotationCircle",
+        "AnnotationEllipse",
         "TextAnnotation",
         "DistanceMeasurement",
         "AngleMeasurement",

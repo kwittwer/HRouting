@@ -125,6 +125,54 @@ def test_validate_semantic_no_calibration_warning_when_values_match():
     assert not any("[Calibration]" in w for w in warnings)
 
 
+def test_validate_semantic_annotation_polygon_geometry_rules():
+    from validate_hrp import validate_semantic  # noqa: PLC0415
+
+    valid = {
+        "canvas": {
+            "annotation_polygons": {
+                "ANPG-1": {
+                    "points": [[0.0, 0.0], [100.0, 0.0], [100.0, 80.0]],
+                }
+            }
+        },
+        "params": {
+            "floorplans": {"grundriss-1": {"name": "EG"}},
+            "annotation_polygons": {
+                "ANPG-1": {
+                    "polygon_id": "ANPG-1",
+                    "floor_plan_id": "grundriss-1",
+                    "name": "Poly",
+                    "visible": True,
+                }
+            },
+        },
+    }
+    semantic_errors, _warnings = validate_semantic(valid)
+    assert not semantic_errors
+
+    invalid = {
+        "canvas": {
+            "annotation_polygons": {
+                "ANPG-1": {
+                    "points": [[0.0, 0.0], [100.0, 0.0]],
+                }
+            }
+        },
+        "params": {
+            "floorplans": {"grundriss-1": {"name": "EG"}},
+            "annotation_polygons": {
+                "ANPG-1": {
+                    "polygon_id": "ANPG-1",
+                    "floor_plan_id": "grundriss-1",
+                }
+            },
+        },
+    }
+    semantic_errors, _warnings = validate_semantic(invalid)
+    assert any("canvas.annotation_polygons.ANPG-1" in err for err in semantic_errors)
+
+
 def test_migration_drops_legacy_ui_state():
     raw = migrate_raw({"params": {"_ui_state": {"main_window": {}}, "circuits": {}}})
     assert "_ui_state" not in raw["params"]

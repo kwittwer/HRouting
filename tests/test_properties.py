@@ -116,10 +116,23 @@ def test_display_value_applies_scale(document):
 
 
 def test_text_fields_write_into_nested_entry(document):
-    text = document.elements["text_annotations"]["TEXT-1"]
+    text = document.elements["text_annotations"].get("TEXT-1")
+    if text is None:
+        floor_plan_id = next(iter(document.floorplans.keys()), "")
+        text_id = document.new_id(TextAnnotation)
+        text = TextAnnotation.create(
+            text_id,
+            floor_plan_id=floor_plan_id,
+            name="Test Text",
+            visible=True,
+        )
+        text.geom["text_annotations"] = {"pos": [300, 50], "content": "", "font_size": 14.0}
+        document.add(text)
+    text_id = text.id
+
     spec = next(f for f in schema_for(text).fields if f.key == "content")
     set_field(text, spec, "Geändert")
-    entry = document.to_dict()["canvas"]["text_annotations"]["TEXT-1"]
+    entry = document.to_dict()["canvas"]["text_annotations"][text_id]
     assert entry["content"] == "Geändert"
     assert entry["pos"] == [300, 50]  # Position unangetastet
 
