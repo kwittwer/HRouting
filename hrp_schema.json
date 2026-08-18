@@ -1076,7 +1076,7 @@
         "id": { "type": "string", "description": "Eindeutige Seiten-ID." },
         "type": {
           "type": "string",
-          "enum": ["plan", "heating", "elektro", "elektro_room", "lengths", "hydraulics"],
+          "enum": ["plan", "heating", "heating_circuit", "elektro", "elektro_room", "lengths", "hydraulics"],
           "description": "Seitentyp."
         },
         "title": { "type": "string" },
@@ -1114,6 +1114,11 @@
           "default": null
         },
         "room_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "circuit_ids": {
           "type": "array",
           "items": { "type": "string" },
           "default": []

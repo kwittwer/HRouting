@@ -130,6 +130,34 @@ def test_pdf_export_dialog_add_remove_and_edit_title(app):
 
 
 @pytest.mark.gui
+def test_pdf_export_dialog_add_heating_circuit_page(app):
+    dialog = PdfExportConfigDialog(
+        pages=[_sample_page()],
+        floor_plans=[("grundriss-1", "EG")],
+        svg_size=(1000.0, 700.0),
+        heating_circuits=[("HK-1", "Wohnzimmer"), ("HK-2", "Kueche")],
+    )
+    try:
+        initial_count = dialog.tree.topLevelItemCount()
+        QTest.mouseClick(dialog.btn_add_heating_circuit, Qt.MouseButton.LeftButton)
+
+        assert dialog.tree.topLevelItemCount() == initial_count + 1
+        current = dialog.tree.currentItem()
+        assert current is not None
+        page = current.data(0, Qt.UserRole)
+        assert isinstance(page, dict)
+        assert page.get("type") == "heating_circuit"
+
+        cb = dialog._circuit_checks["HK-1"]
+        cb.setChecked(True)
+        updated = dialog._current_page()
+        assert updated is not None
+        assert updated.get("circuit_ids") == ["HK-1"]
+    finally:
+        dialog.deleteLater()
+
+
+@pytest.mark.gui
 def test_schaltplan_window_updates_uv_selection_and_tabs(app):
     window = SchaltplanWindow()
     try:

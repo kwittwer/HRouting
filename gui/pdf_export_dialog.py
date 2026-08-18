@@ -61,6 +61,7 @@ class PdfExportConfigDialog(QDialog):
         floor_plans: list[tuple[str, str]],
         svg_size: tuple[float, float],
         elec_rooms: list[tuple[str, str]] | None = None,
+        heating_circuits: list[tuple[str, str]] | None = None,
         export_meta: dict | None = None,
         hrouting_version: str = "",
         canvas=None,
@@ -74,6 +75,7 @@ class PdfExportConfigDialog(QDialog):
         self._pages = copy.deepcopy(pages)
         self._floor_plans = list(floor_plans)
         self._elec_rooms = list(elec_rooms or [])
+        self._heating_circuits = list(heating_circuits or [])
         self._svg_w = float(svg_size[0] if svg_size else 0.0)
         self._svg_h = float(svg_size[1] if svg_size else 0.0)
         self._hrouting_version = str(hrouting_version or "")
@@ -82,6 +84,7 @@ class PdfExportConfigDialog(QDialog):
         self._element_checks: dict[str, QCheckBox] = {}
         self._table_checks: dict[str, QCheckBox] = {}
         self._room_checks: dict[str, QCheckBox] = {}
+        self._circuit_checks: dict[str, QCheckBox] = {}
         self._meta = self._normalize_meta(export_meta)
 
         self._build_ui()
@@ -192,11 +195,14 @@ class PdfExportConfigDialog(QDialog):
         left_btns = QHBoxLayout()
         self.btn_add_plan = QPushButton("Planseite einfügen")
         self.btn_add_plan.clicked.connect(self._on_add_plan_page)
+        self.btn_add_heating_circuit = QPushButton("Heizkreis-Detailseite einfügen")
+        self.btn_add_heating_circuit.clicked.connect(self._on_add_heating_circuit_page)
         self.btn_add_elektro_room = QPushButton("Elektro-Raumseite einfügen")
         self.btn_add_elektro_room.clicked.connect(self._on_add_elektro_room_page)
         self.btn_remove = QPushButton("Seite entfernen")
         self.btn_remove.clicked.connect(self._on_remove_selected)
         left_btns.addWidget(self.btn_add_plan)
+        left_btns.addWidget(self.btn_add_heating_circuit)
         left_btns.addWidget(self.btn_add_elektro_room)
         left_btns.addWidget(self.btn_remove)
         left.addLayout(left_btns)
@@ -272,6 +278,18 @@ class PdfExportConfigDialog(QDialog):
             room_layout.addWidget(cb)
         right.addWidget(self.room_group)
 
+        self.circuit_group = QGroupBox("Heizkreise")
+        circuit_layout = QVBoxLayout(self.circuit_group)
+        circuit_layout.setContentsMargins(6, 6, 6, 6)
+        self.lbl_no_circuits = QLabel("Keine Heizkreise vorhanden.")
+        circuit_layout.addWidget(self.lbl_no_circuits)
+        for circuit_id, circuit_name in self._heating_circuits:
+            cb = QCheckBox(circuit_name or circuit_id)
+            cb.toggled.connect(self._on_circuit_selection_changed)
+            self._circuit_checks[circuit_id] = cb
+            circuit_layout.addWidget(cb)
+        right.addWidget(self.circuit_group)
+
         right.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -320,6 +338,7 @@ class PdfExportConfigDialog(QDialog):
         return {
             "plan": "Plan",
             "heating": "Heizung",
+            "heating_circuit": "Heizkreis-Detail",
             "lengths": "Rohrlängen",
             "hydraulics": "Hydraulik",
             "elektro": "Elektro",
@@ -352,6 +371,8 @@ class PdfExportConfigDialog(QDialog):
             ]
         if ptype == "elektro_room":
             return ["el_ap_infos", "el_kabel"]
+        if ptype == "heating_circuit":
+            return ["hk_lengths", "hk_hydraulics"]
         return []
 
     @staticmethod
@@ -366,6 +387,8 @@ class PdfExportConfigDialog(QDialog):
             }
         if ptype == "elektro_room":
             return {"el_ap_infos", "el_kabel"}
+        if ptype == "heating_circuit":
+            return {"hk_lengths", "hk_hydraulics"}
         return set()
 
     def _load_pages_into_tree(self):
@@ -457,13 +480,16 @@ class PdfExportConfigDialog(QDialog):
             self.cb_enabled.setChecked(bool(page.get("enabled", True)))
 
             ptype = page.get("type", "plan")
-            is_plan_like = ptype in ("plan", "heating", "elektro", "elektro_room")
+            is_plan_like = ptype in ("plan", "heating", "elektro", "elektro_room", "heating_circuit")
             supports_tables = ptype in ("heating", "elektro")
             supports_room_selection = ptype == "elektro_room"
+            supports_circuit_selection = ptype == "heating_circuit"
             self.plan_group.setVisible(is_plan_like)
             self.table_group.setVisible(supports_tables)
             self.room_group.setVisible(supports_room_selection)
+            self.circuit_group.setVisible(supports_circuit_selection)
             self.lbl_no_rooms.setVisible(not bool(self._room_checks))
+            self.lbl_no_circuits.setVisible(not bool(self._circuit_checks))
             self.lbl_non_plan.setVisible(not is_plan_like)
 
             if is_plan_like:
@@ -484,6 +510,14 @@ class PdfExportConfigDialog(QDialog):
                 selected_set = {str(v) for v in selected_room_ids}
                 for room_id, cb in self._room_checks.items():
                     cb.setChecked(room_id in selected_set)
+
+            if supports_circuit_selection:
+                selected_circuit_ids = page.get("circuit_ids")
+                if not isinstance(selected_circuit_ids, list):
+                    selected_circuit_ids = []
+                selected_set = {str(v) for v in selected_circuit_ids}
+                for circuit_id, cb in self._circuit_checks.items():
+                    cb.setChecked(circuit_id in selected_set)
 
             if supports_tables:
                 allowed = self._allowed_table_sections(ptype)
@@ -555,6 +589,16 @@ class PdfExportConfigDialog(QDialog):
 
         self._update_current_page(updater)
 
+    def _on_circuit_selection_changed(self, *_args):
+        def updater(p: dict):
+            p["circuit_ids"] = [
+                circuit_id
+                for circuit_id, cb in self._circuit_checks.items()
+                if cb.isChecked()
+            ]
+
+        self._update_current_page(updater)
+
 
 
 
@@ -608,6 +652,45 @@ class PdfExportConfigDialog(QDialog):
             "floor_plan_id": None,
             "source_rect": None,
             "room_ids": selected_rooms,
+        }
+        item = QTreeWidgetItem(self.tree)
+        item.setText(0, page["title"])
+        item.setText(1, self._page_type_label(page))
+        item.setFlags(
+            item.flags()
+            | Qt.ItemIsUserCheckable
+            | Qt.ItemIsEditable
+            | Qt.ItemIsDragEnabled
+            | Qt.ItemIsDropEnabled
+            | Qt.ItemIsSelectable
+            | Qt.ItemIsEnabled
+        )
+        item.setCheckState(0, Qt.Checked)
+        item.setData(0, Qt.UserRole, page)
+        self.tree.setCurrentItem(item)
+        self._update_page_count_field()
+
+    def _on_add_heating_circuit_page(self):
+        selected_circuits = [
+            circuit_id for circuit_id, cb in self._circuit_checks.items() if cb.isChecked()
+        ]
+        page = {
+            "id": f"heating-circuit-{uuid.uuid4().hex[:8]}",
+            "type": "heating_circuit",
+            "title": "Heizung – Heizkreisdetail",
+            "enabled": True,
+            "show_background": True,
+            "show_heating": True,
+            "show_elektro": False,
+            "element_visibility": {
+                **self._default_element_visibility(),
+                "ap": False,
+                "room": False,
+                "kv": False,
+            },
+            "floor_plan_id": None,
+            "source_rect": None,
+            "circuit_ids": selected_circuits,
         }
         item = QTreeWidgetItem(self.tree)
         item.setText(0, page["title"])

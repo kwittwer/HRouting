@@ -2141,6 +2141,252 @@ def test_pdf_export_elektro_room_writes_pdf_and_persists_config(app, monkeypatch
         window.deleteLater()
 
 
+def test_pdf_export_normalizes_heating_circuit_page(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "hk-1",
+                    "type": "heating_circuit",
+                    "title": "Heizkreisdetail",
+                    "enabled": True,
+                    "circuit_ids": ["HK-1", "HK-1", "HK-2", ""],
+                }
+            ]
+        )
+
+        assert len(pages) == 1
+        page = pages[0]
+        assert page["type"] == "heating_circuit"
+        assert page["circuit_ids"] == ["HK-1", "HK-2"]
+        assert page["element_visibility"]["hk"] is True
+        assert page["element_visibility"]["hkv"] is True
+        assert page["element_visibility"]["hkv_line"] is True
+        assert page["element_visibility"]["ap"] is False
+        assert page["element_visibility"]["room"] is False
+        assert page["element_visibility"]["kv"] is False
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_heating_circuit_filters_rows(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "polygons": {
+                        "HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]],
+                        "HK-2": [[220.0, 0.0], [420.0, 0.0], [420.0, 200.0], [220.0, 200.0]],
+                    },
+                    "manual_routes": {
+                        "HK-1": [[20.0, 20.0], [180.0, 20.0], [180.0, 180.0]],
+                        "HK-2": [[240.0, 20.0], [400.0, 20.0], [400.0, 180.0]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "diameter": 16.0,
+                            "spacing": 150.0,
+                            "wall_dist": 200.0,
+                            "room_temp": 21.0,
+                            "floor_covering": "Fliesen / Keramik",
+                        },
+                        "HK-2": {
+                            "circuit_id": "HK-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kueche",
+                            "diameter": 16.0,
+                            "spacing": 150.0,
+                            "wall_dist": 200.0,
+                            "room_temp": 20.0,
+                            "floor_covering": "Fliesen / Keramik",
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        selected_ids, detail_rows, metric_rows = window._collect_pdf_heating_circuit_rows(["HK-1"])
+
+        assert selected_ids == {"HK-1"}
+        assert [row[0] for row in detail_rows] == ["HK-1"]
+        assert [row[1] for row in detail_rows] == ["Wohnzimmer"]
+        assert [row[0] for row in metric_rows] == ["HK-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_heating_circuit_focus_rect_zooms_to_selected(app, monkeypatch):
+    from PySide6.QtCore import QSettings, QRectF  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "polygons": {
+                        "HK-1": [[0.0, 0.0], [120.0, 0.0], [120.0, 120.0], [0.0, 120.0]],
+                        "HK-2": [[700.0, 700.0], [900.0, 700.0], [900.0, 900.0], [700.0, 900.0]],
+                    },
+                    "manual_routes": {
+                        "HK-1": [[10.0, 10.0], [100.0, 100.0]],
+                        "HK-2": [[720.0, 720.0], [880.0, 880.0]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "circuits": {
+                        "HK-1": {"circuit_id": "HK-1", "floor_plan_id": "grundriss-1", "name": "A"},
+                        "HK-2": {"circuit_id": "HK-2", "floor_plan_id": "grundriss-1", "name": "B"},
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        fallback = QRectF(0.0, 0.0, 1000.0, 1000.0)
+        rect = window._heating_circuit_focus_source_rect(["HK-1"], fallback)
+
+        assert rect.width() < fallback.width()
+        assert rect.height() < fallback.height()
+        assert rect.center().x() < 300.0
+        assert rect.center().y() < 300.0
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_heating_circuit_writes_pdf_and_persists_config(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "polygons": {
+                        "HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]],
+                    },
+                    "manual_routes": {
+                        "HK-1": [[20.0, 20.0], [180.0, 20.0], [180.0, 180.0]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "diameter": 16.0,
+                            "spacing": 150.0,
+                            "wall_dist": 200.0,
+                            "room_temp": 21.0,
+                            "floor_covering": "Fliesen / Keramik",
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        pdf_path = tmp_path / "heating_circuit_report.pdf"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(pdf_path), "PDF (*.pdf)")),
+        )
+
+        pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "hk-page-1",
+                    "type": "heating_circuit",
+                    "title": "Heizkreis Detail",
+                    "enabled": True,
+                    "show_background": True,
+                    "show_heating": True,
+                    "show_elektro": False,
+                    "element_visibility": {
+                        "background": True,
+                        "furniture": True,
+                        "hk": True,
+                        "hkv": True,
+                        "hkv_line": True,
+                        "ap": False,
+                        "room": False,
+                        "kv": False,
+                        "text": True,
+                    },
+                    "circuit_ids": ["HK-1"],
+                }
+            ]
+        )
+        meta = window._normalize_pdf_export_meta({}, pages)
+
+        monkeypatch.setattr(window, "_open_pdf_export_config_dialog", lambda: (pages, meta))
+        window._export_pdf()
+
+        assert pdf_path.exists()
+        assert pdf_path.stat().st_size > 0
+        assert window._pdf_export_pages and window._pdf_export_pages[0]["type"] == "heating_circuit"
+        assert window._pdf_export_pages[0].get("circuit_ids") == ["HK-1"]
+    finally:
+        window.deleteLater()
+
+
 def test_pdf_export_plan_source_filters_floorplans_and_elements(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 

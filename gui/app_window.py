@@ -4011,6 +4011,8 @@ class AppWindow(QMainWindow):
     def _default_pdf_table_sections(ptype: str) -> list[str]:
         if ptype == "heating":
             return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
+        if ptype == "heating_circuit":
+            return ["hk_lengths", "hk_hydraulics"]
         if ptype == "elektro":
             return [
                 "el_kabel",
@@ -4140,7 +4142,15 @@ class AppWindow(QMainWindow):
             if not isinstance(src, dict):
                 continue
             ptype = str(src.get("type", "plan")).strip().lower()
-            if ptype not in ("plan", "heating", "lengths", "hydraulics", "elektro", "elektro_room"):
+            if ptype not in (
+                "plan",
+                "heating",
+                "heating_circuit",
+                "lengths",
+                "hydraulics",
+                "elektro",
+                "elektro_room",
+            ):
                 continue
             page = {
                 "id": str(src.get("id") or f"page-{index + 1}"),
@@ -4148,7 +4158,7 @@ class AppWindow(QMainWindow):
                 "title": str(src.get("title") or "Seite"),
                 "enabled": bool(src.get("enabled", True)),
             }
-            if ptype in ("plan", "heating", "elektro", "elektro_room"):
+            if ptype in ("plan", "heating", "heating_circuit", "elektro", "elektro_room"):
                 page["show_background"] = bool(src.get("show_background", True))
                 page["show_heating"] = bool(src.get("show_heating", True))
                 page["show_elektro"] = bool(src.get("show_elektro", True))
@@ -4164,6 +4174,13 @@ class AppWindow(QMainWindow):
                     vis["ap"] = True
                     vis["room"] = True
                     vis["kv"] = True
+                if ptype == "heating_circuit":
+                    vis["hk"] = True
+                    vis["hkv"] = True
+                    vis["hkv_line"] = True
+                    vis["ap"] = False
+                    vis["room"] = False
+                    vis["kv"] = False
                 page["element_visibility"] = vis
                 page["table_sections"] = list(src.get("table_sections") or self._default_pdf_table_sections(ptype))
                 if ptype == "elektro_room":
@@ -4179,6 +4196,19 @@ class AppWindow(QMainWindow):
                         page["room_ids"] = room_ids
                     else:
                         page["room_ids"] = []
+                if ptype == "heating_circuit":
+                    circuit_ids_src = src.get("circuit_ids")
+                    if isinstance(circuit_ids_src, list):
+                        seen = set()
+                        circuit_ids: list[str] = []
+                        for circuit_id in circuit_ids_src:
+                            key = str(circuit_id or "").strip()
+                            if key and key not in seen:
+                                seen.add(key)
+                                circuit_ids.append(key)
+                        page["circuit_ids"] = circuit_ids
+                    else:
+                        page["circuit_ids"] = []
                 page["floor_plan_id"] = src.get("floor_plan_id") or None
                 rect = src.get("source_rect")
                 if isinstance(rect, (list, tuple)) and len(rect) == 4:
@@ -4201,6 +4231,12 @@ class AppWindow(QMainWindow):
 
     def _current_elec_rooms_for_export_dialog(self) -> list[tuple[str, str]]:
         return self._collect_room_choices()
+
+    def _current_heating_circuits_for_export_dialog(self) -> list[tuple[str, str]]:
+        choices: list[tuple[str, str]] = []
+        for circuit_id, circuit in self._document.elements["circuits"].items():
+            choices.append((circuit_id, str(circuit.name or circuit_id)))
+        return sorted(choices, key=lambda entry: entry[1].lower())
 
     @staticmethod
     def _page_source_rect(page: dict | None) -> QRectF | None:
@@ -4234,6 +4270,7 @@ class AppWindow(QMainWindow):
             pages=pages,
             floor_plans=self._current_floor_plans_for_export_dialog(),
             elec_rooms=self._current_elec_rooms_for_export_dialog(),
+            heating_circuits=self._current_heating_circuits_for_export_dialog(),
             svg_size=self.canvas._svg_size,
             export_meta=self._normalize_pdf_export_meta(self._pdf_export_meta, pages),
             hrouting_version=self._hrouting_program_version(),
@@ -4427,6 +4464,53 @@ class AppWindow(QMainWindow):
         cable_rows.sort(key=lambda row: row[0].lower())
         return selected_ap_ids, selected_cable_ids, ap_rows, cable_rows
 
+    def _collect_pdf_heating_circuit_rows(
+        self,
+        circuit_ids: list[str],
+    ) -> tuple[set[str], list[list[str]], list[list[str]]]:
+        selected_circuit_ids = {str(circuit_id).strip() for circuit_id in circuit_ids if str(circuit_id).strip()}
+        if not selected_circuit_ids:
+            return set(), [], []
+
+        hk_rows, _t_supply, _t_return = self._collect_length_overview_rows()
+        rows_by_id = {str(row.get("id", "")): row for row in hk_rows}
+
+        detail_rows: list[list[str]] = []
+        metric_rows: list[list[str]] = []
+        for circuit_id in sorted(selected_circuit_ids):
+            circuit = self._document.elements["circuits"].get(circuit_id)
+            if circuit is None:
+                continue
+            detail_rows.append(
+                [
+                    circuit_id,
+                    str(circuit.name or circuit_id),
+                    f"{float(circuit.data.get('room_temp', 20.0) or 20.0):.1f} °C",
+                    str(circuit.data.get("floor_covering", "") or ""),
+                    f"{float(circuit.data.get('diameter', 16.0) or 16.0):.1f} mm",
+                    f"{float(circuit.data.get('spacing', 150.0) or 150.0):.0f} mm",
+                    f"{float(circuit.data.get('wall_dist', 200.0) or 200.0):.0f} mm",
+                ]
+            )
+
+            row = rows_by_id.get(circuit_id, {})
+            metric_rows.append(
+                [
+                    circuit_id,
+                    str(circuit.name or circuit_id),
+                    f"{float(row.get('area_m2', 0.0)):.2f} m²",
+                    f"{float(row.get('route_m', 0.0)):.2f} m",
+                    f"{float(row.get('supply_m', 0.0)):.2f} m",
+                    f"{float(row.get('total_m', 0.0)):.2f} m",
+                    f"{float(row.get('power_w', 0.0)):.0f} W",
+                    f"{float(row.get('pressure_drop_mbar', 0.0)):.0f} mbar",
+                ]
+            )
+
+        detail_rows.sort(key=lambda row: row[1].lower())
+        metric_rows.sort(key=lambda row: row[1].lower())
+        return {row[0] for row in detail_rows}, detail_rows, metric_rows
+
     def _room_focus_source_rect(self, room_ids: list[str], fallback: QRectF) -> QRectF:
         selected_room_ids = {str(room_id).strip() for room_id in room_ids if str(room_id).strip()}
         if not selected_room_ids:
@@ -4466,6 +4550,67 @@ class AppWindow(QMainWindow):
             return fallback
 
         pad = max(40.0, min(width, height) * 0.15)
+        rect = QRectF(min_x - pad, min_y - pad, width + 2 * pad, height + 2 * pad)
+        return rect.normalized()
+
+    def _heating_circuit_focus_source_rect(self, circuit_ids: list[str], fallback: QRectF) -> QRectF:
+        selected_circuit_ids = {str(circuit_id).strip() for circuit_id in circuit_ids if str(circuit_id).strip()}
+        if not selected_circuit_ids:
+            return fallback
+
+        min_x: float | None = None
+        min_y: float | None = None
+        max_x: float | None = None
+        max_y: float | None = None
+
+        def _collect_points(value) -> list[tuple[float, float]]:
+            out: list[tuple[float, float]] = []
+            if not isinstance(value, list):
+                return out
+            for entry in value:
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    continue
+                try:
+                    x = float(entry[0])
+                    y = float(entry[1])
+                except (TypeError, ValueError):
+                    continue
+                out.append((x, y))
+            return out
+
+        for circuit_id in selected_circuit_ids:
+            circuit = self._document.elements["circuits"].get(circuit_id)
+            candidate_lists = [
+                self.canvas._polygons.get(circuit_id, []),
+                self.canvas._manual_routes.get(circuit_id, []),
+                self.canvas._supply_lines.get(circuit_id, []),
+            ]
+            if circuit is not None:
+                candidate_lists.extend(
+                    [
+                        circuit.geom.get("polygons", []),
+                        circuit.geom.get("manual_routes", []),
+                        circuit.geom.get("supply_lines", []),
+                    ]
+                )
+
+            for points in candidate_lists:
+                for x, y in _collect_points(points):
+                    min_x = x if min_x is None else min(min_x, x)
+                    min_y = y if min_y is None else min(min_y, y)
+                    max_x = x if max_x is None else max(max_x, x)
+                    max_y = y if max_y is None else max(max_y, y)
+
+        if min_x is None or min_y is None or max_x is None or max_y is None:
+            return fallback
+
+        width = max_x - min_x
+        height = max_y - min_y
+        if width <= 1e-6 or height <= 1e-6:
+            return fallback
+
+        # Keep padding compact so selected circuits appear large in the screenshot.
+        pad = max(20.0, min(width, height) * 0.08)
         rect = QRectF(min_x - pad, min_y - pad, width + 2 * pad, height + 2 * pad)
         return rect.normalized()
 
@@ -5512,6 +5657,66 @@ class AppWindow(QMainWindow):
                 ["Name", "Typ", "Start", "Ende", "Länge"],
                 room_cable_rows,
                 col_widths=[1.6, 1.1, 1.2, 1.2, 0.8],
+            )
+            return
+
+        if ptype == "heating_circuit":
+            circuit_ids = [str(v) for v in (page.get("circuit_ids") or []) if str(v).strip()]
+            selected_circuit_ids, detail_rows, metric_rows = self._collect_pdf_heating_circuit_rows(circuit_ids)
+            plan_title = f"{title} – Plan"
+            detail_title = f"{title} – Heizkreisdetails"
+            metric_title = f"{title} – Verlegungsdaten"
+
+            page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+            _, content_rect = self._draw_pdf_title(painter, page_rect, plan_title)
+
+            if not selected_circuit_ids:
+                painter.drawText(
+                    content_rect,
+                    Qt.AlignCenter | Qt.TextWordWrap,
+                    "Keine Heizkreise ausgewählt.",
+                )
+                return
+
+            source_rect = self._heating_circuit_focus_source_rect(
+                list(selected_circuit_ids),
+                self._effective_pdf_source_rect(page),
+            )
+            image_rect = QRectF(
+                content_rect.x(),
+                content_rect.y(),
+                max(1.0, content_rect.width()),
+                max(1.0, content_rect.height()),
+            )
+
+            for cid in list(self.canvas._polygons) + list(self.canvas._manual_routes) + list(self.canvas._supply_lines):
+                self.canvas._circuit_visible[cid] = cid in selected_circuit_ids
+
+            img = self.canvas.render_for_export(
+                source_rect=source_rect,
+                output_w=max(1, int(image_rect.width())),
+                output_h=max(1, int(image_rect.height())),
+            )
+            painter.drawImage(image_rect, img)
+
+            self._pdf_new_page(painter, writer)
+            self._draw_pdf_table(
+                painter,
+                writer,
+                detail_title,
+                ["ID", "Name", "Raumtemp.", "Boden", "Ø", "Abstand", "Wandabst."],
+                detail_rows,
+                col_widths=[0.9, 1.5, 0.9, 1.2, 0.8, 0.9, 1.0],
+            )
+
+            self._pdf_new_page(painter, writer)
+            self._draw_pdf_table(
+                painter,
+                writer,
+                metric_title,
+                ["ID", "Name", "Fläche", "Rohr", "Zuleitung", "Gesamt", "Leistung", "Δp"],
+                metric_rows,
+                col_widths=[0.8, 1.3, 0.9, 0.9, 0.9, 0.9, 0.9, 0.8],
             )
             return
 
