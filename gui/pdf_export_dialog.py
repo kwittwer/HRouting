@@ -360,6 +360,24 @@ class PdfExportConfigDialog(QDialog):
         }
 
     @staticmethod
+    def _allowed_element_keys(ptype: str) -> set[str]:
+        if ptype == "elektro_room":
+            return {"background", "furniture", "ap", "room", "kv", "text"}
+        if ptype == "heating_circuit":
+            return {"background", "furniture", "hk", "hkv", "hkv_line", "text"}
+        return {
+            "background",
+            "furniture",
+            "hk",
+            "hkv",
+            "hkv_line",
+            "ap",
+            "room",
+            "kv",
+            "text",
+        }
+
+    @staticmethod
     def _default_table_sections(ptype: str) -> list[str]:
         if ptype == "heating":
             return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
@@ -500,8 +518,13 @@ class PdfExportConfigDialog(QDialog):
                 elem_vis = page.get("element_visibility")
                 if not isinstance(elem_vis, dict):
                     elem_vis = self._default_element_visibility()
+                allowed_element_keys = self._allowed_element_keys(ptype)
                 for key, cb in self._element_checks.items():
+                    cb.setVisible(key in allowed_element_keys)
                     cb.setChecked(bool(elem_vis.get(key, True)))
+            else:
+                for cb in self._element_checks.values():
+                    cb.setVisible(False)
 
             if supports_room_selection:
                 selected_room_ids = page.get("room_ids")

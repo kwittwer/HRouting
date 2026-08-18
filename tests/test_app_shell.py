@@ -2557,6 +2557,93 @@ def test_pdf_export_config_persists_across_project_save_and_reload(app, monkeypa
         reloaded.deleteLater()
 
 
+def test_pdf_export_heating_circuit_config_persists_across_project_save_and_reload(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    save_path = tmp_path / "pdf_export_heating_circuit_persist.hrp"
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "polygons": {
+                        "HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "diameter": 16.0,
+                            "spacing": 150.0,
+                            "wall_dist": 200.0,
+                            "room_temp": 21.0,
+                            "floor_covering": "Fliesen / Keramik",
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window._project_path = save_path
+
+        window._pdf_export_pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "hk-page-1",
+                    "type": "heating_circuit",
+                    "title": "Heizkreis Detailseite",
+                    "enabled": True,
+                    "floor_plan_id": "grundriss-1",
+                    "circuit_ids": ["HK-1"],
+                    "table_sections": ["hk_lengths", "hk_hydraulics"],
+                }
+            ]
+        )
+        window._pdf_export_meta = window._normalize_pdf_export_meta(
+            {
+                "project": "Projekt HK",
+                "author": "Max Mustermann",
+                "planning_status": "review",
+                "notes": "HK Export",
+            },
+            window._pdf_export_pages,
+        )
+
+        assert window._save_project() is True
+    finally:
+        window.deleteLater()
+
+    reloaded = AppWindow()
+    try:
+        assert reloaded.open_project_file(save_path) is True
+        assert len(reloaded._pdf_export_pages) == 1
+        assert reloaded._pdf_export_pages[0]["type"] == "heating_circuit"
+        assert reloaded._pdf_export_pages[0]["circuit_ids"] == ["HK-1"]
+        assert reloaded._pdf_export_pages[0]["floor_plan_id"] == "grundriss-1"
+        assert reloaded._pdf_export_meta["project"] == "Projekt HK"
+        assert reloaded._pdf_export_meta["author"] == "Max Mustermann"
+        assert reloaded._pdf_export_meta["planning_status"] == "review"
+        assert reloaded._pdf_export_meta["notes"] == "HK Export"
+    finally:
+        reloaded.deleteLater()
+
+
 def test_navigator_allows_selecting_non_workspace_elements_for_properties(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 

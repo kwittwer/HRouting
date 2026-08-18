@@ -4715,12 +4715,16 @@ class MainWindow(QMainWindow):
     def _default_pdf_table_sections(ptype: str) -> list[str]:
         if ptype == "heating":
             return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
+        if ptype == "heating_circuit":
+            return ["hk_lengths", "hk_hydraulics"]
         if ptype == "elektro":
             return [
                 "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
                 "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
                 "schaltplan_uv", "schaltplan_stromkreise", "schaltplan_hierarchie",
             ]
+        if ptype == "elektro_room":
+            return ["el_ap_infos", "el_kabel"]
         return []
 
     def _default_pdf_export_pages(self) -> list[dict]:
@@ -4815,7 +4819,15 @@ class MainWindow(QMainWindow):
             ptype = str(src.get("type", "plan")).strip().lower()
             if ptype == "plan" and str(src.get("id", "")) == "plan-heating":
                 ptype = "heating"
-            if ptype not in ("plan", "heating", "lengths", "hydraulics", "elektro"):
+            if ptype not in (
+                "plan",
+                "heating",
+                "heating_circuit",
+                "lengths",
+                "hydraulics",
+                "elektro",
+                "elektro_room",
+            ):
                 continue
 
             page = {
@@ -4825,7 +4837,7 @@ class MainWindow(QMainWindow):
                 "enabled": bool(src.get("enabled", True)),
             }
 
-            if ptype in ("plan", "heating", "elektro"):
+            if ptype in ("plan", "heating", "heating_circuit", "elektro", "elektro_room"):
                 page["show_background"] = bool(src.get("show_background", True))
                 page["show_heating"] = bool(src.get("show_heating", True))
                 page["show_elektro"] = bool(src.get("show_elektro", True))
@@ -4839,13 +4851,27 @@ class MainWindow(QMainWindow):
                     default_vis["hk"] = True
                     default_vis["hkv"] = True
                     default_vis["hkv_line"] = True
+                elif ptype == "heating_circuit":
+                    default_vis["hk"] = True
+                    default_vis["hkv"] = True
+                    default_vis["hkv_line"] = True
+                    default_vis["ap"] = False
+                    default_vis["room"] = False
+                    default_vis["kv"] = False
                 elif ptype == "elektro":
+                    default_vis["ap"] = True
+                    default_vis["room"] = True
+                    default_vis["kv"] = True
+                elif ptype == "elektro_room":
+                    default_vis["hk"] = False
+                    default_vis["hkv"] = False
+                    default_vis["hkv_line"] = False
                     default_vis["ap"] = True
                     default_vis["room"] = True
                     default_vis["kv"] = True
                 page["element_visibility"] = default_vis
 
-                if ptype in ("heating", "elektro"):
+                if ptype in ("heating", "heating_circuit", "elektro", "elektro_room"):
                     allowed = set(self._default_pdf_table_sections(ptype))
                     sections_src = src.get("table_sections")
                     if isinstance(sections_src, list):
@@ -4853,6 +4879,34 @@ class MainWindow(QMainWindow):
                     else:
                         sections = self._default_pdf_table_sections(ptype)
                     page["table_sections"] = sections
+
+                if ptype == "elektro_room":
+                    room_ids_src = src.get("room_ids")
+                    if isinstance(room_ids_src, list):
+                        seen: set[str] = set()
+                        room_ids: list[str] = []
+                        for room_id in room_ids_src:
+                            key = str(room_id or "").strip()
+                            if key and key not in seen:
+                                seen.add(key)
+                                room_ids.append(key)
+                        page["room_ids"] = room_ids
+                    else:
+                        page["room_ids"] = []
+
+                if ptype == "heating_circuit":
+                    circuit_ids_src = src.get("circuit_ids")
+                    if isinstance(circuit_ids_src, list):
+                        seen = set()
+                        circuit_ids: list[str] = []
+                        for circuit_id in circuit_ids_src:
+                            key = str(circuit_id or "").strip()
+                            if key and key not in seen:
+                                seen.add(key)
+                                circuit_ids.append(key)
+                        page["circuit_ids"] = circuit_ids
+                    else:
+                        page["circuit_ids"] = []
                 floor_plan_id = src.get("floor_plan_id")
                 page["floor_plan_id"] = floor_plan_id if floor_plan_id else None
 
