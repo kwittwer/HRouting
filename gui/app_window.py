@@ -1210,6 +1210,11 @@ class AppWindow(QMainWindow):
 
         self._load_floor_plan_images(document)
         self._reload_elec_points_to_canvas(document)
+        self._pdf_export_pages = self._normalize_pdf_export_pages(document.pdf_export_pages)
+        self._pdf_export_meta = self._normalize_pdf_export_meta(
+            getattr(document, "pdf_export_meta", {}),
+            self._pdf_export_pages,
+        )
         self._sync_grid_toolbar_from_canvas()
         self._refresh_schema_windows()
         self._update_title()
@@ -2173,6 +2178,13 @@ class AppWindow(QMainWindow):
         document = self._document
         if document is None:
             return
+
+        document.pdf_export_pages = copy.deepcopy(
+            self._normalize_pdf_export_pages(self._pdf_export_pages)
+        )
+        document.pdf_export_meta = copy.deepcopy(
+            self._normalize_pdf_export_meta(self._pdf_export_meta, document.pdf_export_pages)
+        )
 
         canvas_state = self.canvas.to_dict()
         bound_keys = self._bound_canvas_keys()
@@ -4014,6 +4026,8 @@ class AppWindow(QMainWindow):
                 "schaltplan_stromkreise",
                 "schaltplan_hierarchie",
             ]
+        if ptype == "elektro_room":
+            return ["el_ap_infos", "el_kabel"]
         return []
 
     def _default_pdf_export_pages(self) -> list[dict]:
@@ -4126,7 +4140,7 @@ class AppWindow(QMainWindow):
             if not isinstance(src, dict):
                 continue
             ptype = str(src.get("type", "plan")).strip().lower()
-            if ptype not in ("plan", "heating", "lengths", "hydraulics", "elektro"):
+            if ptype not in ("plan", "heating", "lengths", "hydraulics", "elektro", "elektro_room"):
                 continue
             page = {
                 "id": str(src.get("id") or f"page-{index + 1}"),
@@ -4134,7 +4148,7 @@ class AppWindow(QMainWindow):
                 "title": str(src.get("title") or "Seite"),
                 "enabled": bool(src.get("enabled", True)),
             }
-            if ptype in ("plan", "heating", "elektro"):
+            if ptype in ("plan", "heating", "elektro", "elektro_room"):
                 page["show_background"] = bool(src.get("show_background", True))
                 page["show_heating"] = bool(src.get("show_heating", True))
                 page["show_elektro"] = bool(src.get("show_elektro", True))
@@ -4143,8 +4157,28 @@ class AppWindow(QMainWindow):
                 if isinstance(vis_src, dict):
                     for key in vis:
                         vis[key] = bool(vis_src.get(key, vis[key]))
+                if ptype == "elektro_room":
+                    vis["hk"] = False
+                    vis["hkv"] = False
+                    vis["hkv_line"] = False
+                    vis["ap"] = True
+                    vis["room"] = True
+                    vis["kv"] = True
                 page["element_visibility"] = vis
                 page["table_sections"] = list(src.get("table_sections") or self._default_pdf_table_sections(ptype))
+                if ptype == "elektro_room":
+                    room_ids_src = src.get("room_ids")
+                    if isinstance(room_ids_src, list):
+                        seen: set[str] = set()
+                        room_ids: list[str] = []
+                        for room_id in room_ids_src:
+                            key = str(room_id or "").strip()
+                            if key and key not in seen:
+                                seen.add(key)
+                                room_ids.append(key)
+                        page["room_ids"] = room_ids
+                    else:
+                        page["room_ids"] = []
                 page["floor_plan_id"] = src.get("floor_plan_id") or None
                 rect = src.get("source_rect")
                 if isinstance(rect, (list, tuple)) and len(rect) == 4:
@@ -4164,6 +4198,9 @@ class AppWindow(QMainWindow):
             floor = self._document.floorplans.get(fid)
             out.append((fid, (floor.name if floor else "") or fid))
         return out
+
+    def _current_elec_rooms_for_export_dialog(self) -> list[tuple[str, str]]:
+        return self._collect_room_choices()
 
     @staticmethod
     def _page_source_rect(page: dict | None) -> QRectF | None:
@@ -4196,6 +4233,7 @@ class AppWindow(QMainWindow):
         dialog = PdfExportConfigDialog(
             pages=pages,
             floor_plans=self._current_floor_plans_for_export_dialog(),
+            elec_rooms=self._current_elec_rooms_for_export_dialog(),
             svg_size=self.canvas._svg_size,
             export_meta=self._normalize_pdf_export_meta(self._pdf_export_meta, pages),
             hrouting_version=self._hrouting_program_version(),
@@ -4235,39 +4273,78 @@ class AppWindow(QMainWindow):
 
     def _apply_page_visibility(self, page: dict) -> None:
         vis = page.get("element_visibility") or self._default_pdf_element_visibility()
+        selected_floor_plan_id = str(page.get("floor_plan_id") or "").strip() or None
+
+        def _matches_floor_plan_id(value: object) -> bool:
+            if selected_floor_plan_id is None:
+                return True
+            return str(value or "").strip() == selected_floor_plan_id
+
         for fid in self.canvas._floor_plan_order:
             layer = self.canvas._floor_plans.get(fid)
             if layer is None:
                 continue
-            layer.visible = bool(vis.get("background", True))
+            layer.visible = bool(vis.get("background", True)) and _matches_floor_plan_id(fid)
 
         show_hk = bool(vis.get("hk", True))
         for cid in list(self.canvas._polygons) + list(self.canvas._manual_routes) + list(self.canvas._supply_lines):
-            self.canvas._circuit_visible[cid] = show_hk
+            circuit = self._document.elements["circuits"].get(cid)
+            self.canvas._circuit_visible[cid] = show_hk and _matches_floor_plan_id(
+                getattr(circuit, "floor_plan_id", "") if circuit is not None else ""
+            )
 
         show_hkv = bool(vis.get("hkv", True))
         for hid in self.canvas._hkv_points:
-            self.canvas._hkv_visible[hid] = show_hkv
+            hkv = self._document.elements["hkv_points"].get(hid)
+            self.canvas._hkv_visible[hid] = show_hkv and _matches_floor_plan_id(
+                getattr(hkv, "floor_plan_id", "") if hkv is not None else ""
+            )
 
         show_hkv_line = bool(vis.get("hkv_line", True))
         for lid in self.canvas._hkv_lines:
-            self.canvas._hkv_line_visible[lid] = show_hkv_line
+            line = self._document.elements["hkv_lines"].get(lid)
+            line_floor_plan_id = str(getattr(line, "floor_plan_id", "") or "") if line is not None else ""
+            if not line_floor_plan_id and line is not None:
+                start_hkv = self._document.elements["hkv_points"].get(str(line.start_hkv or ""))
+                end_hkv = self._document.elements["hkv_points"].get(str(line.end_hkv or ""))
+                line_floor_plan_id = str(
+                    getattr(start_hkv, "floor_plan_id", "")
+                    or getattr(end_hkv, "floor_plan_id", "")
+                    or ""
+                )
+            self.canvas._hkv_line_visible[lid] = show_hkv_line and _matches_floor_plan_id(line_floor_plan_id)
 
         show_ap = bool(vis.get("ap", True))
         for pid in self.canvas._elec_points:
-            self.canvas._elec_visible[pid] = show_ap
+            point = self._document.elements["elec_points"].get(pid)
+            self.canvas._elec_visible[pid] = show_ap and _matches_floor_plan_id(
+                getattr(point, "floor_plan_id", "") if point is not None else ""
+            )
 
         show_room = bool(vis.get("room", True))
         for rid in self.canvas._elec_room_polygons:
-            self.canvas._elec_room_visible[rid] = show_room
+            room = self._document.elements["elec_rooms"].get(rid)
+            self.canvas._elec_room_visible[rid] = show_room and _matches_floor_plan_id(
+                getattr(room, "floor_plan_id", "") if room is not None else ""
+            )
 
         show_kv = bool(vis.get("kv", True))
         for kid in self.canvas._elec_cables:
-            self.canvas._elec_visible[kid] = show_kv
+            cable = self._document.elements["elec_cables"].get(kid)
+            cable_floor_plan_id = str(getattr(cable, "floor_plan_id", "") or "") if cable is not None else ""
+            if not cable_floor_plan_id and cable is not None:
+                cable_floor_plan_id = self._resolve_schema_cable_floorplan(
+                    str(cable.start_ap or ""),
+                    str(cable.end_ap or ""),
+                )
+            self.canvas._elec_visible[kid] = show_kv and _matches_floor_plan_id(cable_floor_plan_id)
 
         show_text = bool(vis.get("text", True))
         for tid in self.canvas._text_annotations:
-            self.canvas._text_visible[tid] = show_text
+            text = self._document.elements["text_annotations"].get(tid)
+            self.canvas._text_visible[tid] = show_text and _matches_floor_plan_id(
+                getattr(text, "floor_plan_id", "") if text is not None else ""
+            )
 
     def _collect_pdf_electro_rows(self) -> tuple[list[list[str]], list[list[str]]]:
         from model.computed import cable_length_details  # noqa: PLC0415
@@ -4298,6 +4375,99 @@ class AppWindow(QMainWindow):
             ])
         cable_rows.sort(key=lambda row: row[0].lower())
         return ap_rows, cable_rows
+
+    def _collect_pdf_elektro_room_rows(
+        self,
+        room_ids: list[str],
+    ) -> tuple[set[str], set[str], list[list[str]], list[list[str]]]:
+        from model.computed import cable_length_details  # noqa: PLC0415
+
+        selected_room_ids = {str(room_id).strip() for room_id in room_ids if str(room_id).strip()}
+        if not selected_room_ids:
+            return set(), set(), [], []
+
+        selected_ap_ids: set[str] = set()
+        for point_id, point in self._document.elements["elec_points"].items():
+            room_id = self._resolve_existing_ap_room_id(point)
+            if room_id in selected_room_ids:
+                selected_ap_ids.add(point_id)
+
+        selected_cable_ids: set[str] = set()
+        cable_rows: list[list[str]] = []
+        for cable_id, cable in self._document.elements["elec_cables"].items():
+            start_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "")
+            end_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "")
+            if start_id not in selected_ap_ids and end_id not in selected_ap_ids:
+                continue
+            selected_cable_ids.add(cable_id)
+            length_m = float(cable_length_details(self._document, cable)["length_m"])
+            start_name = self._document.elements["elec_points"].get(start_id).name if start_id in self._document.elements["elec_points"] else (start_id or "")
+            end_name = self._document.elements["elec_points"].get(end_id).name if end_id in self._document.elements["elec_points"] else (end_id or "")
+            cable_rows.append([
+                str(cable.name or cable_id),
+                str(cable.cable_type or ""),
+                str(start_name or ""),
+                str(end_name or ""),
+                f"{length_m:.2f} m",
+            ])
+
+        ap_rows: list[list[str]] = []
+        for point_id, point in self._document.elements["elec_points"].items():
+            if point_id not in selected_ap_ids:
+                continue
+            ap_rows.append([
+                str(point.name or point_id),
+                self._describe_ap_type(point),
+                str(point.position or ""),
+                f"{float(point.height_from_floor or 0.0):.1f} cm",
+                str(point.note or ""),
+            ])
+
+        ap_rows.sort(key=lambda row: row[0].lower())
+        cable_rows.sort(key=lambda row: row[0].lower())
+        return selected_ap_ids, selected_cable_ids, ap_rows, cable_rows
+
+    def _room_focus_source_rect(self, room_ids: list[str], fallback: QRectF) -> QRectF:
+        selected_room_ids = {str(room_id).strip() for room_id in room_ids if str(room_id).strip()}
+        if not selected_room_ids:
+            return fallback
+
+        min_x: float | None = None
+        min_y: float | None = None
+        max_x: float | None = None
+        max_y: float | None = None
+
+        for room_id in selected_room_ids:
+            room = self._document.elements["elec_rooms"].get(room_id)
+            if room is None:
+                continue
+            polygon = room.geom.get("elec_rooms") or room.geom.get("elec_room_polygons") or []
+            if not isinstance(polygon, list):
+                continue
+            for entry in polygon:
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    continue
+                try:
+                    x = float(entry[0])
+                    y = float(entry[1])
+                except (TypeError, ValueError):
+                    continue
+                min_x = x if min_x is None else min(min_x, x)
+                min_y = y if min_y is None else min(min_y, y)
+                max_x = x if max_x is None else max(max_x, x)
+                max_y = y if max_y is None else max(max_y, y)
+
+        if min_x is None or min_y is None or max_x is None or max_y is None:
+            return fallback
+
+        width = max_x - min_x
+        height = max_y - min_y
+        if width <= 1e-6 or height <= 1e-6:
+            return fallback
+
+        pad = max(40.0, min(width, height) * 0.15)
+        rect = QRectF(min_x - pad, min_y - pad, width + 2 * pad, height + 2 * pad)
+        return rect.normalized()
 
     @staticmethod
     def _is_uv_type(point: ElecPoint) -> bool:
@@ -5280,6 +5450,71 @@ class AppWindow(QMainWindow):
             )
             return
 
+        if ptype == "elektro_room":
+            room_ids = [str(v) for v in (page.get("room_ids") or []) if str(v).strip()]
+            selected_ap_ids, selected_cable_ids, room_ap_rows, room_cable_rows = self._collect_pdf_elektro_room_rows(room_ids)
+            plan_title = f"{title} – Plan"
+            ap_title = f"{title} – Anschlusspunkte"
+            cable_title = f"{title} – Kabelverbindungen"
+
+            page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+            _, content_rect = self._draw_pdf_title(painter, page_rect, plan_title)
+
+            if not room_ids:
+                painter.drawText(
+                    content_rect,
+                    Qt.AlignCenter | Qt.TextWordWrap,
+                    "Keine Elektro-Räume ausgewählt.",
+                )
+                return
+
+            source_rect = self._room_focus_source_rect(
+                room_ids,
+                self._effective_pdf_source_rect(page),
+            )
+            image_rect = QRectF(
+                content_rect.x(),
+                content_rect.y(),
+                max(1.0, content_rect.width()),
+                max(1.0, content_rect.height()),
+            )
+
+            # Limit visibility to selected rooms and their AP/cables for this page.
+            for rid in self.canvas._elec_room_polygons:
+                self.canvas._elec_room_visible[rid] = rid in set(room_ids)
+            for pid in self.canvas._elec_points:
+                self.canvas._elec_visible[pid] = pid in selected_ap_ids
+            for cid in self.canvas._elec_cables:
+                self.canvas._elec_visible[cid] = cid in selected_cable_ids
+
+            img = self.canvas.render_for_export(
+                source_rect=source_rect,
+                output_w=max(1, int(image_rect.width())),
+                output_h=max(1, int(image_rect.height())),
+            )
+            painter.drawImage(image_rect, img)
+
+            self._pdf_new_page(painter, writer)
+            self._draw_pdf_table(
+                painter,
+                writer,
+                ap_title,
+                ["Name", "Symbol", "Position", "Höhe", "Notiz"],
+                room_ap_rows,
+                col_widths=[1.2, 1.1, 0.9, 0.8, 2.0],
+            )
+
+            self._pdf_new_page(painter, writer)
+            self._draw_pdf_table(
+                painter,
+                writer,
+                cable_title,
+                ["Name", "Typ", "Start", "Ende", "Länge"],
+                room_cable_rows,
+                col_widths=[1.6, 1.1, 1.2, 1.2, 0.8],
+            )
+            return
+
         page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
         _, content_rect = self._draw_pdf_title(painter, page_rect, title)
         source_rect = self._effective_pdf_source_rect(page)
@@ -5749,6 +5984,15 @@ class AppWindow(QMainWindow):
             export_meta = self._pdf_export_meta
         pages = self._normalize_pdf_export_pages(pages)
         export_meta = self._normalize_pdf_export_meta(export_meta, pages)
+
+        # Persist configuration immediately after dialog acceptance,
+        # even if the subsequent file dialog is canceled.
+        changed = (pages != self._pdf_export_pages) or (export_meta != self._pdf_export_meta)
+        self._pdf_export_pages = pages
+        self._pdf_export_meta = export_meta
+        if changed:
+            self._mark_dirty()
+
         self._continue_export_pdf(pages, export_meta)
 
     def _collect_length_overview_rows(self) -> tuple[list[dict], float, float]:

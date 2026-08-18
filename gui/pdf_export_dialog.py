@@ -60,6 +60,7 @@ class PdfExportConfigDialog(QDialog):
         pages: list[dict],
         floor_plans: list[tuple[str, str]],
         svg_size: tuple[float, float],
+        elec_rooms: list[tuple[str, str]] | None = None,
         export_meta: dict | None = None,
         hrouting_version: str = "",
         canvas=None,
@@ -67,10 +68,12 @@ class PdfExportConfigDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("PDF-Export konfigurieren")
-        self.resize(960, 620)
+        self.resize(1400, 900)
+        self.setWindowState(self.windowState() | Qt.WindowMaximized)
 
         self._pages = copy.deepcopy(pages)
         self._floor_plans = list(floor_plans)
+        self._elec_rooms = list(elec_rooms or [])
         self._svg_w = float(svg_size[0] if svg_size else 0.0)
         self._svg_h = float(svg_size[1] if svg_size else 0.0)
         self._hrouting_version = str(hrouting_version or "")
@@ -78,6 +81,7 @@ class PdfExportConfigDialog(QDialog):
         self._canvas = canvas
         self._element_checks: dict[str, QCheckBox] = {}
         self._table_checks: dict[str, QCheckBox] = {}
+        self._room_checks: dict[str, QCheckBox] = {}
         self._meta = self._normalize_meta(export_meta)
 
         self._build_ui()
@@ -127,6 +131,17 @@ class PdfExportConfigDialog(QDialog):
     def _build_ui(self):
         root = QVBoxLayout(self)
 
+        content = QHBoxLayout()
+        root.addLayout(content, stretch=1)
+
+        left_wrap = QWidget()
+        left = QVBoxLayout(left_wrap)
+        content.addWidget(left_wrap, stretch=1)
+
+        right_wrap = QWidget()
+        right = QVBoxLayout(right_wrap)
+        content.addWidget(right_wrap, stretch=1)
+
         meta_group = QGroupBox("Titelseite")
         meta_form = QFormLayout(meta_group)
         self.le_project = QLineEdit(self._meta.get("project", ""))
@@ -158,13 +173,7 @@ class PdfExportConfigDialog(QDialog):
         meta_form.addRow("Seitenanzahl", self.le_page_count)
         meta_form.addRow("HRouting Programmversion", self.le_version)
         meta_form.addRow("Notizen", self.te_notes)
-        root.addWidget(meta_group)
-
-        content = QHBoxLayout()
-        root.addLayout(content, stretch=1)
-
-        left = QVBoxLayout()
-        content.addLayout(left, stretch=1)
+        left.addWidget(meta_group)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Seite", "Typ"])
@@ -183,22 +192,21 @@ class PdfExportConfigDialog(QDialog):
         left_btns = QHBoxLayout()
         self.btn_add_plan = QPushButton("Planseite einfügen")
         self.btn_add_plan.clicked.connect(self._on_add_plan_page)
+        self.btn_add_elektro_room = QPushButton("Elektro-Raumseite einfügen")
+        self.btn_add_elektro_room.clicked.connect(self._on_add_elektro_room_page)
         self.btn_remove = QPushButton("Seite entfernen")
         self.btn_remove.clicked.connect(self._on_remove_selected)
         left_btns.addWidget(self.btn_add_plan)
+        left_btns.addWidget(self.btn_add_elektro_room)
         left_btns.addWidget(self.btn_remove)
         left.addLayout(left_btns)
-
-        right_wrap = QWidget()
-        right = QVBoxLayout(right_wrap)
-        content.addWidget(right_wrap, stretch=1)
 
         self.form = QFormLayout()
         right.addLayout(self.form)
 
         self.le_title = QLineEdit()
         self.le_title.textChanged.connect(self._on_title_changed)
-        self.form.addRow("Überschrift", self.le_title)
+        self.form.addRow("Seitentitel", self.le_title)
 
         self.cb_enabled = QCheckBox("Seite exportieren")
         self.cb_enabled.toggled.connect(self._on_enabled_changed)
@@ -215,21 +223,11 @@ class PdfExportConfigDialog(QDialog):
             label = name.strip() or fid
             self.cb_floor_plan.addItem(label, fid)
         self.cb_floor_plan.currentIndexChanged.connect(self._on_floor_plan_changed)
-        plan_form.addRow("Planquelle", self.cb_floor_plan)
-
-        self.cb_show_background = QCheckBox("Grundrisse anzeigen")
-        self.cb_show_background.toggled.connect(self._on_plan_options_changed)
-        self.cb_show_heating = QCheckBox("Heizung anzeigen")
-        self.cb_show_heating.toggled.connect(self._on_plan_options_changed)
-        self.cb_show_elektro = QCheckBox("Elektro anzeigen")
-        self.cb_show_elektro.toggled.connect(self._on_plan_options_changed)
+        plan_form.addRow("Export-Grundriss", self.cb_floor_plan)
 
         vis_wrap = QWidget()
         vis_layout = QVBoxLayout(vis_wrap)
         vis_layout.setContentsMargins(0, 0, 0, 0)
-        vis_layout.addWidget(self.cb_show_background)
-        vis_layout.addWidget(self.cb_show_heating)
-        vis_layout.addWidget(self.cb_show_elektro)
 
         self.grp_elements = QGroupBox("Elemente")
         elem_layout = QVBoxLayout(self.grp_elements)
@@ -261,6 +259,18 @@ class PdfExportConfigDialog(QDialog):
             self._table_checks[key] = cb
             table_layout.addWidget(cb)
         right.addWidget(self.table_group)
+
+        self.room_group = QGroupBox("Elektro-Räume")
+        room_layout = QVBoxLayout(self.room_group)
+        room_layout.setContentsMargins(6, 6, 6, 6)
+        self.lbl_no_rooms = QLabel("Keine Elektro-Räume vorhanden.")
+        room_layout.addWidget(self.lbl_no_rooms)
+        for room_id, room_name in self._elec_rooms:
+            cb = QCheckBox(room_name or room_id)
+            cb.toggled.connect(self._on_room_selection_changed)
+            self._room_checks[room_id] = cb
+            room_layout.addWidget(cb)
+        right.addWidget(self.room_group)
 
         right.addStretch(1)
 
@@ -313,6 +323,7 @@ class PdfExportConfigDialog(QDialog):
             "lengths": "Rohrlängen",
             "hydraulics": "Hydraulik",
             "elektro": "Elektro",
+            "elektro_room": "Elektro-Raum",
         }.get(ptype, ptype)
 
     @staticmethod
@@ -339,6 +350,8 @@ class PdfExportConfigDialog(QDialog):
                 "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
                 "schaltplan_uv", "schaltplan_stromkreise", "schaltplan_hierarchie",
             ]
+        if ptype == "elektro_room":
+            return ["el_ap_infos", "el_kabel"]
         return []
 
     @staticmethod
@@ -351,6 +364,8 @@ class PdfExportConfigDialog(QDialog):
                 "el_ap_infos", "el_uv", "el_up_distribution", "el_bom", "el_uv_busbars",
                 "schaltplan_uv", "schaltplan_stromkreise", "schaltplan_hierarchie",
             }
+        if ptype == "elektro_room":
+            return {"el_ap_infos", "el_kabel"}
         return set()
 
     def _load_pages_into_tree(self):
@@ -442,10 +457,13 @@ class PdfExportConfigDialog(QDialog):
             self.cb_enabled.setChecked(bool(page.get("enabled", True)))
 
             ptype = page.get("type", "plan")
-            is_plan_like = ptype in ("plan", "heating", "elektro")
+            is_plan_like = ptype in ("plan", "heating", "elektro", "elektro_room")
             supports_tables = ptype in ("heating", "elektro")
+            supports_room_selection = ptype == "elektro_room"
             self.plan_group.setVisible(is_plan_like)
             self.table_group.setVisible(supports_tables)
+            self.room_group.setVisible(supports_room_selection)
+            self.lbl_no_rooms.setVisible(not bool(self._room_checks))
             self.lbl_non_plan.setVisible(not is_plan_like)
 
             if is_plan_like:
@@ -453,15 +471,19 @@ class PdfExportConfigDialog(QDialog):
                 idx = self.cb_floor_plan.findData(floor_plan_id)
                 self.cb_floor_plan.setCurrentIndex(max(0, idx))
 
-                self.cb_show_background.setChecked(bool(page.get("show_background", True)))
-                self.cb_show_heating.setChecked(bool(page.get("show_heating", True)))
-                self.cb_show_elektro.setChecked(bool(page.get("show_elektro", True)))
-
                 elem_vis = page.get("element_visibility")
                 if not isinstance(elem_vis, dict):
                     elem_vis = self._default_element_visibility()
                 for key, cb in self._element_checks.items():
                     cb.setChecked(bool(elem_vis.get(key, True)))
+
+            if supports_room_selection:
+                selected_room_ids = page.get("room_ids")
+                if not isinstance(selected_room_ids, list):
+                    selected_room_ids = []
+                selected_set = {str(v) for v in selected_room_ids}
+                for room_id, cb in self._room_checks.items():
+                    cb.setChecked(room_id in selected_set)
 
             if supports_tables:
                 allowed = self._allowed_table_sections(ptype)
@@ -499,14 +521,6 @@ class PdfExportConfigDialog(QDialog):
             lambda p: p.__setitem__("floor_plan_id", self.cb_floor_plan.currentData())
         )
 
-    def _on_plan_options_changed(self):
-        def updater(p: dict):
-            p["show_background"] = bool(self.cb_show_background.isChecked())
-            p["show_heating"] = bool(self.cb_show_heating.isChecked())
-            p["show_elektro"] = bool(self.cb_show_elektro.isChecked())
-
-        self._update_current_page(updater)
-
     def _on_element_visibility_changed(self, *_args):
         def updater(p: dict):
             vis = {}
@@ -531,6 +545,16 @@ class PdfExportConfigDialog(QDialog):
 
         self._update_current_page(updater)
 
+    def _on_room_selection_changed(self, *_args):
+        def updater(p: dict):
+            p["room_ids"] = [
+                room_id
+                for room_id, cb in self._room_checks.items()
+                if cb.isChecked()
+            ]
+
+        self._update_current_page(updater)
+
 
 
 
@@ -547,6 +571,43 @@ class PdfExportConfigDialog(QDialog):
             "element_visibility": self._default_element_visibility(),
             "floor_plan_id": None,
             "source_rect": None,
+        }
+        item = QTreeWidgetItem(self.tree)
+        item.setText(0, page["title"])
+        item.setText(1, self._page_type_label(page))
+        item.setFlags(
+            item.flags()
+            | Qt.ItemIsUserCheckable
+            | Qt.ItemIsEditable
+            | Qt.ItemIsDragEnabled
+            | Qt.ItemIsDropEnabled
+            | Qt.ItemIsSelectable
+            | Qt.ItemIsEnabled
+        )
+        item.setCheckState(0, Qt.Checked)
+        item.setData(0, Qt.UserRole, page)
+        self.tree.setCurrentItem(item)
+        self._update_page_count_field()
+
+    def _on_add_elektro_room_page(self):
+        selected_rooms = [room_id for room_id, cb in self._room_checks.items() if cb.isChecked()]
+        page = {
+            "id": f"elektro-room-{uuid.uuid4().hex[:8]}",
+            "type": "elektro_room",
+            "title": "Elektro – Raumdetail",
+            "enabled": True,
+            "show_background": True,
+            "show_heating": False,
+            "show_elektro": True,
+            "element_visibility": {
+                **self._default_element_visibility(),
+                "hk": False,
+                "hkv": False,
+                "hkv_line": False,
+            },
+            "floor_plan_id": None,
+            "source_rect": None,
+            "room_ids": selected_rooms,
         }
         item = QTreeWidgetItem(self.tree)
         item.setText(0, page["title"])

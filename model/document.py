@@ -44,7 +44,7 @@ _PARAMS_NON_ELEMENT_KEYS = {"floorplans_order"}
 
 #: canvas-Schlüssel, die separat behandelt werden
 _CANVAS_STRUCTURAL_KEYS = {"floor_plans", "floor_plan_order"}
-_TOP_LEVEL_KNOWN_KEYS = {"svg_path", "canvas", "params", "pdf_export_pages", "format_version"}
+_TOP_LEVEL_KNOWN_KEYS = {"svg_path", "canvas", "params", "pdf_export_pages", "pdf_export_meta", "format_version"}
 
 
 def _all_geom_keys() -> set[str]:
@@ -61,6 +61,7 @@ class Document:
     def __init__(self) -> None:
         self.svg_path: str = ""
         self.pdf_export_pages: list = []
+        self.pdf_export_meta: dict[str, Any] = {}
         self.format_version: int | None = None
         self.top_level_extras: dict[str, Any] = {}
 
@@ -236,6 +237,7 @@ class Document:
 
         doc.svg_path = raw.get("svg_path", "")
         doc.pdf_export_pages = raw.get("pdf_export_pages", []) or []
+        doc.pdf_export_meta = raw.get("pdf_export_meta", {}) or {}
         try:
             doc.format_version = int(raw["format_version"]) if "format_version" in raw else None
         except (TypeError, ValueError):
@@ -385,6 +387,7 @@ class Document:
             "canvas": canvas,
             "params": params,
             "pdf_export_pages": copy.deepcopy(self.pdf_export_pages),
+            "pdf_export_meta": copy.deepcopy(self.pdf_export_meta),
         }
         if self.format_version is not None:
             result["format_version"] = int(self.format_version)

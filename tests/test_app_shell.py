@@ -1892,6 +1892,425 @@ def test_pdf_export_collects_extended_elektro_sections(app, monkeypatch):
         window.deleteLater()
 
 
+def test_pdf_export_normalizes_elektro_room_page(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "room-1",
+                    "type": "elektro_room",
+                    "title": "Raumdetail",
+                    "enabled": True,
+                    "room_ids": ["ER-1", "ER-1", "ER-2", ""],
+                }
+            ]
+        )
+
+        assert len(pages) == 1
+        page = pages[0]
+        assert page["type"] == "elektro_room"
+        assert page["room_ids"] == ["ER-1", "ER-2"]
+        assert page["element_visibility"]["ap"] is True
+        assert page["element_visibility"]["kv"] is True
+        assert page["element_visibility"]["room"] is True
+        assert page["element_visibility"]["hk"] is False
+        assert page["element_visibility"]["hkv"] is False
+        assert page["element_visibility"]["hkv_line"] is False
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_elektro_room_filters_aps_and_cables(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_rooms": {
+                        "ER-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]],
+                        "ER-2": [[250.0, 0.0], [450.0, 0.0], [450.0, 200.0], [250.0, 200.0]],
+                    },
+                    "elec_points": {
+                        "AP-1": [40.0, 40.0],
+                        "AP-2": [120.0, 40.0],
+                        "AP-3": [320.0, 40.0],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[40.0, 40.0], [120.0, 40.0]],
+                        "EK-2": [[120.0, 40.0], [320.0, 40.0]],
+                    },
+                    "cable_start_ap": {"EK-1": "AP-1", "EK-2": "AP-2"},
+                    "cable_end_ap": {"EK-1": "AP-2", "EK-2": "AP-3"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_rooms": {
+                        "ER-1": {"room_id": "ER-1", "floor_plan_id": "grundriss-1", "name": "Wohnraum"},
+                        "ER-2": {"room_id": "ER-2", "floor_plan_id": "grundriss-1", "name": "Kueche"},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose A",
+                            "builtin_symbol": "Steckdose",
+                            "room_id": "ER-1",
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose B",
+                            "builtin_symbol": "Steckdose",
+                            "room_id": "ER-1",
+                        },
+                        "AP-3": {
+                            "point_id": "AP-3",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose C",
+                            "builtin_symbol": "Steckdose",
+                            "room_id": "ER-2",
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel intern",
+                            "type": "NYM-J 3x1,5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        },
+                        "EK-2": {
+                            "cable_id": "EK-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel ueber Raumgrenze",
+                            "type": "NYM-J 3x1,5",
+                            "start_ap": "AP-2",
+                            "end_ap": "AP-3",
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        ap_ids, cable_ids, ap_rows, cable_rows = window._collect_pdf_elektro_room_rows(["ER-1"])
+
+        assert ap_ids == {"AP-1", "AP-2"}
+        assert cable_ids == {"EK-1", "EK-2"}
+        assert [row[0] for row in ap_rows] == ["Steckdose A", "Steckdose B"]
+        assert [row[0] for row in cable_rows] == ["Kabel intern", "Kabel ueber Raumgrenze"]
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_elektro_room_writes_pdf_and_persists_config(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_rooms": {
+                        "ER-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]],
+                    },
+                    "elec_points": {
+                        "AP-1": [40.0, 40.0],
+                        "AP-2": [120.0, 40.0],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[40.0, 40.0], [120.0, 40.0]],
+                    },
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_rooms": {
+                        "ER-1": {"room_id": "ER-1", "floor_plan_id": "grundriss-1", "name": "Wohnraum"},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose A",
+                            "builtin_symbol": "Steckdose",
+                            "room_id": "ER-1",
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose B",
+                            "builtin_symbol": "Steckdose",
+                            "room_id": "ER-1",
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel intern",
+                            "type": "NYM-J 3x1,5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        pdf_path = tmp_path / "elektro_room_report.pdf"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(pdf_path), "PDF (*.pdf)")),
+        )
+
+        pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "room-page-1",
+                    "type": "elektro_room",
+                    "title": "Elektro Raum",
+                    "enabled": True,
+                    "show_background": True,
+                    "show_heating": False,
+                    "show_elektro": True,
+                    "element_visibility": {
+                        "background": True,
+                        "furniture": True,
+                        "hk": False,
+                        "hkv": False,
+                        "hkv_line": False,
+                        "ap": True,
+                        "room": True,
+                        "kv": True,
+                        "text": True,
+                    },
+                    "room_ids": ["ER-1"],
+                }
+            ]
+        )
+        meta = window._normalize_pdf_export_meta({}, pages)
+
+        monkeypatch.setattr(window, "_open_pdf_export_config_dialog", lambda: (pages, meta))
+        window._export_pdf()
+
+        assert pdf_path.exists()
+        assert pdf_path.stat().st_size > 0
+        assert window._pdf_export_pages and window._pdf_export_pages[0]["type"] == "elektro_room"
+        assert window._pdf_export_pages[0].get("room_ids") == ["ER-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_plan_source_filters_floorplans_and_elements(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True},
+                        {"fp_id": "grundriss-2", "visible": True},
+                    ],
+                    "polygons": {
+                        "HK-1": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]],
+                        "HK-2": [[200.0, 0.0], [300.0, 0.0], [300.0, 100.0], [200.0, 100.0]],
+                    },
+                    "elec_points": {
+                        "AP-1": [20.0, 20.0],
+                        "AP-2": [220.0, 20.0],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                        "grundriss-2": {"name": "OG", "visible": True, "file_path": ""},
+                    },
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Raum EG",
+                            "visible": True,
+                        },
+                        "HK-2": {
+                            "circuit_id": "HK-2",
+                            "floor_plan_id": "grundriss-2",
+                            "name": "Raum OG",
+                            "visible": True,
+                        },
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose EG",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-2",
+                            "name": "Dose OG",
+                            "visible": True,
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        page = {
+            "type": "plan",
+            "floor_plan_id": "grundriss-1",
+            "element_visibility": {
+                "background": True,
+                "furniture": True,
+                "hk": True,
+                "hkv": True,
+                "hkv_line": True,
+                "ap": True,
+                "room": True,
+                "kv": True,
+                "text": True,
+            },
+        }
+
+        window._apply_page_visibility(page)
+
+        assert window.canvas._floor_plans["grundriss-1"].visible is True
+        assert window.canvas._floor_plans["grundriss-2"].visible is False
+        assert window.canvas._circuit_visible["HK-1"] is True
+        assert window.canvas._circuit_visible["HK-2"] is False
+        assert window.canvas._elec_visible["AP-1"] is True
+        assert window.canvas._elec_visible["AP-2"] is False
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_config_persists_across_project_save_and_reload(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    save_path = tmp_path / "pdf_export_persist.hrp"
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_rooms": {
+                        "ER-1": {"room_id": "ER-1", "floor_plan_id": "grundriss-1", "name": "Wohnraum"},
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window._project_path = save_path
+
+        window._pdf_export_pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "room-page-1",
+                    "type": "elektro_room",
+                    "title": "Elektro Raumseite",
+                    "enabled": True,
+                    "floor_plan_id": "grundriss-1",
+                    "room_ids": ["ER-1"],
+                    "table_sections": ["el_ap_infos", "el_kabel"],
+                }
+            ]
+        )
+        window._pdf_export_meta = window._normalize_pdf_export_meta(
+            {
+                "project": "Projekt A",
+                "author": "Max Mustermann",
+                "planning_status": "review",
+                "notes": "Exportnotiz",
+            },
+            window._pdf_export_pages,
+        )
+
+        assert window._save_project() is True
+    finally:
+        window.deleteLater()
+
+    reloaded = AppWindow()
+    try:
+        assert reloaded.open_project_file(save_path) is True
+        assert len(reloaded._pdf_export_pages) == 1
+        assert reloaded._pdf_export_pages[0]["type"] == "elektro_room"
+        assert reloaded._pdf_export_pages[0]["room_ids"] == ["ER-1"]
+        assert reloaded._pdf_export_pages[0]["floor_plan_id"] == "grundriss-1"
+        assert reloaded._pdf_export_meta["project"] == "Projekt A"
+        assert reloaded._pdf_export_meta["author"] == "Max Mustermann"
+        assert reloaded._pdf_export_meta["planning_status"] == "review"
+        assert reloaded._pdf_export_meta["notes"] == "Exportnotiz"
+    finally:
+        reloaded.deleteLater()
+
+
 def test_navigator_allows_selecting_non_workspace_elements_for_properties(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 

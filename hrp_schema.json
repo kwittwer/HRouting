@@ -25,6 +25,12 @@
       "items": { "$ref": "#/$defs/PdfExportPage" },
       "default": [],
       "description": "PDF-Export-Seitendefinitionen."
+    },
+    "pdf_export_meta": {
+      "type": "object",
+      "additionalProperties": true,
+      "default": {},
+      "description": "Persistente Metadaten fuer die PDF-Titelseite."
     }
   },
 
@@ -1070,7 +1076,7 @@
         "id": { "type": "string", "description": "Eindeutige Seiten-ID." },
         "type": {
           "type": "string",
-          "enum": ["plan", "heating", "elektro", "lengths", "hydraulics"],
+          "enum": ["plan", "heating", "elektro", "elektro_room", "lengths", "hydraulics"],
           "description": "Seitentyp."
         },
         "title": { "type": "string" },
@@ -1106,6 +1112,11 @@
             { "type": "null" }
           ],
           "default": null
+        },
+        "room_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
         }
       }
     }
