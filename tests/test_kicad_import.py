@@ -9,7 +9,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from logic.kicad_import import (
+    KiCadApGroupCandidate,
     KiCadCableCandidate,
+    KiCadScanResult,
     KiCadSheetPinRef,
     build_kicad_bus_cable_key,
     build_import_preview,
@@ -155,6 +157,30 @@ def test_build_import_preview_marks_create_update_and_unchanged_states():
     assert all(not diff.changed for diff in by_key["WP{2xCAT6}"].diffs)
 
     assert by_key["Zuleitung_Haus{5x10}"].status == "create"
+
+
+def test_build_import_preview_matches_ap_group_with_ap_prefix_normalization(tmp_path):
+    scan_result = KiCadScanResult(root_path=tmp_path / "dummy.kicad_sch", project_uuid="proj-1")
+    scan_result.ap_group_candidates["AP_Herdanschluss"] = KiCadApGroupCandidate(
+        key="AP_Herdanschluss",
+        group_name="AP_Herdanschluss",
+        group_uuid="group-1",
+        frame_uuid="frame-1",
+    )
+
+    previews = build_import_preview(
+        scan_result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-77", "name": "Herdanschluss", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    preview = next(p for p in previews if p.candidate_key == "AP_Herdanschluss")
+    assert preview.cable_name == "Herdanschluss"
+    assert preview.ap_import_action == "AP wiederverwenden"
+    assert preview.ap_match_status == "matched"
+    assert preview.ap_matches[0].point_id == "AP-77"
 
 
 def test_scan_kicad_project_recurses_into_nested_child_sheets(tmp_path):
@@ -467,3 +493,360 @@ def test_build_import_preview_maps_kbl_bus_endpoints_to_ap_names(tmp_path):
     assert preview.end_ap_status == "matched"
     assert preview.start_ap_id == "AP-1"
     assert preview.end_ap_id == "AP-2"
+
+
+def test_build_import_preview_maps_kbl_bus_endpoints_with_margin_tolerance(tmp_path):
+    root = tmp_path / "kbl_preview_margin_test.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-margin")
+    (rectangle (start 0 0) (end 10 10) (uuid "rect-a"))
+    (rectangle (start 90 0) (end 100 10) (uuid "rect-b"))
+    (bus
+        (pts (xy -2 5) (xy 102 5))
+        (uuid "bus-1")
+    )
+    (group "AP_1" (uuid "group-ap-1") (members "rect-a"))
+    (group "AP_2" (uuid "group-ap-2") (members "rect-b"))
+    (group "KBL_MainFeed{5x10}" (uuid "group-kbl") (members "bus-1"))
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "AP_1", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "AP_2", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    kbl_previews = [preview for preview in previews if preview.source == "kbl_bus"]
+    assert len(kbl_previews) == 1
+    preview = kbl_previews[0]
+    assert preview.start_ap_status == "matched"
+    assert preview.end_ap_status == "matched"
+    assert preview.start_ap_id == "AP-1"
+    assert preview.end_ap_id == "AP-2"
+
+
+def test_build_import_preview_maps_kbl_bus_endpoint_when_ap_prefix_differs(tmp_path):
+    root = tmp_path / "kbl_preview_name_norm_test.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-name")
+    (rectangle (start 0 0) (end 10 10) (uuid "rect-a"))
+    (rectangle (start 90 0) (end 100 10) (uuid "rect-b"))
+    (bus
+        (pts (xy 5 5) (xy 95 5))
+        (uuid "bus-1")
+    )
+    (group "AP_Herdanschluss" (uuid "group-ap-1") (members "rect-a"))
+    (group "AP_Backofen" (uuid "group-ap-2") (members "rect-b"))
+    (group "KBL_Kueche{5x2_5}" (uuid "group-kbl") (members "bus-1"))
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "Herdanschluss", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "Backofen", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    kbl_previews = [preview for preview in previews if preview.source == "kbl_bus"]
+    assert len(kbl_previews) == 1
+    preview = kbl_previews[0]
+    assert preview.start_ap_status == "matched"
+    assert preview.end_ap_status == "matched"
+    assert preview.start_ap_id == "AP-1"
+    assert preview.end_ap_id == "AP-2"
+
+
+def test_build_import_preview_resolves_kbl_label_counterpart_across_hierarchy(tmp_path):
+    root = tmp_path / "kbl_label_hierarchy_test.kicad_sch"
+    child = tmp_path / "child.kicad_sch"
+    grand = tmp_path / "grand.kicad_sch"
+
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-hier")
+    (sheet
+        (uuid "sheet-child")
+        (property "Sheetname" "Child")
+        (property "Sheetfile" "child.kicad_sch")
+        (pin "KBL_Backofen{3x1_5}" output (uuid "pin-kbl"))
+    )
+)""",
+        encoding="utf-8",
+    )
+
+    child.write_text(
+        """(kicad_sch
+    (uuid "child-doc")
+    (hierarchical_label "KBL_Backofen{3x1_5}"
+        (shape output)
+        (at 10 10 180)
+        (uuid "label-kbl")
+    )
+    (sheet
+        (uuid "sheet-grand")
+        (property "Sheetname" "Grand")
+        (property "Sheetfile" "grand.kicad_sch")
+        (pin "Herdanschluss{5x2_5}" input (uuid "pin-herd"))
+    )
+)""",
+        encoding="utf-8",
+    )
+
+    grand.write_text(
+        """(kicad_sch
+    (uuid "grand-doc")
+    (hierarchical_label "Herdanschluss{5x2_5}"
+        (shape input)
+        (at 20 20 0)
+        (uuid "label-herd")
+    )
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "Backofen", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "Herdanschluss", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    kbl_label_previews = [preview for preview in previews if preview.source == "kbl_label"]
+    assert len(kbl_label_previews) == 1
+    preview = kbl_label_previews[0]
+    assert preview.cable_name == "Backofen"
+    assert preview.start_ap_status == "matched"
+    assert preview.end_ap_status == "matched"
+    assert preview.start_ap_id == "AP-1"
+    assert preview.end_ap_id == "AP-2"
+
+
+def test_build_import_preview_prefers_uv_spk_counterpart_for_kbl_label(tmp_path):
+    root = tmp_path / "kbl_label_uv_spk_test.kicad_sch"
+    child = tmp_path / "child.kicad_sch"
+    uv_sheet = tmp_path / "UV_SPK.kicad_sch"
+
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-uvspk")
+    (sheet
+        (uuid "sheet-child")
+        (property "Sheetname" "Speisekammer")
+        (property "Sheetfile" "child.kicad_sch")
+        (pin "KBL_Backofen{3x1_5}" output (uuid "pin-kbl"))
+    )
+)""",
+        encoding="utf-8",
+    )
+
+    child.write_text(
+        """(kicad_sch
+    (uuid "child-doc")
+    (sheet
+        (uuid "sheet-uv")
+        (property "Sheetname" "UV_SPK")
+        (property "Sheetfile" "UV_SPK.kicad_sch")
+        (pin "KBL_Backofen{3x1_5}" output (uuid "pin-kbl-child"))
+    )
+    (hierarchical_label "KBL_Backofen{3x1_5}"
+        (shape output)
+        (at 10 10 180)
+        (uuid "label-kbl")
+    )
+    (hierarchical_label "Herdanschluss{5x2_5}"
+        (shape input)
+        (at 20 20 0)
+        (uuid "label-herd")
+    )
+)""",
+        encoding="utf-8",
+    )
+
+    uv_sheet.write_text(
+        """(kicad_sch
+    (uuid "uv-doc")
+    (hierarchical_label "KBL_Backofen{3x1_5}"
+        (shape output)
+        (at 30 30 180)
+        (uuid "label-kbl-uv")
+    )
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "Backofen", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "Herdanschluss", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-3", "name": "AP_UV_SPK", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-4", "name": "UV_spk", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    preview = next(p for p in previews if p.source == "kbl_label")
+    assert preview.start_ap_status == "matched"
+    assert preview.start_ap_id == "AP-1"
+    assert preview.end_ap_status == "matched"
+    assert preview.end_ap_id == "AP-3"
+
+
+def test_build_import_preview_resolves_kbl_kueche3_between_sd2_and_sd3(tmp_path):
+    root = tmp_path / "kbl_kueche3_test.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-kueche3")
+    (label "KBL_Küche3{3x1_5}"
+        (at 10 10 0)
+        (uuid "label-kbl-kueche3")
+    )
+    (label "SD_Küche{3x1_5}"
+        (at 20 20 0)
+        (uuid "label-sd-kueche")
+    )
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "AP_SD_Küche2", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "AP_SD_Küche3", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-3", "name": "SD_Küche2", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-4", "name": "SD_Küche3", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    preview = next(p for p in previews if p.source == "kbl_label" and "Küche3" in p.candidate_key)
+    assert preview.start_ap_status == "matched"
+    assert preview.start_ap_id == "AP-2"
+    assert preview.end_ap_status == "matched"
+    assert preview.end_ap_id == "AP-1"
+
+
+def test_build_import_preview_prefers_local_sd_group_neighbor_for_kbl_kueche3(tmp_path):
+    root = tmp_path / "kbl_kueche3_local_groups.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-kueche3-local")
+    (label "KBL_Küche3{3x1_5}" (at 10 10 0) (uuid "label-kbl"))
+    (rectangle (start 0 0) (end 10 10) (uuid "rect-1"))
+    (rectangle (start 20 0) (end 30 10) (uuid "rect-2"))
+    (rectangle (start 40 0) (end 50 10) (uuid "rect-3"))
+    (rectangle (start 60 0) (end 70 10) (uuid "rect-4"))
+    (group "AP_SD_Küche1" (uuid "group-1") (members "rect-1"))
+    (group "AP_SD_Küche2" (uuid "group-2") (members "rect-2"))
+    (group "AP_SD_Küche3" (uuid "group-3") (members "rect-3"))
+    (group "AP_SD_Küche4" (uuid "group-4") (members "rect-4"))
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "SD_Küche2", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "SD_Küche3", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-3", "name": "SD_Küche4", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    preview = next(p for p in previews if p.source == "kbl_label" and p.candidate_key == "KBL_Küche3{3x1_5}")
+    assert preview.start_ap_status == "matched"
+    assert preview.start_ap_id == "AP-2"
+    assert preview.end_ap_status == "matched"
+    assert preview.end_ap_id == "AP-1"
+
+
+def test_build_import_preview_prefers_numbered_neighbor_in_generic_series(tmp_path):
+    root = tmp_path / "kbl_zimmer_series.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-zimmer-series")
+    (label "KBL_Zimmer3{3x1_5}" (at 10 10 0) (uuid "label-kbl-z3"))
+    (label "Zimmer{3x1_5}" (at 20 20 0) (uuid "label-zimmer"))
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "AP_Zimmer1", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "AP_Zimmer2", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-3", "name": "AP_Zimmer3", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-4", "name": "AP_Zimmer4", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    preview = next(p for p in previews if p.source == "kbl_label" and p.candidate_key == "KBL_Zimmer3{3x1_5}")
+    assert preview.start_ap_status == "matched"
+    assert preview.start_ap_id == "AP-3"
+    assert preview.end_ap_status == "matched"
+    assert preview.end_ap_id == "AP-2"
+
+
+def test_build_import_preview_does_not_create_reverse_pair_for_lowest_index(tmp_path):
+    root = tmp_path / "kbl_lowest_index_no_reverse.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-lowest")
+    (label "KBL_Küche1{3x1_5}" (at 10 10 0) (uuid "label-kbl-1"))
+    (label "KBL_Küche2{3x1_5}" (at 20 20 0) (uuid "label-kbl-2"))
+    (label "SD_Küche{3x1_5}" (at 30 30 0) (uuid "label-sd"))
+    (rectangle (start 0 0) (end 10 10) (uuid "rect-1"))
+    (rectangle (start 20 0) (end 30 10) (uuid "rect-2"))
+    (group "AP_SD_Küche1" (uuid "group-1") (members "rect-1"))
+    (group "AP_SD_Küche2" (uuid "group-2") (members "rect-2"))
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "SD_Küche1", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "SD_Küche2", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    by_key = {p.candidate_key: p for p in previews if p.source == "kbl_label"}
+    p1 = by_key["KBL_Küche1{3x1_5}"]
+    p2 = by_key["KBL_Küche2{3x1_5}"]
+
+    assert p1.start_ap_id == "AP-1"
+    assert p1.start_ap_status == "matched"
+    assert p1.end_ap_id == ""
+    assert p1.end_ap_status == "unmatched"
+
+    assert p2.start_ap_id == "AP-2"
+    assert p2.start_ap_status == "matched"
+    assert p2.end_ap_id == "AP-1"
+    assert p2.end_ap_status == "matched"

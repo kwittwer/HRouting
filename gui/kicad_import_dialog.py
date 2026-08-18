@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
@@ -107,6 +109,17 @@ class KiCadImportDialog(QDialog):
         self.warning_box.setReadOnly(True)
         self.warning_box.setPlaceholderText("Keine Warnungen")
         self.warning_box.setMaximumHeight(100)
+
+        bulk_toggle_row = QHBoxLayout()
+        select_all_btn = QPushButton("Alle auswählen", self)
+        deselect_all_btn = QPushButton("Alle abwählen", self)
+        select_all_btn.clicked.connect(lambda: self._set_all_checks(True))
+        deselect_all_btn.clicked.connect(lambda: self._set_all_checks(False))
+        bulk_toggle_row.addWidget(select_all_btn)
+        bulk_toggle_row.addWidget(deselect_all_btn)
+        bulk_toggle_row.addStretch(1)
+        root.addLayout(bulk_toggle_row)
+
         root.addWidget(self.warning_box)
 
         buttons = QDialogButtonBox(
@@ -217,7 +230,10 @@ class KiCadImportDialog(QDialog):
                 item.setCheckState(
                     0, Qt.Unchecked if preview.status == "unchanged" else Qt.Checked
                 )
-                item.setText(1, preview.status)
+                ap_confidence = self._ap_phase_confidence_label(preview)
+                item.setText(1, f"{self._ap_phase_status_label(preview)} | {ap_confidence}")
+                item.setForeground(1, QBrush(self._endpoint_confidence_color(ap_confidence)))
+                item.setToolTip(1, self._ap_phase_confidence_tooltip(preview))
                 item.setText(2, preview.cable_name)
                 item.setText(3, "AP Group")
                 self._attach_ap_assignment_widgets(item, preview)
@@ -230,7 +246,10 @@ class KiCadImportDialog(QDialog):
                 item.setCheckState(
                     0, Qt.Unchecked if preview.status == "unchanged" else Qt.Checked
                 )
-                item.setText(1, preview.status)
+                confidence = self._endpoint_confidence_label(preview)
+                item.setText(1, f"{preview.status} | {confidence}")
+                item.setForeground(1, QBrush(self._endpoint_confidence_color(confidence)))
+                item.setToolTip(1, self._endpoint_confidence_tooltip(preview))
                 self._attach_cable_widgets(item, preview)
 
         warnings = [w.message for w in self._scan_result.warnings]
@@ -401,6 +420,9 @@ class KiCadImportDialog(QDialog):
             f"Sync-Key: {preview.sync_key}",
         ]
 
+        if self._phase == "cables":
+            lines.append(f"Auto-Erkennung: {self._endpoint_confidence_label(preview)}")
+
         if preview.diffs:
             lines += ["", "Änderungen:"]
             for diff in preview.diffs:
@@ -469,6 +491,10 @@ class KiCadImportDialog(QDialog):
                 f"  Auto Start-AP: {preview.start_ap_group or '-'} ({preview.start_ap_status or 'unmatched'})",
                 f"  Auto Ziel-AP: {preview.end_ap_group or '-'} ({preview.end_ap_status or 'unmatched'})",
             ]
+            if preview.start_ap_diagnostic:
+                lines.append(f"  Diagnose Start: {preview.start_ap_diagnostic}")
+            if preview.end_ap_diagnostic:
+                lines.append(f"  Diagnose Ziel: {preview.end_ap_diagnostic}")
 
         self.detail_box.setPlainText("\n".join(lines))
 
@@ -484,6 +510,41 @@ class KiCadImportDialog(QDialog):
         return left, right
 
     @staticmethod
+    def _endpoint_confidence_label(preview: KiCadImportPreview) -> str:
+        start_status = str(preview.start_ap_status or "").strip().lower()
+        end_status = str(preview.end_ap_status or "").strip().lower()
+
+        if start_status == "matched" and end_status == "matched":
+            return "hoch"
+        if "ambiguous" in (start_status, end_status):
+            return "niedrig"
+        if "matched" in (start_status, end_status):
+            return "mittel"
+        return "niedrig"
+
+    @staticmethod
+    def _endpoint_confidence_color(confidence: str) -> QColor:
+        normalized = str(confidence or "").strip().lower()
+        if normalized == "hoch":
+            return QColor("#2e7d32")
+        if normalized == "mittel":
+            return QColor("#b26a00")
+        return QColor("#c62828")
+
+    @staticmethod
+    def _endpoint_confidence_tooltip(preview: KiCadImportPreview) -> str:
+        start_status = str(preview.start_ap_status or "unmatched")
+        end_status = str(preview.end_ap_status or "unmatched")
+        start_diag = str(preview.start_ap_diagnostic or "-")
+        end_diag = str(preview.end_ap_diagnostic or "-")
+        return (
+            f"Start: {start_status}\n"
+            f"Ziel: {end_status}\n"
+            f"Diagnose Start: {start_diag}\n"
+            f"Diagnose Ziel: {end_diag}"
+        )
+
+    @staticmethod
     def _ap_summary_text(preview: KiCadImportPreview) -> str:
         if not preview.ap_matches:
             return "keiner"
@@ -491,6 +552,50 @@ class KiCadImportDialog(QDialog):
         if preview.ap_match_status == "matched":
             return f"{top.point_id} ({top.score})"
         return f"mehrdeutig ({len(preview.ap_matches)})"
+
+    @staticmethod
+    def _ap_phase_status_label(preview: KiCadImportPreview) -> str:
+        status = str(preview.ap_match_status or "").strip().lower()
+        if status == "matched":
+            return "reused"
+        if status == "ambiguous":
+            return "prüfen"
+        if status == "unmatched":
+            return "create"
+        return str(preview.status or "create")
+
+    @staticmethod
+    def _ap_phase_confidence_label(preview: KiCadImportPreview) -> str:
+        status = str(preview.ap_match_status or "").strip().lower()
+        if status == "matched":
+            return "hoch"
+        if status == "ambiguous":
+            return "mittel"
+        return "niedrig"
+
+    @staticmethod
+    def _ap_phase_confidence_tooltip(preview: KiCadImportPreview) -> str:
+        status = str(preview.ap_match_status or "unmatched")
+        action = str(preview.ap_import_action or "-")
+        if preview.ap_matches:
+            top = preview.ap_matches[0]
+            top_text = (
+                f"Top-Kandidat: {top.point_name} "
+                f"({top.reason}, Score {top.score}, Kandidaten {len(preview.ap_matches)})"
+            )
+        else:
+            top_text = "Top-Kandidat: -"
+        return (
+            f"AP-Match: {status}\n"
+            f"Aktion: {action}\n"
+            f"{top_text}"
+        )
+
+    def _set_all_checks(self, checked: bool) -> None:
+        state = Qt.Checked if checked else Qt.Unchecked
+        for index in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(index)
+            item.setCheckState(0, state)
 
     @staticmethod
     def _format_hierarchy_path(path: tuple[str, ...]) -> str:

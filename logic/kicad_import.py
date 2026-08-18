@@ -15,6 +15,8 @@ from typing import Any, Iterable
 
 
 _COUNT_X_SPEC_RE = re.compile(r"^(?P<count>\d+)x(?P<rest>.+)$")
+_KBL_ENDPOINT_MARGIN_PX = 8.0
+_KBL_ENDPOINT_DISTANCE_GAP_PX = 5.0
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,8 @@ class KiCadImportPreview:
     end_ap_id: str = ""
     start_ap_status: str = ""
     end_ap_status: str = ""
+    start_ap_diagnostic: str = ""
+    end_ap_diagnostic: str = ""
     diffs: list[KiCadFieldDiff] = field(default_factory=list)
 
 
@@ -273,10 +277,31 @@ def build_import_preview(
         cable_name = _strip_kbl_prefix(candidate.base_name or candidate.pin_name_raw)
         cable_type = candidate.normalized_spec or candidate.spec_raw
 
-        start_ap_id, start_ap_status, start_ap_matches = _resolve_kbl_label_endpoint_ap(cable_name, elec_points)
-        end_ap_id = ""
-        end_ap_status = "unmatched"
-        ap_matches = start_ap_matches
+        (
+            start_ap_id,
+            start_ap_status,
+            start_ap_matches,
+            end_ap_id,
+            end_ap_status,
+            end_ap_matches,
+        ) = _resolve_kbl_label_endpoints(candidate, scan_result, elec_points)
+        ap_matches = _merge_unique_ap_matches(start_ap_matches, end_ap_matches)
+        start_ap_diagnostic = _build_kbl_endpoint_diagnostic(
+            side="Start",
+            source="kbl_label",
+            group_name="",
+            group_status="",
+            ap_status=start_ap_status,
+            matches=start_ap_matches,
+        )
+        end_ap_diagnostic = _build_kbl_endpoint_diagnostic(
+            side="Ziel",
+            source="kbl_label",
+            group_name="",
+            group_status="",
+            ap_status=end_ap_status,
+            matches=end_ap_matches,
+        )
 
         if start_ap_status == "matched":
             ap_match_status = "ambiguous"
@@ -306,6 +331,8 @@ def build_import_preview(
                     end_ap_id=end_ap_id,
                     start_ap_status=start_ap_status,
                     end_ap_status=end_ap_status,
+                    start_ap_diagnostic=start_ap_diagnostic,
+                    end_ap_diagnostic=end_ap_diagnostic,
                     diffs=[
                         KiCadFieldDiff("name", "", cable_name, bool(cable_name)),
                         KiCadFieldDiff("type", "", cable_type, bool(cable_type)),
@@ -349,6 +376,8 @@ def build_import_preview(
                 end_ap_id=end_ap_id,
                 start_ap_status=start_ap_status,
                 end_ap_status=end_ap_status,
+                start_ap_diagnostic=start_ap_diagnostic,
+                end_ap_diagnostic=end_ap_diagnostic,
                 diffs=diffs,
             )
         )
@@ -374,6 +403,22 @@ def build_import_preview(
         start_ap_id, start_ap_status, start_ap_matches = _resolve_kbl_endpoint_ap(start_ap_group, elec_points)
         end_ap_id, end_ap_status, end_ap_matches = _resolve_kbl_endpoint_ap(end_ap_group, elec_points)
         ap_matches = _merge_unique_ap_matches(start_ap_matches, end_ap_matches)
+        start_ap_diagnostic = _build_kbl_endpoint_diagnostic(
+            side="Start",
+            source="kbl_bus",
+            group_name=start_ap_group,
+            group_status=start_ap_group_status,
+            ap_status=start_ap_status,
+            matches=start_ap_matches,
+        )
+        end_ap_diagnostic = _build_kbl_endpoint_diagnostic(
+            side="Ziel",
+            source="kbl_bus",
+            group_name=end_ap_group,
+            group_status=end_ap_group_status,
+            ap_status=end_ap_status,
+            matches=end_ap_matches,
+        )
 
         if start_ap_status == "matched" and end_ap_status == "matched":
             ap_match_status = "matched"
@@ -403,6 +448,8 @@ def build_import_preview(
                     end_ap_id=end_ap_id,
                     start_ap_status=start_ap_status,
                     end_ap_status=end_ap_status,
+                    start_ap_diagnostic=start_ap_diagnostic,
+                    end_ap_diagnostic=end_ap_diagnostic,
                     diffs=[
                         KiCadFieldDiff("name", "", cable_name, bool(cable_name)),
                         KiCadFieldDiff("type", "", cable_type, bool(cable_type)),
@@ -446,6 +493,8 @@ def build_import_preview(
                 end_ap_id=end_ap_id,
                 start_ap_status=start_ap_status,
                 end_ap_status=end_ap_status,
+                start_ap_diagnostic=start_ap_diagnostic,
+                end_ap_diagnostic=end_ap_diagnostic,
                 diffs=diffs,
             )
         )
@@ -524,14 +573,19 @@ def build_import_preview(
             )
 
     # Process AP group candidates (AP_ prefix from KiCad groups)
+    point_ap_names = {
+        _normalize_ap_import_name(str(point.get("name", "") or "")).casefold()
+        for point in elec_points
+        if str(point.get("name", "") or "").strip()
+    }
     for ap_candidate in scan_result.ap_group_candidates.values():
         sync_key = f"{scan_result.project_uuid}::ap_group::{ap_candidate.group_name}"
         existing = existing_by_sync_key.get(sync_key)
-        cable_name = ap_candidate.group_name
+        cable_name = _normalize_ap_import_name(ap_candidate.group_name)
         cable_type = ""
         ap_action = (
             "AP wiederverwenden"
-            if str(cable_name or "").strip().casefold() in point_names
+            if str(cable_name or "").strip().casefold() in point_ap_names
             else "AP neu anlegen"
         )
 
@@ -923,6 +977,17 @@ def _normalize_match_text(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
+def _normalize_ap_import_name(value: str) -> str:
+    text = str(value or "").strip()
+    if text[:3].upper() == "AP_":
+        rest = text[3:]
+        # Keep AP_ for technical ID-style names like AP_1 / AP_1_NEU.
+        if rest[:1].isdigit():
+            return text
+        return rest
+    return text
+
+
 def _match_tokens(value: str) -> set[str]:
     return {
         token
@@ -1264,17 +1329,40 @@ def _resolve_kbl_endpoint_group(
     hierarchy_path: tuple[str, ...],
     point: tuple[float, float],
 ) -> tuple[str, str]:
-    hits: list[str] = []
+    exact_hits: list[str] = []
+    nearby: list[tuple[str, float]] = []
     for ap_candidate in scan_result.ap_group_candidates.values():
         if ap_candidate.sheet_file != sheet_file or ap_candidate.hierarchy_path != hierarchy_path:
             continue
         if _point_in_rect(point, ap_candidate.frame_bounds):
-            hits.append(ap_candidate.group_name)
-    unique_hits = sorted(set(hits))
-    if not unique_hits:
+            exact_hits.append(ap_candidate.group_name)
+            nearby.append((ap_candidate.group_name, 0.0))
+            continue
+
+        distance = _point_to_rect_distance(point, ap_candidate.frame_bounds)
+        if distance <= _KBL_ENDPOINT_MARGIN_PX:
+            nearby.append((ap_candidate.group_name, distance))
+
+    unique_exact = sorted(set(exact_hits))
+    if len(unique_exact) == 1:
+        return unique_exact[0], "matched"
+    if len(unique_exact) > 1:
+        return "", "ambiguous"
+
+    if not nearby:
         return "", "unmatched"
-    if len(unique_hits) == 1:
-        return unique_hits[0], "matched"
+
+    best_by_name: dict[str, float] = {}
+    for name, dist in nearby:
+        prev = best_by_name.get(name)
+        if prev is None or dist < prev:
+            best_by_name[name] = dist
+
+    ranked = sorted(best_by_name.items(), key=lambda item: (item[1], item[0].lower()))
+    if len(ranked) == 1:
+        return ranked[0][0], "matched"
+    if ranked[1][1] - ranked[0][1] >= _KBL_ENDPOINT_DISTANCE_GAP_PX:
+        return ranked[0][0], "matched"
     return "", "ambiguous"
 
 
@@ -1284,13 +1372,17 @@ def _resolve_kbl_endpoint_ap(
 ) -> tuple[str, str, list[KiCadApMatch]]:
     if not group_name:
         return "", "unmatched", []
-    target = str(group_name or "").strip().casefold()
+
+    target_forms = _kbl_ap_name_variants(group_name)
     matches: list[KiCadApMatch] = []
     for point in elec_points:
         point_id = str(point.get("id", "") or point.get("point_id", "") or "").strip()
         point_name = str(point.get("name", "") or "").strip()
         floor_plan_id = str(point.get("floor_plan_id", "") or "").strip()
-        if not point_id or point_name.casefold() != target:
+        if not point_id:
+            continue
+        point_norm = _normalize_match_text(point_name)
+        if point_norm not in target_forms:
             continue
         matches.append(
             KiCadApMatch(
@@ -1301,11 +1393,15 @@ def _resolve_kbl_endpoint_ap(
                 reason="AP-Group Endpoint",
             )
         )
-    if not matches:
-        return "", "unmatched", []
-    if len(matches) == 1:
-        return matches[0].point_id, "matched", matches
-    return "", "ambiguous", matches
+
+    match_id, status = _resolve_ap_match_status(matches)
+    if status != "unmatched":
+        return match_id, status, matches
+
+    # Fallback: fuzzy name matching (handles small naming variants).
+    fuzzy = suggest_ap_matches_by_name(_strip_ap_prefix(group_name), elec_points)
+    match_id, status = _resolve_ap_match_status(fuzzy)
+    return match_id, status, fuzzy
 
 
 def _resolve_kbl_label_endpoint_ap(
@@ -1315,8 +1411,13 @@ def _resolve_kbl_label_endpoint_ap(
     base = str(cable_name or "").strip()
     if not base:
         return "", "unmatched", []
-    base_norm = base.casefold()
-    ap_norm = f"AP_{base}".casefold()
+
+    target_forms = {
+        _normalize_match_text(base),
+        _normalize_match_text(f"AP_{base}"),
+        _normalize_match_text(_strip_ap_prefix(base)),
+    }
+    target_forms.discard("")
     matches: list[KiCadApMatch] = []
     for point in elec_points:
         point_id = str(point.get("id", "") or point.get("point_id", "") or "").strip()
@@ -1324,8 +1425,8 @@ def _resolve_kbl_label_endpoint_ap(
         floor_plan_id = str(point.get("floor_plan_id", "") or "").strip()
         if not point_id:
             continue
-        point_norm = point_name.casefold()
-        if point_norm not in (base_norm, ap_norm):
+        point_norm = _normalize_match_text(point_name)
+        if point_norm not in target_forms:
             continue
         matches.append(
             KiCadApMatch(
@@ -1336,11 +1437,436 @@ def _resolve_kbl_label_endpoint_ap(
                 reason="KBL Label Endpoint",
             )
         )
-    if not matches:
+
+    match_id, status = _resolve_ap_match_status(matches)
+    if status != "unmatched":
+        return match_id, status, matches
+
+    fuzzy = suggest_ap_matches_by_name(_strip_ap_prefix(base), elec_points)
+    match_id, status = _resolve_ap_match_status(fuzzy)
+    return match_id, status, fuzzy
+
+
+def _resolve_kbl_label_endpoints(
+    candidate: KiCadCableCandidate,
+    scan_result: KiCadScanResult,
+    elec_points: Iterable[dict[str, Any]],
+) -> tuple[str, str, list[KiCadApMatch], str, str, list[KiCadApMatch]]:
+    primary_name = _strip_kbl_prefix(candidate.base_name or candidate.pin_name_raw)
+    start_ap_id, start_ap_status, start_ap_matches = _resolve_kbl_label_endpoint_ap(
+        primary_name,
+        elec_points,
+    )
+
+    local_end_id, local_end_status, local_end_matches = _resolve_kbl_label_local_group_counterpart(
+        candidate,
+        primary_name,
+        scan_result,
+        elec_points,
+        start_ap_id,
+        start_ap_matches,
+    )
+    if local_end_status == "matched":
+        return (
+            start_ap_id,
+            start_ap_status,
+            start_ap_matches,
+            local_end_id,
+            local_end_status,
+            local_end_matches,
+        )
+
+    hint_names = _collect_kbl_hierarchy_endpoint_hints(candidate)
+    hint_matches = _resolve_kbl_related_end_matches(
+        related_names=hint_names,
+        elec_points=elec_points,
+        start_ap_id=start_ap_id,
+        start_ap_matches=start_ap_matches,
+    )
+    if hint_matches:
+        numbered_hint = _pick_numbered_neighbor_match(primary_name, hint_matches)
+        if numbered_hint is not None:
+            return start_ap_id, start_ap_status, start_ap_matches, numbered_hint.point_id, "matched", [numbered_hint]
+        end_ap_id, end_ap_status = _resolve_ap_match_status(hint_matches)
+        return start_ap_id, start_ap_status, start_ap_matches, end_ap_id, end_ap_status, hint_matches
+
+    related_names = _collect_kbl_related_counterpart_names(candidate, scan_result)
+    if not related_names:
+        return start_ap_id, start_ap_status, start_ap_matches, "", "unmatched", []
+
+    end_matches = _resolve_kbl_related_end_matches(
+        related_names=related_names,
+        elec_points=elec_points,
+        start_ap_id=start_ap_id,
+        start_ap_matches=start_ap_matches,
+    )
+    numbered_fallback = _pick_numbered_neighbor_match(primary_name, end_matches)
+    if numbered_fallback is not None:
+        return (
+            start_ap_id,
+            start_ap_status,
+            start_ap_matches,
+            numbered_fallback.point_id,
+            "matched",
+            [numbered_fallback],
+        )
+    end_ap_id, end_ap_status = _resolve_ap_match_status(end_matches)
+    return start_ap_id, start_ap_status, start_ap_matches, end_ap_id, end_ap_status, end_matches
+
+
+def _resolve_kbl_related_end_matches(
+    related_names: list[str],
+    elec_points: Iterable[dict[str, Any]],
+    start_ap_id: str,
+    start_ap_matches: list[KiCadApMatch],
+) -> list[KiCadApMatch]:
+    if not related_names:
+        return []
+
+    start_semantic = ""
+    for match in start_ap_matches:
+        if match.point_id == start_ap_id:
+            start_semantic = _ap_semantic_key(match.point_name)
+            break
+    if not start_semantic and start_ap_matches:
+        start_semantic = _ap_semantic_key(start_ap_matches[0].point_name)
+
+    end_matches_by_semantic: dict[str, KiCadApMatch] = {}
+    seen_point_ids: set[str] = set()
+    for related_name in related_names:
+        _rid, status, matches = _resolve_kbl_label_endpoint_ap(related_name, elec_points)
+        if status == "unmatched":
+            continue
+        for match in matches:
+            if match.point_id == start_ap_id or match.point_id in seen_point_ids:
+                continue
+            semantic_key = _ap_semantic_key(match.point_name)
+            if start_semantic and semantic_key == start_semantic:
+                continue
+            seen_point_ids.add(match.point_id)
+            current = end_matches_by_semantic.get(semantic_key)
+            if current is None or _prefer_ap_alias_variant(match, current):
+                end_matches_by_semantic[semantic_key] = match
+
+    end_matches = list(end_matches_by_semantic.values())
+    end_matches.sort(key=lambda item: (-item.score, item.point_name.lower(), item.point_id.lower()))
+    return end_matches
+
+
+def _collect_kbl_related_counterpart_names(
+    candidate: KiCadCableCandidate,
+    scan_result: KiCadScanResult,
+) -> list[str]:
+    primary_norm = _normalize_match_text(_strip_kbl_prefix(candidate.base_name or candidate.pin_name_raw))
+    own_refs = {
+        (str(ref.sheet_file or ""), tuple(ref.hierarchy_path or ()))
+        for ref in candidate.pin_refs
+    }
+
+    names: set[str] = set()
+    for other in scan_result.candidates.values():
+        if other.key == candidate.key:
+            continue
+        if _is_kbl_candidate_name(other.pin_name_raw):
+            continue
+
+        other_name = str(other.base_name or other.pin_name_raw or "").strip()
+        if not other_name:
+            continue
+        if _normalize_match_text(other_name) == primary_norm:
+            continue
+
+        related = False
+        for ref in other.pin_refs:
+            ref_loc = (str(ref.sheet_file or ""), tuple(ref.hierarchy_path or ()))
+            if _is_hierarchy_location_related(ref_loc, own_refs):
+                related = True
+                break
+        if related:
+            names.add(other_name)
+
+    return sorted(names, key=lambda value: value.lower())
+
+
+def _collect_kbl_hierarchy_endpoint_hints(candidate: KiCadCableCandidate) -> list[str]:
+    hints: list[str] = []
+
+    for ref in candidate.pin_refs:
+        sheet_stem = Path(str(ref.sheet_file or "")).stem.strip()
+        if sheet_stem and sheet_stem.casefold() not in {"kueche", "küche"}:
+            hints.append(sheet_stem)
+        for part in ref.hierarchy_path:
+            token = str(part or "").strip()
+            if token:
+                hints.append(token)
+
+    # Prioritize UV/verteiler-like endpoints first for cross-sheet connectors.
+    unique: list[str] = []
+    seen: set[str] = set()
+    for hint in hints:
+        norm = _normalize_match_text(hint)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        unique.append(hint)
+
+    unique.sort(
+        key=lambda value: (
+            0 if "uv" in _normalize_match_text(value) else 1,
+            0 if "spk" in _normalize_match_text(value) else 1,
+            value.lower(),
+        )
+    )
+    return unique
+
+
+def _resolve_kbl_label_local_group_counterpart(
+    candidate: KiCadCableCandidate,
+    primary_name: str,
+    scan_result: KiCadScanResult,
+    elec_points: Iterable[dict[str, Any]],
+    start_ap_id: str,
+    start_ap_matches: list[KiCadApMatch],
+) -> tuple[str, str, list[KiCadApMatch]]:
+    primary_family, primary_index = _name_family_index(primary_name)
+    if primary_index is None:
         return "", "unmatched", []
-    if len(matches) == 1:
-        return matches[0].point_id, "matched", matches
-    return "", "ambiguous", matches
+
+    locations = {
+        (str(ref.sheet_file or ""), tuple(ref.hierarchy_path or ()))
+        for ref in candidate.pin_refs
+    }
+
+    start_semantic = ""
+    for match in start_ap_matches:
+        if match.point_id == start_ap_id:
+            start_semantic = _ap_semantic_key(match.point_name)
+            break
+
+    local_matches: list[tuple[int, str, KiCadApMatch]] = []
+    for ap_group in scan_result.ap_group_candidates.values():
+        group_loc = (str(ap_group.sheet_file or ""), tuple(ap_group.hierarchy_path or ()))
+        if group_loc not in locations:
+            continue
+
+        group_name = _strip_ap_prefix(ap_group.group_name)
+        group_family, group_index = _name_family_index(group_name)
+        if group_index is None:
+            continue
+        if not _families_related(primary_family, group_family):
+            continue
+
+        group_ap_id, group_status, group_ap_matches = _resolve_kbl_endpoint_ap(ap_group.group_name, elec_points)
+        if group_status != "matched" or not group_ap_matches or not group_ap_id:
+            continue
+
+        chosen = next((m for m in group_ap_matches if m.point_id == group_ap_id), group_ap_matches[0])
+        semantic = _ap_semantic_key(chosen.point_name)
+        if semantic and start_semantic and semantic == start_semantic:
+            continue
+        local_matches.append((group_index, ap_group.group_name, chosen))
+
+    if not local_matches:
+        return "", "unmatched", []
+
+    # Favor the nearest lower numbered neighbor to the KBL index.
+    local_matches.sort(
+        key=lambda item: (
+            abs(item[0] - primary_index),
+            item[0],
+            item[1].lower(),
+        )
+    )
+    lower = [entry for entry in local_matches if entry[0] < primary_index]
+    if not lower:
+        return "", "unmatched", []
+
+    best = lower[0][2]
+    return best.point_id, "matched", [best]
+
+
+def _name_family_index(value: str) -> tuple[str, int | None]:
+    text = str(value or "").strip()
+    if not text:
+        return "", None
+
+    # Split trailing numeric endpoint index, e.g. Kueche3 -> (kueche, 3).
+    match = re.match(r"^(.*?)(\d+)$", text)
+    if not match:
+        return _normalize_match_text(text), None
+
+    family_raw = str(match.group(1) or "")
+    index_raw = str(match.group(2) or "")
+    family = _normalize_match_text(family_raw)
+    try:
+        index = int(index_raw)
+    except ValueError:
+        return family, None
+    return family, index
+
+
+def _families_related(left: str, right: str) -> bool:
+    a = str(left or "").strip()
+    b = str(right or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return a.endswith(b) or b.endswith(a)
+
+
+def _pick_numbered_neighbor_match(
+    primary_name: str,
+    matches: list[KiCadApMatch],
+) -> KiCadApMatch | None:
+    if not matches:
+        return None
+
+    primary_family, primary_index = _name_family_index(primary_name)
+    if primary_index is None:
+        return None
+
+    ranked: list[tuple[int, int, int, str, KiCadApMatch]] = []
+    for match in matches:
+        family, index = _name_family_index(_strip_ap_prefix(match.point_name))
+        if index is None:
+            continue
+        if not _families_related(primary_family, family):
+            continue
+        if index >= primary_index:
+            continue
+        ranked.append(
+            (
+                abs(index - primary_index),
+                index,
+                str(match.point_name or "").lower(),
+                match,
+            )
+        )
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    return ranked[0][3]
+
+
+def _is_hierarchy_location_related(
+    location: tuple[str, tuple[str, ...]],
+    candidate_locations: set[tuple[str, tuple[str, ...]]],
+) -> bool:
+    sheet_file, path = location
+    for cand_sheet, cand_path in candidate_locations:
+        if sheet_file == cand_sheet:
+            return True
+        if _is_hierarchy_prefix(path, cand_path) or _is_hierarchy_prefix(cand_path, path):
+            return True
+    return False
+
+
+def _is_hierarchy_prefix(prefix: tuple[str, ...], full: tuple[str, ...]) -> bool:
+    if len(prefix) > len(full):
+        return False
+    return full[: len(prefix)] == prefix
+
+
+def _resolve_ap_match_status(matches: list[KiCadApMatch]) -> tuple[str, str]:
+    if not matches:
+        return "", "unmatched"
+
+    semantic_keys = {_ap_semantic_key(match.point_name) for match in matches if _ap_semantic_key(match.point_name)}
+    if len(semantic_keys) == 1:
+        ordered = sorted(matches, key=lambda item: (0 if str(item.point_name).upper().startswith("AP_") else 1, item.point_name.lower(), item.point_id.lower()))
+        return ordered[0].point_id, "matched"
+
+    summary = ap_match_summary(matches)
+    if summary == "matched":
+        return matches[0].point_id, "matched"
+    return "", "ambiguous"
+
+
+def _strip_ap_prefix(value: str) -> str:
+    text = str(value or "").strip()
+    if text[:3].upper() == "AP_":
+        return text[3:]
+    return text
+
+
+def _ap_semantic_key(value: str) -> str:
+    return _normalize_match_text(_strip_ap_prefix(value))
+
+
+def _prefer_ap_alias_variant(candidate: KiCadApMatch, current: KiCadApMatch) -> bool:
+    candidate_is_prefixed = str(candidate.point_name or "").upper().startswith("AP_")
+    current_is_prefixed = str(current.point_name or "").upper().startswith("AP_")
+    if candidate_is_prefixed != current_is_prefixed:
+        return candidate_is_prefixed
+    if candidate.score != current.score:
+        return candidate.score > current.score
+    return str(candidate.point_name or "").lower() < str(current.point_name or "").lower()
+
+
+def _kbl_ap_name_variants(group_name: str) -> set[str]:
+    raw = str(group_name or "").strip()
+    stripped = _strip_ap_prefix(raw)
+    variants = {
+        _normalize_match_text(raw),
+        _normalize_match_text(stripped),
+        _normalize_match_text(f"AP_{stripped}"),
+    }
+    variants.discard("")
+    return variants
+
+
+def _point_to_rect_distance(
+    point: tuple[float, float],
+    rect: tuple[float, float, float, float],
+) -> float:
+    px, py = point
+    x_min, y_min, x_max, y_max = rect
+    dx = max(x_min - px, 0.0, px - x_max)
+    dy = max(y_min - py, 0.0, py - y_max)
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _build_kbl_endpoint_diagnostic(
+    side: str,
+    source: str,
+    group_name: str,
+    group_status: str,
+    ap_status: str,
+    matches: list[KiCadApMatch],
+) -> str:
+    parts: list[str] = [f"{side}-Erkennung"]
+
+    if source == "kbl_bus":
+        geom_text = {
+            "matched": "Geom-Treffer: eindeutiger AP-Frame",
+            "ambiguous": "Geom-Treffer: mehrere AP-Frames",
+            "unmatched": "Geom-Treffer: kein AP-Frame in Reichweite",
+        }.get(group_status or "", "Geom-Treffer: unbekannt")
+        if group_name:
+            geom_text += f" ({group_name})"
+        parts.append(geom_text)
+    elif source == "kbl_label":
+        parts.append("Quelle: KBL-Label (ohne direkte Bus-Endpunktgeometrie)")
+
+    ap_text = {
+        "matched": "AP-Match: eindeutig",
+        "ambiguous": "AP-Match: mehrdeutig",
+        "unmatched": "AP-Match: kein Treffer",
+    }.get(ap_status or "", "AP-Match: unbekannt")
+    parts.append(ap_text)
+
+    if matches:
+        top = matches[0]
+        parts.append(
+            f"Top-Kandidat: {top.point_name} ({top.reason}, Score {top.score}, Kandidaten {len(matches)})"
+        )
+    elif source == "kbl_label" and side.casefold().startswith("ziel"):
+        parts.append("Hinweis: Ziel-AP kann aus reinem KBL-Label nicht automatisch abgeleitet werden")
+
+    return " | ".join(parts)
 
 
 def _merge_unique_ap_matches(

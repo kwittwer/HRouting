@@ -6360,11 +6360,21 @@ class AppWindow(QMainWindow):
         cable_previews: list[object] = [
             p for p in phase_two_previews if p.source in {"kbl_bus", "kbl_label"}
         ]
-        cable_warnings: list[str] = [
-            f"KBL-Kabel '{p.cable_name}': Start/Ziel-AP nicht eindeutig erkannt, bitte manuell wählen."
-            for p in cable_previews
-            if p.start_ap_status != "matched" or p.end_ap_status != "matched"
-        ]
+        cable_warnings: list[str] = []
+        for p in cable_previews:
+            if p.start_ap_status == "matched" and p.end_ap_status == "matched":
+                continue
+            details: list[str] = []
+            start_diag = str(getattr(p, "start_ap_diagnostic", "") or "").strip()
+            end_diag = str(getattr(p, "end_ap_diagnostic", "") or "").strip()
+            if start_diag:
+                details.append(f"Start: {start_diag}")
+            if end_diag:
+                details.append(f"Ziel: {end_diag}")
+            suffix = f" Details: {' | '.join(details)}" if details else ""
+            cable_warnings.append(
+                f"KBL-Kabel '{p.cable_name}': Start/Ziel-AP nicht eindeutig erkannt, bitte manuell wählen.{suffix}"
+            )
 
         if not cable_previews:
             typed_candidates = [
