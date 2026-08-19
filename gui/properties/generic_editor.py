@@ -313,7 +313,7 @@ class GenericElementEditor(QWidget):
 
 
 class GenericMultiElementEditor(QWidget):
-    """Formular für die gemeinsame Bearbeitung mehrerer Elemente desselben Typs."""
+    """Formular für die gemeinsame Bearbeitung mehrerer Elemente."""
 
     field_changed = Signal(list, str, object)  # (element_ids, key, wert)
     pre_change = Signal()                      # fires BEFORE batch write (for undo)
@@ -342,20 +342,35 @@ class GenericMultiElementEditor(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        category = str(getattr(type(self._elements[0]), "CATEGORY_LABEL", schema.title) or schema.title)
+        type_counts: dict[str, int] = {}
+        for element in self._elements:
+            label = str(getattr(type(element), "CATEGORY_LABEL", type(element).__name__) or type(element).__name__)
+            type_counts[label] = type_counts.get(label, 0) + 1
+
+        if len(type_counts) == 1:
+            category = next(iter(type_counts.keys()))
+            header_text = f"<b>{len(self._elements)}x {category}</b> · Gemeinsame Bearbeitung"
+            type_detail = ""
+        else:
+            header_text = f"<b>{len(self._elements)}x Gemischte Auswahl</b> · Gemeinsame Bearbeitung"
+            type_detail = "Typen: " + ", ".join(
+                f"{count}x {label}" for label, count in sorted(type_counts.items())
+            )
+
         ids_preview = ", ".join(element.id for element in self._elements[:8])
         if len(self._elements) > 8:
             ids_preview = f"{ids_preview}, ..."
 
-        header = QLabel(
-            f"<b>{len(self._elements)}x {category}</b> · Gemeinsame Bearbeitung",
-            self,
-        )
+        header = QLabel(header_text, self)
         header.setWordWrap(True)
         header.setStyleSheet("font-size: 14px;")
         layout.addWidget(header)
 
-        detail = QLabel(f"Auswahl: {ids_preview}", self)
+        detail_parts = []
+        if type_detail:
+            detail_parts.append(type_detail)
+        detail_parts.append(f"Auswahl: {ids_preview}")
+        detail = QLabel(" | ".join(detail_parts), self)
         detail.setWordWrap(True)
         detail.setStyleSheet("color: #9aa5b1;")
         layout.addWidget(detail)

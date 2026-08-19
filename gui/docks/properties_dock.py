@@ -6,6 +6,8 @@ zwischengespeichert, damit ein Wechsel der Auswahl schnell bleibt.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -25,7 +27,8 @@ from PySide6.QtWidgets import (
 
 from gui.properties import GenericElementEditor, GenericMultiElementEditor, GlobalSettingsEditor
 from model.document import Document
-from model.schema import FieldKind, schema_for
+from model.elements import Element
+from model.schema import FieldKind, FieldSpec, schema_for
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +268,23 @@ class PropertiesDock(QDockWidget):
     setting_changed = Signal(str, object)      # (key, wert)
     pre_change = Signal()                      # fires before any write (for undo)
 
+    _MULTI_EDITABLE_KEYS = frozenset(
+        {
+            "color",
+            "visible",
+            "label_visible",
+            "label_size",
+            "type",
+            "ap_type",
+            "builtin_symbol",
+            "width",
+            "height",
+            "stroke_width",
+            "font_size",
+            "type_label_visible",
+        }
+    )
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Eigenschaften", parent)
         self.setObjectName("dock_properties")
@@ -299,7 +319,7 @@ class PropertiesDock(QDockWidget):
             self.show_global_settings()
 
     def show_elements(self, element_ids: list[str]) -> None:
-        """Zeigt den Mehrfach-Editor für Elemente desselben Typs."""
+        """Zeigt den Mehrfach-Editor für gemeinsame Eigenschaften."""
         document = self._document
         if document is None:
             self.show_placeholder()
@@ -316,43 +336,17 @@ class PropertiesDock(QDockWidget):
             self.show_element(elements[0].id if elements else "")
             return
 
-        first_type = type(elements[0])
-        if any(type(element) is not first_type for element in elements):
-            counts: dict[str, int] = {}
-            for element in elements:
-                label = str(getattr(type(element), "CATEGORY_LABEL", type(element).__name__))
-                counts[label] = counts.get(label, 0) + 1
-            parts = [f"{count}x {label}" for label, count in sorted(counts.items())]
-            self.show_placeholder(
-                "Mehrfachbearbeitung nur für gleichen Elementtyp verfügbar\n"
-                f"Aktuelle Auswahl: {', '.join(parts)}"
-            )
-            return
-
         schema = schema_for(elements[0])
         if schema is None:
             self.show_placeholder("Für diese Auswahl gibt es keine gemeinsamen Eigenschaften")
             return
 
-        editable_keys = {
-            "color",
-            "visible",
-            "label_visible",
-            "label_size",
-            "type",
-            "ap_type",
-            "builtin_symbol",
-            "width",
-            "height",
-            "stroke_width",
-        }
-        editable_specs = [
-            spec
-            for spec in schema.fields
-            if spec.key in editable_keys and spec.kind is not FieldKind.READONLY
-        ]
+        editable_specs = self._common_editable_specs(elements)
         if not editable_specs:
-            self.show_placeholder("Für diese Auswahl sind keine gemeinsamen Felder verfügbar")
+            self.show_placeholder(
+                "Für diese Auswahl sind keine gemeinsamen Felder verfügbar\n"
+                f"Aktuelle Auswahl: {self._selection_type_summary(elements)}"
+            )
             return
 
         if self._multi_editor is not None:
@@ -371,6 +365,97 @@ class PropertiesDock(QDockWidget):
         self._stack.addWidget(self._multi_editor)
         self._current_id = ""
         self._stack.setCurrentWidget(self._multi_editor)
+
+    @staticmethod
+    def _selection_type_summary(elements: list[Element]) -> str:
+        counts: dict[str, int] = {}
+        for element in elements:
+            label = str(getattr(type(element), "CATEGORY_LABEL", type(element).__name__))
+            counts[label] = counts.get(label, 0) + 1
+        return ", ".join(f"{count}x {label}" for label, count in sorted(counts.items()))
+
+    def _common_editable_specs(self, elements: list[Element]) -> list[FieldSpec]:
+        document = self._document
+        if document is None or not elements:
+            return []
+
+        schema_maps: list[dict[str, FieldSpec]] = []
+        first_schema = schema_for(elements[0])
+        if first_schema is None:
+            return []
+
+        ordered_keys = [spec.key for spec in first_schema.fields]
+        for element in elements:
+            schema = schema_for(element)
+            if schema is None:
+                return []
+            schema_maps.append(
+                {
+                    spec.key: spec
+                    for spec in schema.fields
+                    if spec.key in self._MULTI_EDITABLE_KEYS
+                    and spec.kind not in (FieldKind.READONLY, FieldKind.FILE)
+                }
+            )
+
+        common_keys = set(schema_maps[0].keys())
+        for spec_map in schema_maps[1:]:
+            common_keys.intersection_update(spec_map.keys())
+
+        merged_specs = []
+        for key in ordered_keys:
+            if key not in common_keys:
+                continue
+            candidates = [spec_map[key] for spec_map in schema_maps]
+            if not self._specs_are_compatible(candidates):
+                continue
+
+            merged = candidates[0]
+            if merged.kind in (FieldKind.CHOICE, FieldKind.EDITABLE_CHOICE):
+                all_options = [tuple(spec.resolve_options(document)) for spec in candidates]
+                if merged.kind is FieldKind.CHOICE:
+                    options = [
+                        option
+                        for option in all_options[0]
+                        if all(option in choices for choices in all_options[1:])
+                    ]
+                else:
+                    options = []
+                    for choices in all_options:
+                        for option in choices:
+                            if option not in options:
+                                options.append(option)
+                if not options:
+                    continue
+                merged = replace(merged, options=tuple(options), document_options=None)
+
+            merged_specs.append(merged)
+
+        return merged_specs
+
+    @staticmethod
+    def _specs_are_compatible(specs: list[FieldSpec]) -> bool:
+        if not specs:
+            return False
+        first = specs[0]
+
+        # Feldtyp muss identisch sein, sonst kann kein gemeinsames Widget entstehen.
+        if any(spec.kind is not first.kind for spec in specs[1:]):
+            return False
+
+        # Numerische Felder nur zusammenführen, wenn Darstellung konsistent bleibt.
+        if first.kind is FieldKind.NUMBER:
+            for spec in specs[1:]:
+                if (
+                    spec.scale != first.scale
+                    or spec.unit != first.unit
+                    or spec.decimals != first.decimals
+                ):
+                    return False
+
+        # Choice/EditableChoice werden in _common_editable_specs über Optionen
+        # zusammengeführt. Hier reicht die Kind-Kompatibilität.
+        return True
 
     def show_element(self, element_id: str) -> None:
         """Zeigt den Editor eines Elements; erzeugt ihn bei Bedarf."""

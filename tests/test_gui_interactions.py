@@ -433,3 +433,142 @@ def test_distributor_dropdown_and_value_cleanup_when_hkv_deleted(app, monkeypatc
         assert "Verteiler EG" not in options_after
     finally:
         window.deleteLater()
+
+
+@pytest.mark.gui
+def test_mixed_selection_shows_only_shared_fields(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [100.0, 100.0]},
+                    "elec_cables": {"EK-1": [[100.0, 100.0], [300.0, 100.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": ""},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "AP 1",
+                            "color": "#4fc3f7",
+                            "visible": True,
+                            "label_visible": True,
+                            "label_size": 12.0,
+                            "builtin_symbol": "Steckdose",
+                        }
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel 1",
+                            "color": "#ff9800",
+                            "visible": True,
+                            "label_visible": True,
+                            "label_size": 12.0,
+                            "type": "3x1,5",
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_elements(["AP-1", "EK-1"])
+
+        editor = window.properties._multi_editor
+        assert editor is not None
+        keys = set(editor._widgets.keys())
+        assert {"color", "visible", "label_visible", "label_size"}.issubset(keys)
+        assert "builtin_symbol" not in keys
+        assert "ap_type" not in keys
+        assert "type" not in keys
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_mixed_batch_edit_undo_redo_is_single_step(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [100.0, 100.0]},
+                    "elec_cables": {"EK-1": [[100.0, 100.0], [300.0, 100.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": ""},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "AP 1",
+                            "color": "#4fc3f7",
+                            "visible": True,
+                            "label_visible": True,
+                            "label_size": 12.0,
+                            "builtin_symbol": "Steckdose",
+                        }
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel 1",
+                            "color": "#ff9800",
+                            "visible": True,
+                            "label_visible": True,
+                            "label_size": 12.0,
+                            "type": "3x1,5",
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_elements(["AP-1", "EK-1"])
+
+        editor = window.properties._multi_editor
+        assert editor is not None
+
+        color_before_ap = str(document.elements["elec_points"]["AP-1"].data.get("color") or "")
+        color_before_ek = str(document.elements["elec_cables"]["EK-1"].data.get("color") or "")
+        undo_len_before = len(window._undo_stack)
+
+        editor._on_field_changed("color", "#123456")
+
+        assert str(document.elements["elec_points"]["AP-1"].data.get("color") or "") == "#123456"
+        assert str(document.elements["elec_cables"]["EK-1"].data.get("color") or "") == "#123456"
+        assert len(window._undo_stack) == undo_len_before + 1
+
+        window._undo()
+        assert str(document.elements["elec_points"]["AP-1"].data.get("color") or "") == color_before_ap
+        assert str(document.elements["elec_cables"]["EK-1"].data.get("color") or "") == color_before_ek
+
+        window._redo()
+        assert str(document.elements["elec_points"]["AP-1"].data.get("color") or "") == "#123456"
+        assert str(document.elements["elec_cables"]["EK-1"].data.get("color") or "") == "#123456"
+    finally:
+        window.deleteLater()

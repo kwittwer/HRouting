@@ -29,6 +29,7 @@ from model.field_access import (  # noqa: E402
 )
 from model.schema import (  # noqa: E402
     SCHEMAS,
+    FieldSpec,
     FieldKind,
     groups_of,
     schema_for,
@@ -323,6 +324,23 @@ def test_multi_editor_shows_mixed_placeholder_for_different_values(app, document
         editor.deleteLater()
 
 
+def test_multi_editor_header_marks_mixed_selection(app, document):
+    from PySide6.QtWidgets import QLabel  # noqa: PLC0415
+    from gui.properties import GenericMultiElementEditor  # noqa: PLC0415
+
+    point = document.elements["elec_points"]["AP-1"]
+    cable = document.elements["elec_cables"]["EK-1"]
+    schema = schema_for(point)
+    editable_specs = [spec for spec in schema.fields if spec.key == "color"]
+
+    editor = GenericMultiElementEditor(document, [point, cable], schema, editable_specs)
+    try:
+        labels = [label.text() for label in editor.findChildren(QLabel)]
+        assert any("Gemischte Auswahl" in text for text in labels)
+    finally:
+        editor.deleteLater()
+
+
 def test_properties_dock_shows_element(app, document):
     from gui.docks.properties_dock import PropertiesDock  # noqa: PLC0415
 
@@ -347,6 +365,38 @@ def test_properties_dock_handles_unknown_element(app, document):
         dock.set_document(document)
         dock.show_element("gibt-es-nicht")
         assert dock._current_id == ""
+    finally:
+        dock.deleteLater()
+
+
+def test_properties_dock_shows_shared_fields_for_mixed_selection(app, document):
+    from gui.docks.properties_dock import PropertiesDock  # noqa: PLC0415
+
+    dock = PropertiesDock()
+    try:
+        dock.set_document(document)
+        dock.show_elements(["AP-1", "EK-1"])
+
+        editor = dock._multi_editor
+        assert editor is not None
+        widget_keys = set(editor._widgets.keys())
+        assert {"color", "visible", "label_visible", "label_size"}.issubset(widget_keys)
+        assert "builtin_symbol" not in widget_keys
+        assert "ap_type" not in widget_keys
+        assert "width" not in widget_keys
+    finally:
+        dock.deleteLater()
+
+
+def test_properties_dock_rejects_incompatible_number_specs(app):
+    from gui.docks.properties_dock import PropertiesDock  # noqa: PLC0415
+
+    spec_cm = FieldSpec("width", "Breite", FieldKind.NUMBER, scale=10.0, unit="cm", decimals=1)
+    spec_px = FieldSpec("width", "Breite", FieldKind.NUMBER, scale=1.0, unit="px", decimals=1)
+
+    dock = PropertiesDock()
+    try:
+        assert not dock._specs_are_compatible([spec_cm, spec_px])
     finally:
         dock.deleteLater()
 
