@@ -276,6 +276,10 @@ def build_import_preview(
         existing = existing_by_sync_key.get(sync_key)
         cable_name = _strip_kbl_prefix(candidate.base_name or candidate.pin_name_raw)
         cable_type = candidate.normalized_spec or candidate.spec_raw
+        label_named_endpoints = _parse_kbl_named_endpoints(cable_name)
+        start_ap_group_hint = label_named_endpoints[0] if label_named_endpoints else ""
+        end_ap_group_hint = label_named_endpoints[1] if label_named_endpoints else ""
+        label_diag_source = "kbl_name" if label_named_endpoints else "kbl_label"
 
         (
             start_ap_id,
@@ -288,16 +292,16 @@ def build_import_preview(
         ap_matches = _merge_unique_ap_matches(start_ap_matches, end_ap_matches)
         start_ap_diagnostic = _build_kbl_endpoint_diagnostic(
             side="Start",
-            source="kbl_label",
-            group_name="",
+            source=label_diag_source,
+            group_name=start_ap_group_hint,
             group_status="",
             ap_status=start_ap_status,
             matches=start_ap_matches,
         )
         end_ap_diagnostic = _build_kbl_endpoint_diagnostic(
             side="Ziel",
-            source="kbl_label",
-            group_name="",
+            source=label_diag_source,
+            group_name=end_ap_group_hint,
             group_status="",
             ap_status=end_ap_status,
             matches=end_ap_matches,
@@ -325,8 +329,8 @@ def build_import_preview(
                     ap_import_action=ap_action,
                     ap_match_status=ap_match_status,
                     ap_matches=ap_matches,
-                    start_ap_group="",
-                    end_ap_group="",
+                    start_ap_group=start_ap_group_hint,
+                    end_ap_group=end_ap_group_hint,
                     start_ap_id=start_ap_id,
                     end_ap_id=end_ap_id,
                     start_ap_status=start_ap_status,
@@ -370,8 +374,8 @@ def build_import_preview(
                 ap_import_action=ap_action,
                 ap_match_status=ap_match_status,
                 ap_matches=ap_matches,
-                start_ap_group="",
-                end_ap_group="",
+                start_ap_group=start_ap_group_hint,
+                end_ap_group=end_ap_group_hint,
                 start_ap_id=start_ap_id,
                 end_ap_id=end_ap_id,
                 start_ap_status=start_ap_status,
@@ -402,10 +406,48 @@ def build_import_preview(
         )
         start_ap_id, start_ap_status, start_ap_matches = _resolve_kbl_endpoint_ap(start_ap_group, elec_points)
         end_ap_id, end_ap_status, end_ap_matches = _resolve_kbl_endpoint_ap(end_ap_group, elec_points)
+
+        named_endpoints = _parse_kbl_named_endpoints(cable_name)
+        named_source_used = False
+        if named_endpoints is not None:
+            hint_start, hint_end = named_endpoints
+            hint_start_id, hint_start_status, hint_start_matches = _resolve_kbl_endpoint_ap(hint_start, elec_points)
+            hint_end_id, hint_end_status, hint_end_matches = _resolve_kbl_endpoint_ap(hint_end, elec_points)
+
+            if hint_start_status == "matched":
+                start_ap_group = hint_start
+                start_ap_group_status = "from-name"
+                start_ap_id = hint_start_id
+                start_ap_status = hint_start_status
+                start_ap_matches = hint_start_matches
+                named_source_used = True
+            elif start_ap_status == "unmatched" and hint_start_status == "ambiguous":
+                start_ap_group = hint_start
+                start_ap_group_status = "from-name"
+                start_ap_id = ""
+                start_ap_status = hint_start_status
+                start_ap_matches = hint_start_matches
+                named_source_used = True
+
+            if hint_end_status == "matched":
+                end_ap_group = hint_end
+                end_ap_group_status = "from-name"
+                end_ap_id = hint_end_id
+                end_ap_status = hint_end_status
+                end_ap_matches = hint_end_matches
+                named_source_used = True
+            elif end_ap_status == "unmatched" and hint_end_status == "ambiguous":
+                end_ap_group = hint_end
+                end_ap_group_status = "from-name"
+                end_ap_id = ""
+                end_ap_status = hint_end_status
+                end_ap_matches = hint_end_matches
+                named_source_used = True
+
         ap_matches = _merge_unique_ap_matches(start_ap_matches, end_ap_matches)
         start_ap_diagnostic = _build_kbl_endpoint_diagnostic(
             side="Start",
-            source="kbl_bus",
+            source="kbl_name" if named_source_used else "kbl_bus",
             group_name=start_ap_group,
             group_status=start_ap_group_status,
             ap_status=start_ap_status,
@@ -413,7 +455,7 @@ def build_import_preview(
         )
         end_ap_diagnostic = _build_kbl_endpoint_diagnostic(
             side="Ziel",
-            source="kbl_bus",
+            source="kbl_name" if named_source_used else "kbl_bus",
             group_name=end_ap_group,
             group_status=end_ap_group_status,
             ap_status=end_ap_status,
@@ -974,7 +1016,14 @@ def _matching_labels(labels: Iterable[str], base_name: str, spec_raw: str) -> se
 
 
 def _normalize_match_text(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+    text = str(value or "").lower()
+    text = (
+        text.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+    )
+    return re.sub(r"[^a-z0-9]+", "", text)
 
 
 def _normalize_ap_import_name(value: str) -> str:
@@ -989,9 +1038,16 @@ def _normalize_ap_import_name(value: str) -> str:
 
 
 def _match_tokens(value: str) -> set[str]:
+    text = str(value or "").lower()
+    text = (
+        text.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+    )
     return {
         token
-        for token in re.split(r"[^a-z0-9]+", str(value or "").lower())
+        for token in re.split(r"[^a-z0-9]+", text)
         if token and len(token) >= 2
     }
 
@@ -1220,6 +1276,18 @@ def _parse_kbl_group_name(name: str) -> dict[str, str]:
     }
 
 
+def _parse_kbl_named_endpoints(base_name: str) -> tuple[str, str] | None:
+    text = str(base_name or "").strip()
+    if not text or ":" not in text:
+        return None
+    left, right = text.split(":", 1)
+    start = str(left or "").strip()
+    end = str(right or "").strip()
+    if not start or not end:
+        return None
+    return start, end
+
+
 def _build_ap_group_candidates(result: KiCadScanResult) -> None:
     result.ap_group_candidates.clear()
 
@@ -1381,8 +1449,9 @@ def _resolve_kbl_endpoint_ap(
         floor_plan_id = str(point.get("floor_plan_id", "") or "").strip()
         if not point_id:
             continue
-        point_norm = _normalize_match_text(point_name)
-        if point_norm not in target_forms:
+        point_norm_name = _normalize_match_text(point_name)
+        point_norm_id = _normalize_match_text(point_id)
+        if point_norm_name not in target_forms and point_norm_id not in target_forms:
             continue
         matches.append(
             KiCadApMatch(
@@ -1453,10 +1522,35 @@ def _resolve_kbl_label_endpoints(
     elec_points: Iterable[dict[str, Any]],
 ) -> tuple[str, str, list[KiCadApMatch], str, str, list[KiCadApMatch]]:
     primary_name = _strip_kbl_prefix(candidate.base_name or candidate.pin_name_raw)
-    start_ap_id, start_ap_status, start_ap_matches = _resolve_kbl_label_endpoint_ap(
+    primary_start_ap_id, primary_start_ap_status, primary_start_ap_matches = _resolve_kbl_label_endpoint_ap(
         primary_name,
         elec_points,
     )
+
+    start_ap_id = primary_start_ap_id
+    start_ap_status = primary_start_ap_status
+    start_ap_matches = primary_start_ap_matches
+
+    named_endpoints = _parse_kbl_named_endpoints(primary_name)
+    if named_endpoints is not None:
+        named_start, named_end = named_endpoints
+        named_start_id, named_start_status, named_start_matches = _resolve_kbl_endpoint_ap(named_start, elec_points)
+        named_end_id, named_end_status, named_end_matches = _resolve_kbl_endpoint_ap(named_end, elec_points)
+
+        if named_start_status == "matched":
+            start_ap_id = named_start_id
+            start_ap_status = named_start_status
+            start_ap_matches = named_start_matches
+
+        if start_ap_status == "matched" and named_end_status == "matched":
+            return (
+                start_ap_id,
+                start_ap_status,
+                start_ap_matches,
+                named_end_id,
+                named_end_status,
+                named_end_matches,
+            )
 
     local_end_id, local_end_status, local_end_matches = _resolve_kbl_label_local_group_counterpart(
         candidate,
@@ -1848,6 +1942,11 @@ def _build_kbl_endpoint_diagnostic(
         if group_name:
             geom_text += f" ({group_name})"
         parts.append(geom_text)
+    elif source == "kbl_name":
+        if group_name:
+            parts.append(f"Quelle: KBL-Name-Endpunkt ({group_name})")
+        else:
+            parts.append("Quelle: KBL-Name-Endpunkt")
     elif source == "kbl_label":
         parts.append("Quelle: KBL-Label (ohne direkte Bus-Endpunktgeometrie)")
 

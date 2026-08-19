@@ -339,7 +339,10 @@ class AppWindow(QMainWindow):
 
         import_menu = bar.addMenu("&Import")
         self._add_action(import_menu, "Aus HRP importieren…", self._import_hrp_elements)
-        self._add_action(import_menu, "KiCad-Kabel aus Schaltplan…", self._import_kicad_cables)
+        kicad_menu = import_menu.addMenu("KiCad-Import…")
+        self._add_action(kicad_menu, "AP + Kabel", self._import_kicad_ap_and_cables)
+        self._add_action(kicad_menu, "Nur AP", self._import_kicad_only_aps)
+        self._add_action(kicad_menu, "Nur Kabel", self._import_kicad_only_cables)
 
         help_menu = bar.addMenu("&Hilfe")
         self._add_action(help_menu, "Über HRouting…", self._show_about)
@@ -6269,7 +6272,23 @@ class AppWindow(QMainWindow):
         layout.addWidget(bb)
         dialog.exec()
 
+    def _import_kicad_ap_and_cables(self) -> None:
+        self._import_kicad_workflow(import_aps=True, import_cables=True)
+
+    def _import_kicad_only_aps(self) -> None:
+        self._import_kicad_workflow(import_aps=True, import_cables=False)
+
+    def _import_kicad_only_cables(self) -> None:
+        self._import_kicad_workflow(import_aps=False, import_cables=True)
+
     def _import_kicad_cables(self) -> None:
+        """Backward-compatible alias for tests/extensions."""
+        self._import_kicad_ap_and_cables()
+
+    def _import_kicad_workflow(self, import_aps: bool, import_cables: bool) -> None:
+        if not import_aps and not import_cables:
+            return
+
         start_dir = str(self._project_path.parent) if self._project_path else ""
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -6289,15 +6308,20 @@ class AppWindow(QMainWindow):
         if hasattr(self, "_update_elec_point_room_assignments"):
             self._update_elec_point_room_assignments()
 
-        if (
-            not scan_result.ap_group_candidates
-            and not scan_result.kbl_bus_candidates
-            and not any(
-                str(getattr(c, "pin_name_raw", "") or "").strip().upper().startswith("KBL_")
-                and str(getattr(c, "spec_raw", "") or "").strip()
-                for c in scan_result.candidates.values()
-            )
-        ):
+        has_ap_candidates = bool(scan_result.ap_group_candidates)
+        has_cable_candidates = bool(scan_result.kbl_bus_candidates) or any(
+            str(getattr(c, "pin_name_raw", "") or "").strip().upper().startswith("KBL_")
+            and str(getattr(c, "spec_raw", "") or "").strip()
+            for c in scan_result.candidates.values()
+        )
+
+        if import_aps and import_cables and not has_ap_candidates and not has_cable_candidates:
+            QMessageBox.information(self, "KiCad-Import", "Keine importierbaren AP-/Kabelkandidaten gefunden.")
+            return
+        if import_aps and not import_cables and not has_ap_candidates:
+            QMessageBox.information(self, "KiCad-Import", "Keine importierbaren AP-Kandidaten gefunden.")
+            return
+        if import_cables and not import_aps and not has_cable_candidates:
             QMessageBox.information(self, "KiCad-Import", "Keine importierbaren Kabelkandidaten gefunden.")
             return
 
@@ -6307,48 +6331,77 @@ class AppWindow(QMainWindow):
             elec_points=self._kicad_elec_points_payload(),
         )
 
-        ap_previews = self._build_kicad_ap_phase_previews(previews)
-        approved_ap_names = {preview.cable_name.strip().casefold() for preview in ap_previews if preview.cable_name.strip()}
-        if ap_previews:
-            ap_dialog = KiCadImportDialog(
-                scan_result,
-                ap_previews,
-                phase="aps",
-                floorplan_choices=self._collect_floorplan_choices(),
-                room_choices_by_floorplan=self._collect_room_choices_by_floorplan(),
-                initial_ap_assignments=self._build_initial_textfield_ap_assignments(scan_result, ap_previews),
-                parent=self,
-            )
-            if ap_dialog.exec() != QDialog.Accepted:
-                return
-            approved_ap_keys = set(ap_dialog.selected_keys())
-            valid_ap_keys = {str(preview.candidate_key) for preview in ap_previews}
-            approved_ap_keys &= valid_ap_keys
-            if not approved_ap_keys and valid_ap_keys:
-                # Backward compatibility for non-phase-aware dialog stubs in tests.
-                approved_ap_keys = set(valid_ap_keys)
+        undo_pushed = False
+        ap_summary = {
+            "created": 0,
+            "reused": 0,
+            "approved_ap_names": set(),
+        }
+
+        if import_aps:
+            ap_previews = self._build_kicad_ap_phase_previews(previews)
             approved_ap_names = {
                 preview.cable_name.strip().casefold()
                 for preview in ap_previews
-                if preview.candidate_key in approved_ap_keys and preview.cable_name.strip()
+                if preview.cable_name.strip()
             }
-            self._push_undo()
-            selected_ap_assignments = {}
-            if hasattr(ap_dialog, "selected_ap_assignments"):
-                selected_ap_assignments = ap_dialog.selected_ap_assignments() or {}
-            ap_summary = self._apply_kicad_ap_import(
-                scan_result,
-                approved_ap_keys,
-                selected_ap_assignments,
+            if ap_previews:
+                ap_dialog = KiCadImportDialog(
+                    scan_result,
+                    ap_previews,
+                    phase="aps",
+                    floorplan_choices=self._collect_floorplan_choices(),
+                    room_choices_by_floorplan=self._collect_room_choices_by_floorplan(),
+                    initial_ap_assignments=self._build_initial_textfield_ap_assignments(scan_result, ap_previews),
+                    parent=self,
+                )
+                if ap_dialog.exec() != QDialog.Accepted:
+                    return
+                approved_ap_keys = set(ap_dialog.selected_keys())
+                valid_ap_keys = {str(preview.candidate_key) for preview in ap_previews}
+                approved_ap_keys &= valid_ap_keys
+                if not approved_ap_keys and valid_ap_keys:
+                    # Backward compatibility for non-phase-aware dialog stubs in tests.
+                    approved_ap_keys = set(valid_ap_keys)
+                approved_ap_names = {
+                    preview.cable_name.strip().casefold()
+                    for preview in ap_previews
+                    if preview.candidate_key in approved_ap_keys and preview.cable_name.strip()
+                }
+                self._push_undo()
+                undo_pushed = True
+                selected_ap_assignments = {}
+                if hasattr(ap_dialog, "selected_ap_assignments"):
+                    selected_ap_assignments = ap_dialog.selected_ap_assignments() or {}
+                ap_summary = self._apply_kicad_ap_import(
+                    scan_result,
+                    approved_ap_keys,
+                    selected_ap_assignments,
+                )
+            else:
+                ap_summary = {
+                    "created": 0,
+                    "reused": 0,
+                    "approved_ap_names": approved_ap_names,
+                }
+
+        if not import_cables:
+            self.statusBar().showMessage(
+                (
+                    f"KiCad-Import (Nur AP): AP neu {ap_summary['created']}, "
+                    f"AP wiederverwendet {ap_summary['reused']}"
+                ),
+                5000,
             )
-        else:
-            approved_ap_keys = set()
-            self._push_undo()
-            ap_summary = {
-                "created": 0,
-                "reused": 0,
-                "approved_ap_names": approved_ap_names,
-            }
+            QMessageBox.information(
+                self,
+                "KiCad-Import",
+                (
+                    f"AP neu angelegt: {ap_summary['created']}\n"
+                    f"AP wiederverwendet: {ap_summary['reused']}"
+                ),
+            )
+            return
 
         phase_two_previews = build_import_preview(
             scan_result,
@@ -6408,6 +6461,10 @@ class AppWindow(QMainWindow):
                 "\n".join(detail_lines),
             )
             return
+
+        if not undo_pushed:
+            self._push_undo()
+            undo_pushed = True
 
         dialog = KiCadImportDialog(
             scan_result,

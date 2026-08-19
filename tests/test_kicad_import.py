@@ -569,6 +569,114 @@ def test_build_import_preview_maps_kbl_bus_endpoint_when_ap_prefix_differs(tmp_p
     assert preview.end_ap_id == "AP-2"
 
 
+def test_build_import_preview_maps_kbl_bus_endpoints_from_name_pattern(tmp_path):
+    root = tmp_path / "kbl_named_endpoints_test.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-named")
+    (rectangle (start 0 0) (end 10 10) (uuid "rect-a"))
+    (rectangle (start 90 0) (end 100 10) (uuid "rect-b"))
+    (bus
+        (pts (xy 5 5) (xy 95 5))
+        (uuid "bus-1")
+    )
+    (group "AP_FallbackA" (uuid "group-ap-1") (members "rect-a"))
+    (group "AP_FallbackB" (uuid "group-ap-2") (members "rect-b"))
+    (group "KBL_AP_SD2_SPK:AP_SD3_SPK{3x1_5}" (uuid "group-kbl") (members "bus-1"))
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "AP_SD2_SPK", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "AP_SD3_SPK", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-3", "name": "FallbackA", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-4", "name": "FallbackB", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    kbl_previews = [preview for preview in previews if preview.source == "kbl_bus"]
+    assert len(kbl_previews) == 1
+    preview = kbl_previews[0]
+    assert preview.cable_name == "AP_SD2_SPK:AP_SD3_SPK"
+    assert preview.start_ap_status == "matched"
+    assert preview.end_ap_status == "matched"
+    assert preview.start_ap_id == "AP-1"
+    assert preview.end_ap_id == "AP-2"
+
+
+def test_build_import_preview_maps_kbl_bus_endpoints_from_name_pattern_via_point_ids(tmp_path):
+    root = tmp_path / "kbl_named_endpoints_via_ids_test.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-named-ids")
+    (rectangle (start 0 0) (end 10 10) (uuid "rect-a"))
+    (rectangle (start 90 0) (end 100 10) (uuid "rect-b"))
+    (bus
+        (pts (xy 5 5) (xy 95 5))
+        (uuid "bus-1")
+    )
+    (group "AP_FallbackA" (uuid "group-ap-1") (members "rect-a"))
+    (group "AP_FallbackB" (uuid "group-ap-2") (members "rect-b"))
+    (group "KBL_AP_SD_Küche2:AP_SD_Küche3{3x1_5}" (uuid "group-kbl") (members "bus-1"))
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP_SD_KUECHE2", "name": "Steckdose A", "floor_plan_id": "grundriss-1"},
+            {"id": "AP_SD_KUECHE3", "name": "Steckdose B", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    preview = next(p for p in previews if p.source == "kbl_bus")
+    assert preview.start_ap_status == "matched"
+    assert preview.end_ap_status == "matched"
+    assert preview.start_ap_id == "AP_SD_KUECHE2"
+    assert preview.end_ap_id == "AP_SD_KUECHE3"
+
+
+def test_build_import_preview_maps_kbl_label_endpoints_from_name_pattern(tmp_path):
+    root = tmp_path / "kbl_label_named_endpoints_test.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-label-named")
+    (label "KBL_AP_SD2_SPK:AP_SD3_SPK{3x1_5}"
+        (at 10 10 0)
+        (uuid "label-kbl")
+    )
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "AP_SD2_SPK", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "AP_SD3_SPK", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    preview = next(p for p in previews if p.source == "kbl_label")
+    assert preview.cable_name == "AP_SD2_SPK:AP_SD3_SPK"
+    assert preview.start_ap_group == "AP_SD2_SPK"
+    assert preview.end_ap_group == "AP_SD3_SPK"
+    assert preview.start_ap_status == "matched"
+    assert preview.end_ap_status == "matched"
+    assert preview.start_ap_id == "AP-1"
+    assert preview.end_ap_id == "AP-2"
+
+
 def test_build_import_preview_resolves_kbl_label_counterpart_across_hierarchy(tmp_path):
     root = tmp_path / "kbl_label_hierarchy_test.kicad_sch"
     child = tmp_path / "child.kicad_sch"
