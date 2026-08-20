@@ -677,6 +677,40 @@ def test_build_import_preview_maps_kbl_label_endpoints_from_name_pattern(tmp_pat
     assert preview.end_ap_id == "AP-2"
 
 
+def test_build_import_preview_maps_kbl_label_complex_eth_pattern_endpoints(tmp_path):
+    root = tmp_path / "kbl_label_eth_pattern_test.kicad_sch"
+    root.write_text(
+        """(kicad_sch
+    (uuid "project-kbl-label-eth")
+    (label "KBL_ETH_AP_UV_Zahlerschrank:AP_Smarthome_Verteilung{2xCAT6}"
+        (at 10 10 0)
+        (uuid "label-kbl")
+    )
+)""",
+        encoding="utf-8",
+    )
+
+    result = scan_kicad_project(root)
+    previews = build_import_preview(
+        result,
+        existing_cables=[],
+        elec_points=[
+            {"id": "AP-1", "name": "AP_UV_Zahlerschrank", "floor_plan_id": "grundriss-1"},
+            {"id": "AP-2", "name": "AP_Smarthome_Verteilung", "floor_plan_id": "grundriss-1"},
+        ],
+    )
+
+    preview = next(p for p in previews if p.source == "kbl_label")
+    assert preview.cable_name == "ETH_AP_UV_Zahlerschrank:AP_Smarthome_Verteilung"
+    assert preview.cable_type == "2xCAT6"
+    assert preview.start_ap_group == "ETH_AP_UV_Zahlerschrank"
+    assert preview.end_ap_group == "AP_Smarthome_Verteilung"
+    assert preview.start_ap_status == "matched"
+    assert preview.end_ap_status == "matched"
+    assert preview.start_ap_id == "AP-1"
+    assert preview.end_ap_id == "AP-2"
+
+
 def test_build_import_preview_resolves_kbl_label_counterpart_across_hierarchy(tmp_path):
     root = tmp_path / "kbl_label_hierarchy_test.kicad_sch"
     child = tmp_path / "child.kicad_sch"

@@ -411,8 +411,8 @@ def build_import_preview(
         named_source_used = False
         if named_endpoints is not None:
             hint_start, hint_end = named_endpoints
-            hint_start_id, hint_start_status, hint_start_matches = _resolve_kbl_endpoint_ap(hint_start, elec_points)
-            hint_end_id, hint_end_status, hint_end_matches = _resolve_kbl_endpoint_ap(hint_end, elec_points)
+            hint_start_id, hint_start_status, hint_start_matches = _resolve_kbl_hint_endpoint_ap(hint_start, elec_points)
+            hint_end_id, hint_end_status, hint_end_matches = _resolve_kbl_hint_endpoint_ap(hint_end, elec_points)
 
             if hint_start_status == "matched":
                 start_ap_group = hint_start
@@ -1288,6 +1288,69 @@ def _parse_kbl_named_endpoints(base_name: str) -> tuple[str, str] | None:
     return start, end
 
 
+def _resolve_kbl_hint_endpoint_ap(
+    hint_name: str,
+    elec_points: Iterable[dict[str, Any]],
+) -> tuple[str, str, list[KiCadApMatch]]:
+    """Resolve Start/Ende endpoint hints using strict token-scoring (for explicit KBL_Start:Ende format).
+    
+    This matcher is stricter than the fuzzy fallback in _resolve_kbl_endpoint_ap,
+    using only token overlap scoring to avoid over-matching on multi-component names.
+    Falls back to exact ID matching if no token matches found.
+    """
+    if not hint_name:
+        return "", "unmatched", []
+
+    hint_tokens = _match_tokens(hint_name)
+    if not hint_tokens:
+        return "", "unmatched", []
+
+    matches: list[tuple[int, str, dict[str, str]]] = []
+    for point in elec_points:
+        point_id = str(point.get("id", "") or point.get("point_id", "") or "").strip()
+        point_name = str(point.get("name", "") or "").strip()
+        floor_plan_id = str(point.get("floor_plan_id", "") or "").strip()
+        if not point_id:
+            continue
+
+        # Check token overlap in both name and ID
+        point_name_tokens = _match_tokens(point_name)
+        point_id_tokens = _match_tokens(point_id)
+        
+        # Try token overlap in both fields
+        name_overlap = len(hint_tokens & point_name_tokens)
+        id_overlap = len(hint_tokens & point_id_tokens)
+        overlap = max(name_overlap, id_overlap)
+
+        if overlap > 0:
+            score = overlap * 100 // len(hint_tokens)
+            matches.append((overlap, point_name.lower(), {"id": point_id, "name": point_name, "floor_plan_id": floor_plan_id, "score": score}))
+
+    if not matches:
+        return "", "unmatched", []
+
+    matches.sort(key=lambda item: (-item[0], item[1]))
+    results = []
+    best_overlap = matches[0][0]
+
+    for overlap, _, point_data in matches:
+        if overlap < best_overlap:
+            break
+        results.append(
+            KiCadApMatch(
+                point_id=point_data["id"],
+                point_name=point_data["name"],
+                floor_plan_id=point_data["floor_plan_id"],
+                score=point_data["score"],
+                reason="Start/End Endpoint Hint",
+            )
+        )
+
+    if len(results) == 1:
+        return results[0].point_id, "matched", results
+    return "", "ambiguous", results
+
+
 def _build_ap_group_candidates(result: KiCadScanResult) -> None:
     result.ap_group_candidates.clear()
 
@@ -1534,8 +1597,8 @@ def _resolve_kbl_label_endpoints(
     named_endpoints = _parse_kbl_named_endpoints(primary_name)
     if named_endpoints is not None:
         named_start, named_end = named_endpoints
-        named_start_id, named_start_status, named_start_matches = _resolve_kbl_endpoint_ap(named_start, elec_points)
-        named_end_id, named_end_status, named_end_matches = _resolve_kbl_endpoint_ap(named_end, elec_points)
+        named_start_id, named_start_status, named_start_matches = _resolve_kbl_hint_endpoint_ap(named_start, elec_points)
+        named_end_id, named_end_status, named_end_matches = _resolve_kbl_hint_endpoint_ap(named_end, elec_points)
 
         if named_start_status == "matched":
             start_ap_id = named_start_id
