@@ -2876,8 +2876,11 @@ class MainWindow(QMainWindow):
         self.canvas.set_color(point_id, QColor(params.get("color", "#4fc3f7")))
         self.canvas._label_map[point_id] = str(params.get("name", point_id) or point_id)
         self.canvas._elec_points[point_id] = QPointF(position)
+        changed_cables = self.canvas.sync_connected_elec_cable_endpoints(point_id)
         self.canvas.update()
         self.canvas.elec_point_placed.emit(point_id)
+        for cable_id in changed_cables:
+            self.canvas.elec_cable_changed.emit(cable_id)
 
     def _resolve_schema_cable_floorplan(self, start_ap_id: str, end_ap_id: str) -> str:
         for point_id in (start_ap_id, end_ap_id):

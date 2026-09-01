@@ -162,6 +162,7 @@ class AppWindow(QMainWindow):
         self._pdf_export_meta: dict[str, str] = {}
         self._annotation_live_value_cache: dict[str, tuple] = {}
         self._pending_annotation_refresh_id: str = ""
+        self._context_menu_batch_ids: list[str] = []
         self._annotation_live_refresh_timer = QTimer(self)
         self._annotation_live_refresh_timer.setSingleShot(True)
         self._annotation_live_refresh_timer.setInterval(33)
@@ -568,6 +569,23 @@ class AppWindow(QMainWindow):
                 cable.geom["cable_start_ap"] = start_ap_id
                 cable.geom["cable_end_ap"] = end_ap_id
                 self._rebuild_schema_cable_geometry(cable, start_ap_id, end_ap_id)
+                if not defer_updates:
+                    self.canvas.update()
+
+        if key in ("type", "type_label_visible") and element_id in self._document.elements.get("elec_cables", {}):
+            cable = self._document.elements["elec_cables"].get(element_id)
+            if cable is not None:
+                cable_type = str(cable.data.get("type") or cable.data.get("cable_type") or "").strip()
+                cable.cable_type = cable_type
+                cable.geom["elec_cable_type_text"] = cable_type
+                cable.geom["elec_cable_type_label_visible"] = bool(
+                    cable.geom.get("elec_cable_type_label_visible", False)
+                )
+                self.canvas.set_elec_cable_type_text(element_id, cable_type)
+                self.canvas.set_elec_cable_type_label_visible(
+                    element_id,
+                    bool(cable.geom.get("elec_cable_type_label_visible", False)),
+                )
                 if not defer_updates:
                     self.canvas.update()
 
@@ -2013,8 +2031,25 @@ class AppWindow(QMainWindow):
     def _run_context_action(self, action_id: str, element_id: str, kind: str) -> None:
         selected_ids = self.navigator.selected_ids()
         is_batch_selection = len(selected_ids) > 1 and element_id in selected_ids
+        batch_action_ids = {
+            "batch_label_show",
+            "batch_label_hide",
+            "batch_label_size",
+            "batch_cable_type_show",
+            "batch_cable_type_hide",
+        }
 
-        if element_id and not (is_batch_selection and action_id == "delete"):
+        if element_id and not (
+            is_batch_selection
+            and action_id in {
+                "delete",
+                "batch_label_show",
+                "batch_label_hide",
+                "batch_label_size",
+                "batch_cable_type_show",
+                "batch_cable_type_hide",
+            }
+        ):
             self.navigator.select(element_id)
             self.canvas.set_selected_item(element_id)
             if self._document.get(element_id) is not None:
@@ -2047,6 +2082,39 @@ class AppWindow(QMainWindow):
         if action_id == "delete":
             self._delete_selected()
             return
+        if action_id == "batch_label_show":
+            source_ids = list(self._context_menu_batch_ids) or selected_ids
+            self._batch_set_label_visibility(self._batch_label_target_ids(source_ids), True)
+            self._context_menu_batch_ids = []
+            return
+        if action_id == "batch_label_hide":
+            source_ids = list(self._context_menu_batch_ids) or selected_ids
+            self._batch_set_label_visibility(self._batch_label_target_ids(source_ids), False)
+            self._context_menu_batch_ids = []
+            return
+        if action_id == "batch_label_size":
+            source_ids = list(self._context_menu_batch_ids) or selected_ids
+            self._batch_set_label_size(self._batch_label_target_ids(source_ids))
+            self._context_menu_batch_ids = []
+            return
+        if action_id == "batch_cable_type_show":
+            source_ids = list(self._context_menu_batch_ids) or selected_ids
+            self._batch_set_cable_type_label_visibility(
+                self._batch_cable_type_target_ids(source_ids),
+                True,
+            )
+            self._context_menu_batch_ids = []
+            return
+        if action_id == "batch_cable_type_hide":
+            source_ids = list(self._context_menu_batch_ids) or selected_ids
+            self._batch_set_cable_type_label_visibility(
+                self._batch_cable_type_target_ids(source_ids),
+                False,
+            )
+            self._context_menu_batch_ids = []
+            return
+        if action_id not in batch_action_ids:
+            self._context_menu_batch_ids = []
         if action_id == "draw_cable_from_ap" and element_id:
             self._add_elec_cable_from_ap(element_id)
             return
@@ -2058,15 +2126,47 @@ class AppWindow(QMainWindow):
 
         menu = QMenu(self)
         action_map: dict[QAction, str] = {}
+        self._context_menu_batch_ids = []
 
         selected_ids = self.navigator.selected_ids()
         batch_ids = selected_ids if len(selected_ids) > 1 and element_id in selected_ids else []
+        batch_label_ids = self._batch_label_target_ids(batch_ids)
+        batch_cable_type_ids = self._batch_cable_type_target_ids(batch_ids)
 
         if batch_ids:
+            self._context_menu_batch_ids = list(batch_ids)
             batch_label = f"{len(batch_ids)} Elemente löschen"
             delete_action = menu.addAction(batch_label)
             delete_action.setEnabled(True)
             action_map[delete_action] = "delete"
+
+            if batch_label_ids:
+                menu.addSeparator()
+                label_on = menu.addAction(f"Beschriftung anzeigen ({len(batch_label_ids)})")
+                label_on.setEnabled(True)
+                action_map[label_on] = "batch_label_show"
+
+                label_off = menu.addAction(f"Beschriftung ausblenden ({len(batch_label_ids)})")
+                label_off.setEnabled(True)
+                action_map[label_off] = "batch_label_hide"
+
+                label_size = menu.addAction(f"Beschriftungsgröße setzen… ({len(batch_label_ids)})")
+                label_size.setEnabled(True)
+                action_map[label_size] = "batch_label_size"
+
+            if batch_cable_type_ids:
+                menu.addSeparator()
+                cable_type_on = menu.addAction(
+                    f"Kabeltyp im Plan anzeigen ({len(batch_cable_type_ids)})"
+                )
+                cable_type_on.setEnabled(True)
+                action_map[cable_type_on] = "batch_cable_type_show"
+
+                cable_type_off = menu.addAction(
+                    f"Kabeltyp im Plan ausblenden ({len(batch_cable_type_ids)})"
+                )
+                cable_type_off.setEnabled(True)
+                action_map[cable_type_off] = "batch_cable_type_hide"
 
             menu.addSeparator()
             undo_action = menu.addAction("Rückgängig")
@@ -2079,6 +2179,7 @@ class AppWindow(QMainWindow):
             pos_for_exec = global_pos.toPoint() if hasattr(global_pos, "toPoint") else QPoint(global_pos)
             chosen = menu.exec(pos_for_exec)
             if chosen is None:
+                self._context_menu_batch_ids = []
                 return
             action_id = action_map.get(chosen)
             if action_id:
@@ -2102,6 +2203,7 @@ class AppWindow(QMainWindow):
         pos_for_exec = global_pos.toPoint() if hasattr(global_pos, "toPoint") else QPoint(global_pos)
         chosen = menu.exec(pos_for_exec)
         if chosen is None:
+            self._context_menu_batch_ids = []
             return
         action_id = action_map.get(chosen)
         if action_id:
@@ -2109,6 +2211,135 @@ class AppWindow(QMainWindow):
 
     def _on_navigator_context(self, element_id: str, kind: str, global_pos) -> None:
         self._open_context_menu(element_id, kind, global_pos)
+
+    def _batch_label_target_ids(self, candidate_ids: list[str]) -> list[str]:
+        targets: list[str] = []
+        for element_id in candidate_ids:
+            if _parse_helper_nav_id(element_id) is not None:
+                continue
+            if _parse_measurement_nav_id(element_id) is not None:
+                continue
+            if element_id in self._document.floorplans or element_id in self._document.furniture:
+                continue
+            element = self._document.get(element_id)
+            if element is None:
+                continue
+            targets.append(element_id)
+        return targets
+
+    def _batch_set_label_visibility(self, element_ids: list[str], visible: bool) -> None:
+        if not element_ids:
+            self.statusBar().showMessage("Keine passenden Elemente für Beschriftungs-Sichtbarkeit", 2500)
+            return
+
+        self._push_undo()
+        touched = 0
+        for element_id in element_ids:
+            element = self._document.get(element_id)
+            if element is None:
+                continue
+            element.label_visible = bool(visible)
+            self._document.element_changed.emit(element_id)
+            touched += 1
+
+        if not touched:
+            return
+        self.properties.refresh_current()
+        self.canvas.update()
+        self._refresh_schema_windows()
+        self._mark_dirty()
+        self.statusBar().showMessage(
+            f"Beschriftung für {touched} Elemente {'angezeigt' if visible else 'ausgeblendet'}",
+            3000,
+        )
+
+    def _batch_set_label_size(self, element_ids: list[str]) -> None:
+        if not element_ids:
+            self.statusBar().showMessage("Keine passenden Elemente für Beschriftungsgröße", 2500)
+            return
+
+        first = self._document.get(element_ids[0])
+        current = 12.0
+        if first is not None:
+            try:
+                current = float(first.label_size or 12.0)
+            except (TypeError, ValueError):
+                current = 12.0
+
+        value, ok = QInputDialog.getDouble(
+            self,
+            "Beschriftungsgröße",
+            "Neue Beschriftungsgröße (pt):",
+            current,
+            1.0,
+            200.0,
+            1,
+        )
+        if not ok:
+            return
+
+        self._push_undo()
+        touched = 0
+        for element_id in element_ids:
+            element = self._document.get(element_id)
+            if element is None:
+                continue
+            element.label_size = float(value)
+            self._document.element_changed.emit(element_id)
+            touched += 1
+
+        if not touched:
+            return
+        self.properties.refresh_current()
+        self.canvas.update()
+        self._refresh_schema_windows()
+        self._mark_dirty()
+        self.statusBar().showMessage(f"Beschriftungsgröße für {touched} Elemente auf {value:.1f} pt gesetzt", 3000)
+
+    def _batch_cable_type_target_ids(self, candidate_ids: list[str]) -> list[str]:
+        targets: list[str] = []
+        for element_id in candidate_ids:
+            if element_id in self._document.elements.get("elec_cables", {}):
+                targets.append(element_id)
+        return targets
+
+    def _batch_set_cable_type_label_visibility(self, cable_ids: list[str], visible: bool) -> None:
+        if not cable_ids:
+            self.statusBar().showMessage("Keine Kabel für Kabeltyp-Anzeige ausgewählt", 2500)
+            return
+
+        self._push_undo()
+        touched = 0
+        for cable_id in cable_ids:
+            cable = self._document.elements.get("elec_cables", {}).get(cable_id)
+            if cable is None:
+                continue
+            cable_type = str(
+                cable.geom.get("elec_cable_type_text")
+                or cable.data.get("type")
+                or cable.data.get("cable_type")
+                or cable.cable_type
+                or ""
+            ).strip()
+            if cable_type:
+                cable.cable_type = cable_type
+                cable.geom["elec_cable_type_text"] = cable_type
+                self.canvas.set_elec_cable_type_text(cable_id, cable_type)
+            cable.geom["elec_cable_type_label_visible"] = bool(visible)
+            self.canvas.set_elec_cable_type_label_visible(cable_id, bool(visible))
+            self._document.element_changed.emit(cable_id)
+            touched += 1
+
+        if not touched:
+            return
+        self.properties.refresh_current()
+        self.canvas.update()
+        self._refresh_schema_windows()
+        self._mark_dirty()
+        self.statusBar().showMessage(
+            f"Kabeltyp-Beschriftung für {touched} Kabel {'angezeigt' if visible else 'ausgeblendet'}",
+            3000,
+        )
 
     def _on_navigator_floorplan_order_changed(self, order: list[str]) -> None:
         if self._document is None:

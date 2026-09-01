@@ -1886,6 +1886,9 @@ def _create_mcp(window: MainWindow, bridge):
                 ny = y if y is not None else (
                     old.y() if old else 0)
                 window.canvas._elec_points[point_id] = QPointF(nx, ny)
+                changed_cables = window.canvas.sync_connected_elec_cable_endpoints(point_id)
+                for cable_id in changed_cables:
+                    window.canvas.elec_cable_changed.emit(cable_id)
             if builtin_symbol is not None:
                 idx = panel.cmb_symbol.findText(builtin_symbol)
                 if idx >= 0:

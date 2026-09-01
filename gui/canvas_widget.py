@@ -2433,6 +2433,55 @@ class CanvasWidget(QWidget):
         return (self._cable_start_ap.get(cable_id, ""),
                 self._cable_end_ap.get(cable_id, ""))
 
+    def _resolve_cable_ap_binding(self, cable_id: str, side: str) -> str:
+        """Resolve AP binding for one cable side.
+
+        Primary source is the canvas geometry map. If missing, fall back to
+        ElecCable params (start_ap/end_ap) to keep drag behavior stable for
+        projects where legacy data only stores the params field.
+        """
+        if side == "start":
+            ap_id = str(self._cable_start_ap.get(cable_id, "") or "").strip()
+        else:
+            ap_id = str(self._cable_end_ap.get(cable_id, "") or "").strip()
+        if ap_id:
+            return ap_id
+
+        if self._document is not None:
+            cable = self._document.get(cable_id)
+            if cable is not None:
+                fallback = str(
+                    getattr(cable, "start_ap", "") if side == "start" else getattr(cable, "end_ap", "")
+                ).strip()
+                if fallback:
+                    if side == "start":
+                        self._cable_start_ap[cable_id] = fallback
+                    else:
+                        self._cable_end_ap[cable_id] = fallback
+                    return fallback
+        return ""
+
+    def sync_connected_elec_cable_endpoints(self, point_id: str) -> set[str]:
+        """Snap all cable endpoints connected to *point_id* onto the AP position."""
+        pid = str(point_id or "").strip()
+        pos = self._elec_points.get(pid)
+        if not pid or pos is None:
+            return set()
+
+        changed: set[str] = set()
+        for cid, pts in self._elec_cables.items():
+            if not pts:
+                continue
+            start_ap = self._resolve_cable_ap_binding(cid, "start")
+            end_ap = self._resolve_cable_ap_binding(cid, "end")
+            if start_ap == pid:
+                pts[0] = QPointF(pos)
+                changed.add(cid)
+            if end_ap == pid:
+                pts[-1] = QPointF(pos)
+                changed.add(cid)
+        return changed
+
     def _apply_angle_snap_supply(self, target: QPointF) -> QPointF:
         if self._snap_angle <= 0 or not self._current_supply_points:
             return target
@@ -6882,12 +6931,8 @@ class CanvasWidget(QWidget):
                         self._elec_cables[sel_id] = new_pts
 
             if moved_ap_ids:
-                for cid, ap_id in self._cable_start_ap.items():
-                    if ap_id in moved_ap_ids and cid in self._elec_cables and self._elec_cables[cid]:
-                        self._elec_cables[cid][0] = QPointF(self._elec_points[ap_id])
-                for cid, ap_id in self._cable_end_ap.items():
-                    if ap_id in moved_ap_ids and cid in self._elec_cables and self._elec_cables[cid]:
-                        self._elec_cables[cid][-1] = QPointF(self._elec_points[ap_id])
+                for ap_id in moved_ap_ids:
+                    self.sync_connected_elec_cable_endpoints(ap_id)
             
             self.update()
             return
@@ -7469,13 +7514,7 @@ class CanvasWidget(QWidget):
             ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
             pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
             self._elec_points[pid] = pt
-            # Move connected cable start/end points along with the AP
-            for cid, ap_id in self._cable_start_ap.items():
-                if ap_id == pid and cid in self._elec_cables:
-                    self._elec_cables[cid][0] = QPointF(pt)
-            for cid, ap_id in self._cable_end_ap.items():
-                if ap_id == pid and cid in self._elec_cables:
-                    self._elec_cables[cid][-1] = QPointF(pt)
+            self.sync_connected_elec_cable_endpoints(pid)
             self.update()
             return
 

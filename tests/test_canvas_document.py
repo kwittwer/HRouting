@@ -203,6 +203,36 @@ def test_dragging_route_point_persists_to_document(bound):
     assert saved[1] == [260.0, 140.0], f"Punkt nicht verschoben: {saved}"
 
 
+def test_dragging_ap_moves_cable_endpoint_with_params_fallback(bound):
+    """AP-Drag muss Kabelenden nachziehen, auch wenn nur params gebunden sind.
+
+    Regression: In einigen Projekten fehlten ``canvas.cable_start_ap`` /
+    ``canvas.cable_end_ap``-Eintraege, waehrend ``params.start_ap/end_ap``
+    gesetzt waren. Der AP galt dann als verbunden, das Kabelende bewegte sich
+    beim Drag aber nicht mit.
+    """
+    canvas, document = bound
+    cable = document.elements["elec_cables"]["EK-1"]
+
+    canvas._elec_points["AP-1"] = QPointF(100.0, 100.0)
+    canvas._elec_points["AP-2"] = QPointF(250.0, 100.0)
+    canvas._elec_cables["EK-1"] = [QPointF(100.0, 100.0), QPointF(250.0, 100.0)]
+
+    cable.start_ap = "AP-1"
+    cable.end_ap = "AP-2"
+    canvas._cable_start_ap.pop("EK-1", None)
+    canvas._cable_end_ap.pop("EK-1", None)
+
+    _mouse(canvas, "press", QPointF(100.0, 100.0))
+    assert canvas._dragging_elec_point == "AP-1"
+
+    _mouse(canvas, "move", QPointF(180.0, 140.0), ctrl=True)
+    _mouse(canvas, "release", QPointF(180.0, 140.0), ctrl=True)
+
+    saved = document.to_dict()["canvas"]["elec_cables"]["EK-1"]
+    assert saved[0] == [180.0, 140.0]
+
+
 def test_dragging_circuit_polygon_vertex_snaps_without_ctrl(bound):
     canvas, document = bound
     canvas.start_edit_polygon("HK-1")
