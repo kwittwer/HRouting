@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import math
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 
@@ -19,18 +20,22 @@ from PySide6.QtCore import QPointF, QRectF, QDateTime, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QDialogButtonBox,
     QDialog,
     QFileDialog,
+    QHBoxLayout,
+    QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressDialog,
-    QInputDialog,
     QMenu,
     QToolBar,
     QCheckBox,
     QDoubleSpinBox,
     QPushButton,
     QComboBox,
+    QStyle,
     QTabBar,
     QVBoxLayout,
     QWidget,
@@ -129,6 +134,45 @@ def _parse_measurement_nav_id(nav_id: str) -> tuple[str, int] | None:
     return None
 
 
+class _GitCommitDialog(QDialog):
+    def __init__(self, default_message: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Git Commit & Push")
+        self.resize(720, 420)
+        self.setMinimumSize(640, 360)
+
+        layout = QVBoxLayout(self)
+
+        intro = QLabel("Commit-Nachricht", self)
+        layout.addWidget(intro)
+
+        self._message_edit = QPlainTextEdit(self)
+        self._message_edit.setPlainText(default_message)
+        self._message_edit.setPlaceholderText("Beschreibe kurz, was sich am Projekt geändert hat.")
+        layout.addWidget(self._message_edit, 1)
+
+        options_row = QHBoxLayout()
+        self._push_checkbox = QCheckBox("Commit direkt auf den konfigurierten Upstream pushen", self)
+        self._push_checkbox.setChecked(True)
+        options_row.addWidget(self._push_checkbox)
+        options_row.addStretch(1)
+        layout.addLayout(options_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._message_edit.selectAll()
+        self._message_edit.setFocus()
+
+    def commit_message(self) -> str:
+        return self._message_edit.toPlainText().strip()
+
+    def push_after_commit(self) -> bool:
+        return self._push_checkbox.isChecked()
+
+
 class AppWindow(QMainWindow):
     """Dock-basiertes Hauptfenster mit Workspace-Tabs."""
 
@@ -153,6 +197,8 @@ class AppWindow(QMainWindow):
         self._undo_group_timer.timeout.connect(self._finish_undo_group)
         self._undo_action: QAction | None = None
         self._redo_action: QAction | None = None
+        self._save_git_action: QAction | None = None
+        self._git_commit_push_action: QAction | None = None
         self._recent_menu: QMenu | None = None
         self._grid_toolbar: QToolBar | None = None
         self._elec_schema_window: ElecSchemaWindow | None = None
@@ -173,7 +219,9 @@ class AppWindow(QMainWindow):
         self._build_central()
         self._build_docks()
         self._build_menus()
+        self._refresh_git_toolbar_actions()
         self._connect_signals()
+        self._update_git_action_state()
 
         self._restore_layout()
         self._apply_workspace(layout_store.last_workspace(DEFAULT_WORKSPACE_ID))
@@ -287,6 +335,12 @@ class AppWindow(QMainWindow):
         self._add_action(file_menu, "Speichern", self._save_project, QKeySequence.Save)
         self._add_action(
             file_menu, "Speichern unter…", self._save_project_as, QKeySequence.SaveAs
+        )
+        self._save_git_action = self._add_action(
+            file_menu, "Speichern, Commit & Push…", self._save_and_git_commit_push
+        )
+        self._git_commit_push_action = self._add_action(
+            file_menu, "Commit & Push…", self._git_commit_push_project
         )
         file_menu.addSeparator()
         self._add_action(file_menu, "Projekt reparieren & bereinigen…", self._repair_project)
@@ -3183,6 +3237,7 @@ class AppWindow(QMainWindow):
         self._project_path = None
         self._dirty = False
         self._set_document(Document())
+        self._update_git_action_state()
         self.log.info("Neues Projekt angelegt")
 
     def _open_project(self) -> None:
@@ -3205,6 +3260,7 @@ class AppWindow(QMainWindow):
         self._dirty = False
         self._set_document(document)
         self._remember_project_path(self._project_path)
+        self._update_git_action_state()
         self.log.success(f"Projekt geladen: {path}")
         return True
 
@@ -3221,8 +3277,185 @@ class AppWindow(QMainWindow):
         self._dirty = False
         self._remember_project_path(self._project_path)
         self._update_title()
+        self._update_git_action_state()
         self.log.success(f"Gespeichert: {self._project_path}")
         return True
+
+    def _save_and_git_commit_push(self) -> None:
+        if not self._save_project():
+            return
+        self._git_commit_push_project(prompt_save=False)
+
+    def _git_commit_push_project(self, checked: bool = False, *, prompt_save: bool = True) -> bool:
+        del checked
+        project_path = self._project_path
+        if project_path is None:
+            QMessageBox.information(self, "Git", "Projekt noch nicht gespeichert.")
+            return False
+        if prompt_save and self._dirty and not self._confirm_discard():
+            return False
+
+        repo_root = self._find_git_repo_root(project_path)
+        if repo_root is None:
+            QMessageBox.information(
+                self,
+                "Git",
+                "Die Projektdatei liegt nicht in einem Git-Repository oder Git ist nicht verfügbar.",
+            )
+            return False
+
+        commit_paths = self._git_project_commit_paths(project_path, repo_root)
+        if not commit_paths:
+            QMessageBox.warning(self, "Git", "Für dieses Projekt konnten keine commitbaren Pfade ermittelt werden.")
+            return False
+
+        request = self._prompt_git_commit_request(self._default_git_commit_message(project_path))
+        if request is None:
+            return False
+        commit_message, push_after_commit = request
+
+        try:
+            self._git_stage_paths(repo_root, commit_paths)
+            if not self._git_has_staged_changes(repo_root, commit_paths):
+                QMessageBox.information(
+                    self,
+                    "Git",
+                    "Keine Änderungen in den Projektdateien zum Committen gefunden.",
+                )
+                return False
+            self._git_commit(repo_root, commit_message)
+            pushed = False
+            if push_after_commit:
+                self._git_push(repo_root)
+                pushed = True
+        except RuntimeError as exc:
+            QMessageBox.critical(self, "Git", str(exc))
+            self.log.error(str(exc))
+            return False
+
+        rel_paths = ", ".join(commit_paths)
+        action = "committet und gepusht" if pushed else "committet"
+        self.log.success(f"Git: {action}: {rel_paths}")
+        self.statusBar().showMessage(f"Projekt {action}", 4000)
+        return True
+
+    def _default_git_commit_message(self, project_path: Path) -> str:
+        timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm")
+        return f"Update {project_path.stem} ({timestamp})"
+
+    def _prompt_git_commit_request(self, default_message: str) -> tuple[str, bool] | None:
+        dialog = _GitCommitDialog(default_message, self)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        commit_message = dialog.commit_message()
+        if not commit_message:
+            QMessageBox.warning(self, "Git", "Die Commit-Nachricht darf nicht leer sein.")
+            return None
+        return commit_message, dialog.push_after_commit()
+
+    def _find_git_repo_root(self, project_path: Path) -> Path | None:
+        try:
+            result = self._run_git_command(
+                ["rev-parse", "--show-toplevel"],
+                cwd=project_path.parent,
+                check=False,
+            )
+        except RuntimeError:
+            return None
+        if result.returncode != 0:
+            return None
+        root_text = result.stdout.strip()
+        if not root_text:
+            return None
+        return Path(root_text)
+
+    def _update_git_action_state(self) -> None:
+        enabled = False
+        if self._project_path is not None:
+            enabled = self._find_git_repo_root(self._project_path) is not None
+        for action in (self._save_git_action, self._git_commit_push_action):
+            if action is None:
+                continue
+            action.setEnabled(enabled)
+            if enabled:
+                action.setToolTip("Projektdatei im Git-Repository committen und optional pushen")
+            elif self._project_path is None:
+                action.setToolTip("Projekt zuerst speichern, um Git-Aktionen zu aktivieren")
+            else:
+                action.setToolTip("Projektdatei liegt in keinem erkannten Git-Repository")
+
+    def _refresh_git_toolbar_actions(self) -> None:
+        if self._grid_toolbar is None:
+            return
+
+        existing_actions = self._grid_toolbar.actions()
+        separator_present = any(action.isSeparator() and action.property("git_toolbar_separator") for action in existing_actions)
+
+        if self._save_git_action is not None:
+            self._save_git_action.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+            if self._save_git_action not in existing_actions:
+                self._grid_toolbar.insertAction(existing_actions[0] if existing_actions else None, self._save_git_action)
+                existing_actions = self._grid_toolbar.actions()
+        if self._git_commit_push_action is not None:
+            self._git_commit_push_action.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
+            if self._git_commit_push_action not in existing_actions:
+                anchor = existing_actions[1] if len(existing_actions) > 1 else None
+                self._grid_toolbar.insertAction(anchor, self._git_commit_push_action)
+                existing_actions = self._grid_toolbar.actions()
+
+        if not separator_present and (self._save_git_action is not None or self._git_commit_push_action is not None):
+            separator = self._grid_toolbar.insertSeparator(existing_actions[2] if len(existing_actions) > 2 else None)
+            separator.setProperty("git_toolbar_separator", True)
+
+    def _git_project_commit_paths(self, project_path: Path, repo_root: Path) -> list[str]:
+        relative_paths: list[str] = []
+        try:
+            relative_paths.append(project_path.resolve().relative_to(repo_root.resolve()).as_posix())
+        except ValueError:
+            pass
+        return relative_paths
+
+    def _git_stage_paths(self, repo_root: Path, relative_paths: list[str]) -> None:
+        self._run_git_command(["add", "--", *relative_paths], cwd=repo_root, check=True)
+
+    def _git_has_staged_changes(self, repo_root: Path, relative_paths: list[str]) -> bool:
+        result = self._run_git_command(
+            ["diff", "--cached", "--quiet", "--", *relative_paths],
+            cwd=repo_root,
+            check=False,
+        )
+        return result.returncode == 1
+
+    def _git_commit(self, repo_root: Path, message: str) -> None:
+        self._run_git_command(["commit", "-m", message], cwd=repo_root, check=True)
+
+    def _git_push(self, repo_root: Path) -> None:
+        self._run_git_command(["push"], cwd=repo_root, check=True)
+
+    def _run_git_command(
+        self,
+        args: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        command = ["git", *args]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"Git konnte nicht ausgeführt werden: {exc}") from exc
+
+        if check and result.returncode != 0:
+            command_text = "git " + " ".join(args)
+            details = (result.stderr or result.stdout or "Unbekannter Git-Fehler").strip()
+            raise RuntimeError(f"Git-Befehl fehlgeschlagen ({command_text}):\n{details}")
+        return result
 
     def _import_hrp_elements(self) -> None:
         start_dir = str(self._project_path.parent) if self._project_path else ""

@@ -220,6 +220,23 @@ def test_elec_schema_window_renders_and_delete_signals(app):
 
 
 @pytest.mark.gui
+def test_git_commit_dialog_uses_large_multiline_editor(app):
+    from gui.app_window import _GitCommitDialog  # noqa: PLC0415
+
+    dialog = _GitCommitDialog("Update Planung", None)
+    try:
+        assert dialog.minimumWidth() >= 640
+        assert dialog.minimumHeight() >= 360
+        assert dialog._message_edit.toPlainText() == "Update Planung"
+        assert dialog._push_checkbox.isChecked() is True
+
+        dialog._message_edit.setPlainText("  Erste Zeile\nZweite Zeile  ")
+        assert dialog.commit_message() == "Erste Zeile\nZweite Zeile"
+    finally:
+        dialog.deleteLater()
+
+
+@pytest.mark.gui
 def test_properties_edit_name_updates_document_and_undo_redo(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 

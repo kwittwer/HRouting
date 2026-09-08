@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1709,6 +1710,224 @@ def test_export_menu_hides_kicad_and_qet_actions(app, monkeypatch):
         assert "QElectroTech exportieren…" not in labels
     finally:
         window.deleteLater()
+
+
+def test_file_menu_shows_git_actions(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        file_action = next(
+            (a for a in window.menuBar().actions() if "datei" in a.text().lower()),
+            None,
+        )
+        assert file_action is not None
+        file_menu = file_action.menu()
+        assert file_menu is not None
+        labels = [a.text() for a in file_menu.actions() if a.text()]
+
+        assert "Speichern, Commit & Push…" in labels
+        assert "Commit & Push…" in labels
+    finally:
+        window.deleteLater()
+
+
+def test_git_actions_enable_only_for_saved_repo_projects(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    project_path = repo_root / "demo.hrp"
+    project_path.write_text("{}", encoding="utf-8")
+
+    def fake_repo_root(path: Path) -> Path | None:
+        return repo_root if path == project_path else None
+
+    window = AppWindow()
+    try:
+        assert window._save_git_action is not None
+        assert window._git_commit_push_action is not None
+        assert not window._save_git_action.isEnabled()
+        assert not window._git_commit_push_action.isEnabled()
+
+        monkeypatch.setattr(window, "_find_git_repo_root", fake_repo_root)
+        window._project_path = project_path
+        window._update_git_action_state()
+
+        assert window._save_git_action.isEnabled()
+        assert window._git_commit_push_action.isEnabled()
+
+        window._project_path = None
+        window._update_git_action_state()
+
+        assert not window._save_git_action.isEnabled()
+        assert not window._git_commit_push_action.isEnabled()
+    finally:
+        window.deleteLater()
+
+
+def test_top_toolbar_contains_git_actions_with_icons(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        assert window._grid_toolbar is not None
+        toolbar_actions = [action for action in window._grid_toolbar.actions() if action.text()]
+        labels = [action.text() for action in toolbar_actions]
+
+        assert "Speichern, Commit & Push…" in labels
+        assert "Commit & Push…" in labels
+
+        save_action = next(action for action in toolbar_actions if action.text() == "Speichern, Commit & Push…")
+        push_action = next(action for action in toolbar_actions if action.text() == "Commit & Push…")
+        assert not save_action.icon().isNull()
+        assert not push_action.icon().isNull()
+    finally:
+        window.deleteLater()
+
+
+def test_save_and_git_commit_push_saves_before_git_flow(app, monkeypatch):
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    window = AppWindow()
+    try:
+        calls: list[tuple[str, bool | None]] = []
+
+        def fake_save() -> bool:
+            calls.append(("save", None))
+            return True
+
+        def fake_git(*, prompt_save: bool = True) -> bool:
+            calls.append(("git", prompt_save))
+            return True
+
+        monkeypatch.setattr(window, "_save_project", fake_save)
+        monkeypatch.setattr(window, "_git_commit_push_project", fake_git)
+
+        window._save_and_git_commit_push()
+
+        assert calls == [("save", None), ("git", False)]
+    finally:
+        window.deleteLater()
+
+
+def test_git_commit_push_stages_project_file_and_pushes(app, monkeypatch, tmp_path):
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    project_dir = repo_root / "projects"
+    project_dir.mkdir()
+    project_path = project_dir / "demo.hrp"
+    project_path.write_text("{}", encoding="utf-8")
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        del capture_output, text, check
+        commands.append(list(command))
+        if command[:3] == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, stdout=str(repo_root), stderr="")
+        if command[:2] == ["git", "add"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "diff", "--cached", "--quiet"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        if command[:2] == ["git", "commit"]:
+            return subprocess.CompletedProcess(command, 0, stdout="Committed", stderr="")
+        if command[:2] == ["git", "push"]:
+            return subprocess.CompletedProcess(command, 0, stdout="Pushed", stderr="")
+        raise AssertionError(f"Unerwarteter Git-Befehl: {command!r} @ {cwd}")
+
+        
+    monkeypatch.setattr("gui.app_window.subprocess.run", fake_run)
+
+    window = AppWindow()
+    try:
+        window._project_path = project_path
+        monkeypatch.setattr(window, "_prompt_git_commit_request", lambda default_message: ("Projektstand sichern", True))
+
+        assert window._git_commit_push_project(prompt_save=False) is True
+    finally:
+        window.deleteLater()
+
+    assert commands == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "add", "--", "projects/demo.hrp"],
+        ["git", "diff", "--cached", "--quiet", "--", "projects/demo.hrp"],
+        ["git", "commit", "-m", "Projektstand sichern"],
+        ["git", "push"],
+    ]
+
+
+def test_git_commit_push_requires_changes_in_project_scope(app, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    project_path = repo_root / "demo.hrp"
+    project_path.write_text("{}", encoding="utf-8")
+
+    commands: list[list[str]] = []
+    infos: list[str] = []
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        del cwd, capture_output, text, check
+        commands.append(list(command))
+        if command[:3] == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, stdout=str(repo_root), stderr="")
+        if command[:2] == ["git", "add"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "diff", "--cached", "--quiet"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"Unerwarteter Git-Befehl: {command!r}")
+
+    monkeypatch.setattr("gui.app_window.subprocess.run", fake_run)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: infos.append(str(args[2])))
+
+    window = AppWindow()
+    try:
+        window._project_path = project_path
+        monkeypatch.setattr(window, "_prompt_git_commit_request", lambda default_message: ("Projektstand sichern", False))
+
+        assert window._git_commit_push_project(prompt_save=False) is False
+    finally:
+        window.deleteLater()
+
+    assert commands == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "add", "--", "demo.hrp"],
+        ["git", "diff", "--cached", "--quiet", "--", "demo.hrp"],
+    ]
+    assert infos == ["Keine Änderungen in den Projektdateien zum Committen gefunden."]
 
 
 def test_export_pdf_smoke_writes_file(app, monkeypatch, tmp_path):
