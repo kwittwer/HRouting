@@ -17,7 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QDateTime, QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QKeySequence
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialogButtonBox,
@@ -35,7 +35,6 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QPushButton,
     QComboBox,
-    QStyle,
     QTabBar,
     QVBoxLayout,
     QWidget,
@@ -3392,20 +3391,37 @@ class AppWindow(QMainWindow):
         separator_present = any(action.isSeparator() and action.property("git_toolbar_separator") for action in existing_actions)
 
         if self._save_git_action is not None:
-            self._save_git_action.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
-            if self._save_git_action not in existing_actions:
-                self._grid_toolbar.insertAction(existing_actions[0] if existing_actions else None, self._save_git_action)
-                existing_actions = self._grid_toolbar.actions()
+            self._grid_toolbar.removeAction(self._save_git_action)
         if self._git_commit_push_action is not None:
-            self._git_commit_push_action.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
+            self._git_commit_push_action.setIcon(self._make_git_toolbar_icon())
             if self._git_commit_push_action not in existing_actions:
-                anchor = existing_actions[1] if len(existing_actions) > 1 else None
-                self._grid_toolbar.insertAction(anchor, self._git_commit_push_action)
+                self._grid_toolbar.insertAction(existing_actions[0] if existing_actions else None, self._git_commit_push_action)
                 existing_actions = self._grid_toolbar.actions()
 
-        if not separator_present and (self._save_git_action is not None or self._git_commit_push_action is not None):
-            separator = self._grid_toolbar.insertSeparator(existing_actions[2] if len(existing_actions) > 2 else None)
+        if not separator_present and self._git_commit_push_action is not None:
+            separator = self._grid_toolbar.insertSeparator(existing_actions[1] if len(existing_actions) > 1 else None)
             separator.setProperty("git_toolbar_separator", True)
+
+    def _make_git_toolbar_icon(self) -> QIcon:
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#f05133"))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(6, 6, 14, 10)
+        painter.drawLine(6, 14, 6, 6)
+        painter.drawLine(6, 14, 14, 10)
+        painter.setBrush(QColor("#f05133"))
+        painter.drawEllipse(3, 3, 6, 6)
+        painter.drawEllipse(3, 11, 6, 6)
+        painter.drawEllipse(11, 7, 6, 6)
+        painter.end()
+        return QIcon(pixmap)
 
     def _git_project_commit_paths(self, project_path: Path, repo_root: Path) -> list[str]:
         relative_paths: list[str] = []

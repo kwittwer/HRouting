@@ -1796,12 +1796,10 @@ def test_top_toolbar_contains_git_actions_with_icons(app, monkeypatch):
         toolbar_actions = [action for action in window._grid_toolbar.actions() if action.text()]
         labels = [action.text() for action in toolbar_actions]
 
-        assert "Speichern, Commit & Push…" in labels
         assert "Commit & Push…" in labels
+        assert "Speichern, Commit & Push…" not in labels
 
-        save_action = next(action for action in toolbar_actions if action.text() == "Speichern, Commit & Push…")
         push_action = next(action for action in toolbar_actions if action.text() == "Commit & Push…")
-        assert not save_action.icon().isNull()
         assert not push_action.icon().isNull()
     finally:
         window.deleteLater()
