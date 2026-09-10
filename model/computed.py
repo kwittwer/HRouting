@@ -489,6 +489,7 @@ def _electro_overview_data(document: Document) -> dict[str, Any]:
             "point_id": point_id,
             "name": str(point.name or point_id),
             "ap_type": str(point.builtin_symbol or point.ap_type or "Unbekannt"),
+            "height_from_floor_cm": float(point.height_from_floor or 0.0) / 10.0,
             "cables": sorted(set(ap_to_cables.get(point_id, []))),
         }
 

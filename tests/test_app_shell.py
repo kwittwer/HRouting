@@ -3954,12 +3954,14 @@ def test_project_overview_dock_set_document(app, monkeypatch):
                             "floor_plan_id": "grundriss-1",
                             "name": "Steckdose Wohnen",
                             "builtin_symbol": "Steckdose",
+                            "height_from_floor": 1450.0,
                         },
                         "AP-2": {
                             "point_id": "AP-2",
                             "floor_plan_id": "grundriss-1",
                             "name": "LAN Dose",
                             "builtin_symbol": "LAN",
+                            "height_from_floor": 300.0,
                         },
                     },
                     "elec_cables": {
@@ -4001,6 +4003,13 @@ def test_project_overview_dock_set_document(app, monkeypatch):
         assert window.overview_electro._elec_ap_mat_table.rowCount() >= 1
         assert window.overview_electro._elec_room_table.rowCount() >= 1
         assert window.overview_electro._elec_cable_table.rowCount() >= 1
+        room_table = window.overview_electro._elec_room_table
+        height_values = [
+            room_table.item(r, 3).text()
+            for r in range(room_table.rowCount())
+            if room_table.item(r, 3) is not None
+        ]
+        assert "145.0 cm" in height_values
     finally:
         window.deleteLater()
 

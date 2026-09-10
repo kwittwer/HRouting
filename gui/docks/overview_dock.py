@@ -414,8 +414,8 @@ class ProjectOverviewDock(QDockWidget):
         return tbl
 
     def _build_elec_room_table(self) -> QTableWidget:
-        tbl = QTableWidget(0, 4)
-        tbl.setHorizontalHeaderLabels(["Raum", "AP", "AP-Typ", "Kabel"])
+        tbl = QTableWidget(0, 5)
+        tbl.setHorizontalHeaderLabels(["Raum", "AP", "AP-Typ", "Höhe über FB [cm]", "Kabel"])
         # Grouped rows should keep a deterministic room -> AP order.
         tbl.setSortingEnabled(False)
         tbl.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -652,6 +652,7 @@ class ProjectOverviewDock(QDockWidget):
                         "room": room_name,
                         "ap": f"{len(aps)} AP",
                         "ap_type": "",
+                        "ap_height_cm": "",
                         "cables": "",
                         "full_cables": "",
                         "is_group": True,
@@ -665,6 +666,7 @@ class ProjectOverviewDock(QDockWidget):
                             "room": "",
                             "ap": f"  - {str(ap.get('name') or ap.get('point_id') or '–')}",
                             "ap_type": str(ap.get("ap_type") or "Unbekannt"),
+                            "ap_height_cm": ap.get("height_from_floor_cm"),
                             "cables": self._format_cable_refs(cable_refs),
                             "full_cables": full_cables,
                             "is_group": False,
@@ -678,6 +680,7 @@ class ProjectOverviewDock(QDockWidget):
                         "room": room_name,
                         "ap": "–",
                         "ap_type": "–",
+                        "ap_height_cm": "–",
                         "cables": "–",
                         "full_cables": "–",
                         "is_group": False,
@@ -692,6 +695,7 @@ class ProjectOverviewDock(QDockWidget):
                         "room": room_name,
                         "ap": str(ap.get("name") or ap.get("point_id") or "–"),
                         "ap_type": str(ap.get("ap_type") or "Unbekannt"),
+                        "ap_height_cm": ap.get("height_from_floor_cm"),
                         "cables": self._format_cable_refs(cable_refs),
                         "full_cables": full_cables,
                         "is_group": False,
@@ -716,9 +720,14 @@ class ProjectOverviewDock(QDockWidget):
             tbl.setItem(r, 0, _str_item(row.get("room", "")))
             tbl.setItem(r, 1, _str_item(row.get("ap", "")))
             tbl.setItem(r, 2, _str_item(row.get("ap_type", "")))
+            ap_height = row.get("ap_height_cm")
+            if isinstance(ap_height, (int, float)):
+                tbl.setItem(r, 3, _num_item(float(ap_height), ".1f", "cm"))
+            else:
+                tbl.setItem(r, 3, _str_item(str(ap_height or "")))
             cable_item = _str_item(row.get("cables", ""))
             cable_item.setToolTip(str(row.get("full_cables", "")))
-            tbl.setItem(r, 3, cable_item)
+            tbl.setItem(r, 4, cable_item)
             if row.get("is_group"):
                 _style_group_row(r)
         tbl.resizeColumnsToContents()
