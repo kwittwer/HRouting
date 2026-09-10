@@ -27,6 +27,9 @@ class DockId:
     OVERVIEW_GENERAL = "overview_general"
     OVERVIEW_HEATING = "overview_heating"
     OVERVIEW_ELECTRO = "overview_electro"
+    OVERVIEW_ELECTRO_MATERIALS = "overview_electro_materials"
+    OVERVIEW_ELECTRO_ROOMS = "overview_electro_rooms"
+    OVERVIEW_ELECTRO_CABLES = "overview_electro_cables"
     # Backward compatibility alias for old single overview dock id.
     OVERVIEW = OVERVIEW_HEATING
 

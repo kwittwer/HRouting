@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from model.document import Document
-from model.field_access import get_field
+from model.field_access import apply_display_value, get_field
 from model.elements import (
     AngleMeasurement,
     AnnotationCircle,
@@ -283,6 +283,27 @@ class AppWindow(QMainWindow):
             object_name="dock_overview_electro",
             visible_tabs=("Elektro",),
         )
+        self.overview_electro_materials = ProjectOverviewDock(
+            self,
+            title="Projektinfo: Elektro Materialliste",
+            object_name="dock_overview_electro_materials",
+            visible_tabs=("Elektro",),
+            visible_electro_sections=("materials",),
+        )
+        self.overview_electro_rooms = ProjectOverviewDock(
+            self,
+            title="Projektinfo: Elektro Raumliste",
+            object_name="dock_overview_electro_rooms",
+            visible_tabs=("Elektro",),
+            visible_electro_sections=("rooms",),
+        )
+        self.overview_electro_cables = ProjectOverviewDock(
+            self,
+            title="Projektinfo: Elektro Kabelliste",
+            object_name="dock_overview_electro_cables",
+            visible_tabs=("Elektro",),
+            visible_electro_sections=("cables",),
+        )
         # Backward compatibility for tests/extensions that still use `window.overview`.
         self.overview = self.overview_heating
 
@@ -293,10 +314,16 @@ class AppWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_general)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_heating)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro_materials)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro_rooms)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro_cables)
         self.log.hide()
         self.overview_general.hide()
         self.overview_heating.hide()
         self.overview_electro.hide()
+        self.overview_electro_materials.hide()
+        self.overview_electro_rooms.hide()
+        self.overview_electro_cables.hide()
 
         self._docks = {
             DockId.NAVIGATOR: self.navigator,
@@ -306,6 +333,9 @@ class AppWindow(QMainWindow):
             DockId.OVERVIEW_GENERAL: self.overview_general,
             DockId.OVERVIEW_HEATING: self.overview_heating,
             DockId.OVERVIEW_ELECTRO: self.overview_electro,
+            DockId.OVERVIEW_ELECTRO_MATERIALS: self.overview_electro_materials,
+            DockId.OVERVIEW_ELECTRO_ROOMS: self.overview_electro_rooms,
+            DockId.OVERVIEW_ELECTRO_CABLES: self.overview_electro_cables,
         }
 
         for dock in self._docks.values():
@@ -520,6 +550,14 @@ class AppWindow(QMainWindow):
         self.properties.action_triggered.connect(self._on_property_action)
         self.properties.setting_changed.connect(self._on_global_setting_changed)
         self.properties.pre_change.connect(self._push_undo)
+        self.overview_electro.pre_change.connect(self._push_undo)
+        self.overview_electro.element_field_changed.connect(self._on_overview_field_changed)
+        self.overview_electro_materials.pre_change.connect(self._push_undo)
+        self.overview_electro_materials.element_field_changed.connect(self._on_overview_field_changed)
+        self.overview_electro_rooms.pre_change.connect(self._push_undo)
+        self.overview_electro_rooms.element_field_changed.connect(self._on_overview_field_changed)
+        self.overview_electro_cables.pre_change.connect(self._push_undo)
+        self.overview_electro_cables.element_field_changed.connect(self._on_overview_field_changed)
 
     def _update_grid_color_btn(self, color: QColor) -> None:
         r, g, b, a = color.red(), color.green(), color.blue(), color.alpha()
@@ -556,29 +594,66 @@ class AppWindow(QMainWindow):
         """Ein Feld im Eigenschaften-Dock wurde geändert."""
         effects = self._apply_property_side_effects(element_id, key)
         self._document.element_changed.emit(element_id)
+        if key == "height_from_floor" and element_id in self._document.elements.get("elec_points", {}):
+            for cable_id in self._connected_cable_ids_for_ap(element_id):
+                self._document.element_changed.emit(cable_id)
         if effects.get("refresh_navigator"):
             self.navigator.set_document(self._document)
         self.canvas.update()
         self._refresh_schema_windows()
         self._mark_dirty()
 
+    def _on_overview_field_changed(self, element_id: str, key: str, value) -> None:
+        """Übernimmt Inline-Änderungen aus der Elektro-Projektübersicht."""
+        if self._document is None:
+            return
+        element = self._document.get(element_id)
+        if element is None:
+            return
+
+        schema = schema_for(element)
+        spec = next((s for s in (schema.fields if schema is not None else ()) if s.key == key), None)
+        if spec is None:
+            return
+
+        apply_display_value(element, spec, value)
+        self._on_property_changed(element_id, key, value)
+
     def _on_batch_property_changed(self, element_ids: list[str], key: str, _value) -> None:
         defer_updates = len(element_ids) >= 25
         touched = 0
         refresh_navigator = False
+        extra_changed_ids: set[str] = set()
         for element_id in element_ids:
             if self._document.get(element_id) is None:
                 continue
             effects = self._apply_property_side_effects(element_id, key, defer_updates=defer_updates)
             refresh_navigator = refresh_navigator or bool(effects.get("refresh_navigator"))
             self._document.element_changed.emit(element_id)
+            if key == "height_from_floor" and element_id in self._document.elements.get("elec_points", {}):
+                extra_changed_ids.update(self._connected_cable_ids_for_ap(element_id))
             touched += 1
+        for cable_id in sorted(extra_changed_ids):
+            if cable_id not in element_ids:
+                self._document.element_changed.emit(cable_id)
         if touched:
             if refresh_navigator:
                 self.navigator.set_document(self._document)
             self.canvas.update()
             self._refresh_schema_windows()
             self._mark_dirty()
+
+    def _connected_cable_ids_for_ap(self, ap_id: str) -> list[str]:
+        ap_id = str(ap_id or "").strip()
+        if not ap_id or self._document is None:
+            return []
+        cable_ids: list[str] = []
+        for cable_id, cable in self._document.elements.get("elec_cables", {}).items():
+            start_ap_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "").strip()
+            end_ap_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "").strip()
+            if ap_id == start_ap_id or ap_id == end_ap_id:
+                cable_ids.append(cable_id)
+        return cable_ids
 
     def _apply_property_side_effects(
         self,
@@ -1282,6 +1357,9 @@ class AppWindow(QMainWindow):
         self.overview_general.set_document(document)
         self.overview_heating.set_document(document)
         self.overview_electro.set_document(document)
+        self.overview_electro_materials.set_document(document)
+        self.overview_electro_rooms.set_document(document)
+        self.overview_electro_cables.set_document(document)
 
         # Globale Ansichtsdaten (Zoom, Raster, Grundriss-Transformationen,
         # Hilfslinien, Messungen) in den Canvas übertragen …
@@ -3192,6 +3270,8 @@ class AppWindow(QMainWindow):
             comment="",
             start_ap="",
             end_ap="",
+            start_length_surcharge_input="+ AP Höhe",
+            end_length_surcharge_input="+ AP Höhe",
         )
         self._document.add(cable)
         self.canvas.register_element(eid)
@@ -3233,6 +3313,8 @@ class AppWindow(QMainWindow):
             comment="",
             start_ap=ap_id,
             end_ap="",
+            start_length_surcharge_input="+ AP Höhe",
+            end_length_surcharge_input="+ AP Höhe",
         )
         self._document.add(cable)
         self.canvas.register_element(eid)
@@ -5133,7 +5215,7 @@ class AppWindow(QMainWindow):
                 str(point.name or pid),
                 str(point.builtin_symbol or ""),
                 str(point.position or ""),
-                f"{float(point.height_from_floor or 0.0):.1f} cm",
+                f"{float(point.height_from_floor or 0.0) / 10.0:.1f} cm",
                 str(point.note or ""),
             ])
         ap_rows.sort(key=lambda row: row[0].lower())
@@ -5197,7 +5279,7 @@ class AppWindow(QMainWindow):
                 str(point.name or point_id),
                 self._describe_ap_type(point),
                 str(point.position or ""),
-                f"{float(point.height_from_floor or 0.0):.1f} cm",
+                f"{float(point.height_from_floor or 0.0) / 10.0:.1f} cm",
                 str(point.note or ""),
             ])
 
@@ -5889,8 +5971,8 @@ class AppWindow(QMainWindow):
             start_point = self._document.elements["elec_points"].get(start_id)
             end_point = self._document.elements["elec_points"].get(end_id)
 
-            start_height = float(start_point.height_from_floor if start_point else 0.0)
-            end_height = float(end_point.height_from_floor if end_point else 0.0)
+            start_height = float(start_point.height_from_floor if start_point else 0.0) / 10.0
+            end_height = float(end_point.height_from_floor if end_point else 0.0) / 10.0
 
             row = {
                 "name": str(cable.name or cable_id),
@@ -5926,7 +6008,7 @@ class AppWindow(QMainWindow):
                     "type": self._describe_ap_type(point),
                     "room": point_id_to_room_name.get(pid, "(ohne Raum)"),
                     "position": str(point.position or "").strip(),
-                    "height_cm": float(point.height_from_floor or 0.0),
+                    "height_cm": float(point.height_from_floor or 0.0) / 10.0,
                     "device_color": str(point.smarthome_device_color or "").strip(),
                     "device": str(point.smarthome_device or "").strip(),
                     "note": str(point.note or "").strip(),

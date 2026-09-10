@@ -2456,6 +2456,91 @@ def test_pdf_export_normalizes_elektro_room_page(app, monkeypatch):
         window.deleteLater()
 
 
+def test_pdf_export_uses_ap_height_in_cm(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "mm_per_px": 10.0}],
+                    "elec_points": {
+                        "AP-1": [10, 10],
+                        "AP-2": [40, 40],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[10, 10], [40, 40]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                            "mm_per_px": 10.0,
+                        }
+                    },
+                    "floorplans_order": ["grundriss-1"],
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 1",
+                            "builtin_symbol": "Steckdose",
+                            "height_from_floor": 1450.0,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 2",
+                            "builtin_symbol": "LAN",
+                            "height_from_floor": 300.0,
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel 1",
+                            "type": "NYM-J 3x1.5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        }
+                    },
+                    "hkv_points": {},
+                    "hkv_lines": {},
+                    "elec_rooms": {},
+                    "text_annotations": {},
+                    "furniture": {},
+                },
+            }
+        )
+        window._set_document(document)
+
+        ap_rows, _cable_rows = window._collect_pdf_electro_rows()
+        assert any(row[3] == "145.0 cm" for row in ap_rows)
+
+        export_data = window._collect_export_data()
+        heights = {row["name"]: row["height_cm"] for row in export_data.get("ap_info_rows", [])}
+        assert float(heights.get("Dose 1", 0.0)) == 145.0
+
+        cable_heights = {
+            row["name"]: (row.get("start_height_cm"), row.get("end_height_cm"))
+            for row in export_data.get("kv_rows", [])
+        }
+        assert cable_heights.get("Kabel 1") == (145.0, 30.0)
+    finally:
+        window.deleteLater()
+
+
 def test_pdf_export_elektro_room_filters_aps_and_cables(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -4037,6 +4122,153 @@ def test_project_overview_dock_planung_linda(app, monkeypatch):
         assert window.overview_heating._document is not None
         assert window.overview_heating._hk_table.rowCount() > 0, "Keine Heizkreise in Tabelle"
         assert window.overview_electro._elec_cable_table.rowCount() > 0, "Keine Kabel in Elektro-Tabelle"
+    finally:
+        window.deleteLater()
+
+
+def test_project_overview_electro_inline_editing(app, monkeypatch):
+    """Raumliste/Kabelliste in der Elektro-Übersicht erlaubt Inline-Bearbeitung."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QComboBox  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "mm_per_px": 10.0}],
+                    "elec_rooms": {
+                        "ER-1": [[0, 0], [220, 0], [220, 220], [0, 220]],
+                    },
+                    "elec_points": {
+                        "AP-1": [40, 40],
+                        "AP-2": [160, 160],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[40, 40], [160, 160]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                            "mm_per_px": 10.0,
+                        }
+                    },
+                    "floorplans_order": ["grundriss-1"],
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose Wohnen",
+                            "builtin_symbol": "Steckdose",
+                            "height_from_floor": 1450.0,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "LAN Dose",
+                            "builtin_symbol": "LAN",
+                            "height_from_floor": 300.0,
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Zuleitung Wohnen",
+                            "type": "NYM-J 3x1.5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        }
+                    },
+                    "hkv_points": {},
+                    "hkv_lines": {},
+                    "elec_rooms": {
+                        "ER-1": {
+                            "room_id": "ER-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnraum",
+                        }
+                    },
+                    "text_annotations": {},
+                    "furniture": {},
+                },
+            }
+        )
+        window._set_document(doc)
+
+        room_table = window.overview_electro._elec_room_table
+        cable_table = window.overview_electro._elec_cable_table
+
+        ap_row = -1
+        for r in range(room_table.rowCount()):
+            item = room_table.item(r, 1)
+            if item is not None and "Steckdose Wohnen" in item.text():
+                ap_row = r
+                break
+        assert ap_row >= 0
+
+        room_table.item(ap_row, 1).setText("Steckdose TV")
+        app.processEvents()
+        assert doc.elements["elec_points"]["AP-1"].data.get("name") == "Steckdose TV"
+
+        ap_type_combo = room_table.cellWidget(ap_row, 2)
+        assert isinstance(ap_type_combo, QComboBox)
+        ap_type_combo.setCurrentText("LAN")
+        app.processEvents()
+        assert doc.elements["elec_points"]["AP-1"].data.get("builtin_symbol") == "LAN"
+
+        room_table.item(ap_row, 3).setText("160")
+        app.processEvents()
+        assert float(doc.elements["elec_points"]["AP-1"].data.get("height_from_floor", 0.0)) == 1600.0
+
+        assert cable_table.rowCount() == 1
+        cable_table.item(0, 0).setText("Kabel Wohnen")
+        app.processEvents()
+        assert doc.elements["elec_cables"]["EK-1"].data.get("name") == "Kabel Wohnen"
+
+        cable_type_combo = cable_table.cellWidget(0, 1)
+        assert isinstance(cable_type_combo, QComboBox)
+        cable_type_combo.setEditText("Sonderleitung 5x2,5")
+        app.processEvents()
+        assert doc.elements["elec_cables"]["EK-1"].data.get("type") == "Sonderleitung 5x2,5"
+    finally:
+        window.deleteLater()
+
+
+def test_project_overview_electro_separate_docks_exist(app, monkeypatch):
+    """Elektro-Projektinfo ist in drei separate Docks aufteilbar."""
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.workspaces import DockId  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        assert window.overview_electro_materials is not None
+        assert window.overview_electro_rooms is not None
+        assert window.overview_electro_cables is not None
+
+        assert DockId.OVERVIEW_ELECTRO_MATERIALS in window._docks
+        assert DockId.OVERVIEW_ELECTRO_ROOMS in window._docks
+        assert DockId.OVERVIEW_ELECTRO_CABLES in window._docks
+
+        assert window.overview_electro._elec_splitter.count() == 3
+        assert window.overview_electro_materials._elec_splitter.count() == 1
+        assert window.overview_electro_rooms._elec_splitter.count() == 1
+        assert window.overview_electro_cables._elec_splitter.count() == 1
     finally:
         window.deleteLater()
 

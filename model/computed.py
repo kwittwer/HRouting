@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import math
+import re
 from typing import Any
 
 from .document import Document
@@ -157,12 +158,8 @@ def cable_length_details(document: Document, cable: ElecCable) -> dict[str, floa
         }
 
     path_length_m = polyline_length_px(_points(cable.path)) * scale / 1000.0
-    start_surcharge_m = float(cable.start_length_surcharge_m or 0.0)
-    end_surcharge_m = float(cable.end_length_surcharge_m or 0.0)
-    if start_surcharge_m < 0:
-        start_surcharge_m = 0.0
-    if end_surcharge_m < 0:
-        end_surcharge_m = 0.0
+    start_surcharge_m = _resolve_cable_side_surcharge_m(document, cable, side="start")
+    end_surcharge_m = _resolve_cable_side_surcharge_m(document, cable, side="end")
     surcharge_m = start_surcharge_m + end_surcharge_m
 
     return {
@@ -174,6 +171,90 @@ def cable_length_details(document: Document, cable: ElecCable) -> dict[str, floa
         "length_m": path_length_m + surcharge_m,
         "installed_length_m": path_length_m + surcharge_m,
     }
+
+
+_AP_HEIGHT_TOKENS = {
+    "+aphöhe",
+    "+aphoehe",
+    "+aphöhe",
+    "+ap",
+    "aphöhe",
+    "aphoehe",
+    "aphöhe",
+    "ap",
+}
+
+
+def _resolve_cable_side_surcharge_m(document: Document, cable: ElecCable, *, side: str) -> float:
+    input_key = f"{side}_length_surcharge_input"
+    legacy_key = f"{side}_length_surcharge_m"
+
+    raw_input = cable.data.get(input_key, None)
+    has_input_key = input_key in cable.data
+    has_legacy_key = legacy_key in cable.data
+    legacy = _safe_non_negative_float(getattr(cable, legacy_key, 0.0))
+    ap_id = str(cable.start_ap if side == "start" else cable.end_ap or "")
+    if not ap_id:
+        ap_id = str(cable.geom.get("cable_start_ap" if side == "start" else "cable_end_ap") or "")
+    ap_height_m = _ap_height_m(document, ap_id)
+
+    mode, parsed_m = _parse_length_surcharge_input(raw_input)
+    if mode == "value":
+        return parsed_m
+    if mode == "ap":
+        return ap_height_m
+    if mode == "missing":
+        # Default fuer neue/alte Kabel ohne explizite Aufschlag-Felder:
+        # nutze die AP-Hoehe automatisch als Hoehenaufschlag.
+        if not has_input_key and not has_legacy_key:
+            return ap_height_m
+        return legacy
+    return legacy
+
+
+def _parse_length_surcharge_input(raw_value: Any) -> tuple[str, float]:
+    if raw_value is None:
+        return "missing", 0.0
+
+    if isinstance(raw_value, (int, float)):
+        return "value", _safe_non_negative_float(raw_value)
+
+    text = str(raw_value or "").strip()
+    if not text:
+        return "missing", 0.0
+
+    normalized = text.lower().replace(",", ".")
+    compact = re.sub(r"\s+", "", normalized)
+    if compact in _AP_HEIGHT_TOKENS:
+        return "ap", 0.0
+
+    match = re.fullmatch(r"([+-]?\d+(?:\.\d+)?)\s*(cm|m)?", normalized)
+    if not match:
+        return "invalid", 0.0
+
+    value = _safe_non_negative_float(match.group(1))
+    unit = (match.group(2) or "m").lower()
+    if unit == "cm":
+        return "value", value / 100.0
+    return "value", value
+
+
+def _safe_non_negative_float(value: Any) -> float:
+    try:
+        parsed = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if parsed > 0.0 else 0.0
+
+
+def _ap_height_m(document: Document, ap_id: str) -> float:
+    if not ap_id:
+        return 0.0
+    point = document.elements.get("elec_points", {}).get(ap_id)
+    if point is None:
+        return 0.0
+    # AP-Hoehe wird intern in mm gespeichert.
+    return _safe_non_negative_float(point.height_from_floor) / 1000.0
 
 
 def _format_number(value: float, decimals: int, unit: str) -> str:

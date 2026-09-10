@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QByteArray, Qt, QTimer, QSettings, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QDockWidget,
     QFormLayout,
     QHBoxLayout,
@@ -122,6 +124,9 @@ def _str_item(text: str) -> _ReadOnlyTableItem:
 class ProjectOverviewDock(QDockWidget):
     """Zeigt berechnete Projektübersicht mit optionaler Tab-Einschränkung."""
 
+    pre_change = Signal()
+    element_field_changed = Signal(str, str, object)
+
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -129,6 +134,7 @@ class ProjectOverviewDock(QDockWidget):
         title: str = "Projektübersicht",
         object_name: str = "dock_overview",
         visible_tabs: tuple[str, ...] | None = None,
+        visible_electro_sections: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__(title, parent)
         self.setObjectName(object_name)
@@ -145,6 +151,15 @@ class ProjectOverviewDock(QDockWidget):
         self.setWidget(self._tabs)
         self._tab_names: list[str] = []
         self._last_electro_data: dict = {}
+        self._updating_electro_tables = False
+        self._elec_room_row_ap_ids: dict[int, str] = {}
+        self._elec_cable_row_ids: dict[int, str] = {}
+        if visible_electro_sections is None:
+            self._visible_electro_sections = {"materials", "rooms", "cables"}
+        else:
+            self._visible_electro_sections = {
+                str(section).strip().lower() for section in visible_electro_sections if str(section).strip()
+            }
 
         # Tab Allgemein
         self._general_scroll = QScrollArea()
@@ -225,7 +240,8 @@ class ProjectOverviewDock(QDockWidget):
         self._elec_ap_mat_table = self._build_elec_ap_material_table()
         elec_mat_layout.addWidget(self._elec_ap_mat_table, 1)
         self._elec_mat_section.set_content_layout(elec_mat_layout)
-        self._elec_splitter.addWidget(self._elec_mat_section)
+        if "materials" in self._visible_electro_sections:
+            self._elec_splitter.addWidget(self._elec_mat_section)
 
         # Elektro: Raumliste
         self._elec_room_section = _CollapsibleSection("Raumliste", expanded=True)
@@ -239,7 +255,9 @@ class ProjectOverviewDock(QDockWidget):
         self._elec_room_table = self._build_elec_room_table()
         elec_room_layout.addWidget(self._elec_room_table, 1)
         self._elec_room_section.set_content_layout(elec_room_layout)
-        self._elec_splitter.addWidget(self._elec_room_section)
+        if "rooms" in self._visible_electro_sections:
+            self._elec_splitter.addWidget(self._elec_room_section)
+        self._elec_room_table.itemChanged.connect(self._on_elec_room_item_changed)
 
         # Elektro: Kabelliste
         self._elec_cable_section = _CollapsibleSection("Kabelliste", expanded=True)
@@ -248,12 +266,24 @@ class ProjectOverviewDock(QDockWidget):
         self._elec_cable_table = self._build_elec_cable_table()
         elec_cable_layout.addWidget(self._elec_cable_table, 1)
         self._elec_cable_section.set_content_layout(elec_cable_layout)
-        self._elec_splitter.addWidget(self._elec_cable_section)
+        if "cables" in self._visible_electro_sections:
+            self._elec_splitter.addWidget(self._elec_cable_section)
+        self._elec_cable_table.itemChanged.connect(self._on_elec_cable_item_changed)
+
+        self._heating_sections = (self._hk_section, self._hkv_section, self._mat_section)
+        self._electro_sections = tuple(
+            section
+            for section, key in (
+                (self._elec_mat_section, "materials"),
+                (self._elec_room_section, "rooms"),
+                (self._elec_cable_section, "cables"),
+            )
+            if key in self._visible_electro_sections
+        )
 
         for splitter in (self._heating_splitter, self._elec_splitter):
-            splitter.setStretchFactor(0, 1)
-            splitter.setStretchFactor(1, 1)
-            splitter.setStretchFactor(2, 1)
+            for idx in range(splitter.count()):
+                splitter.setStretchFactor(idx, 1)
             splitter.splitterMoved.connect(self._save_ui_state)
 
         self._hk_section.toggled.connect(self._on_section_visibility_changed)
@@ -267,14 +297,8 @@ class ProjectOverviewDock(QDockWidget):
             self._restrict_tabs(visible_tabs)
 
         self._restore_ui_state()
-        self._rebalance_splitter(
-            self._heating_splitter,
-            (self._hk_section, self._hkv_section, self._mat_section),
-        )
-        self._rebalance_splitter(
-            self._elec_splitter,
-            (self._elec_mat_section, self._elec_room_section, self._elec_cable_section),
-        )
+        self._rebalance_splitter(self._heating_splitter, self._heating_sections)
+        self._rebalance_splitter(self._elec_splitter, self._electro_sections)
 
     def _restrict_tabs(self, visible_tabs: tuple[str, ...]) -> None:
         visible = {name.strip() for name in visible_tabs}
@@ -337,20 +361,16 @@ class ProjectOverviewDock(QDockWidget):
         s.setValue(f"{base}/elec_splitter", self._elec_splitter.saveState())
 
     def _rebalance_splitter(self, splitter: QSplitter, sections: tuple[_CollapsibleSection, ...]) -> None:
+        if not sections:
+            return
         sizes = []
         for section in sections:
             sizes.append(120 if section.is_expanded() else max(24, section.sizeHint().height()))
         splitter.setSizes(sizes)
 
     def _on_section_visibility_changed(self, *_args) -> None:
-        self._rebalance_splitter(
-            self._heating_splitter,
-            (self._hk_section, self._hkv_section, self._mat_section),
-        )
-        self._rebalance_splitter(
-            self._elec_splitter,
-            (self._elec_mat_section, self._elec_room_section, self._elec_cable_section),
-        )
+        self._rebalance_splitter(self._heating_splitter, self._heating_sections)
+        self._rebalance_splitter(self._elec_splitter, self._electro_sections)
         self._save_ui_state()
 
     # ── Tabellen-Builder ─────────────────────────────────────────────
@@ -418,7 +438,10 @@ class ProjectOverviewDock(QDockWidget):
         tbl.setHorizontalHeaderLabels(["Raum", "AP", "AP-Typ", "Höhe über FB [cm]", "Kabel"])
         # Grouped rows should keep a deterministic room -> AP order.
         tbl.setSortingEnabled(False)
-        tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+        tbl.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.EditKeyPressed
+        )
         tbl.setSelectionBehavior(QTableWidget.SelectRows)
         tbl.setAlternatingRowColors(True)
         tbl.horizontalHeader().setStretchLastSection(True)
@@ -430,13 +453,43 @@ class ProjectOverviewDock(QDockWidget):
         tbl = QTableWidget(0, 5)
         tbl.setHorizontalHeaderLabels(["Name", "Typ", "Länge [m]", "Start AP", "End AP"])
         tbl.setSortingEnabled(True)
-        tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+        tbl.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.EditKeyPressed
+        )
         tbl.setSelectionBehavior(QTableWidget.SelectRows)
         tbl.setAlternatingRowColors(True)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         tbl.verticalHeader().hide()
         return tbl
+
+    @staticmethod
+    def _set_item_editable(item: QTableWidgetItem, editable: bool) -> None:
+        flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        if editable:
+            flags |= Qt.ItemIsEditable
+        item.setFlags(flags)
+
+    @staticmethod
+    def _parse_float_text(text: str) -> float | None:
+        raw = str(text or "").strip().replace("cm", "").strip().replace(",", ".")
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _elec_ap_symbol_options() -> list[str]:
+        try:
+            from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
+
+            values = [str(v) for v in BUILTIN_SYMBOLS.keys() if str(v).strip()]
+            return sorted(set(values), key=str.lower)
+        except Exception:
+            return []
 
     # ── Document-Anbindung ───────────────────────────────────────────
 
@@ -635,7 +688,9 @@ class ProjectOverviewDock(QDockWidget):
         ap_tbl.resizeColumnsToContents()
 
     def _fill_elec_room_table(self, rooms: list[dict]) -> None:
+        self._updating_electro_tables = True
         rows: list[dict] = []
+        self._elec_room_row_ap_ids = {}
         sorted_rooms = sorted(
             rooms or [],
             key=lambda room: str(room.get("room_name") or "Ohne Raum").lower(),
@@ -653,6 +708,7 @@ class ProjectOverviewDock(QDockWidget):
                         "ap": f"{len(aps)} AP",
                         "ap_type": "",
                         "ap_height_cm": "",
+                        "point_id": "",
                         "cables": "",
                         "full_cables": "",
                         "is_group": True,
@@ -664,9 +720,10 @@ class ProjectOverviewDock(QDockWidget):
                     rows.append(
                         {
                             "room": "",
-                            "ap": f"  - {str(ap.get('name') or ap.get('point_id') or '–')}",
+                            "ap": str(ap.get("name") or ap.get("point_id") or "–"),
                             "ap_type": str(ap.get("ap_type") or "Unbekannt"),
                             "ap_height_cm": ap.get("height_from_floor_cm"),
+                            "point_id": str(ap.get("point_id") or ""),
                             "cables": self._format_cable_refs(cable_refs),
                             "full_cables": full_cables,
                             "is_group": False,
@@ -681,6 +738,7 @@ class ProjectOverviewDock(QDockWidget):
                         "ap": "–",
                         "ap_type": "–",
                         "ap_height_cm": "–",
+                        "point_id": "",
                         "cables": "–",
                         "full_cables": "–",
                         "is_group": False,
@@ -696,6 +754,7 @@ class ProjectOverviewDock(QDockWidget):
                         "ap": str(ap.get("name") or ap.get("point_id") or "–"),
                         "ap_type": str(ap.get("ap_type") or "Unbekannt"),
                         "ap_height_cm": ap.get("height_from_floor_cm"),
+                        "point_id": str(ap.get("point_id") or ""),
                         "cables": self._format_cable_refs(cable_refs),
                         "full_cables": full_cables,
                         "is_group": False,
@@ -715,32 +774,159 @@ class ProjectOverviewDock(QDockWidget):
 
         tbl = self._elec_room_table
         tbl.setSortingEnabled(False)
+        tbl.blockSignals(True)
         tbl.setRowCount(len(rows))
+        symbol_options = self._elec_ap_symbol_options()
         for r, row in enumerate(rows):
-            tbl.setItem(r, 0, _str_item(row.get("room", "")))
-            tbl.setItem(r, 1, _str_item(row.get("ap", "")))
-            tbl.setItem(r, 2, _str_item(row.get("ap_type", "")))
+            point_id = str(row.get("point_id") or "")
+            self._elec_room_row_ap_ids[r] = point_id
+
+            room_item = _str_item(row.get("room", ""))
+            self._set_item_editable(room_item, False)
+            tbl.setItem(r, 0, room_item)
+
+            ap_item = _str_item(row.get("ap", ""))
+            self._set_item_editable(ap_item, bool(point_id))
+            tbl.setItem(r, 1, ap_item)
+
+            if point_id:
+                combo = QComboBox(tbl)
+                combo.addItems(symbol_options)
+                current_type = str(row.get("ap_type", "") or "")
+                if current_type and combo.findText(current_type) < 0:
+                    combo.addItem(current_type)
+                combo.setCurrentText(current_type)
+                combo.currentTextChanged.connect(
+                    lambda value, pid=point_id: self._on_elec_room_ap_type_changed(pid, value)
+                )
+                tbl.setCellWidget(r, 2, combo)
+            else:
+                tbl.setCellWidget(r, 2, None)
+                type_item = _str_item(row.get("ap_type", ""))
+                self._set_item_editable(type_item, False)
+                tbl.setItem(r, 2, type_item)
+
             ap_height = row.get("ap_height_cm")
             if isinstance(ap_height, (int, float)):
-                tbl.setItem(r, 3, _num_item(float(ap_height), ".1f", "cm"))
+                height_item = _num_item(float(ap_height), ".1f", "cm")
+                self._set_item_editable(height_item, bool(point_id))
+                tbl.setItem(r, 3, height_item)
             else:
-                tbl.setItem(r, 3, _str_item(str(ap_height or "")))
+                height_item = _str_item(str(ap_height or ""))
+                self._set_item_editable(height_item, bool(point_id))
+                tbl.setItem(r, 3, height_item)
             cable_item = _str_item(row.get("cables", ""))
+            self._set_item_editable(cable_item, False)
             cable_item.setToolTip(str(row.get("full_cables", "")))
             tbl.setItem(r, 4, cable_item)
             if row.get("is_group"):
                 _style_group_row(r)
+        tbl.blockSignals(False)
+        self._updating_electro_tables = False
         tbl.resizeColumnsToContents()
 
     def _fill_elec_cable_table(self, cables: list[dict]) -> None:
+        self._updating_electro_tables = True
         tbl = self._elec_cable_table
         tbl.setSortingEnabled(False)
+        tbl.blockSignals(True)
         tbl.setRowCount(len(cables or []))
+        self._elec_cable_row_ids = {}
+        cable_type_options: list[str] = []
+        try:
+            from model.schema import CABLE_TYPES  # noqa: PLC0415
+
+            cable_type_options = [str(v) for v in CABLE_TYPES if str(v).strip()]
+        except Exception:
+            cable_type_options = []
         for r, cable in enumerate(cables or []):
-            tbl.setItem(r, 0, _str_item(cable.get("name", "")))
-            tbl.setItem(r, 1, _str_item(cable.get("type", "")))
-            tbl.setItem(r, 2, _num_item(float(cable.get("length_m", 0.0) or 0.0), ".2f", "m"))
-            tbl.setItem(r, 3, _str_item(cable.get("start_ap_name", "")))
-            tbl.setItem(r, 4, _str_item(cable.get("end_ap_name", "")))
+            cable_id = str(cable.get("id") or "")
+            self._elec_cable_row_ids[r] = cable_id
+
+            name_item = _str_item(cable.get("name", ""))
+            self._set_item_editable(name_item, bool(cable_id))
+            tbl.setItem(r, 0, name_item)
+
+            current_type = str(cable.get("type", "") or "")
+            if cable_id:
+                combo = QComboBox(tbl)
+                combo.setEditable(True)
+                combo.addItems(cable_type_options)
+                if current_type and combo.findText(current_type) < 0:
+                    combo.addItem(current_type)
+                combo.setCurrentText(current_type)
+                combo.currentTextChanged.connect(
+                    lambda value, cid=cable_id: self._on_elec_cable_type_changed(cid, value)
+                )
+                tbl.setCellWidget(r, 1, combo)
+            else:
+                tbl.setCellWidget(r, 1, None)
+                type_item = _str_item(current_type)
+                self._set_item_editable(type_item, False)
+                tbl.setItem(r, 1, type_item)
+
+            length_item = _num_item(float(cable.get("length_m", 0.0) or 0.0), ".2f", "m")
+            self._set_item_editable(length_item, False)
+            tbl.setItem(r, 2, length_item)
+
+            start_item = _str_item(cable.get("start_ap_name", ""))
+            self._set_item_editable(start_item, False)
+            tbl.setItem(r, 3, start_item)
+
+            end_item = _str_item(cable.get("end_ap_name", ""))
+            self._set_item_editable(end_item, False)
+            tbl.setItem(r, 4, end_item)
+        tbl.blockSignals(False)
+        self._updating_electro_tables = False
         tbl.setSortingEnabled(True)
         tbl.resizeColumnsToContents()
+
+    def _on_elec_room_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._updating_electro_tables or item is None:
+            return
+        row = item.row()
+        col = item.column()
+        point_id = str(self._elec_room_row_ap_ids.get(row, "") or "").strip()
+        if not point_id:
+            return
+        if col == 1:
+            self.pre_change.emit()
+            self.element_field_changed.emit(point_id, "name", str(item.text() or "").strip())
+            return
+        if col == 3:
+            value_cm = self._parse_float_text(item.text())
+            if value_cm is None:
+                self._do_refresh()
+                return
+            self.pre_change.emit()
+            self.element_field_changed.emit(point_id, "height_from_floor", float(value_cm))
+
+    def _on_elec_room_ap_type_changed(self, point_id: str, value: str) -> None:
+        if self._updating_electro_tables:
+            return
+        point_id = str(point_id or "").strip()
+        if not point_id:
+            return
+        self.pre_change.emit()
+        self.element_field_changed.emit(point_id, "builtin_symbol", str(value or "").strip())
+
+    def _on_elec_cable_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._updating_electro_tables or item is None:
+            return
+        row = item.row()
+        col = item.column()
+        cable_id = str(self._elec_cable_row_ids.get(row, "") or "").strip()
+        if not cable_id:
+            return
+        if col == 0:
+            self.pre_change.emit()
+            self.element_field_changed.emit(cable_id, "name", str(item.text() or "").strip())
+
+    def _on_elec_cable_type_changed(self, cable_id: str, value: str) -> None:
+        if self._updating_electro_tables:
+            return
+        cable_id = str(cable_id or "").strip()
+        if not cable_id:
+            return
+        self.pre_change.emit()
+        self.element_field_changed.emit(cable_id, "type", str(value or "").strip())

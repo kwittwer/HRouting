@@ -776,17 +776,17 @@ def test_cable_length_uses_strict_floorplan_scale_and_manual_surcharges():
 
     values = computed_values(doc, cable)
     assert values["path_length_m"] == "2.50 m"
-    assert values["start_surcharge_m"] == "0.00 m"
-    assert values["end_surcharge_m"] == "0.00 m"
-    assert values["length_m"] == "2.50 m"
+    assert values["start_surcharge_m"] == "0.03 m"
+    assert values["end_surcharge_m"] == "0.04 m"
+    assert values["length_m"] == "2.57 m"
 
     overview = project_overview_data(doc)
     cable_row = next(row for row in overview["electro"]["cables"] if row["id"] == "EK-1")
-    assert cable_row["length_m"] == pytest.approx(2.5, abs=1e-9)
+    assert cable_row["length_m"] == pytest.approx(2.57, abs=1e-9)
     assert cable_row["valid_scale"] is True
 
     material_sum = overview["electro"]["materials"]["cable_length_by_type_m"]
-    assert material_sum["NYM-J 3x1,5"] == pytest.approx(2.5, abs=1e-9)
+    assert material_sum["NYM-J 3x1,5"] == pytest.approx(2.57, abs=1e-9)
 
     cable.start_length_surcharge_m = 0.2
     cable.end_length_surcharge_m = 0.5
@@ -867,6 +867,181 @@ def test_cable_length_prefers_ref_line_scale_when_mm_per_px_is_stale():
     assert details["scale_mm_per_px"] == pytest.approx(10.0, abs=1e-9)
     assert details["path_length_m"] == pytest.approx(1.0, abs=1e-9)
     assert details["length_m"] == pytest.approx(1.0, abs=1e-9)
+
+
+def test_cable_length_optional_ap_height_surcharge_and_free_text_override():
+    from model.computed import cable_length_details  # noqa: PLC0415
+
+    raw = {
+        "canvas": {
+            "floor_plans": [{"fp_id": "grundriss-1", "mm_per_px": 10.0}],
+            "elec_points": {
+                "AP-1": [0.0, 0.0],
+                "AP-2": [100.0, 0.0],
+            },
+            "elec_cables": {
+                "EK-1": [[0.0, 0.0], [100.0, 0.0]],
+            },
+            "cable_start_ap": {"EK-1": "AP-1"},
+            "cable_end_ap": {"EK-1": "AP-2"},
+        },
+        "params": {
+            "floorplans": {
+                "grundriss-1": {"floor_plan_id": "grundriss-1", "name": "EG", "mm_per_px": 10.0}
+            },
+            "floorplans_order": ["grundriss-1"],
+            "elec_points": {
+                "AP-1": {
+                    "point_id": "AP-1",
+                    "name": "Dose A",
+                    "floor_plan_id": "grundriss-1",
+                    "height_from_floor": 1450.0,
+                },
+                "AP-2": {
+                    "point_id": "AP-2",
+                    "name": "Dose B",
+                    "floor_plan_id": "grundriss-1",
+                    "height_from_floor": 300.0,
+                },
+            },
+            "elec_cables": {
+                "EK-1": {
+                    "cable_id": "EK-1",
+                    "name": "Kabel 1",
+                    "type": "NYM-J 3x1,5",
+                    "floor_plan_id": "grundriss-1",
+                    "start_ap": "AP-1",
+                    "end_ap": "AP-2",
+                    "start_length_surcharge_input": "+ AP Höhe",
+                    "end_length_surcharge_input": "140 cm",
+                }
+            },
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    cable = doc.elements["elec_cables"]["EK-1"]
+
+    values = cable_length_details(doc, cable)
+    assert values["path_length_m"] == pytest.approx(1.0, abs=1e-9)
+    assert values["start_surcharge_m"] == pytest.approx(1.45, abs=1e-9)
+    assert values["end_surcharge_m"] == pytest.approx(1.4, abs=1e-9)
+    assert values["length_m"] == pytest.approx(3.85, abs=1e-9)
+
+    cable.data["end_length_surcharge_input"] = "2 m"
+    values_override_m = cable_length_details(doc, cable)
+    assert values_override_m["end_surcharge_m"] == pytest.approx(2.0, abs=1e-9)
+    assert values_override_m["length_m"] == pytest.approx(4.45, abs=1e-9)
+
+
+def test_cable_length_defaults_to_ap_height_when_optional_fields_missing():
+    from model.computed import cable_length_details  # noqa: PLC0415
+
+    raw = {
+        "canvas": {
+            "floor_plans": [{"fp_id": "grundriss-1", "mm_per_px": 10.0}],
+            "elec_points": {
+                "AP-1": [0.0, 0.0],
+                "AP-2": [100.0, 0.0],
+            },
+            "elec_cables": {
+                "EK-1": [[0.0, 0.0], [100.0, 0.0]],
+            },
+            "cable_start_ap": {"EK-1": "AP-1"},
+            "cable_end_ap": {"EK-1": "AP-2"},
+        },
+        "params": {
+            "floorplans": {
+                "grundriss-1": {"floor_plan_id": "grundriss-1", "name": "EG", "mm_per_px": 10.0}
+            },
+            "floorplans_order": ["grundriss-1"],
+            "elec_points": {
+                "AP-1": {
+                    "point_id": "AP-1",
+                    "floor_plan_id": "grundriss-1",
+                    "height_from_floor": 1450.0,
+                },
+                "AP-2": {
+                    "point_id": "AP-2",
+                    "floor_plan_id": "grundriss-1",
+                    "height_from_floor": 300.0,
+                },
+            },
+            "elec_cables": {
+                "EK-1": {
+                    "cable_id": "EK-1",
+                    "floor_plan_id": "grundriss-1",
+                    "start_ap": "AP-1",
+                    "end_ap": "AP-2",
+                }
+            },
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    cable = doc.elements["elec_cables"]["EK-1"]
+    values = cable_length_details(doc, cable)
+
+    assert values["path_length_m"] == pytest.approx(1.0, abs=1e-9)
+    assert values["start_surcharge_m"] == pytest.approx(1.45, abs=1e-9)
+    assert values["end_surcharge_m"] == pytest.approx(0.3, abs=1e-9)
+    assert values["length_m"] == pytest.approx(2.75, abs=1e-9)
+
+
+def test_cable_length_reacts_to_ap_height_changes_with_ap_default_surcharge():
+    from model.computed import cable_length_details  # noqa: PLC0415
+
+    raw = {
+        "canvas": {
+            "floor_plans": [{"fp_id": "grundriss-1", "mm_per_px": 10.0}],
+            "elec_points": {
+                "AP-1": [0.0, 0.0],
+                "AP-2": [100.0, 0.0],
+            },
+            "elec_cables": {
+                "EK-1": [[0.0, 0.0], [100.0, 0.0]],
+            },
+            "cable_start_ap": {"EK-1": "AP-1"},
+            "cable_end_ap": {"EK-1": "AP-2"},
+        },
+        "params": {
+            "floorplans": {
+                "grundriss-1": {"floor_plan_id": "grundriss-1", "name": "EG", "mm_per_px": 10.0}
+            },
+            "floorplans_order": ["grundriss-1"],
+            "elec_points": {
+                "AP-1": {
+                    "point_id": "AP-1",
+                    "floor_plan_id": "grundriss-1",
+                    "height_from_floor": 1000.0,
+                },
+                "AP-2": {
+                    "point_id": "AP-2",
+                    "floor_plan_id": "grundriss-1",
+                    "height_from_floor": 1000.0,
+                },
+            },
+            "elec_cables": {
+                "EK-1": {
+                    "cable_id": "EK-1",
+                    "floor_plan_id": "grundriss-1",
+                    "start_ap": "AP-1",
+                    "end_ap": "AP-2",
+                    "start_length_surcharge_input": "+ AP Höhe",
+                    "end_length_surcharge_input": "+ AP Höhe",
+                }
+            },
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    cable = doc.elements["elec_cables"]["EK-1"]
+    before = cable_length_details(doc, cable)
+    assert before["length_m"] == pytest.approx(3.0, abs=1e-9)
+
+    doc.elements["elec_points"]["AP-1"].height_from_floor = 2000.0
+    after = cable_length_details(doc, cable)
+    assert after["length_m"] == pytest.approx(4.0, abs=1e-9)
 
 
 def test_elec_cable_preserves_kicad_sync_metadata_roundtrip():
