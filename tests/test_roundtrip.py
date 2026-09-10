@@ -178,6 +178,32 @@ def test_migration_drops_legacy_ui_state():
     assert "_ui_state" not in raw["params"]
 
 
+def test_migration_sets_default_color_dialog_palette_when_missing():
+    raw = migrate_raw({"params": {"circuits": {}}})
+    colors = raw["params"].get("ui_color_dialog_custom_colors")
+    assert isinstance(colors, list)
+    assert len(colors) == 16
+    assert colors[0] == "#ffffff"
+    assert colors[-1] == "#800080".lower()
+
+
+def test_migration_normalizes_color_dialog_palette_values():
+    raw = migrate_raw(
+        {
+            "params": {
+                "ui_color_dialog_custom_colors": [
+                    "#ABCDEF",
+                    "  #123456  ",
+                    "#12",
+                    "red",
+                    123,
+                ]
+            }
+        }
+    )
+    assert raw["params"]["ui_color_dialog_custom_colors"] == ["#abcdef", "#123456"]
+
+
 def test_migration_moves_global_helper_lines():
     raw = migrate_raw(
         {

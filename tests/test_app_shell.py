@@ -1344,6 +1344,156 @@ def test_context_menu_offers_draw_cable_for_ap(app, monkeypatch):
         window.deleteLater()
 
 
+def test_context_menu_offers_point_actions_for_canvas_cable_click(app, monkeypatch):
+    from PySide6.QtCore import QSettings, QPointF  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_cables": {"EK-1": [[0.0, 0.0], [100.0, 0.0]]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel 1",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window._apply_workspace("electrical")
+
+        default_actions = [entry[0] for entry in window._workspace_context_action_specs("EK-1", "element")]
+        assert "insert_point_ctx" not in default_actions
+        assert "delete_point_ctx" not in default_actions
+
+        window._context_menu_canvas_obj_type = "elec_cable"
+        window._context_menu_canvas_pt = QPointF(50.0, 0.0)
+        actions = [entry[0] for entry in window._workspace_context_action_specs("EK-1", "element")]
+        assert "insert_point_ctx" in actions
+        assert "delete_point_ctx" in actions
+    finally:
+        window.deleteLater()
+
+
+def test_context_insert_point_on_cable_works_in_edit_mode(app, monkeypatch):
+    from PySide6.QtCore import QSettings, QPointF  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_cables": {"EK-1": [[0.0, 0.0], [100.0, 0.0]]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel 1",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.canvas.start_edit_elec_cable("EK-1")
+        assert window.canvas.tool_mode() == ToolMode.EDIT_ELEC_CABLE
+
+        window._context_menu_canvas_obj_type = "elec_cable"
+        window._context_menu_canvas_pt = QPointF(50.0, 0.0)
+        window._run_context_action("insert_point_ctx", "EK-1", "element")
+
+        pts = window.canvas._elec_cables["EK-1"]
+        assert len(pts) == 3
+        assert pts[1].x() == 50.0
+        assert pts[1].y() == 0.0
+    finally:
+        window.deleteLater()
+
+
+def test_context_delete_point_on_cable_works_in_edit_mode(app, monkeypatch):
+    from PySide6.QtCore import QSettings, QPointF  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_cables": {"EK-1": [[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel 1",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.canvas.start_edit_elec_cable("EK-1")
+        assert window.canvas.tool_mode() == ToolMode.EDIT_ELEC_CABLE
+
+        window._context_menu_canvas_obj_type = "elec_cable"
+        window._context_menu_canvas_pt = QPointF(50.0, 0.0)
+        window._run_context_action("delete_point_ctx", "EK-1", "element")
+
+        pts = window.canvas._elec_cables["EK-1"]
+        assert len(pts) == 2
+    finally:
+        window.deleteLater()
+
+
 def test_context_menu_includes_generic_actions(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -1735,6 +1885,7 @@ def test_file_menu_shows_git_actions(app, monkeypatch):
 
         assert "Speichern, Commit & Push…" in labels
         assert "Commit & Push…" in labels
+        assert "Remote prüfen & Pull…" in labels
     finally:
         window.deleteLater()
 
@@ -1761,8 +1912,10 @@ def test_git_actions_enable_only_for_saved_repo_projects(app, monkeypatch, tmp_p
     try:
         assert window._save_git_action is not None
         assert window._git_commit_push_action is not None
+        assert window._git_pull_action is not None
         assert not window._save_git_action.isEnabled()
         assert not window._git_commit_push_action.isEnabled()
+        assert not window._git_pull_action.isEnabled()
 
         monkeypatch.setattr(window, "_find_git_repo_root", fake_repo_root)
         window._project_path = project_path
@@ -1770,12 +1923,14 @@ def test_git_actions_enable_only_for_saved_repo_projects(app, monkeypatch, tmp_p
 
         assert window._save_git_action.isEnabled()
         assert window._git_commit_push_action.isEnabled()
+        assert window._git_pull_action.isEnabled()
 
         window._project_path = None
         window._update_git_action_state()
 
         assert not window._save_git_action.isEnabled()
         assert not window._git_commit_push_action.isEnabled()
+        assert not window._git_pull_action.isEnabled()
     finally:
         window.deleteLater()
 
@@ -1797,10 +1952,13 @@ def test_top_toolbar_contains_git_actions_with_icons(app, monkeypatch):
         labels = [action.text() for action in toolbar_actions]
 
         assert "Commit & Push…" in labels
+        assert "Remote prüfen & Pull…" in labels
         assert "Speichern, Commit & Push…" not in labels
 
         push_action = next(action for action in toolbar_actions if action.text() == "Commit & Push…")
+        pull_action = next(action for action in toolbar_actions if action.text() == "Remote prüfen & Pull…")
         assert not push_action.icon().isNull()
+        assert not pull_action.icon().isNull()
     finally:
         window.deleteLater()
 
@@ -1851,6 +2009,8 @@ def test_git_commit_push_stages_project_file_and_pushes(app, monkeypatch, tmp_pa
         commands.append(list(command))
         if command[:3] == ["git", "rev-parse", "--show-toplevel"]:
             return subprocess.CompletedProcess(command, 0, stdout=str(repo_root), stderr="")
+        if command[:5] == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="kein upstream")
         if command[:2] == ["git", "add"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[:4] == ["git", "diff", "--cached", "--quiet"]:
@@ -1875,6 +2035,7 @@ def test_git_commit_push_stages_project_file_and_pushes(app, monkeypatch, tmp_pa
 
     assert commands == [
         ["git", "rev-parse", "--show-toplevel"],
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
         ["git", "add", "--", "projects/demo.hrp"],
         ["git", "diff", "--cached", "--quiet", "--", "projects/demo.hrp"],
         ["git", "commit", "-m", "Projektstand sichern"],
@@ -1902,6 +2063,8 @@ def test_git_commit_push_requires_changes_in_project_scope(app, monkeypatch, tmp
         commands.append(list(command))
         if command[:3] == ["git", "rev-parse", "--show-toplevel"]:
             return subprocess.CompletedProcess(command, 0, stdout=str(repo_root), stderr="")
+        if command[:5] == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="kein upstream")
         if command[:2] == ["git", "add"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[:4] == ["git", "diff", "--cached", "--quiet"]:
@@ -1922,10 +2085,156 @@ def test_git_commit_push_requires_changes_in_project_scope(app, monkeypatch, tmp
 
     assert commands == [
         ["git", "rev-parse", "--show-toplevel"],
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
         ["git", "add", "--", "demo.hrp"],
         ["git", "diff", "--cached", "--quiet", "--", "demo.hrp"],
     ]
     assert infos == ["Keine Änderungen in den Projektdateien zum Committen gefunden."]
+
+
+def test_git_commit_push_pulls_when_remote_is_newer(app, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    project_path = repo_root / "demo.hrp"
+    project_path.write_text("{}", encoding="utf-8")
+
+    commands: list[list[str]] = []
+    reloads: list[Path] = []
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        del cwd, capture_output, text, check
+        commands.append(list(command))
+        if command[:3] == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, stdout=str(repo_root), stderr="")
+        if command[:5] == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]:
+            return subprocess.CompletedProcess(command, 0, stdout="origin/main\n", stderr="")
+        if command[:3] == ["git", "fetch", "--quiet"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "rev-list", "--left-right", "--count"]:
+            return subprocess.CompletedProcess(command, 0, stdout="0\t2\n", stderr="")
+        if command[:3] == ["git", "pull", "--ff-only"]:
+            return subprocess.CompletedProcess(command, 0, stdout="Updating", stderr="")
+        if command[:2] == ["git", "add"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "diff", "--cached", "--quiet"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        if command[:2] == ["git", "commit"]:
+            return subprocess.CompletedProcess(command, 0, stdout="Committed", stderr="")
+        raise AssertionError(f"Unerwarteter Git-Befehl: {command!r}")
+
+    monkeypatch.setattr("gui.app_window.subprocess.run", fake_run)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+
+    window = AppWindow()
+    try:
+        window._project_path = project_path
+        monkeypatch.setattr(window, "_prompt_git_commit_request", lambda default_message: ("Nach Pull sichern", False))
+
+        def fake_open(path: Path) -> bool:
+            reloads.append(path)
+            return True
+
+        monkeypatch.setattr(window, "open_project_file", fake_open)
+        assert window._git_commit_push_project(prompt_save=False) is True
+    finally:
+        window.deleteLater()
+
+    assert reloads == [project_path]
+    assert commands == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        ["git", "fetch", "--quiet"],
+        ["git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        ["git", "pull", "--ff-only"],
+        ["git", "add", "--", "demo.hrp"],
+        ["git", "diff", "--cached", "--quiet", "--", "demo.hrp"],
+        ["git", "commit", "-m", "Nach Pull sichern"],
+    ]
+
+
+def test_load_project_offers_pull_when_remote_is_newer(app, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    project_path = repo_root / "demo.hrp"
+    project_path.write_text("{}", encoding="utf-8")
+
+    called_fetch: list[Path] = []
+    pulled: list[Path] = []
+    reloaded: list[Path] = []
+
+    window = AppWindow()
+    try:
+        monkeypatch.setattr(window, "_find_git_repo_root", lambda p: repo_root)
+        monkeypatch.setattr(window, "_git_current_upstream", lambda root: "origin/main")
+        monkeypatch.setattr(window, "_git_ahead_behind_count", lambda root: (0, 1))
+
+        def fake_run_git(args, *, cwd, check):
+            if args == ["fetch", "--quiet"]:
+                called_fetch.append(cwd)
+                return subprocess.CompletedProcess(["git", *args], 0, stdout="", stderr="")
+            raise AssertionError(f"Unerwarteter Git-Befehl im Ladepfad: {args!r}")
+
+        monkeypatch.setattr(window, "_run_git_command", fake_run_git)
+        monkeypatch.setattr(window, "_git_pull_ff_only", lambda root: pulled.append(root))
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+        monkeypatch.setattr(window, "open_project_file", lambda path: reloaded.append(path) or True)
+
+        window._maybe_offer_pull_for_loaded_project(project_path)
+    finally:
+        window.deleteLater()
+
+    assert called_fetch == [repo_root]
+    assert pulled == [repo_root]
+    assert reloaded == [project_path]
+
+
+def test_load_project_skips_pull_when_user_declines(app, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    project_path = repo_root / "demo.hrp"
+    project_path.write_text("{}", encoding="utf-8")
+
+    pulled: list[Path] = []
+    reloaded: list[Path] = []
+
+    window = AppWindow()
+    try:
+        monkeypatch.setattr(window, "_find_git_repo_root", lambda p: repo_root)
+        monkeypatch.setattr(window, "_git_current_upstream", lambda root: "origin/main")
+        monkeypatch.setattr(window, "_git_ahead_behind_count", lambda root: (0, 3))
+        monkeypatch.setattr(
+            window,
+            "_run_git_command",
+            lambda args, *, cwd, check: subprocess.CompletedProcess(["git", *args], 0, stdout="", stderr=""),
+        )
+        monkeypatch.setattr(window, "_git_pull_ff_only", lambda root: pulled.append(root))
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+        monkeypatch.setattr(window, "open_project_file", lambda path: reloaded.append(path) or True)
+
+        window._maybe_offer_pull_for_loaded_project(project_path)
+    finally:
+        window.deleteLater()
+
+    assert pulled == []
+    assert reloaded == []
 
 
 def test_export_pdf_smoke_writes_file(app, monkeypatch, tmp_path):

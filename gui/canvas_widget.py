@@ -1923,7 +1923,9 @@ class CanvasWidget(QWidget):
             self.update()
 
     def context_insert_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF) -> bool:
-        if self._mode != ToolMode.NONE:
+        if self._mode != ToolMode.NONE and not (
+            obj_type == "elec_cable" and self._mode == ToolMode.EDIT_ELEC_CABLE
+        ):
             return False
 
         if obj_type == "elec_cable":
@@ -2010,7 +2012,9 @@ class CanvasWidget(QWidget):
         return False
 
     def context_delete_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF) -> bool:
-        if self._mode != ToolMode.NONE:
+        if self._mode != ToolMode.NONE and not (
+            obj_type == "elec_cable" and self._mode == ToolMode.EDIT_ELEC_CABLE
+        ):
             return False
 
         if obj_type == "elec_cable":
@@ -10245,11 +10249,13 @@ class CanvasWidget(QWidget):
             return
         color = self._color_map.get(cable_id, QColor("#ff9800"))
         sw = self._elec_cable_stroke_width.get(cable_id, 2.0)
+        is_highlighted = (
+            cable_id == self._selected_item_id
+            and self._selected_item_type == "elec_cable"
+        )
         pen = QPen(color, sw / self._scale)
         pen.setJoinStyle(Qt.RoundJoin)
         pen.setCapStyle(Qt.RoundCap)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
         rounding = 8.0 / self._scale
         path_key = (
             tuple((p.x(), p.y()) for p in points),
@@ -10261,11 +10267,37 @@ class CanvasWidget(QWidget):
         else:
             path = self._smooth_polyline_path(points, rounding)
             self._elec_cable_path_cache[cable_id] = (path_key, path)
+
+        painter.setBrush(Qt.NoBrush)
+        if is_highlighted:
+            glow = QColor("#ffffff")
+            glow.setAlpha(90)
+            glow_pen = QPen(glow, (sw + 8.0) / self._scale)
+            glow_pen.setJoinStyle(Qt.RoundJoin)
+            glow_pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(glow_pen)
+            painter.drawPath(path)
+
+            accent = QColor(color)
+            accent.setAlpha(220)
+            accent_pen = QPen(accent, (sw + 3.5) / self._scale)
+            accent_pen.setJoinStyle(Qt.RoundJoin)
+            accent_pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(accent_pen)
+            painter.drawPath(path)
+
+        painter.setPen(pen)
         painter.drawPath(path)
-        painter.setBrush(QBrush(color))
-        r = 3.0 / self._scale
-        for pt in points:
-            painter.drawEllipse(pt, r, r)
+
+        if is_highlighted:
+            outer_radius = 5.0 / self._scale
+            inner_radius = 3.0 / self._scale
+            for pt in points:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(QColor("#ffffff")))
+                painter.drawEllipse(pt, outer_radius, outer_radius)
+                painter.setBrush(QBrush(color))
+                painter.drawEllipse(pt, inner_radius, inner_radius)
 
     def _draw_elec_cable_in_progress(self, painter):
         if not self._current_elec_cable_points:
@@ -10298,17 +10330,23 @@ class CanvasWidget(QWidget):
         pts = self._elec_cables.get(cable_id, [])
         if not pts:
             return
+        if cable_id != self._selected_item_id or self._selected_item_type != "elec_cable":
+            return
         color = self._color_map.get(cable_id, QColor("#ff9800"))
-        r = 5.0 / self._scale
+        outer_radius = 7.0 / self._scale
+        inner_radius = 4.5 / self._scale
         for i, p in enumerate(pts):
             if (self._dragging_route_point
                     and self._dragging_route_point[0] == cable_id
                     and self._dragging_route_point[1] == i):
-                painter.setBrush(QBrush(QColor("#ff6b6b")))
+                fill = QColor("#ff6b6b")
             else:
-                painter.setBrush(QBrush(color))
-            painter.setPen(QPen(QColor("#ffffff"), 1.0 / self._scale))
-            painter.drawEllipse(p, r, r)
+                fill = QColor(color)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor("#ffffff")))
+            painter.drawEllipse(p, outer_radius, outer_radius)
+            painter.setBrush(QBrush(fill))
+            painter.drawEllipse(p, inner_radius, inner_radius)
 
     # ── Supply line drawing ─────────────────────────────────────────── #
 

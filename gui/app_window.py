@@ -78,6 +78,11 @@ from logic.hrp_import import import_selected_elements, iter_import_candidates
 from .elec_schema_window import ApNode, CableEdge, ElecSchemaWindow
 from .hrp_import_dialog import HrpImportDialog
 from .kicad_import_dialog import KiCadImportDialog
+from .color_dialog_state import (
+    PARAMS_COLOR_DIALOG_CUSTOM_COLORS_KEY,
+    apply_custom_colors,
+    capture_custom_colors,
+)
 from .pdf_export_dialog import PdfExportConfigDialog
 from .schaltplan_window import SchaltplanWindow
 from logic.schaltplan_generator import build_uv_hierarchy, get_uv_circuits
@@ -198,6 +203,7 @@ class AppWindow(QMainWindow):
         self._redo_action: QAction | None = None
         self._save_git_action: QAction | None = None
         self._git_commit_push_action: QAction | None = None
+        self._git_pull_action: QAction | None = None
         self._recent_menu: QMenu | None = None
         self._grid_toolbar: QToolBar | None = None
         self._elec_schema_window: ElecSchemaWindow | None = None
@@ -208,6 +214,8 @@ class AppWindow(QMainWindow):
         self._annotation_live_value_cache: dict[str, tuple] = {}
         self._pending_annotation_refresh_id: str = ""
         self._context_menu_batch_ids: list[str] = []
+        self._context_menu_canvas_obj_type: str = ""
+        self._context_menu_canvas_pt: QPointF | None = None
         self._annotation_live_refresh_timer = QTimer(self)
         self._annotation_live_refresh_timer.setSingleShot(True)
         self._annotation_live_refresh_timer.setInterval(33)
@@ -340,6 +348,9 @@ class AppWindow(QMainWindow):
         )
         self._git_commit_push_action = self._add_action(
             file_menu, "Commit & Push…", self._git_commit_push_project
+        )
+        self._git_pull_action = self._add_action(
+            file_menu, "Remote prüfen & Pull…", self._git_pull_project_from_remote
         )
         file_menu.addSeparator()
         self._add_action(file_menu, "Projekt reparieren & bereinigen…", self._repair_project)
@@ -1289,6 +1300,7 @@ class AppWindow(QMainWindow):
             getattr(document, "pdf_export_meta", {}),
             self._pdf_export_pages,
         )
+        apply_custom_colors(document.settings.get(PARAMS_COLOR_DIALOG_CUSTOM_COLORS_KEY))
         self._sync_grid_toolbar_from_canvas()
         self._refresh_schema_windows()
         self._update_title()
@@ -1310,6 +1322,8 @@ class AppWindow(QMainWindow):
             "edit_supply": lambda eid: self.canvas.start_edit_supply_line(eid),
             "draw_cable": lambda eid: self.canvas.start_draw_elec_cable(eid),
             "edit_cable": lambda eid: self.canvas.start_edit_elec_cable(eid),
+            "insert_point_ctx": self._action_insert_point_context,
+            "delete_point_ctx": self._action_delete_point_context,
             "draw_line": self._action_draw_line,
             "edit_line": self._action_edit_line,
             "draw_rectangle": lambda eid: self._action_draw_annotation(eid, "annotation_rectangle"),
@@ -2047,6 +2061,15 @@ class AppWindow(QMainWindow):
             if isinstance(element, ElecPoint):
                 specs.append(("draw_cable_from_ap", "Kabel ziehen", True))
 
+            if (
+                isinstance(element, ElecCable)
+                and kind == "element"
+                and self._context_menu_canvas_obj_type == "elec_cable"
+                and self._context_menu_canvas_pt is not None
+            ):
+                specs.append(("insert_point_ctx", "Punkt hinzufügen", True))
+                specs.append(("delete_point_ctx", "Punkt löschen", True))
+
             schema = schema_for(element)
             same_workspace = getattr(type(element), "LAYER", None) is self._workspace.layer
             if schema is not None and same_workspace:
@@ -2173,6 +2196,38 @@ class AppWindow(QMainWindow):
             return
         if element_id:
             self._on_property_action(element_id, action_id)
+
+    def _action_insert_point_context(self, element_id: str) -> None:
+        canvas_pt = self._context_menu_canvas_pt
+        if self._context_menu_canvas_obj_type != "elec_cable" or canvas_pt is None:
+            self.statusBar().showMessage("Punkt hinzufügen nur bei Klick auf ein Kabel möglich.", 2500)
+            return
+        if self.canvas._hit_elec_cable_edge(canvas_pt, element_id) is None:
+            self.statusBar().showMessage("Keine passende Kante für neuen Punkt gefunden.", 2500)
+            return
+
+        self._push_undo()
+        if self.canvas.context_insert_point("elec_cable", element_id, QPointF(canvas_pt)):
+            self.statusBar().showMessage("Punkt hinzugefügt.", 2000)
+            return
+        self.statusBar().showMessage("Keine passende Kante für neuen Punkt gefunden.", 2500)
+
+    def _action_delete_point_context(self, element_id: str) -> None:
+        canvas_pt = self._context_menu_canvas_pt
+        if self._context_menu_canvas_obj_type != "elec_cable" or canvas_pt is None:
+            self.statusBar().showMessage("Punkt löschen nur bei Klick auf ein Kabel möglich.", 2500)
+            return
+        hit = self.canvas._hit_elec_cable_point(canvas_pt, element_id)
+        pts = self.canvas._elec_cables.get(element_id, [])
+        if hit is None or len(pts) <= 2:
+            self.statusBar().showMessage("Kein löschbarer Punkt an dieser Stelle.", 2500)
+            return
+
+        self._push_undo()
+        if self.canvas.context_delete_point("elec_cable", element_id, QPointF(canvas_pt)):
+            self.statusBar().showMessage("Punkt gelöscht.", 2000)
+            return
+        self.statusBar().showMessage("Kein löschbarer Punkt an dieser Stelle.", 2500)
 
     def _open_context_menu(self, element_id: str, kind: str, global_pos) -> None:
         from PySide6.QtCore import QPoint  # noqa: PLC0415
@@ -2452,8 +2507,18 @@ class AppWindow(QMainWindow):
             kind = "helper_line"
             self._open_context_menu(obj_id, kind, global_pos)
             return
+
+        self._context_menu_canvas_obj_type = obj_type or ""
+        try:
+            self._context_menu_canvas_pt = QPointF(_canvas_pt) if _canvas_pt is not None else None
+        except TypeError:
+            self._context_menu_canvas_pt = None
         kind = "floorplan" if obj_id in self._document.floorplans else "element"
-        self._open_context_menu(obj_id, kind, global_pos)
+        try:
+            self._open_context_menu(obj_id, kind, global_pos)
+        finally:
+            self._context_menu_canvas_obj_type = ""
+            self._context_menu_canvas_pt = None
 
     def _sync_canvas_to_document(self) -> None:
         """Überträgt die noch nicht gebundenen Canvas-Daten ins Dokument.
@@ -2472,6 +2537,7 @@ class AppWindow(QMainWindow):
         document.pdf_export_meta = copy.deepcopy(
             self._normalize_pdf_export_meta(self._pdf_export_meta, document.pdf_export_pages)
         )
+        document.settings[PARAMS_COLOR_DIALOG_CUSTOM_COLORS_KEY] = capture_custom_colors()
 
         canvas_state = self.canvas.to_dict()
         bound_keys = self._bound_canvas_keys()
@@ -3245,7 +3311,9 @@ class AppWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Projekt öffnen", "", _FILE_FILTER)
         if not path:
             return
-        self.open_project_file(Path(path))
+        project_path = Path(path)
+        if self.open_project_file(project_path):
+            self._maybe_offer_pull_for_loaded_project(project_path)
 
     def open_project_file(self, path: Path) -> bool:
         """Öffnet ein Projekt ohne Dialog (z. B. per Kommandozeile)."""
@@ -3314,6 +3382,12 @@ class AppWindow(QMainWindow):
         commit_message, push_after_commit = request
 
         try:
+            remote_sync = self._git_sync_with_remote(repo_root)
+            if remote_sync == "cancel":
+                return False
+            if remote_sync == "pulled":
+                if not self.open_project_file(project_path):
+                    return False
             self._git_stage_paths(repo_root, commit_paths)
             if not self._git_has_staged_changes(repo_root, commit_paths):
                 QMessageBox.information(
@@ -3337,6 +3411,160 @@ class AppWindow(QMainWindow):
         self.log.success(f"Git: {action}: {rel_paths}")
         self.statusBar().showMessage(f"Projekt {action}", 4000)
         return True
+
+    def _git_sync_with_remote(self, repo_root: Path) -> str:
+        upstream = self._git_current_upstream(repo_root)
+        if not upstream:
+            return "no_upstream"
+
+        self._run_git_command(["fetch", "--quiet"], cwd=repo_root, check=True)
+        ahead_count, behind_count = self._git_ahead_behind_count(repo_root)
+        if behind_count <= 0:
+            return "up_to_date"
+
+        answer = QMessageBox.question(
+            self,
+            "Git Remote neuer",
+            (
+                "Das Remote-Repository hat neuere Commits.\n\n"
+                f"Lokale Commits voraus: {ahead_count}\n"
+                f"Remote-Commits voraus: {behind_count}\n\n"
+                "Jetzt per 'git pull --ff-only' aktualisieren?"
+            ),
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Cancel:
+            return "cancel"
+        if answer == QMessageBox.No:
+            return "skip_pull"
+
+        self._git_pull_ff_only(repo_root)
+        self.log.info("Git: Remote-Aenderungen erfolgreich gepullt.")
+        self.statusBar().showMessage("Git: Remote-Aenderungen gepullt", 3500)
+        return "pulled"
+
+    def _git_pull_project_from_remote(self, checked: bool = False) -> bool:
+        del checked
+        project_path = self._project_path
+        if project_path is None:
+            QMessageBox.information(self, "Git Pull", "Projekt noch nicht gespeichert.")
+            return False
+
+        repo_root = self._find_git_repo_root(project_path)
+        if repo_root is None:
+            QMessageBox.information(self, "Git Pull", "Die Projektdatei liegt nicht in einem Git-Repository.")
+            return False
+
+        upstream = self._git_current_upstream(repo_root)
+        if not upstream:
+            QMessageBox.information(self, "Git Pull", "Kein Upstream-Branch konfiguriert.")
+            return False
+
+        try:
+            self._run_git_command(["fetch", "--quiet"], cwd=repo_root, check=True)
+            ahead_count, behind_count = self._git_ahead_behind_count(repo_root)
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "Git Pull", str(exc))
+            self.log.error(str(exc))
+            return False
+
+        if behind_count <= 0:
+            QMessageBox.information(self, "Git Pull", "Kein neuerer Remote-Stand vorhanden.")
+            return False
+
+        answer = QMessageBox.question(
+            self,
+            "Remote-Updates gefunden",
+            (
+                "Das Remote-Repository hat einen neueren Stand.\n\n"
+                f"Lokale Commits voraus: {ahead_count}\n"
+                f"Remote-Commits voraus: {behind_count}\n\n"
+                "Jetzt per 'git pull --ff-only' aktualisieren?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+
+        try:
+            self._git_pull_ff_only(repo_root)
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "Git Pull", str(exc))
+            self.log.error(str(exc))
+            return False
+
+        if self.open_project_file(project_path):
+            self.log.success("Projekt nach Git Pull neu geladen.")
+            self.statusBar().showMessage("Remote-Updates gepullt und Projekt neu geladen", 4000)
+            return True
+        return False
+
+    def _maybe_offer_pull_for_loaded_project(self, project_path: Path) -> None:
+        repo_root = self._find_git_repo_root(project_path)
+        if repo_root is None:
+            return
+
+        try:
+            upstream = self._git_current_upstream(repo_root)
+            if not upstream:
+                return
+            self._run_git_command(["fetch", "--quiet"], cwd=repo_root, check=True)
+            _ahead, behind = self._git_ahead_behind_count(repo_root)
+            if behind <= 0:
+                return
+        except RuntimeError as exc:
+            self.log.info(f"Git-Remote-Pruefung beim Laden uebersprungen: {exc}")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Remote-Updates gefunden",
+            (
+                "Fuer dieses Projekt gibt es einen neueren Stand im Remote-Repository.\n\n"
+                "Jetzt per 'git pull --ff-only' aktualisieren?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            self._git_pull_ff_only(repo_root)
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "Git Pull", str(exc))
+            self.log.error(str(exc))
+            return
+
+        if self.open_project_file(project_path):
+            self.log.success("Projekt nach Git Pull neu geladen.")
+            self.statusBar().showMessage("Remote-Updates gepullt und Projekt neu geladen", 4000)
+
+    def _git_current_upstream(self, repo_root: Path) -> str:
+        result = self._run_git_command(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            cwd=repo_root,
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+
+    def _git_ahead_behind_count(self, repo_root: Path) -> tuple[int, int]:
+        result = self._run_git_command(
+            ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            cwd=repo_root,
+            check=True,
+        )
+        counts = result.stdout.strip().split()
+        if len(counts) < 2:
+            raise RuntimeError("Git-Status konnte nicht gelesen werden (ahead/behind).")
+        try:
+            return int(counts[0]), int(counts[1])
+        except ValueError as exc:
+            raise RuntimeError("Git-Status enthaelt ungueltige ahead/behind-Werte.") from exc
 
     def _default_git_commit_message(self, project_path: Path) -> str:
         timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm")
@@ -3372,7 +3600,7 @@ class AppWindow(QMainWindow):
         enabled = False
         if self._project_path is not None:
             enabled = self._find_git_repo_root(self._project_path) is not None
-        for action in (self._save_git_action, self._git_commit_push_action):
+        for action in (self._save_git_action, self._git_commit_push_action, self._git_pull_action):
             if action is None:
                 continue
             action.setEnabled(enabled)
@@ -3393,33 +3621,58 @@ class AppWindow(QMainWindow):
         if self._save_git_action is not None:
             self._grid_toolbar.removeAction(self._save_git_action)
         if self._git_commit_push_action is not None:
-            self._git_commit_push_action.setIcon(self._make_git_toolbar_icon())
+            self._git_commit_push_action.setIcon(self._make_git_up_icon())
             if self._git_commit_push_action not in existing_actions:
                 self._grid_toolbar.insertAction(existing_actions[0] if existing_actions else None, self._git_commit_push_action)
                 existing_actions = self._grid_toolbar.actions()
+        if self._git_pull_action is not None:
+            self._git_pull_action.setIcon(self._make_git_down_icon())
+            if self._git_pull_action not in existing_actions:
+                anchor = existing_actions[1] if len(existing_actions) > 1 else None
+                self._grid_toolbar.insertAction(anchor, self._git_pull_action)
+                existing_actions = self._grid_toolbar.actions()
 
-        if not separator_present and self._git_commit_push_action is not None:
-            separator = self._grid_toolbar.insertSeparator(existing_actions[1] if len(existing_actions) > 1 else None)
+        if not separator_present and (self._git_commit_push_action is not None or self._git_pull_action is not None):
+            separator = self._grid_toolbar.insertSeparator(existing_actions[2] if len(existing_actions) > 2 else None)
             separator.setProperty("git_toolbar_separator", True)
 
-    def _make_git_toolbar_icon(self) -> QIcon:
+    def _make_git_up_icon(self) -> QIcon:
         pixmap = QPixmap(20, 20)
         pixmap.fill(Qt.GlobalColor.transparent)
 
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#f05133"))
+        pen = QPen(QColor("#2e7d32"))
         pen.setWidth(2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
-        painter.drawLine(6, 6, 14, 10)
-        painter.drawLine(6, 14, 6, 6)
-        painter.drawLine(6, 14, 14, 10)
-        painter.setBrush(QColor("#f05133"))
-        painter.drawEllipse(3, 3, 6, 6)
-        painter.drawEllipse(3, 11, 6, 6)
-        painter.drawEllipse(11, 7, 6, 6)
+        painter.drawLine(10, 15, 10, 5)
+        painter.drawLine(10, 5, 6, 9)
+        painter.drawLine(10, 5, 14, 9)
+        painter.setBrush(QColor("#2e7d32"))
+        painter.drawEllipse(8, 14, 4, 4)
+        painter.drawEllipse(8, 2, 4, 4)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_git_down_icon(self) -> QIcon:
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#1565c0"))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(10, 5, 10, 15)
+        painter.drawLine(10, 15, 6, 11)
+        painter.drawLine(10, 15, 14, 11)
+        painter.setBrush(QColor("#1565c0"))
+        painter.drawEllipse(8, 2, 4, 4)
+        painter.drawEllipse(8, 14, 4, 4)
         painter.end()
         return QIcon(pixmap)
 
@@ -3447,6 +3700,9 @@ class AppWindow(QMainWindow):
 
     def _git_push(self, repo_root: Path) -> None:
         self._run_git_command(["push"], cwd=repo_root, check=True)
+
+    def _git_pull_ff_only(self, repo_root: Path) -> None:
+        self._run_git_command(["pull", "--ff-only"], cwd=repo_root, check=True)
 
     def _run_git_command(
         self,
@@ -3764,7 +4020,8 @@ class AppWindow(QMainWindow):
             return
         if not self._confirm_discard():
             return
-        self.open_project_file(filepath)
+        if self.open_project_file(filepath):
+            self._maybe_offer_pull_for_loaded_project(filepath)
 
     def _auto_load_last_project(self) -> None:
         if self._project_path is not None:
@@ -3775,7 +4032,8 @@ class AppWindow(QMainWindow):
         path = Path(raw)
         if not path.exists() or path.suffix.lower() not in (".hrp", ".json"):
             return
-        self.open_project_file(path)
+        if self.open_project_file(path):
+            self._maybe_offer_pull_for_loaded_project(path)
 
     def _update_title(self) -> None:
         name = self._project_path.name if self._project_path else "Unbenannt"

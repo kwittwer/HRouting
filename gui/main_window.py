@@ -41,6 +41,11 @@ from PySide6.QtPrintSupport import QPrinter
 
 from gui.canvas_widget import CanvasWidget, COLORS, ToolMode
 from gui.parameter_panel import ParameterPanel, SafeDoubleSpinBox, SafeComboBox, BUILTIN_SYMBOLS
+from gui.color_dialog_state import (
+    PARAMS_COLOR_DIALOG_CUSTOM_COLORS_KEY,
+    apply_custom_colors,
+    capture_custom_colors,
+)
 from gui.pdf_export_dialog import PdfExportConfigDialog
 from gui.elec_schema_window import ElecSchemaWindow, ApNode, CableEdge
 from gui.schaltplan_window import SchaltplanWindow
@@ -4252,6 +4257,7 @@ class MainWindow(QMainWindow):
         # ── 2. JSON bauen – alle Pfade relativ zur Projektdatei ──────────
 
         params = self.param_panel.to_dict()
+        params[PARAMS_COLOR_DIALOG_CUSTOM_COLORS_KEY] = capture_custom_colors()
         # Ensure the new schematic model exists; infer from legacy data if missing.
         params["elec_schematic"] = sanitize_elec_schematic(
             params.get("elec_schematic") or infer_elec_schematic_from_legacy(params)
@@ -4380,6 +4386,7 @@ class MainWindow(QMainWindow):
 
             # --- resolve floorplan file paths + load images -------------
             params = data.get("params", {})
+            apply_custom_colors(params.get(PARAMS_COLOR_DIALOG_CUSTOM_COLORS_KEY))
             # Backward compatible migration into the new schematic model.
             params["elec_schematic"] = sanitize_elec_schematic(
                 params.get("elec_schematic") or infer_elec_schematic_from_legacy(params)

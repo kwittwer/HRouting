@@ -279,6 +279,7 @@ class PropertiesDock(QDockWidget):
             "builtin_symbol",
             "width",
             "height",
+            "height_from_floor",
             "stroke_width",
             "font_size",
             "type_label_visible",

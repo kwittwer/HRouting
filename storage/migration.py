@@ -14,9 +14,17 @@ from .asset_data_uri import is_data_uri
 
 #: Schlüssel, unter dem die alte UI ihren Fensterzustand in params ablegte.
 LEGACY_UI_STATE_KEY = "_ui_state"
+COLOR_DIALOG_CUSTOM_COLORS_KEY = "ui_color_dialog_custom_colors"
 FORMAT_VERSION_KEY = "format_version"
 CURRENT_HRP_FORMAT_VERSION = 2
 LEGACY_HRP_FORMAT_VERSION = 1
+
+_DEFAULT_CUSTOM_COLOR_PALETTE = [
+    "#ffffff", "#c0c0c0", "#808080", "#000000",
+    "#ff0000", "#800000", "#ffff00", "#808000",
+    "#00ff00", "#008000", "#00ffff", "#008080",
+    "#0000ff", "#000080", "#ff00ff", "#800080",
+]
 
 
 def migrate_raw(raw: dict) -> dict:
@@ -30,6 +38,8 @@ def migrate_raw(raw: dict) -> dict:
 
     canvas = raw["canvas"]
     params = raw["params"]
+
+    _migrate_color_dialog_custom_colors(params)
 
     # Bekannte Altversionen werden immer auf das aktuelle Format gehoben.
     if detected_version <= LEGACY_HRP_FORMAT_VERSION:
@@ -92,6 +102,21 @@ def _migrate_floorplan_order(canvas: dict, params: dict) -> None:
 def _drop_legacy_ui_state(params: dict) -> None:
     """Fensterzustand wandert in QSettings – aus dem Projekt entfernen."""
     params.pop(LEGACY_UI_STATE_KEY, None)
+
+
+def _migrate_color_dialog_custom_colors(params: dict) -> None:
+    """Stellt eine portable, valide Custom-Color-Liste für den Farbdialog sicher."""
+    value = params.get(COLOR_DIALOG_CUSTOM_COLORS_KEY)
+    normalized: list[str] = []
+    if isinstance(value, list):
+        for raw in value:
+            if not isinstance(raw, str):
+                continue
+            text = raw.strip().lower()
+            if re.fullmatch(r"#[0-9a-f]{6}", text):
+                normalized.append(text)
+
+    params[COLOR_DIALOG_CUSTOM_COLORS_KEY] = normalized or list(_DEFAULT_CUSTOM_COLOR_PALETTE)
 
 
 _ABSOLUTE_PATH_RE = re.compile(r"^(?:[a-zA-Z]:[\\/]|\\\\|/)")
