@@ -69,6 +69,7 @@ MIN_SYMBOL_PICK_HALF_PX = 8.0
 ELEC_CABLE_OVERLAP_TOLERANCE_PX = 8.0
 ELEC_CABLE_OVERLAP_ANGLE_TOL_DEG = 10.0
 ELEC_CABLE_DEFAULT_LANE_GAP_PX = 2.0
+ELEC_CABLE_AP_APPROACH_LENGTH_DEFAULT_PX = 12.0
 ELEC_POINT_FILL_ALPHA_DEFAULT = 60
 _HELPER_NAV_ID_PREFIX = "NAV-HLP::"
 
@@ -261,6 +262,7 @@ class CanvasWidget(QWidget):
         self._elec_cable_type_text: Dict[str, str]                 = {}
         self._elec_cable_type_label_visible: Dict[str, bool]       = {}
         self._elec_cable_overlap_gap_px: float                     = ELEC_CABLE_DEFAULT_LANE_GAP_PX
+        self._elec_cable_ap_approach_length_px: float              = ELEC_CABLE_AP_APPROACH_LENGTH_DEFAULT_PX
         self._elec_point_fill_alpha: int                           = ELEC_POINT_FILL_ALPHA_DEFAULT
         self._elec_visible:       Dict[str, bool]                 = {}
 
@@ -528,6 +530,14 @@ class CanvasWidget(QWidget):
 
     def elec_cable_overlap_gap_px(self) -> float:
         return float(self._elec_cable_overlap_gap_px)
+
+    def set_elec_cable_ap_approach_length_px(self, length_px: float) -> None:
+        self._elec_cable_ap_approach_length_px = max(0.0, float(length_px))
+        self._elec_cable_path_cache.clear()
+        self.update()
+
+    def elec_cable_ap_approach_length_px(self) -> float:
+        return float(self._elec_cable_ap_approach_length_px)
 
     def set_elec_point_fill_alpha(self, alpha: int) -> None:
         self._elec_point_fill_alpha = max(0, min(255, int(alpha)))
@@ -2421,13 +2431,16 @@ class CanvasWidget(QWidget):
         if len(pts) < 2:
             return None
         seg_offsets = self._get_elec_cable_segment_offsets(cable_id, pts)
-        render_pts = self._build_elec_cable_offset_polyline(pts, seg_offsets)
+        render_pts, edge_owner_indices = self._build_elec_cable_render_geometry(
+            cable_id, pts, seg_offsets
+        )
         sw = self._elec_cable_stroke_width.get(cable_id, 2.0)
         threshold = max(8.0, sw * 2) / self._scale
         for i in range(len(render_pts) - 1):
             proj = _project_on_segment(canvas_pt, render_pts[i], render_pts[i + 1])
             if _qdist(canvas_pt, proj) < threshold:
-                return (i, i + 1)
+                owner = edge_owner_indices[i] if i < len(edge_owner_indices) else i
+                return (owner, owner + 1)
         return None
 
     def _build_elec_cable_overlap_signature(self, visible_cables: List[str]) -> tuple:
@@ -2613,11 +2626,77 @@ class CanvasWidget(QWidget):
 
     def _build_elec_cable_offset_polyline(self,
                                           points: List[QPointF],
-                                          seg_offsets: List[float]) -> List[QPointF]:
+                                          seg_offsets: List[float],
+                                          cable_id: str = "") -> List[QPointF]:
+        render_pts, _edge_owner_indices = self._build_elec_cable_render_geometry(
+            cable_id, points, seg_offsets
+        )
+        return render_pts
+
+    def _build_elec_cable_ap_bend_point(self,
+                                        cable_id: str,
+                                        side: str,
+                                        anchor: QPointF,
+                                        neighbor: QPointF,
+                                        offset: float) -> Optional[QPointF]:
+        ap_id = self._resolve_cable_ap_binding(cable_id, side)
+        if not ap_id or abs(offset) < 1e-9:
+            return None
+
+        if side == "start":
+            dx = neighbor.x() - anchor.x()
+            dy = neighbor.y() - anchor.y()
+        else:
+            dx = anchor.x() - neighbor.x()
+            dy = anchor.y() - neighbor.y()
+        seg_length = math.hypot(dx, dy)
+        if seg_length < 1e-9:
+            return None
+
+        ux = dx / seg_length
+        uy = dy / seg_length
+        nx = -uy
+        ny = ux
+        approach_run = max(0.0, self._elec_cable_ap_approach_length_px)
+        approach_run = min(seg_length * 0.45, approach_run)
+        if approach_run < 1e-6:
+            return None
+
+        if side == "start":
+            base_x = anchor.x() + ux * approach_run
+            base_y = anchor.y() + uy * approach_run
+        else:
+            base_x = anchor.x() - ux * approach_run
+            base_y = anchor.y() - uy * approach_run
+
+        bend_x = base_x + nx * offset
+        bend_y = base_y + ny * offset
+
+        final_dx = anchor.x() - bend_x
+        final_dy = anchor.y() - bend_y
+        final_length = math.hypot(final_dx, final_dy)
+        if final_length < 1e-9:
+            return None
+
+        final_ux = final_dx / final_length
+        final_uy = final_dy / final_length
+        cross = abs(final_ux * uy - final_uy * ux)
+        dot = final_ux * ux + final_uy * uy
+        if cross <= 1e-6 and dot > 0.999:
+            return None
+
+        return QPointF(bend_x, bend_y)
+
+    def _build_elec_cable_render_geometry(self,
+                                          cable_id: str,
+                                          points: List[QPointF],
+                                          seg_offsets: List[float]) -> Tuple[List[QPointF], List[int]]:
         if len(points) < 2 or len(seg_offsets) != len(points) - 1:
-            return list(points)
+            edge_owners = list(range(max(len(points) - 1, 0)))
+            return list(points), edge_owners
 
         n = len(points)
+        last_seg_index = n - 2
         point_offsets: List[float] = [0.0] * n
         point_offsets[0] = seg_offsets[0]
         point_offsets[-1] = seg_offsets[-1]
@@ -2676,7 +2755,48 @@ class CanvasWidget(QWidget):
             off = point_offsets[i]
             shifted.append(QPointF(pt.x() + nx * off, pt.y() + ny * off))
 
-        return shifted
+        render_pts: List[QPointF] = list(shifted)
+        point_hints: List[int] = [min(i, last_seg_index) for i in range(len(render_pts))]
+
+        start_bend = self._build_elec_cable_ap_bend_point(
+            cable_id,
+            "start",
+            points[0],
+            points[1],
+            seg_offsets[0],
+        ) if cable_id else None
+        if start_bend is not None:
+            render_pts[0] = QPointF(points[0])
+            render_pts.insert(1, start_bend)
+            point_hints.insert(1, 0)
+
+        end_bend = self._build_elec_cable_ap_bend_point(
+            cable_id,
+            "end",
+            points[-1],
+            points[-2],
+            seg_offsets[-1],
+        ) if cable_id else None
+        if end_bend is not None:
+            render_pts[-1] = QPointF(points[-1])
+            insert_at = len(render_pts) - 1
+            render_pts.insert(insert_at, end_bend)
+            point_hints.insert(insert_at, last_seg_index)
+
+        deduped_pts: List[QPointF] = []
+        deduped_hints: List[int] = []
+        for pt, hint in zip(render_pts, point_hints):
+            if deduped_pts and _qdist(deduped_pts[-1], pt) < 1e-6:
+                deduped_hints[-1] = min(deduped_hints[-1], hint)
+                continue
+            deduped_pts.append(QPointF(pt))
+            deduped_hints.append(hint)
+
+        edge_owner_indices: List[int] = []
+        for i in range(len(deduped_pts) - 1):
+            edge_owner_indices.append(min(deduped_hints[i], deduped_hints[i + 1]))
+
+        return deduped_pts, edge_owner_indices
 
     def _apply_angle_snap_elec(self, target: QPointF) -> QPointF:
         if self._snap_angle <= 0 or not self._current_elec_cable_points:
@@ -10554,7 +10674,7 @@ class CanvasWidget(QWidget):
             and self._selected_item_type == "elec_cable"
         )
         seg_offsets = self._get_elec_cable_segment_offsets(cable_id, points)
-        render_pts = self._build_elec_cable_offset_polyline(points, seg_offsets)
+        render_pts = self._build_elec_cable_offset_polyline(points, seg_offsets, cable_id)
 
         pen = QPen(color, sw / self._scale)
         pen.setJoinStyle(Qt.RoundJoin)

@@ -4792,6 +4792,7 @@ def test_duplicate_cable_resets_endpoint_references(app, monkeypatch):
 
 def test_paste_copied_ap_creates_offset_duplicate(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
 
     monkeypatch.setattr(
         QSettings, "value", lambda self, key, default=None, **kw: default
@@ -4814,6 +4815,7 @@ def test_paste_copied_ap_creates_offset_duplicate(app, monkeypatch):
                         "point_id": "AP-1",
                         "floor_plan_id": "grundriss-1",
                         "name": "Steckdose",
+                        "builtin_symbol": "Steckdose",
                     }
                 },
             },
@@ -4824,6 +4826,14 @@ def test_paste_copied_ap_creates_offset_duplicate(app, monkeypatch):
     try:
         window._set_document(document)
         window._copy_buffer = {"id": "AP-1", "type": "ElecPoint"}
+        icon_calls: list[tuple[str, str]] = []
+        original_set_icon = window.canvas.set_elec_point_icon
+
+        def tracked_set_icon(point_id: str, path: str):
+            icon_calls.append((point_id, path))
+            return original_set_icon(point_id, path)
+
+        monkeypatch.setattr(window.canvas, "set_elec_point_icon", tracked_set_icon)
         window._paste_copied()
 
         ids = sorted(document.elements["elec_points"].keys())
@@ -4832,7 +4842,72 @@ def test_paste_copied_ap_creates_offset_duplicate(app, monkeypatch):
         duplicate = document.elements["elec_points"][new_id]
         assert duplicate.floor_plan_id == "grundriss-1"
         assert duplicate.name == "Steckdose"
+        assert duplicate.builtin_symbol == "Steckdose"
         assert duplicate.geom.get("elec_points") == [30.0, 30.0]
+        assert (new_id, str(BUILTIN_SYMBOLS.get("Steckdose", "") or "")) in icon_calls
+    finally:
+        window.deleteLater()
+
+
+def test_main_window_duplicate_ap_preserves_symbol_and_metadata(app, monkeypatch):
+    from PySide6.QtCore import QSettings, QPointF  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.main_window import MainWindow  # noqa: PLC0415
+    from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
+
+    window = MainWindow()
+    try:
+        window._elec_point_counter = 1
+        source_panel = window._create_elec_point_panel("AP-1", fp_id="grundriss-1", name="Schalter Küche")
+        source_panel.from_dict(
+            {
+                "point_id": "AP-1",
+                "name": "Schalter Küche",
+                "color": "#123456",
+                "width": 40.0,
+                "height": 50.0,
+                "builtin_symbol": "Steckdose",
+                "visible": False,
+                "label_visible": False,
+                "label_size": 14.0,
+                "ap_type": "hak",
+                "position": "Fensternische",
+                "height_from_floor": 17.5,
+                "smarthome_device": "Shelly",
+                "smarthome_device_color": "schwarz",
+                "note": "Hinter dem Vorhang",
+                "hak_config": {"incoming_voltage": "400V", "main_fuse_a": "63"},
+            }
+        )
+        window.canvas._elec_points["AP-1"] = QPointF(10.0, 10.0)
+
+        new_id = window._duplicate_elec_point("AP-1")
+
+        assert new_id == "AP-2"
+        duplicate_panel = window.param_panel.elec_point_panels[new_id]
+        duplicate = duplicate_panel.to_dict()
+        assert duplicate["name"] == "Schalter Küche"
+        assert duplicate["builtin_symbol"] == "Steckdose"
+        assert duplicate["icon_path"] == str(BUILTIN_SYMBOLS.get("Steckdose", "") or "")
+        assert duplicate["visible"] is False
+        assert duplicate["label_visible"] is False
+        assert duplicate["label_size"] == 14.0
+        assert duplicate["ap_type"] == "hak"
+        assert duplicate["position"] == "Fensternische"
+        assert duplicate["height_from_floor"] == 17.5
+        assert duplicate["smarthome_device"] == "Shelly"
+        assert duplicate["smarthome_device_color"] == "schwarz"
+        assert duplicate["note"] == "Hinter dem Vorhang"
+        assert duplicate["hak_config"] == {"incoming_voltage": "400V", "main_fuse_a": "63"}
+        assert window.canvas._elec_visible[new_id] is False
+        assert window.canvas._elec_point_position[new_id] == "Fensternische"
+        assert window.canvas._elec_point_notes[new_id] == "Hinter dem Vorhang"
+        assert window.canvas._elec_points[new_id] == QPointF(30.0, 30.0)
     finally:
         window.deleteLater()
 
@@ -7504,7 +7579,10 @@ def test_e1_add_elec_point_creates_element_and_starts_place(app, monkeypatch):
         assert len(points) == 1
         pid = next(iter(points))
         assert points[pid].floor_plan_id == next(iter(window._document.floorplans))
+        assert points[pid].width == 100.0
+        assert points[pid].height == 100.0
         assert window.canvas.tool_mode() == ToolMode.PLACE_ELEC_POINT
+        assert window.canvas._elec_point_size_px[pid] == (100.0, 100.0)
     finally:
         window.deleteLater()
 

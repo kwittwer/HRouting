@@ -190,4 +190,95 @@ def test_e6_elec_point_fill_alpha_clamps(app):
         canvas.deleteLater()
 
 
+def test_e6_elec_cable_ap_approach_length_clamps(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas.set_elec_cable_ap_approach_length_px(-5.0)
+        assert canvas.elec_cable_ap_approach_length_px() == 0.0
+
+        canvas.set_elec_cable_ap_approach_length_px(18.5)
+        assert canvas.elec_cable_ap_approach_length_px() == pytest.approx(18.5)
+    finally:
+        canvas.deleteLater()
+
+
+def test_e6_connected_ap_render_path_keeps_endpoint_center(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas._elec_cables = {
+            "EK-1": [QPointF(0.0, 0.0), QPointF(200.0, 0.0)],
+            "EK-2": [QPointF(0.0, 0.0), QPointF(200.0, 0.0)],
+        }
+        canvas._elec_visible = {"EK-1": True, "EK-2": True}
+        canvas._elec_cable_stroke_width = {"EK-1": 2.0, "EK-2": 2.0}
+        canvas._cable_start_ap = {"EK-1": "AP-1", "EK-2": "AP-2"}
+        canvas._cable_end_ap = {"EK-1": "AP-3", "EK-2": "AP-4"}
+        canvas._elec_point_size_px = {
+            "AP-1": (30.0, 30.0),
+            "AP-2": (30.0, 30.0),
+            "AP-3": (30.0, 30.0),
+            "AP-4": (30.0, 30.0),
+        }
+
+        pts = canvas._elec_cables["EK-1"]
+        seg_offsets = canvas._get_elec_cable_segment_offsets("EK-1", pts)
+        render_pts = canvas._build_elec_cable_offset_polyline(pts, seg_offsets, "EK-1")
+
+        assert render_pts[0] == pts[0]
+        assert render_pts[-1] == pts[-1]
+        assert len(render_pts) == 4
+        assert render_pts[1].y() == pytest.approx(seg_offsets[0], abs=1e-6)
+        assert render_pts[2].y() == pytest.approx(seg_offsets[0], abs=1e-6)
+    finally:
+        canvas.deleteLater()
+
+
+def test_e6_hit_testing_with_ap_bend_maps_to_original_segment(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas._elec_cables = {
+            "EK-1": [QPointF(0.0, 0.0), QPointF(200.0, 0.0)],
+            "EK-2": [QPointF(0.0, 0.0), QPointF(200.0, 0.0)],
+        }
+        canvas._elec_visible = {"EK-1": True, "EK-2": True}
+        canvas._elec_cable_stroke_width = {"EK-1": 2.0, "EK-2": 2.0}
+        canvas._cable_end_ap = {"EK-1": "AP-1", "EK-2": "AP-2"}
+        canvas._elec_point_size_px = {"AP-1": (30.0, 30.0), "AP-2": (30.0, 30.0)}
+
+        pts = canvas._elec_cables["EK-1"]
+        seg_offsets = canvas._get_elec_cable_segment_offsets("EK-1", pts)
+        render_pts = canvas._build_elec_cable_offset_polyline(pts, seg_offsets, "EK-1")
+        bend_mid = QPointF(
+            (render_pts[-2].x() + render_pts[-1].x()) * 0.5,
+            (render_pts[-2].y() + render_pts[-1].y()) * 0.5,
+        )
+
+        assert canvas._hit_elec_cable_edge(bend_mid, "EK-1") == (0, 1)
+    finally:
+        canvas.deleteLater()
+
+
+def test_e6_ap_bend_omitted_for_straight_center_approach(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        pts = [QPointF(0.0, 0.0), QPointF(200.0, 0.0)]
+        seg_offsets = [0.0]
+        canvas._cable_end_ap = {"EK-1": "AP-1"}
+        canvas._elec_point_size_px = {"AP-1": (30.0, 30.0)}
+
+        render_pts = canvas._build_elec_cable_offset_polyline(pts, seg_offsets, "EK-1")
+
+        assert render_pts == pts
+    finally:
+        canvas.deleteLater()
+
+
 

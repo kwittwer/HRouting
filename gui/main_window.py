@@ -3708,40 +3708,21 @@ class MainWindow(QMainWindow):
         self._elec_point_counter += 1
         new_id = f"AP-{self._elec_point_counter}"
         panel = self._create_elec_point_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
-        panel.sb_width.setValue(src.get("width", 30.0) / 10)
-        panel.sb_height.setValue(src.get("height", 30.0) / 10)
-        panel.chk_label_visible.setChecked(src.get("label_visible", True))
-        panel.sb_label_size.setValue(src.get("label_size", 12.0))
-        panel.set_ap_type(src.get("ap_type", "standard"))
-        panel.set_uv_config(copy.deepcopy(src.get("uv_config") or {}))
-        panel.set_up_distribution_config(copy.deepcopy(src.get("up_distribution_config") or {}))
-        # Position und Höhe kopieren
-        pos_idx = panel.cmb_position.findText(src.get("position", "Wand"))
-        if pos_idx >= 0:
-            panel.cmb_position.setCurrentIndex(pos_idx)
-        panel.sb_height_from_floor.setValue(src.get("height_from_floor", 0.0))
-        self.canvas._elec_point_position[new_id] = src.get("position", "Wand")
-        self.canvas._elec_point_height[new_id] = src.get("height_from_floor", 0.0)
-        self.canvas._elec_point_notes[new_id] = src.get("note", "")
-        self.canvas._elec_point_smarthome_device[new_id] = src.get("smarthome_device", "")
-        self.canvas._elec_point_smarthome_device_color[new_id] = src.get("smarthome_device_color", "")
-        c = src.get("color", "#4fc3f7")
-        panel._color = QColor(c)
-        panel._update_color_button()
-        icon_path = src.get("icon_path", "")
-        builtin = src.get("builtin_symbol", "(kein Symbol)")
-        if builtin and builtin != "(kein Symbol)":
-            idx = panel.cmb_symbol.findText(builtin)
-            if idx >= 0:
-                panel.cmb_symbol.setCurrentIndex(idx)
-        elif icon_path:
-            panel._icon_path = icon_path
-            panel.btn_icon.setText(icon_path.split("/")[-1].split("\\")[-1])
-            self.canvas.set_elec_point_icon(new_id, icon_path)
+        panel.from_dict(src)
+        params = panel.get_parameters()
+        self.canvas._elec_point_position[new_id] = params.get("position", "Wand")
+        self.canvas._elec_point_height[new_id] = params.get("height_from_floor", 0.0)
+        self.canvas._elec_point_notes[new_id] = params.get("note", "")
+        self.canvas._elec_point_smarthome_device[new_id] = params.get("smarthome_device", "")
+        self.canvas._elec_point_smarthome_device_color[new_id] = params.get("smarthome_device_color", "")
+        self.canvas._elec_visible[new_id] = bool(params.get("visible", True))
+        color = str(params.get("color", "#4fc3f7") or "#4fc3f7")
         self.canvas._ensure_color(new_id)
-        self.canvas.set_color(new_id, QColor(c))
-        self.canvas.set_label_font_size(new_id, src.get("label_size", 12.0))
-        self.canvas.set_label_visible(new_id, src.get("label_visible", True))
+        self.canvas.set_color(new_id, QColor(color))
+        self.canvas._label_map[new_id] = str(params.get("name", new_id) or new_id)
+        self.canvas.set_label_font_size(new_id, params.get("label_size", 12.0))
+        self.canvas.set_label_visible(new_id, params.get("label_visible", True))
+        self.canvas.set_elec_point_icon(new_id, str(params.get("icon_path", "") or ""))
         if source_id in self.canvas._elec_points:
             p = self.canvas._elec_points[source_id]
             self.canvas._elec_points[new_id] = QPointF(p.x() + 20, p.y() + 20)

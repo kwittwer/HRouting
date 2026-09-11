@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -106,6 +107,7 @@ _RECENT_KEY = "recent_projects"
 _LAST_PDF_EXPORT_KEY = "last_pdf_export_path"
 _LAST_SVG_EXPORT_KEY = "last_svg_export_path"
 _ELEC_CABLE_OVERLAP_GAP_KEY = "display/elec_cable_overlap_gap_px"
+_ELEC_CABLE_AP_APPROACH_LENGTH_KEY = "display/elec_cable_ap_approach_length_px"
 _ELEC_POINT_FILL_OPACITY_PERCENT_KEY = "display/elec_point_fill_opacity_percent"
 _ELEC_POINT_FILL_ALPHA_LEGACY_KEY = "display/elec_point_fill_alpha"
 _MAX_RECENT = 8
@@ -184,12 +186,13 @@ class _DisplaySettingsDialog(QDialog):
     def __init__(
         self,
         overlap_gap_px: float,
+        ap_approach_length_px: float,
         elec_point_fill_percent: int,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Einstellungen")
-        self.resize(420, 240)
+        self.resize(420, 310)
 
         layout = QVBoxLayout(self)
         layout.addWidget(
@@ -207,6 +210,22 @@ class _DisplaySettingsDialog(QDialog):
         self._overlap_gap_spin.setSuffix(" px")
         self._overlap_gap_spin.setValue(max(0.0, float(overlap_gap_px)))
         layout.addWidget(self._overlap_gap_spin)
+
+        layout.addWidget(
+            QLabel(
+                "Kabel-Anlaufstück vor AP (in px).\n"
+                "Definiert, wie weit die parallele Spur vor dem Knick bis zum AP weiterläuft.",
+                self,
+            )
+        )
+
+        self._ap_approach_length_spin = QDoubleSpinBox(self)
+        self._ap_approach_length_spin.setRange(0.0, 100.0)
+        self._ap_approach_length_spin.setDecimals(1)
+        self._ap_approach_length_spin.setSingleStep(1.0)
+        self._ap_approach_length_spin.setSuffix(" px")
+        self._ap_approach_length_spin.setValue(max(0.0, float(ap_approach_length_px)))
+        layout.addWidget(self._ap_approach_length_spin)
 
         layout.addWidget(
             QLabel(
@@ -230,6 +249,9 @@ class _DisplaySettingsDialog(QDialog):
 
     def overlap_gap_px(self) -> float:
         return float(self._overlap_gap_spin.value())
+
+    def elec_cable_ap_approach_length_px(self) -> float:
+        return float(self._ap_approach_length_spin.value())
 
     def elec_point_fill_percent(self) -> int:
         return int(round(self._ap_alpha_spin.value()))
@@ -667,6 +689,13 @@ class AppWindow(QMainWindow):
             except (TypeError, ValueError):
                 pass
 
+        raw_approach = self._settings().value(_ELEC_CABLE_AP_APPROACH_LENGTH_KEY, None)
+        if raw_approach is not None:
+            try:
+                self.canvas.set_elec_cable_ap_approach_length_px(float(raw_approach))
+            except (TypeError, ValueError):
+                pass
+
         raw_percent = self._settings().value(_ELEC_POINT_FILL_OPACITY_PERCENT_KEY, None)
         if raw_percent is not None:
             try:
@@ -693,17 +722,21 @@ class AppWindow(QMainWindow):
         current_percent = self._alpha_to_percent(self.canvas.elec_point_fill_alpha())
         dialog = _DisplaySettingsDialog(
             self.canvas.elec_cable_overlap_gap_px(),
+            self.canvas.elec_cable_ap_approach_length_px(),
             current_percent,
             self,
         )
         if dialog.exec() != QDialog.Accepted:
             return
         gap_px = dialog.overlap_gap_px()
+        approach_length_px = dialog.elec_cable_ap_approach_length_px()
         ap_percent = dialog.elec_point_fill_percent()
         ap_alpha = self._percent_to_alpha(ap_percent)
         self.canvas.set_elec_cable_overlap_gap_px(gap_px)
+        self.canvas.set_elec_cable_ap_approach_length_px(approach_length_px)
         self.canvas.set_elec_point_fill_alpha(ap_alpha)
         self._settings().setValue(_ELEC_CABLE_OVERLAP_GAP_KEY, gap_px)
+        self._settings().setValue(_ELEC_CABLE_AP_APPROACH_LENGTH_KEY, approach_length_px)
         self._settings().setValue(_ELEC_POINT_FILL_OPACITY_PERCENT_KEY, ap_percent)
         if gap_px <= 0.0:
             self.statusBar().showMessage("Kabel-Overlapping deaktiviert", 3000)
@@ -713,6 +746,9 @@ class AppWindow(QMainWindow):
                 f"Kabel-Overlapping-Abstand: {gap_px:.1f} px", 3000
             )
             self.log.info(f"Anzeige: Kabel-Overlapping-Abstand auf {gap_px:.1f} px gesetzt")
+        self.log.info(
+            f"Anzeige: Kabel-Anlaufstück vor AP auf {approach_length_px:.1f} px gesetzt"
+        )
         self.log.info(f"Anzeige: AP-Hintergrund Transparenz auf {ap_percent} % gesetzt")
 
     def _on_property_changed(self, element_id: str, key: str, _value) -> None:
@@ -2156,6 +2192,9 @@ class AppWindow(QMainWindow):
             self._document.add(clone)
 
         self.canvas.register_element(new_id)
+        if isinstance(clone, ElecPoint):
+            for key in ("name", "color", "width", "height", "icon_path", "visible"):
+                self._apply_property_side_effects(new_id, key, defer_updates=True)
         self._document.element_changed.emit(new_id)
         self._emit_structure_changed()
         self.canvas.update()
@@ -3270,13 +3309,14 @@ class AppWindow(QMainWindow):
             return
         self._push_undo()
         pid = self._document.new_id(ElecPoint)
+        default_size_mm = 100.0
         point = ElecPoint.create(
             pid,
             floor_plan_id=fp_id,
             name=f"Anschlusspunkt {pid.rsplit('-', 1)[-1]}",
             color="#4fc3f7",
-            width=30.0,
-            height=30.0,
+            width=default_size_mm,
+            height=default_size_mm,
             icon_path="",
             builtin_symbol="Steckdose",
             visible=True,
@@ -3291,7 +3331,7 @@ class AppWindow(QMainWindow):
         self._document.add(point)
         self._emit_structure_changed()
         self.navigator.select(pid)
-        self.canvas.start_place_elec_point(pid, 30.0, 30.0)
+        self.canvas.start_place_elec_point(pid, default_size_mm, default_size_mm)
         self._mark_dirty()
 
     def _add_elec_room(self) -> None:
@@ -4604,8 +4644,8 @@ class AppWindow(QMainWindow):
             floor_plan_id=fp_id,
             name=name,
             color=color,
-            width=30.0,
-            height=30.0,
+            width=100.0,
+            height=100.0,
             icon_path=icon_path,
             builtin_symbol=symbol,
             visible=True,
@@ -4623,7 +4663,7 @@ class AppWindow(QMainWindow):
             zaehler_config={},
         )
         point.geom["elec_points"] = [float(position[0]), float(position[1])]
-        point.geom["elec_point_size_px"] = [30.0, 30.0]
+        point.geom["elec_point_size_px"] = [100.0, 100.0]
         point.geom["elec_visible"] = True
 
         self._document.add(point)
@@ -8173,8 +8213,8 @@ class AppWindow(QMainWindow):
             floor_plan_id=floor_plan_id,
             name=ap_name,
             color="#4fc3f7",
-            width=30.0,
-            height=30.0,
+            width=100.0,
+            height=100.0,
             icon_path=str(BUILTIN_SYMBOLS.get("Steckdose", "") or ""),
             builtin_symbol="Steckdose",
             visible=True,
