@@ -434,6 +434,31 @@ class CanvasWidget(QWidget):
         self._drag_multi_start_positions: Dict[Tuple[str, str], QPointF] = {}  # Start-Positionen
         self._drag_multi_anchor: Optional[QPointF] = None  # Maus-Anchor beim Multi-Drag
 
+        # Phase 1: Rendering throttle (60 Hz max during drag)
+        self._last_drag_render_time: float = 0.0  # timestamp in milliseconds
+        self._drag_render_interval_ms: float = 16.7  # ~60 Hz (1000/60)
+        self._dirty_moved_elec_points: Set[str] = set()  # APs moved during drag, synced at release
+        self._dirty_moved_elec_cables: Set[str] = set()  # Cables moved during drag
+        self._dirty_moved_hkvs: Set[str] = set()  # HKVs moved during drag
+
+        # Phase 2: Spatial indexing for AP fast lookup
+        self._ap_spatial_grid: Dict[Tuple[int, int], Set[str]] = {}  # (grid_x, grid_y) -> set of AP-IDs
+        self._ap_grid_cell_size_px: float = 500.0  # Cell size in pixels for spatial grid
+        self._ap_spatial_index_valid: bool = False  # Whether spatial index needs rebuild
+
+        # Phase 3: Incremental rendering (dirty-layer tracking)
+        self._dirty_layers: Set[str] = set()  # Set of layer names needing redraw
+        self._layer_names = {
+            "floor_plans", "grid", "helper_lines", "polygons", "routes",
+            "elec_rooms", "supply_lines", "elec_cables", "elec_points",
+            "hkv_lines", "hkv_points", "text_annotations", "annotations",
+            "measurements", "labels", "foreground"
+        }
+        
+        # Phase 3: Floor plan pixmap cache (selective rendering)
+        self._floor_plan_cache: Dict[str, QPixmap] = {}  # fp_id -> pixmap
+        self._floor_plan_cache_valid: Dict[str, bool] = {}  # fp_id -> is_valid_flag
+
     def _debug_measure_pos(self, tag: str, **values) -> None:
         """Emit optional debug logs for measurement position tracing."""
         if not self._debug_measure_pos_logs:
@@ -2820,22 +2845,143 @@ class CanvasWidget(QWidget):
     def _find_nearest_ap(self, canvas_pt: QPointF,
                          threshold_px: float = 20.0) -> str | None:
         """Return the point_id of the nearest visible AP within *threshold_px*
-        (in screen pixels), or None."""
+        (in screen pixels), or None.
+        
+        Uses spatial indexing for fast lookup (O(1) candidate collection).
+        Falls back to full scan if index is invalid.
+        """
         best_id: str | None = None
         best_d = threshold_px / self._scale
-        for pid, pos in self._elec_points.items():
-            if not self._elec_visible.get(pid, True):
-                continue
-            d = _qdist(canvas_pt, pos)
-            if d < best_d:
-                best_d = d
-                best_id = pid
+        
+        # Rebuild spatial index if needed
+        if not self._ap_spatial_index_valid and self._elec_points:
+            self._build_spatial_index_elec_points()
+        
+        # If we have a valid index, use it to quickly find candidates
+        if self._ap_spatial_index_valid and self._ap_spatial_grid:
+            gx, gy = self._get_grid_cell(canvas_pt)
+            candidates: Set[str] = set()
+            
+            # Check current cell and immediate neighbors (3x3 grid area)
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    cell_key = (gx + dx, gy + dy)
+                    if cell_key in self._ap_spatial_grid:
+                        candidates.update(self._ap_spatial_grid[cell_key])
+            
+            # Find nearest among candidates
+            for pid in candidates:
+                if not self._elec_visible.get(pid, True):
+                    continue
+                pos = self._elec_points.get(pid)
+                if pos is None:
+                    continue
+                d = _qdist(canvas_pt, pos)
+                if d < best_d:
+                    best_d = d
+                    best_id = pid
+        else:
+            # Fallback: linear scan (for empty projects or initial state)
+            for pid, pos in self._elec_points.items():
+                if not self._elec_visible.get(pid, True):
+                    continue
+                d = _qdist(canvas_pt, pos)
+                if d < best_d:
+                    best_d = d
+                    best_id = pid
+        
         return best_id
 
     def get_cable_ap(self, cable_id: str) -> tuple[str, str]:
         """Return (start_ap, end_ap) for the given cable."""
         return (self._cable_start_ap.get(cable_id, ""),
                 self._cable_end_ap.get(cable_id, ""))
+
+    def _invalidate_floor_plan_cache(self, fp_id: str | None = None) -> None:
+        """Invalidate floor plan cache for specific or all floor plans.
+        
+        Args:
+            fp_id: Specific floor plan ID to invalidate. If None, invalidates all.
+        """
+        if fp_id is None:
+            # Invalidate all caches
+            self._floor_plan_cache_valid.clear()
+        elif fp_id in self._floor_plan_cache_valid:
+            self._floor_plan_cache_valid[fp_id] = False
+
+    def _mark_dirty(self, *layer_names: str) -> None:
+        """Mark layers as dirty (needing redraw).
+        
+        Args:
+            *layer_names: Layer names to mark dirty (from _layer_names set)
+                         If none provided, marks ALL layers dirty
+        """
+        if not layer_names:
+            # No specific layers → mark all dirty
+            self._dirty_layers = set(self._layer_names)
+        else:
+            # Mark specific layers
+            for name in layer_names:
+                if name in self._layer_names:
+                    self._dirty_layers.add(name)
+    
+    def _is_dirty(self, layer_name: str) -> bool:
+        """Check if a layer is marked dirty."""
+        return layer_name in self._dirty_layers
+    
+    def _clear_dirty(self) -> None:
+        """Clear all dirty flags after rendering."""
+        self._dirty_layers.clear()
+
+    def _should_update_drag_render(self) -> bool:
+        """Check if enough time has passed to trigger a canvas update during drag.
+        
+        Returns True if update() should be called, False to skip and throttle.
+        This implements 60 Hz max rendering during drag operations.
+        """
+        import time
+        current_time_ms = time.time() * 1000.0
+        if current_time_ms - self._last_drag_render_time >= self._drag_render_interval_ms:
+            self._last_drag_render_time = current_time_ms
+            return True
+        return False
+
+    def _get_grid_cell(self, pt: QPointF) -> Tuple[int, int]:
+        """Convert canvas point to grid cell coordinates.
+        
+        Args:
+            pt: Canvas position
+            
+        Returns:
+            Tuple of (grid_x, grid_y) cell indices
+        """
+        cell_size = self._ap_grid_cell_size_px
+        return (int(pt.x() / cell_size), int(pt.y() / cell_size))
+
+    def _build_spatial_index_elec_points(self) -> None:
+        """Build spatial index for all electrical points (APs).
+        
+        This divides the canvas into a grid and maps each AP to its cell(s).
+        Index is used by _find_nearest_ap() to quickly find nearby APs.
+        """
+        self._ap_spatial_grid.clear()
+        
+        for ap_id, pos in self._elec_points.items():
+            if not self._elec_visible.get(ap_id, True):
+                continue
+            
+            # Get grid cell(s) for this AP (use up to 2x2 cells for safety)
+            gx, gy = self._get_grid_cell(pos)
+            
+            # Add to all nearby cells (current + neighbors, for larger collision radius)
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    cell_key = (gx + dx, gy + dy)
+                    if cell_key not in self._ap_spatial_grid:
+                        self._ap_spatial_grid[cell_key] = set()
+                    self._ap_spatial_grid[cell_key].add(ap_id)
+        
+        self._ap_spatial_index_valid = True
 
     def _resolve_cable_ap_binding(self, cable_id: str, side: str) -> str:
         """Resolve AP binding for one cable side.
@@ -2885,6 +3031,24 @@ class CanvasWidget(QWidget):
                 pts[-1] = QPointF(pos)
                 changed.add(cid)
         return changed
+
+    def _apply_deferred_drag_sync(self) -> None:
+        """Apply all deferred model syncs after a drag operation ends.
+        
+        This method is called in mouseReleaseEvent to finalize all the changes
+        that were tracked during mouseMoveEvent without full model sync.
+        """
+        # Sync all moved APs with their connected cables
+        for ap_id in self._dirty_moved_elec_points:
+            self.sync_connected_elec_cable_endpoints(ap_id)
+        
+        # If APs were moved, invalidate spatial index for rebuild on next lookup
+        if self._dirty_moved_elec_points:
+            self._ap_spatial_index_valid = False
+        
+        self._dirty_moved_elec_points.clear()
+        self._dirty_moved_elec_cables.clear()
+        self._dirty_moved_hkvs.clear()
 
     def _apply_angle_snap_supply(self, target: QPointF) -> QPointF:
         if self._snap_angle <= 0 or not self._current_supply_points:
@@ -3044,6 +3208,16 @@ class CanvasWidget(QWidget):
         self._document = document
         bind_canvas(self, document, stages, on_change=self._on_document_data_changed)
         self._rebuild_label_map()
+        
+        # Invalidate spatial index when document changes
+        self._ap_spatial_index_valid = False
+        
+        # Invalidate floor plan cache when document changes
+        self._invalidate_floor_plan_cache()
+        
+        # Mark all layers dirty when document changes
+        self._mark_dirty()
+        
         self.update()
 
     def _rebuild_label_map(self) -> None:
@@ -7337,10 +7511,14 @@ class CanvasWidget(QWidget):
                         self._elec_cables[sel_id] = new_pts
 
             if moved_ap_ids:
-                for ap_id in moved_ap_ids:
-                    self.sync_connected_elec_cable_endpoints(ap_id)
+                self._dirty_moved_elec_points.update(moved_ap_ids)
+            for sel_type, sel_id in self._dragging_multi:
+                if sel_type == "elec_cable":
+                    self._dirty_moved_elec_cables.add(sel_id)
             
-            self.update()
+            self._mark_dirty("elec_points", "elec_cables", "hkv_points", "text_annotations", "labels")
+            if self._should_update_drag_render():
+                self.update()
             return
 
         # ── Handle panning ──
@@ -7463,7 +7641,9 @@ class CanvasWidget(QWidget):
                     if end_ap and end_ap in self._elec_points:
                         pts[-1] = QPointF(self._elec_points[end_ap])
 
-                self.update()
+                self._dirty_moved_elec_cables.add(cid)  # Defer sync
+                if self._should_update_drag_render():
+                    self.update()
             return
 
         # ── Handle dragging of elec cable points (at any time, not just in edit mode) ──
@@ -7485,7 +7665,9 @@ class CanvasWidget(QWidget):
                         pts[idx] = base_pt
                 else:
                     pts[idx] = base_pt
-                self.update()
+                self._dirty_moved_elec_cables.add(cid)  # Defer sync
+                if self._should_update_drag_render():
+                    self.update()
                 return
 
         # ── Grundriss verschieben ──
@@ -7920,8 +8102,10 @@ class CanvasWidget(QWidget):
             ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
             pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
             self._elec_points[pid] = pt
-            self.sync_connected_elec_cable_endpoints(pid)
-            self.update()
+            self._dirty_moved_elec_points.add(pid)  # Defer sync until mouseReleaseEvent
+            self._mark_dirty("elec_points", "elec_cables", "labels")
+            if self._should_update_drag_render():
+                self.update()
             return
 
         if self._mode == ToolMode.MOVE_HKV and self._dragging_hkv:
@@ -7940,6 +8124,7 @@ class CanvasWidget(QWidget):
             for lid, hkv_id in self._hkv_line_end.items():
                 if hkv_id == hid and lid in self._hkv_lines:
                     self._hkv_lines[lid][-1] = QPointF(pt)
+            self._mark_dirty("hkv_points", "supply_lines", "hkv_lines", "labels")
             self.update()
             return
 
@@ -8247,6 +8432,9 @@ class CanvasWidget(QWidget):
         for cid in changed_cable_ids:
             self.elec_cable_changed.emit(cid)
 
+        # Apply any deferred model syncs from drag phase
+        self._apply_deferred_drag_sync()
+
         self._dragging_multi.clear()
         self._drag_multi_start_positions.clear()
         self._drag_multi_anchor = None
@@ -8292,6 +8480,8 @@ class CanvasWidget(QWidget):
                 self._dragging_elec_cable_origin = []
                 self._dragging_elec_cable_fixed_indices = set()
                 self.setCursor(Qt.ArrowCursor)
+                # Apply deferred model syncs
+                self._apply_deferred_drag_sync()
                 self.elec_cable_changed.emit(cid)
                 self.update()
                 return
@@ -8452,6 +8642,8 @@ class CanvasWidget(QWidget):
                 self._dragging_elec_point = None
                 self._mode = ToolMode.NONE
                 self.setCursor(Qt.ArrowCursor)
+                # Apply deferred model syncs (sync connected cables)
+                self._apply_deferred_drag_sync()
                 self.elec_point_placed.emit(pid)
                 # Emit cable changed for every cable connected to this AP
                 for cid in list(self._cable_start_ap):
@@ -8860,16 +9052,31 @@ class CanvasWidget(QWidget):
             painter.translate(-sw / 2, -sh / 2)
             painter.setOpacity(layer.opacity)
             if layer.renderer:
-                # QSvgRenderer fails when the effective pixel area
-                # exceeds Qt's 256 MB allocation limit (~64M pixels).
-                # Fall back to a capped intermediate pixmap.
-                effective_w = sw * self._scale
-                effective_h = sh * self._scale
-                if effective_w * effective_h > 36_000_000 or effective_w > 10000 or effective_h > 10000:
-                    cap = 6000.0
-                    ratio = min(cap / max(effective_w, 1), cap / max(effective_h, 1), 1.0)
-                    pm_w = max(1, int(effective_w * ratio))
-                    pm_h = max(1, int(effective_h * ratio))
+                # Phase 3: Cache SVG renderer output to avoid expensive re-renders
+                cache_key = fid
+                cache_valid = self._floor_plan_cache_valid.get(cache_key, False)
+                
+                if cache_valid and cache_key in self._floor_plan_cache:
+                    # Use cached SVG pixmap
+                    cached_pm = self._floor_plan_cache[cache_key]
+                    painter.drawPixmap(QRectF(0, 0, sw, sh), cached_pm,
+                                       QRectF(cached_pm.rect()))
+                else:
+                    # Render SVG and cache result
+                    # QSvgRenderer fails when the effective pixel area
+                    # exceeds Qt's 256 MB allocation limit (~64M pixels).
+                    # Fall back to a capped intermediate pixmap.
+                    effective_w = sw * self._scale
+                    effective_h = sh * self._scale
+                    if effective_w * effective_h > 36_000_000 or effective_w > 10000 or effective_h > 10000:
+                        cap = 6000.0
+                        ratio = min(cap / max(effective_w, 1), cap / max(effective_h, 1), 1.0)
+                        pm_w = max(1, int(effective_w * ratio))
+                        pm_h = max(1, int(effective_h * ratio))
+                    else:
+                        pm_w = max(1, int(sw))
+                        pm_h = max(1, int(sh))
+                    
                     pm = QPixmap(pm_w, pm_h)
                     pm.fill(Qt.transparent)
                     pm_painter = QPainter(pm)
@@ -8877,10 +9084,13 @@ class CanvasWidget(QWidget):
                     pm_painter.setRenderHint(QPainter.SmoothPixmapTransform)
                     layer.renderer.render(pm_painter, QRectF(0, 0, pm_w, pm_h))
                     pm_painter.end()
+                    
+                    # Cache the pixmap
+                    self._floor_plan_cache[cache_key] = pm
+                    self._floor_plan_cache_valid[cache_key] = True
+                    
                     painter.setRenderHint(QPainter.SmoothPixmapTransform)
                     painter.drawPixmap(QRectF(0, 0, sw, sh), pm, QRectF(pm.rect()))
-                else:
-                    layer.renderer.render(painter, QRectF(0, 0, sw, sh))
             elif layer.pixmap:
                 if sw > 0 and sh > 0:
                     painter.drawPixmap(QRectF(0, 0, sw, sh), layer.pixmap,
