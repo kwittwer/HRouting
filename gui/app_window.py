@@ -105,6 +105,9 @@ _LAST_PROJECT_KEY = "last_project_path"
 _RECENT_KEY = "recent_projects"
 _LAST_PDF_EXPORT_KEY = "last_pdf_export_path"
 _LAST_SVG_EXPORT_KEY = "last_svg_export_path"
+_ELEC_CABLE_OVERLAP_GAP_KEY = "display/elec_cable_overlap_gap_px"
+_ELEC_POINT_FILL_OPACITY_PERCENT_KEY = "display/elec_point_fill_opacity_percent"
+_ELEC_POINT_FILL_ALPHA_LEGACY_KEY = "display/elec_point_fill_alpha"
 _MAX_RECENT = 8
 
 _FILE_FILTER = "HRouting-Projekt (*.hrp);;Alle Dateien (*)"
@@ -177,6 +180,61 @@ class _GitCommitDialog(QDialog):
         return self._push_checkbox.isChecked()
 
 
+class _DisplaySettingsDialog(QDialog):
+    def __init__(
+        self,
+        overlap_gap_px: float,
+        elec_point_fill_percent: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Einstellungen")
+        self.resize(420, 240)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                "Kabel-Overlapping: Abstand zwischen parallelen Spuren (in px).\n"
+                "0 deaktiviert die Overlap-Aufspreizung.",
+                self,
+            )
+        )
+
+        self._overlap_gap_spin = QDoubleSpinBox(self)
+        self._overlap_gap_spin.setRange(0.0, 20.0)
+        self._overlap_gap_spin.setDecimals(1)
+        self._overlap_gap_spin.setSingleStep(0.5)
+        self._overlap_gap_spin.setSuffix(" px")
+        self._overlap_gap_spin.setValue(max(0.0, float(overlap_gap_px)))
+        layout.addWidget(self._overlap_gap_spin)
+
+        layout.addWidget(
+            QLabel(
+                "AP-Hintergrund Transparenz (0-100 %).\n"
+                "0 % = voll transparent, 100 % = voll deckend.",
+                self,
+            )
+        )
+        self._ap_alpha_spin = QDoubleSpinBox(self)
+        self._ap_alpha_spin.setRange(0.0, 100.0)
+        self._ap_alpha_spin.setDecimals(0)
+        self._ap_alpha_spin.setSingleStep(1.0)
+        self._ap_alpha_spin.setSuffix(" %")
+        self._ap_alpha_spin.setValue(max(0.0, min(100.0, float(elec_point_fill_percent))))
+        layout.addWidget(self._ap_alpha_spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def overlap_gap_px(self) -> float:
+        return float(self._overlap_gap_spin.value())
+
+    def elec_point_fill_percent(self) -> int:
+        return int(round(self._ap_alpha_spin.value()))
+
+
 class AppWindow(QMainWindow):
     """Dock-basiertes Hauptfenster mit Workspace-Tabs."""
 
@@ -224,6 +282,7 @@ class AppWindow(QMainWindow):
         )
 
         self._build_central()
+        self._load_display_settings()
         self._build_docks()
         self._build_menus()
         self._refresh_git_toolbar_actions()
@@ -389,6 +448,7 @@ class AppWindow(QMainWindow):
             "Grundriss-Skalierungen aus Referenzlinien synchronisieren",
             self._sync_floorplan_scales_from_references,
         )
+        self._add_action(file_menu, "Einstellungen…", self._open_display_settings)
         file_menu.addSeparator()
         self._add_action(file_menu, "Beenden", self.close, QKeySequence.Quit)
 
@@ -588,7 +648,72 @@ class AppWindow(QMainWindow):
     def _on_snap_angle_changed(self, index: int) -> None:
         angle = self._snap_combo.itemData(index)
         self.canvas.set_snap_angle(float(angle or 0))
-        self._mark_dirty()
+
+    @staticmethod
+    def _alpha_to_percent(alpha: int) -> int:
+        clamped = max(0, min(255, int(alpha)))
+        return int(round((clamped * 100.0) / 255.0))
+
+    @staticmethod
+    def _percent_to_alpha(percent: int | float) -> int:
+        clamped = max(0.0, min(100.0, float(percent)))
+        return int(round((clamped * 255.0) / 100.0))
+
+    def _load_display_settings(self) -> None:
+        raw = self._settings().value(_ELEC_CABLE_OVERLAP_GAP_KEY, None)
+        if raw is not None:
+            try:
+                self.canvas.set_elec_cable_overlap_gap_px(float(raw))
+            except (TypeError, ValueError):
+                pass
+
+        raw_percent = self._settings().value(_ELEC_POINT_FILL_OPACITY_PERCENT_KEY, None)
+        if raw_percent is not None:
+            try:
+                alpha = self._percent_to_alpha(float(raw_percent))
+                self.canvas.set_elec_point_fill_alpha(alpha)
+            except (TypeError, ValueError):
+                pass
+            return
+
+        # Backward compatibility: previous versions stored raw alpha 0-255.
+        raw_alpha = self._settings().value(_ELEC_POINT_FILL_ALPHA_LEGACY_KEY, None)
+        if raw_alpha is not None:
+            try:
+                alpha = int(float(raw_alpha))
+                self.canvas.set_elec_point_fill_alpha(alpha)
+                self._settings().setValue(
+                    _ELEC_POINT_FILL_OPACITY_PERCENT_KEY,
+                    self._alpha_to_percent(alpha),
+                )
+            except (TypeError, ValueError):
+                pass
+
+    def _open_display_settings(self) -> None:
+        current_percent = self._alpha_to_percent(self.canvas.elec_point_fill_alpha())
+        dialog = _DisplaySettingsDialog(
+            self.canvas.elec_cable_overlap_gap_px(),
+            current_percent,
+            self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        gap_px = dialog.overlap_gap_px()
+        ap_percent = dialog.elec_point_fill_percent()
+        ap_alpha = self._percent_to_alpha(ap_percent)
+        self.canvas.set_elec_cable_overlap_gap_px(gap_px)
+        self.canvas.set_elec_point_fill_alpha(ap_alpha)
+        self._settings().setValue(_ELEC_CABLE_OVERLAP_GAP_KEY, gap_px)
+        self._settings().setValue(_ELEC_POINT_FILL_OPACITY_PERCENT_KEY, ap_percent)
+        if gap_px <= 0.0:
+            self.statusBar().showMessage("Kabel-Overlapping deaktiviert", 3000)
+            self.log.info("Anzeige: Kabel-Overlapping deaktiviert")
+        else:
+            self.statusBar().showMessage(
+                f"Kabel-Overlapping-Abstand: {gap_px:.1f} px", 3000
+            )
+            self.log.info(f"Anzeige: Kabel-Overlapping-Abstand auf {gap_px:.1f} px gesetzt")
+        self.log.info(f"Anzeige: AP-Hintergrund Transparenz auf {ap_percent} % gesetzt")
 
     def _on_property_changed(self, element_id: str, key: str, _value) -> None:
         """Ein Feld im Eigenschaften-Dock wurde geändert."""
@@ -3521,9 +3646,8 @@ class AppWindow(QMainWindow):
         if answer == QMessageBox.No:
             return "skip_pull"
 
-        self._git_pull_ff_only(repo_root)
-        self.log.info("Git: Remote-Aenderungen erfolgreich gepullt.")
-        self.statusBar().showMessage("Git: Remote-Aenderungen gepullt", 3500)
+        if not self._git_pull_with_overwrite_prompt(repo_root):
+            return "skip_pull"
         return "pulled"
 
     def _git_pull_project_from_remote(self, checked: bool = False) -> bool:
@@ -3571,7 +3695,8 @@ class AppWindow(QMainWindow):
             return False
 
         try:
-            self._git_pull_ff_only(repo_root)
+            if not self._git_pull_with_overwrite_prompt(repo_root):
+                return False
         except RuntimeError as exc:
             QMessageBox.warning(self, "Git Pull", str(exc))
             self.log.error(str(exc))
@@ -3614,7 +3739,8 @@ class AppWindow(QMainWindow):
             return
 
         try:
-            self._git_pull_ff_only(repo_root)
+            if not self._git_pull_with_overwrite_prompt(repo_root):
+                return
         except RuntimeError as exc:
             QMessageBox.warning(self, "Git Pull", str(exc))
             self.log.error(str(exc))
@@ -3785,6 +3911,44 @@ class AppWindow(QMainWindow):
 
     def _git_pull_ff_only(self, repo_root: Path) -> None:
         self._run_git_command(["pull", "--ff-only"], cwd=repo_root, check=True)
+
+    def _git_pull_with_overwrite_prompt(self, repo_root: Path) -> bool:
+        try:
+            self._git_pull_ff_only(repo_root)
+            self.log.info("Git: Remote-Aenderungen erfolgreich gepullt.")
+            self.statusBar().showMessage("Git: Remote-Aenderungen gepullt", 3500)
+            return True
+        except RuntimeError as exc:
+            if not self._is_pull_overwrite_conflict(str(exc)):
+                raise
+
+            answer = QMessageBox.question(
+                self,
+                "Lokalen Stand verwerfen?",
+                (
+                    "Lokale Aenderungen blockieren den Pull.\n\n"
+                    "Soll der lokale Stand verworfen und auf den Remote-Stand gewechselt werden?\n"
+                    "(git reset --hard @{upstream})"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self.log.info("Git Pull abgebrochen: Lokale Aenderungen behalten.")
+                return False
+
+            self._run_git_command(["reset", "--hard", "@{upstream}"], cwd=repo_root, check=True)
+            self.log.info("Git: Lokale Aenderungen verworfen, Remote-Stand uebernommen.")
+            self.statusBar().showMessage("Lokale Aenderungen verworfen, Remote-Stand aktiv", 4500)
+            return True
+
+    @staticmethod
+    def _is_pull_overwrite_conflict(message: str) -> bool:
+        text = (message or "").lower()
+        return (
+            "would be overwritten by merge" in text
+            or "please commit your changes or stash them before you merge" in text
+        )
 
     def _run_git_command(
         self,

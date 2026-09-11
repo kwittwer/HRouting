@@ -1886,6 +1886,7 @@ def test_file_menu_shows_git_actions(app, monkeypatch):
         assert "Speichern, Commit & Push…" in labels
         assert "Commit & Push…" in labels
         assert "Remote prüfen & Pull…" in labels
+        assert "Einstellungen…" in labels
     finally:
         window.deleteLater()
 
@@ -2235,6 +2236,84 @@ def test_load_project_skips_pull_when_user_declines(app, monkeypatch, tmp_path):
 
     assert pulled == []
     assert reloaded == []
+
+
+def test_pull_project_can_discard_local_changes_and_reset_to_upstream(app, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    project_path = repo_root / "demo.hrp"
+    project_path.write_text("{}", encoding="utf-8")
+
+    commands: list[list[str]] = []
+    reloaded: list[Path] = []
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, check=None):
+        del cwd, capture_output, text, check
+        commands.append(list(command))
+        if command[:3] == ["git", "rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, stdout=str(repo_root), stderr="")
+        if command[:5] == ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]:
+            return subprocess.CompletedProcess(command, 0, stdout="origin/main\n", stderr="")
+        if command[:3] == ["git", "fetch", "--quiet"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:4] == ["git", "rev-list", "--left-right", "--count"]:
+            return subprocess.CompletedProcess(command, 0, stdout="0\t1\n", stderr="")
+        if command[:3] == ["git", "pull", "--ff-only"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=(
+                    "error: Your local changes to the following files would be overwritten by merge:\n"
+                    "Please commit your changes or stash them before you merge.\n"
+                    "Aborting\n"
+                ),
+            )
+        if command[:4] == ["git", "reset", "--hard", "@{upstream}"]:
+            return subprocess.CompletedProcess(command, 0, stdout="HEAD is now at abc", stderr="")
+        raise AssertionError(f"Unerwarteter Git-Befehl: {command!r}")
+
+    monkeypatch.setattr("gui.app_window.subprocess.run", fake_run)
+
+    ask_count = {"value": 0}
+
+    def fake_question(*args, **kwargs):
+        del kwargs
+        ask_count["value"] += 1
+        if ask_count["value"] == 1:
+            return QMessageBox.Yes
+        return QMessageBox.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", fake_question)
+
+    window = AppWindow()
+    try:
+        window._project_path = project_path
+
+        def fake_open(path: Path) -> bool:
+            reloaded.append(path)
+            return True
+
+        monkeypatch.setattr(window, "open_project_file", fake_open)
+        assert window._git_pull_project_from_remote() is True
+    finally:
+        window.deleteLater()
+
+    assert reloaded == [project_path]
+    assert [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        ["git", "fetch", "--quiet"],
+        ["git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        ["git", "pull", "--ff-only"],
+        ["git", "reset", "--hard", "@{upstream}"],
+    ] == commands
 
 
 def test_export_pdf_smoke_writes_file(app, monkeypatch, tmp_path):

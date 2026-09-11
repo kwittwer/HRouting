@@ -66,6 +66,10 @@ HIT_POINT_RADIUS_PX = 10.0
 HIT_EDGE_RADIUS_PX = 8.0
 HIT_CABLE_POINT_RADIUS_PX = 20.0
 MIN_SYMBOL_PICK_HALF_PX = 8.0
+ELEC_CABLE_OVERLAP_TOLERANCE_PX = 8.0
+ELEC_CABLE_OVERLAP_ANGLE_TOL_DEG = 10.0
+ELEC_CABLE_DEFAULT_LANE_GAP_PX = 2.0
+ELEC_POINT_FILL_ALPHA_DEFAULT = 60
 _HELPER_NAV_ID_PREFIX = "NAV-HLP::"
 
 
@@ -173,6 +177,8 @@ class CanvasWidget(QWidget):
         self._manual_route_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
         self._supply_line_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
         self._elec_cable_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
+        self._elec_cable_overlap_cache_key: Optional[tuple] = None
+        self._elec_cable_segment_offset_cache: Dict[str, List[float]] = {}
         self._hkv_line_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
 
         # Background color
@@ -254,6 +260,8 @@ class CanvasWidget(QWidget):
         self._elec_cable_stroke_width: Dict[str, float]            = {}
         self._elec_cable_type_text: Dict[str, str]                 = {}
         self._elec_cable_type_label_visible: Dict[str, bool]       = {}
+        self._elec_cable_overlap_gap_px: float                     = ELEC_CABLE_DEFAULT_LANE_GAP_PX
+        self._elec_point_fill_alpha: int                           = ELEC_POINT_FILL_ALPHA_DEFAULT
         self._elec_visible:       Dict[str, bool]                 = {}
 
         # Cable ↔ AP connections  (cable_id → point_id or "")
@@ -510,6 +518,23 @@ class CanvasWidget(QWidget):
 
     def snap_angle(self) -> float:
         return float(self._snap_angle)
+
+    def set_elec_cable_overlap_gap_px(self, gap_px: float) -> None:
+        self._elec_cable_overlap_gap_px = max(0.0, float(gap_px))
+        self._elec_cable_path_cache.clear()
+        self._elec_cable_overlap_cache_key = None
+        self._elec_cable_segment_offset_cache.clear()
+        self.update()
+
+    def elec_cable_overlap_gap_px(self) -> float:
+        return float(self._elec_cable_overlap_gap_px)
+
+    def set_elec_point_fill_alpha(self, alpha: int) -> None:
+        self._elec_point_fill_alpha = max(0, min(255, int(alpha)))
+        self.update()
+
+    def elec_point_fill_alpha(self) -> int:
+        return int(self._elec_point_fill_alpha)
 
     # ── Floor plan layer management ────────────────────────────────
 
@@ -2326,6 +2351,9 @@ class CanvasWidget(QWidget):
 
     def set_elec_cable_stroke_width(self, cable_id: str, width: float):
         self._elec_cable_stroke_width[cable_id] = max(0.5, min(10.0, width))
+        self._elec_cable_path_cache.pop(cable_id, None)
+        self._elec_cable_overlap_cache_key = None
+        self._elec_cable_segment_offset_cache.clear()
         self.update()
 
     def set_elec_cable_type_text(self, cable_id: str, cable_type: str):
@@ -2350,6 +2378,8 @@ class CanvasWidget(QWidget):
             d.pop(cable_id, None)
             d.pop(cable_type_label_id, None)
         self._elec_cable_path_cache.pop(cable_id, None)
+        self._elec_cable_overlap_cache_key = None
+        self._elec_cable_segment_offset_cache.pop(cable_id, None)
         self._color_map.pop(cable_id, None)
         self.update()
 
@@ -2390,13 +2420,263 @@ class CanvasWidget(QWidget):
         pts = self._elec_cables.get(cable_id, [])
         if len(pts) < 2:
             return None
+        seg_offsets = self._get_elec_cable_segment_offsets(cable_id, pts)
+        render_pts = self._build_elec_cable_offset_polyline(pts, seg_offsets)
         sw = self._elec_cable_stroke_width.get(cable_id, 2.0)
         threshold = max(8.0, sw * 2) / self._scale
-        for i in range(len(pts) - 1):
-            proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
+        for i in range(len(render_pts) - 1):
+            proj = _project_on_segment(canvas_pt, render_pts[i], render_pts[i + 1])
             if _qdist(canvas_pt, proj) < threshold:
                 return (i, i + 1)
         return None
+
+    def _build_elec_cable_overlap_signature(self, visible_cables: List[str]) -> tuple:
+        payload: List[tuple] = []
+        for cid in visible_cables:
+            pts = self._elec_cables.get(cid, [])
+            pts_key = tuple((round(p.x(), 3), round(p.y(), 3)) for p in pts)
+            sw = round(float(self._elec_cable_stroke_width.get(cid, 2.0)), 3)
+            payload.append((cid, sw, pts_key))
+        return (
+            round(float(self._scale), 6),
+            round(float(self._elec_cable_overlap_gap_px), 3),
+            tuple(payload),
+        )
+
+    def _lane_step_for_stroke(self, stroke_width: float) -> float:
+        if self._elec_cable_overlap_gap_px <= 0.0:
+            return 0.0
+        # Keep a small visible gutter between adjacent parallel cable lanes.
+        spacing_px = max(2.0, float(stroke_width) + self._elec_cable_overlap_gap_px)
+        return spacing_px / max(self._scale, 1e-9)
+
+    def _segment_line_distance(self,
+                               pt: QPointF,
+                               origin: QPointF,
+                               ux: float,
+                               uy: float) -> float:
+        nx = -uy
+        ny = ux
+        dx = pt.x() - origin.x()
+        dy = pt.y() - origin.y()
+        return abs(dx * nx + dy * ny)
+
+    def _segments_overlap_for_lane(self, seg_a: dict, seg_b: dict) -> bool:
+        tol = ELEC_CABLE_OVERLAP_TOLERANCE_PX
+        if seg_a["max_x"] + tol < seg_b["min_x"]:
+            return False
+        if seg_b["max_x"] + tol < seg_a["min_x"]:
+            return False
+        if seg_a["max_y"] + tol < seg_b["min_y"]:
+            return False
+        if seg_b["max_y"] + tol < seg_a["min_y"]:
+            return False
+
+        cos_tol = math.cos(math.radians(ELEC_CABLE_OVERLAP_ANGLE_TOL_DEG))
+        dot = abs(seg_a["ux"] * seg_b["ux"] + seg_a["uy"] * seg_b["uy"])
+        if dot < cos_tol:
+            return False
+
+        da0 = self._segment_line_distance(seg_a["a"], seg_b["a"], seg_b["ux"], seg_b["uy"])
+        da1 = self._segment_line_distance(seg_a["b"], seg_b["a"], seg_b["ux"], seg_b["uy"])
+        db0 = self._segment_line_distance(seg_b["a"], seg_a["a"], seg_a["ux"], seg_a["uy"])
+        db1 = self._segment_line_distance(seg_b["b"], seg_a["a"], seg_a["ux"], seg_a["uy"])
+        if max(da0, da1, db0, db1) > tol:
+            return False
+
+        def _projection_interval(base_seg: dict, other_seg: dict) -> Tuple[float, float]:
+            ax = base_seg["a"].x()
+            ay = base_seg["a"].y()
+            ux = base_seg["ux"]
+            uy = base_seg["uy"]
+            t0 = (other_seg["a"].x() - ax) * ux + (other_seg["a"].y() - ay) * uy
+            t1 = (other_seg["b"].x() - ax) * ux + (other_seg["b"].y() - ay) * uy
+            return (min(t0, t1), max(t0, t1))
+
+        b_lo, b_hi = _projection_interval(seg_a, seg_b)
+        overlap = min(seg_a["length"], b_hi) - max(0.0, b_lo)
+        return overlap > 0.5
+
+    def _compute_elec_cable_segment_offsets(self,
+                                            visible_cables: List[str]) -> Dict[str, List[float]]:
+        offsets: Dict[str, List[float]] = {
+            cid: [0.0] * max(len(self._elec_cables.get(cid, [])) - 1, 0)
+            for cid in visible_cables
+        }
+        segment_meta: Dict[Tuple[str, int], dict] = {}
+        segment_keys: List[Tuple[str, int]] = []
+
+        for cid in visible_cables:
+            pts = self._elec_cables.get(cid, [])
+            sw = self._elec_cable_stroke_width.get(cid, 2.0)
+            for i in range(len(pts) - 1):
+                a = pts[i]
+                b = pts[i + 1]
+                dx = b.x() - a.x()
+                dy = b.y() - a.y()
+                length = math.hypot(dx, dy)
+                if length < 1e-6:
+                    continue
+                ux = dx / length
+                uy = dy / length
+                key = (cid, i)
+                segment_keys.append(key)
+                segment_meta[key] = {
+                    "cable_id": cid,
+                    "index": i,
+                    "a": a,
+                    "b": b,
+                    "length": length,
+                    "ux": ux,
+                    "uy": uy,
+                    "sw": sw,
+                    "min_x": min(a.x(), b.x()),
+                    "max_x": max(a.x(), b.x()),
+                    "min_y": min(a.y(), b.y()),
+                    "max_y": max(a.y(), b.y()),
+                }
+
+        if len(segment_keys) < 2:
+            return offsets
+
+        parent: Dict[Tuple[str, int], Tuple[str, int]] = {k: k for k in segment_keys}
+
+        def _find(k: Tuple[str, int]) -> Tuple[str, int]:
+            root = k
+            while parent[root] != root:
+                root = parent[root]
+            while parent[k] != k:
+                nxt = parent[k]
+                parent[k] = root
+                k = nxt
+            return root
+
+        def _union(a_key: Tuple[str, int], b_key: Tuple[str, int]) -> None:
+            ra = _find(a_key)
+            rb = _find(b_key)
+            if ra != rb:
+                parent[rb] = ra
+
+        for i, key_a in enumerate(segment_keys):
+            meta_a = segment_meta[key_a]
+            for key_b in segment_keys[i + 1:]:
+                if key_a[0] == key_b[0]:
+                    continue
+                meta_b = segment_meta[key_b]
+                if self._segments_overlap_for_lane(meta_a, meta_b):
+                    _union(key_a, key_b)
+
+        components: Dict[Tuple[str, int], List[Tuple[str, int]]] = {}
+        for key in segment_keys:
+            root = _find(key)
+            components.setdefault(root, []).append(key)
+
+        for comp_keys in components.values():
+            cables = sorted({segment_meta[k]["cable_id"] for k in comp_keys})
+            if len(cables) < 2:
+                continue
+            lane_idx = {cid: idx for idx, cid in enumerate(cables)}
+            comp_sw = max(float(segment_meta[k]["sw"]) for k in comp_keys)
+            step = self._lane_step_for_stroke(comp_sw)
+            center = (len(cables) - 1) / 2.0
+            for key in comp_keys:
+                cid = segment_meta[key]["cable_id"]
+                seg_index = segment_meta[key]["index"]
+                offsets[cid][seg_index] = (lane_idx[cid] - center) * step
+
+        return offsets
+
+    def _get_elec_cable_segment_offsets(self,
+                                        cable_id: str,
+                                        points: List[QPointF]) -> List[float]:
+        if (
+            len(points) < 2
+            or self._mode == ToolMode.EDIT_ELEC_CABLE
+            or self._elec_cable_overlap_gap_px <= 0.0
+        ):
+            return [0.0] * max(len(points) - 1, 0)
+
+        visible_cables = sorted(
+            cid
+            for cid, pts in self._elec_cables.items()
+            if self._elec_visible.get(cid, True) and len(pts) >= 2
+        )
+        signature = self._build_elec_cable_overlap_signature(visible_cables)
+        if signature != self._elec_cable_overlap_cache_key:
+            self._elec_cable_overlap_cache_key = signature
+            self._elec_cable_segment_offset_cache = self._compute_elec_cable_segment_offsets(visible_cables)
+
+        cached = self._elec_cable_segment_offset_cache.get(cable_id)
+        if cached is None or len(cached) != len(points) - 1:
+            return [0.0] * max(len(points) - 1, 0)
+        return list(cached)
+
+    def _build_elec_cable_offset_polyline(self,
+                                          points: List[QPointF],
+                                          seg_offsets: List[float]) -> List[QPointF]:
+        if len(points) < 2 or len(seg_offsets) != len(points) - 1:
+            return list(points)
+
+        n = len(points)
+        point_offsets: List[float] = [0.0] * n
+        point_offsets[0] = seg_offsets[0]
+        point_offsets[-1] = seg_offsets[-1]
+        for i in range(1, n - 1):
+            point_offsets[i] = (seg_offsets[i - 1] + seg_offsets[i]) * 0.5
+
+        shifted: List[QPointF] = []
+        for i, pt in enumerate(points):
+            if i == 0:
+                ref_a = points[0]
+                ref_b = points[1]
+            elif i == n - 1:
+                ref_a = points[-2]
+                ref_b = points[-1]
+            else:
+                prev = points[i - 1]
+                curr = points[i]
+                nxt = points[i + 1]
+                ux1 = curr.x() - prev.x()
+                uy1 = curr.y() - prev.y()
+                ux2 = nxt.x() - curr.x()
+                uy2 = nxt.y() - curr.y()
+                d1 = math.hypot(ux1, uy1)
+                d2 = math.hypot(ux2, uy2)
+                if d1 > 1e-9:
+                    ux1 /= d1
+                    uy1 /= d1
+                if d2 > 1e-9:
+                    ux2 /= d2
+                    uy2 /= d2
+                tx = ux1 + ux2
+                ty = uy1 + uy2
+                if math.hypot(tx, ty) > 1e-9:
+                    ref_a = QPointF(curr.x() - tx, curr.y() - ty)
+                    ref_b = QPointF(curr.x() + tx, curr.y() + ty)
+                elif d2 > 1e-9:
+                    ref_a = curr
+                    ref_b = nxt
+                elif d1 > 1e-9:
+                    ref_a = prev
+                    ref_b = curr
+                else:
+                    shifted.append(QPointF(pt))
+                    continue
+
+            dx = ref_b.x() - ref_a.x()
+            dy = ref_b.y() - ref_a.y()
+            d = math.hypot(dx, dy)
+            if d < 1e-9:
+                shifted.append(QPointF(pt))
+                continue
+            ux = dx / d
+            uy = dy / d
+            nx = -uy
+            ny = ux
+            off = point_offsets[i]
+            shifted.append(QPointF(pt.x() + nx * off, pt.y() + ny * off))
+
+        return shifted
 
     def _apply_angle_snap_elec(self, target: QPointF) -> QPointF:
         if self._snap_angle <= 0 or not self._current_elec_cable_points:
@@ -3950,6 +4230,8 @@ class CanvasWidget(QWidget):
         self._manual_route_path_cache.clear()
         self._supply_line_path_cache.clear()
         self._elec_cable_path_cache.clear()
+        self._elec_cable_overlap_cache_key = None
+        self._elec_cable_segment_offset_cache.clear()
         self._hkv_line_path_cache.clear()
         self._floor_plan_order.clear()
         self._ref_floor_id = None
@@ -8674,15 +8956,33 @@ class CanvasWidget(QWidget):
                 and self._current_hkv_line_id):
             self._draw_hkv_line_in_progress(painter)
 
-        # Elektro: Anschlusspunkte
+        highlighted_cable_id: str | None = None
+        if self._selected_item_type == "elec_cable":
+            sid = self._selected_item_id
+            if (
+                isinstance(sid, str)
+                and sid in self._elec_cables
+                and self._elec_visible.get(sid, True)
+            ):
+                highlighted_cable_id = sid
+
+        # Elektro: Kabelverbindungen (normalerweise unter APs)
+        for cid, pts in self._elec_cables.items():
+            if not self._elec_visible.get(cid, True):
+                continue
+            if highlighted_cable_id is not None and cid == highlighted_cable_id:
+                continue
+            self._draw_elec_cable(painter, cid, pts)
+
+        # Elektro: Anschlusspunkte immer oberhalb normaler Kabel
         for pid in self._elec_points:
             if self._elec_visible.get(pid, True):
                 self._draw_elec_point(painter, pid)
 
-        # Elektro: Kabelverbindungen
-        for cid, pts in self._elec_cables.items():
-            if self._elec_visible.get(cid, True):
-                self._draw_elec_cable(painter, cid, pts)
+        # Selektiertes (gehighlightetes) Kabel bewusst oberhalb der APs
+        if highlighted_cable_id is not None:
+            highlighted_points = self._elec_cables.get(highlighted_cable_id, [])
+            self._draw_elec_cable(painter, highlighted_cable_id, highlighted_points)
 
         # Kabel in Arbeit
         if (self._mode == ToolMode.DRAW_ELEC_CABLE
@@ -10231,7 +10531,7 @@ class CanvasWidget(QWidget):
         rect = QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h)
         color = self._color_map.get(point_id, QColor("#4fc3f7"))
         fill = QColor(color)
-        fill.setAlpha(60)
+        fill.setAlpha(self._elec_point_fill_alpha)
         painter.setBrush(QBrush(fill))
         painter.setPen(QPen(QColor(color), 2.0 / self._scale))
         painter.drawRect(rect)
@@ -10253,19 +10553,23 @@ class CanvasWidget(QWidget):
             cable_id == self._selected_item_id
             and self._selected_item_type == "elec_cable"
         )
+        seg_offsets = self._get_elec_cable_segment_offsets(cable_id, points)
+        render_pts = self._build_elec_cable_offset_polyline(points, seg_offsets)
+
         pen = QPen(color, sw / self._scale)
         pen.setJoinStyle(Qt.RoundJoin)
         pen.setCapStyle(Qt.RoundCap)
         rounding = 8.0 / self._scale
         path_key = (
-            tuple((p.x(), p.y()) for p in points),
+            tuple((round(p.x(), 4), round(p.y(), 4)) for p in render_pts),
+            round(sw, 3),
             round(self._scale, 6),
         )
         cached = self._elec_cable_path_cache.get(cable_id)
         if cached and cached[0] == path_key:
             path = cached[1]
         else:
-            path = self._smooth_polyline_path(points, rounding)
+            path = self._smooth_polyline_path(render_pts, rounding)
             self._elec_cable_path_cache[cable_id] = (path_key, path)
 
         painter.setBrush(Qt.NoBrush)
@@ -10292,7 +10596,7 @@ class CanvasWidget(QWidget):
         if is_highlighted:
             outer_radius = 5.0 / self._scale
             inner_radius = 3.0 / self._scale
-            for pt in points:
+            for pt in render_pts:
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QBrush(QColor("#ffffff")))
                 painter.drawEllipse(pt, outer_radius, outer_radius)

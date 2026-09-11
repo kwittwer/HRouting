@@ -16,6 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QPointF  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 
@@ -72,6 +73,121 @@ def test_e6_canvas_menu_action_exists(app):
         assert found, "Cable action not found in menu"
     finally:
         window.deleteLater()
+
+
+def test_e6_identical_cables_get_opposite_offsets(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        p0 = QPointF(10.0, 10.0)
+        p1 = QPointF(210.0, 10.0)
+        canvas._elec_cables = {
+            "EK-1": [QPointF(p0), QPointF(p1)],
+            "EK-2": [QPointF(p0), QPointF(p1)],
+        }
+        canvas._elec_visible = {"EK-1": True, "EK-2": True}
+        canvas._elec_cable_stroke_width = {"EK-1": 2.0, "EK-2": 2.0}
+
+        off1 = canvas._get_elec_cable_segment_offsets("EK-1", canvas._elec_cables["EK-1"])
+        off2 = canvas._get_elec_cable_segment_offsets("EK-2", canvas._elec_cables["EK-2"])
+
+        assert len(off1) == 1
+        assert len(off2) == 1
+        assert abs(off1[0]) > 0.0
+        assert abs(off2[0]) > 0.0
+        assert off1[0] == pytest.approx(-off2[0], rel=1e-6, abs=1e-6)
+    finally:
+        canvas.deleteLater()
+
+
+def test_e6_partial_overlap_offsets_only_overlapped_segment(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas._elec_cables = {
+            "EK-1": [QPointF(0.0, 0.0), QPointF(100.0, 0.0), QPointF(200.0, 0.0)],
+            "EK-2": [QPointF(0.0, 0.0), QPointF(100.0, 0.0)],
+        }
+        canvas._elec_visible = {"EK-1": True, "EK-2": True}
+        canvas._elec_cable_stroke_width = {"EK-1": 2.0, "EK-2": 2.0}
+
+        off1 = canvas._get_elec_cable_segment_offsets("EK-1", canvas._elec_cables["EK-1"])
+        off2 = canvas._get_elec_cable_segment_offsets("EK-2", canvas._elec_cables["EK-2"])
+
+        assert len(off1) == 2
+        assert len(off2) == 1
+        assert abs(off1[0]) > 0.0
+        assert off1[1] == pytest.approx(0.0, abs=1e-6)
+        assert abs(off2[0]) > 0.0
+    finally:
+        canvas.deleteLater()
+
+
+def test_e6_hit_testing_uses_shifted_render_path(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas._elec_cables = {
+            "EK-1": [QPointF(0.0, 0.0), QPointF(200.0, 0.0)],
+            "EK-2": [QPointF(0.0, 0.0), QPointF(200.0, 0.0)],
+        }
+        canvas._elec_visible = {"EK-1": True, "EK-2": True}
+        canvas._elec_cable_stroke_width = {"EK-1": 2.0, "EK-2": 2.0}
+
+        pts = canvas._elec_cables["EK-1"]
+        seg_offsets = canvas._get_elec_cable_segment_offsets("EK-1", pts)
+        shifted = canvas._build_elec_cable_offset_polyline(pts, seg_offsets)
+        mid = QPointF(
+            (shifted[0].x() + shifted[1].x()) * 0.5,
+            (shifted[0].y() + shifted[1].y()) * 0.5,
+        )
+
+        hit = canvas._hit_elec_cable_edge(mid, "EK-1")
+        assert hit == (0, 1)
+    finally:
+        canvas.deleteLater()
+
+
+def test_e6_overlap_gap_zero_disables_offsetting(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas._elec_cables = {
+            "EK-1": [QPointF(0.0, 0.0), QPointF(200.0, 0.0)],
+            "EK-2": [QPointF(0.0, 0.0), QPointF(200.0, 0.0)],
+        }
+        canvas._elec_visible = {"EK-1": True, "EK-2": True}
+        canvas._elec_cable_stroke_width = {"EK-1": 2.0, "EK-2": 2.0}
+        canvas.set_elec_cable_overlap_gap_px(0.0)
+
+        off1 = canvas._get_elec_cable_segment_offsets("EK-1", canvas._elec_cables["EK-1"])
+        off2 = canvas._get_elec_cable_segment_offsets("EK-2", canvas._elec_cables["EK-2"])
+
+        assert off1 == [0.0]
+        assert off2 == [0.0]
+    finally:
+        canvas.deleteLater()
+
+
+def test_e6_elec_point_fill_alpha_clamps(app):
+    from gui.canvas_widget import CanvasWidget  # noqa: PLC0415
+
+    canvas = CanvasWidget()
+    try:
+        canvas.set_elec_point_fill_alpha(-20)
+        assert canvas.elec_point_fill_alpha() == 0
+
+        canvas.set_elec_point_fill_alpha(80)
+        assert canvas.elec_point_fill_alpha() == 80
+
+        canvas.set_elec_point_fill_alpha(999)
+        assert canvas.elec_point_fill_alpha() == 255
+    finally:
+        canvas.deleteLater()
 
 
 
