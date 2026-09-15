@@ -224,6 +224,7 @@ class ElecCable(Element):
         "elec_cables",
         "elec_cable_notes",
         "elec_cable_stroke_width",
+        "elec_cable_line_style",
         "elec_cable_type_text",
         "elec_cable_type_label_visible",
         "cable_start_ap",
@@ -233,6 +234,7 @@ class ElecCable(Element):
 
     cable_type = _param("type", "")
     comment = _param("comment", "")
+    line_style = _param("line_style", "solid")
     start_ap = _param("start_ap", "")
     end_ap = _param("end_ap", "")
     start_length_surcharge_m = _param("start_length_surcharge_m", 0.0)

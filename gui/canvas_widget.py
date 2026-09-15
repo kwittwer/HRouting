@@ -259,6 +259,7 @@ class CanvasWidget(QWidget):
         self._elec_cables:        Dict[str, List[QPointF]]        = {}
         self._elec_cable_notes:   Dict[str, str]                  = {}
         self._elec_cable_stroke_width: Dict[str, float]            = {}
+        self._elec_cable_line_style: Dict[str, str]                = {}
         self._elec_cable_type_text: Dict[str, str]                 = {}
         self._elec_cable_type_label_visible: Dict[str, bool]       = {}
         self._elec_cable_overlap_gap_px: float                     = ELEC_CABLE_DEFAULT_LANE_GAP_PX
@@ -2391,6 +2392,13 @@ class CanvasWidget(QWidget):
         self._elec_cable_segment_offset_cache.clear()
         self.update()
 
+    def set_elec_cable_line_style(self, cable_id: str, style_key: str):
+        style = str(style_key or "solid").strip().lower()
+        if style not in {"solid", "dash", "dot", "dashdot"}:
+            style = "solid"
+        self._elec_cable_line_style[cable_id] = style
+        self.update()
+
     def set_elec_cable_type_text(self, cable_id: str, cable_type: str):
         self._elec_cable_type_text[cable_id] = str(cable_type or "").strip()
         self.update()
@@ -2406,6 +2414,7 @@ class CanvasWidget(QWidget):
         cable_type_label_id = self._elec_cable_type_label_id(cable_id)
         for d in (self._elec_cables, self._elec_visible,
                   self._elec_cable_notes, self._elec_cable_stroke_width,
+                  self._elec_cable_line_style,
                   self._elec_cable_type_text, self._elec_cable_type_label_visible,
                   self._cable_start_ap, self._cable_end_ap,
                   self._label_positions, self._label_font_sizes, self._label_visible,
@@ -4567,6 +4576,7 @@ class CanvasWidget(QWidget):
         self._elec_cables.clear()
         self._elec_cable_notes.clear()
         self._elec_cable_stroke_width.clear()
+        self._elec_cable_line_style.clear()
         self._elec_cable_type_text.clear()
         self._elec_cable_type_label_visible.clear()
         self._elec_visible.clear()
@@ -4798,6 +4808,7 @@ class CanvasWidget(QWidget):
             },
             "elec_cable_notes": dict(self._elec_cable_notes),
             "elec_cable_stroke_width": dict(self._elec_cable_stroke_width),
+            "elec_cable_line_style": dict(self._elec_cable_line_style),
             "elec_cable_type_text": dict(self._elec_cable_type_text),
             "elec_cable_type_label_visible": dict(self._elec_cable_type_label_visible),
             "cable_start_ap": dict(self._cable_start_ap),
@@ -5052,6 +5063,10 @@ class CanvasWidget(QWidget):
         }
         self._elec_cable_stroke_width = {
             cid: float(v) for cid, v in d.get("elec_cable_stroke_width", {}).items()
+        }
+        self._elec_cable_line_style = {
+            cid: (str(v).strip().lower() if str(v).strip().lower() in {"solid", "dash", "dot", "dashdot"} else "solid")
+            for cid, v in d.get("elec_cable_line_style", {}).items()
         }
         self._elec_cable_type_text = {
             cid: str(v) for cid, v in d.get("elec_cable_type_text", {}).items()
@@ -10887,6 +10902,7 @@ class CanvasWidget(QWidget):
         render_pts = self._build_elec_cable_offset_polyline(points, seg_offsets, cable_id)
 
         pen = QPen(color, sw / self._scale)
+        pen.setStyle(self._helper_line_pen_style(self._elec_cable_line_style.get(cable_id, "solid")))
         pen.setJoinStyle(Qt.RoundJoin)
         pen.setCapStyle(Qt.RoundCap)
         rounding = 8.0 / self._scale
@@ -10948,7 +10964,9 @@ class CanvasWidget(QWidget):
             return
         sw = self._elec_cable_stroke_width.get(
             self._current_elec_cable_id, 2.0)
-        pen = QPen(color, sw / self._scale, Qt.DashLine)
+        line_style = self._elec_cable_line_style.get(self._current_elec_cable_id, "solid")
+        pen = QPen(color, sw / self._scale)
+        pen.setStyle(self._helper_line_pen_style(line_style))
         pen.setJoinStyle(Qt.RoundJoin)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)

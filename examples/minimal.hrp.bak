@@ -67,8 +67,57 @@
         "line_style": "dash"
       }
     },
-    "cable_end_ap": {
-      "EK-1": "AP-2"
+    "elec_room_visible": {
+      "ER-1": true
+    },
+    "elec_visible": {
+      "AP-1": true,
+      "AP-2": true,
+      "EK-1": true
+    },
+    "hkv_visible": {
+      "HKV-1": true
+    },
+    "hkv_line_visible": {},
+    "label_font_sizes": {
+      "HK-1": 12.0,
+      "HK-2": 12.0,
+      "AP-1": 12.0,
+      "AP-2": 12.0,
+      "ER-1": 12.0,
+      "EK-1": 12.0,
+      "HKV-1": 12.0
+    },
+    "label_visible": {
+      "HK-1": true,
+      "HK-2": true,
+      "AP-1": true,
+      "AP-2": true,
+      "ER-1": true,
+      "EK-1": true,
+      "HKV-1": true
+    },
+    "distance_measurements": {},
+    "distance_label_positions": {},
+    "angle_measurements": {},
+    "angle_label_positions": {},
+    "hkv_points": {
+      "HKV-1": [
+        400.0,
+        50.0
+      ]
+    },
+    "elec_cables": {
+      "EK-1": [
+        [
+          200.0,
+          250.0
+        ],
+        [
+          700.0,
+          200.0
+        ]
+      ]
     },
     "annotation_lines": {
       "ANL-3": {
@@ -85,8 +134,6 @@
         ]
       }
     },
-    "distance_measurements": {},
-    "text_annotations": {},
     "annotation_ellipses": {
       "ANE-2": {
         "color": "#aaaaff",
@@ -105,37 +152,8 @@
         "radius_y": 92.0
       }
     },
-    "elec_point_size_px": {
-      "AP-1": [
-        1.2,
-        1.2
-      ],
-      "AP-2": [
-        1.2,
-        1.2
-      ]
-    },
-    "hkv_line_visible": {},
-    "annotation_rectangles": {
-      "ANR-3": {
-        "color": "#00e5ff",
-        "line_style": "solid",
-        "stroke_width": 2.0,
-        "fill_color": "#ffffff",
-        "corner_radius": 0.0,
-        "start": [
-          -196.76337634585352,
-          356.0
-        ],
-        "end": [
-          -96.0,
-          437.5908605243692
-        ]
-      }
-    },
-    "ref_line_visible": {
-      "grundriss-1": true,
-      "grundriss-2": true
+    "cable_end_ap": {
+      "EK-1": "AP-2"
     },
     "annotation_circles": {
       "ANC-3": {
@@ -169,10 +187,6 @@
         "radius": 78.0
       }
     },
-    "angle_measurements": {},
-    "elec_room_visible": {
-      "ER-1": true
-    },
     "elec_rooms": {
       "ER-1": [
         [
@@ -191,51 +205,6 @@
           50.0,
           550.0
         ]
-      ]
-    },
-    "label_font_sizes": {
-      "HK-1": 12.0,
-      "HK-2": 12.0,
-      "HKV-1": 12.0,
-      "AP-1": 12.0,
-      "AP-2": 12.0,
-      "ER-1": 12.0,
-      "EK-1": 12.0
-    },
-    "elec_points": {
-      "AP-1": [
-        200.0,
-        250.0
-      ],
-      "AP-2": [
-        700.0,
-        200.0
-      ]
-    },
-    "elec_cable_line_style": {
-      "EK-1": "solid"
-    },
-    "hkv_points": {
-      "HKV-1": [
-        400.0,
-        50.0
-      ]
-    },
-    "hkv_visible": {
-      "HKV-1": true
-    },
-    "cable_start_ap": {
-      "EK-1": "AP-1"
-    },
-    "distance_label_positions": {},
-    "start_points": {
-      "HK-1": [
-        100.0,
-        100.0
-      ],
-      "HK-2": [
-        600.0,
-        100.0
       ]
     },
     "annotation_polygons": {
@@ -292,22 +261,23 @@
         ]
       }
     },
-    "elec_visible": {
-      "AP-1": true,
-      "AP-2": true,
-      "EK-1": true
-    },
-    "elec_cables": {
-      "EK-1": [
-        [
-          200.0,
-          250.0
+    "text_annotations": {},
+    "annotation_rectangles": {
+      "ANR-3": {
+        "color": "#00e5ff",
+        "line_style": "solid",
+        "stroke_width": 2.0,
+        "fill_color": "#ffffff",
+        "corner_radius": 0.0,
+        "start": [
+          -196.76337634585352,
+          356.0
         ],
-        [
-          700.0,
-          200.0
+        "end": [
+          -96.0,
+          437.5908605243692
         ]
-      ]
+      }
     },
     "polygons": {
       "HK-1": [
@@ -347,6 +317,20 @@
         ]
       ]
     },
+    "ref_line_visible": {
+      "grundriss-1": true,
+      "grundriss-2": true
+    },
+    "start_points": {
+      "HK-1": [
+        100.0,
+        100.0
+      ],
+      "HK-2": [
+        600.0,
+        100.0
+      ]
+    },
     "annotation_polylines": {
       "ANP-2": {
         "color": "#00e5ff",
@@ -376,15 +360,28 @@
         ]
       }
     },
-    "angle_label_positions": {},
-    "label_visible": {
-      "HK-1": true,
-      "HK-2": true,
-      "HKV-1": true,
-      "AP-1": true,
-      "AP-2": true,
-      "ER-1": true,
-      "EK-1": true
+    "cable_start_ap": {
+      "EK-1": "AP-1"
+    },
+    "elec_point_size_px": {
+      "AP-1": [
+        1.2,
+        1.2
+      ],
+      "AP-2": [
+        1.2,
+        1.2
+      ]
+    },
+    "elec_points": {
+      "AP-1": [
+        200.0,
+        250.0
+      ],
+      "AP-2": [
+        700.0,
+        200.0
+      ]
     },
     "floor_plans": [
       {
@@ -441,25 +438,6 @@
     "t_supply": 35.0,
     "t_return": 30.0,
     "t_norm_outdoor": -12.0,
-    "ui_color_dialog_custom_colors": [
-      "#ffffff",
-      "#c0c0c0",
-      "#808080",
-      "#000000",
-      "#ff0000",
-      "#800000",
-      "#ffff00",
-      "#808000",
-      "#00ff00",
-      "#008000",
-      "#00ffff",
-      "#008080",
-      "#0000ff",
-      "#000080",
-      "#ff00ff",
-      "#800080"
-    ],
-    "elec_cable_type_styles": {},
     "floorplans": {
       "grundriss-1": {
         "name": "Erdgeschoss",
@@ -597,7 +575,7 @@
       "EK-1": {
         "cable_id": "EK-1",
         "floor_plan_id": "grundriss-1",
-        "name": "KBL_Steckdose Wohnzimmer:Steckdose 2 Wohnzimmer",
+        "name": "Kabel AP1-AP2",
         "color": "#f4a261",
         "visible": true,
         "label_visible": true,
@@ -607,9 +585,7 @@
         "start_ap": "AP-1",
         "end_ap": "AP-2",
         "start_length_surcharge_m": 0.0,
-        "end_length_surcharge_m": 0.0,
-        "line_style": "solid",
-        "stroke_width": 2.0
+        "end_length_surcharge_m": 0.0
       }
     },
     "text_annotations": {},
@@ -709,6 +685,5 @@
     "angle_measurements": {}
   },
   "pdf_export_pages": [],
-  "pdf_export_meta": {},
   "format_version": 2
 }

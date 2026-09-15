@@ -27,6 +27,8 @@ _DEFAULT_CUSTOM_COLOR_PALETTE = [
     "#0000ff", "#000080", "#ff00ff", "#800080",
 ]
 
+_VALID_CABLE_LINE_STYLES = {"solid", "dash", "dot", "dashdot"}
+
 
 def migrate_raw(raw: dict) -> dict:
     """Normalisiert ein rohes .hrp-Dict. Gibt eine neue Struktur zurück."""
@@ -42,6 +44,7 @@ def migrate_raw(raw: dict) -> dict:
 
     _migrate_color_dialog_custom_colors(params)
     _migrate_auto_cable_names(params, canvas)
+    _migrate_cable_style_profiles(params, canvas)
 
     # Bekannte Altversionen werden immer auf das aktuelle Format gehoben.
     if detected_version <= LEGACY_HRP_FORMAT_VERSION:
@@ -184,6 +187,7 @@ def _migrate_legacy_electrical_ids(canvas: dict, params: dict) -> None:
             "elec_cables",
             "elec_cable_notes",
             "elec_cable_stroke_width",
+            "elec_cable_line_style",
             "elec_cable_type_text",
             "elec_cable_type_label_visible",
             "cable_start_ap",
@@ -242,6 +246,89 @@ def _migrate_auto_cable_names(params: dict, canvas: dict) -> None:
             else:
                 end_name = end_ap_id
         entry["name"] = format_auto_cable_name(start_name, end_name)
+
+
+def _normalize_cable_line_style(value: object) -> str:
+    style = str(value or "solid").strip().lower()
+    return style if style in _VALID_CABLE_LINE_STYLES else "solid"
+
+
+def _normalize_cable_stroke_width(value: object) -> float:
+    try:
+        width = float(value)
+    except (TypeError, ValueError):
+        width = 2.0
+    return max(0.5, min(10.0, width))
+
+
+def _migrate_cable_style_profiles(params: dict, canvas: dict) -> None:
+    """Sichert linientypbezogene Kabeldarstellung und Typprofile.
+
+    - Normalisiert fehlende/ungültige ``line_style`` Werte auf ``solid``.
+    - Spiegelt den Stil nach ``canvas.elec_cable_line_style``.
+    - Baut ``params.elec_cable_type_styles`` auf, falls noch nicht vorhanden,
+      anhand des ersten Kabels je Typ in ID-sortierter Reihenfolge.
+    """
+    cables = params.get("elec_cables")
+    if not isinstance(cables, dict):
+        return
+
+    canvas_line_styles = canvas.get("elec_cable_line_style")
+    if not isinstance(canvas_line_styles, dict):
+        canvas_line_styles = {}
+        canvas["elec_cable_line_style"] = canvas_line_styles
+
+    for cable_id, entry in cables.items():
+        if not isinstance(entry, dict):
+            continue
+        style = _normalize_cable_line_style(
+            entry.get("line_style", canvas_line_styles.get(cable_id, "solid"))
+        )
+        entry["line_style"] = style
+        canvas_line_styles[cable_id] = style
+
+        stroke_width = _normalize_cable_stroke_width(
+            entry.get("stroke_width", canvas.get("elec_cable_stroke_width", {}).get(cable_id, 2.0))
+        )
+        entry["stroke_width"] = stroke_width
+
+    existing_profiles = params.get("elec_cable_type_styles")
+    if isinstance(existing_profiles, dict) and existing_profiles:
+        normalized_profiles: dict[str, dict[str, object]] = {}
+        for cable_type, profile in existing_profiles.items():
+            if not isinstance(profile, dict):
+                continue
+            normalized_profiles[str(cable_type)] = {
+                "color": str(profile.get("color") or "#ff9800"),
+                "stroke_width": _normalize_cable_stroke_width(profile.get("stroke_width", 2.0)),
+                "line_style": _normalize_cable_line_style(profile.get("line_style", "solid")),
+            }
+        params["elec_cable_type_styles"] = normalized_profiles
+        return
+
+    profiles: dict[str, dict[str, object]] = {}
+    canvas_stroke_width = canvas.get("elec_cable_stroke_width")
+    if not isinstance(canvas_stroke_width, dict):
+        canvas_stroke_width = {}
+
+    for cable_id in sorted(cables.keys()):
+        entry = cables.get(cable_id)
+        if not isinstance(entry, dict):
+            continue
+        cable_type = str(entry.get("type") or "").strip()
+        if not cable_type or cable_type in profiles:
+            continue
+        profiles[cable_type] = {
+            "color": str(entry.get("color") or "#ff9800"),
+            "stroke_width": _normalize_cable_stroke_width(
+                entry.get("stroke_width", canvas_stroke_width.get(cable_id, 2.0))
+            ),
+            "line_style": _normalize_cable_line_style(
+                entry.get("line_style", canvas_line_styles.get(cable_id, "solid"))
+            ),
+        }
+
+    params["elec_cable_type_styles"] = profiles
 
 
 def _migrate_params_bucket_ids(

@@ -93,6 +93,14 @@ def test_visibility_maps_write_to_params(bound):
     assert document.to_dict()["params"]["circuits"]["HK-1"]["visible"] is False
 
 
+def test_cable_line_style_map_writes_to_document(bound):
+    canvas, document = bound
+    canvas._elec_cable_line_style["EK-1"] = "dashdot"
+
+    saved = document.to_dict()["canvas"]
+    assert saved["elec_cable_line_style"]["EK-1"] == "dashdot"
+
+
 def test_inplace_point_assignment_lands_in_document(bound):
     """In-Place-Mutation einer Punktliste muss ins Document zurückschreiben.
 
@@ -189,6 +197,7 @@ def test_dragging_route_point_persists_to_document(bound):
     Wandabstands-Constraints den Zielpunkt nicht verschieben.
     """
     canvas, document = bound
+    canvas._circuit_visible["HK-1"] = True
     canvas._manual_routes["HK-1"] = [
         QPointF(100, 100), QPointF(200, 100), QPointF(200, 200)
     ]
@@ -370,6 +379,7 @@ def test_route_point_draggable_in_heating_workspace(bound):
     from model.layers import LayerId
 
     canvas, _document = bound
+    canvas._circuit_visible["HK-1"] = True
     canvas._manual_routes["HK-1"] = [QPointF(100, 100), QPointF(200, 100)]
     canvas.set_selectable_layers({LayerId.HEATING})
 
@@ -395,6 +405,7 @@ def test_locked_hit_falls_through_to_allowed_object(bound):
     from model.layers import LayerId
 
     canvas, _document = bound
+    canvas._circuit_visible["HK-1"] = True
     # AP und Routenpunkt exakt übereinander legen.
     canvas._elec_points["AP-1"] = QPointF(400, 400)
     canvas._manual_routes["HK-1"] = [QPointF(100, 100), QPointF(400, 400)]
@@ -412,6 +423,7 @@ def test_workspace_switch_cancels_locked_route_drag(bound):
     from gui.canvas_widget import ToolMode
 
     canvas, _document = bound
+    canvas._circuit_visible["HK-1"] = True
     canvas._manual_routes["HK-1"] = [QPointF(100, 100), QPointF(200, 100)]
     canvas.set_selectable_layers({LayerId.HEATING})
     _mouse(canvas, "press", QPointF(200, 100))

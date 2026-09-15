@@ -470,6 +470,8 @@ ELEC_CABLE_SCHEMA = ElementSchema(
         FieldSpec("stroke_width", "Strichstärke", FieldKind.NUMBER,
                   minimum=0.5, maximum=10.0, step=0.5, decimals=1, unit="px",
                   default=2.0, group="Darstellung"),
+        FieldSpec("line_style", "Linientyp", FieldKind.CHOICE,
+              options=LINE_STYLES, default="solid", group="Darstellung"),
         FieldSpec("comment", "Kommentar", FieldKind.MULTILINE, group="Notiz"),
         FieldSpec("kicad_project_uuid", "KiCad Projekt-UUID", FieldKind.READONLY,
                   default="", group="KiCad-Sync"),

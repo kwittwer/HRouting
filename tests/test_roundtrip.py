@@ -310,6 +310,52 @@ def test_migration_normalizes_existing_cable_names_to_auto_format():
     assert raw["params"]["elec_cables"]["EK-1"]["name"] == "KBL_Dose:Leuchte"
 
 
+def test_migration_initializes_cable_type_styles_and_line_style_map():
+    raw = migrate_raw(
+        {
+            "canvas": {
+                "elec_cable_stroke_width": {
+                    "EK-2": 3.5,
+                },
+            },
+            "params": {
+                "elec_cables": {
+                    "EK-2": {
+                        "cable_id": "EK-2",
+                        "type": "3x1,5",
+                        "color": "#112233",
+                        "stroke_width": 3.5,
+                        "line_style": "dash",
+                    },
+                    "EK-9": {
+                        "cable_id": "EK-9",
+                        "type": "5x1,5",
+                        "color": "#445566",
+                        "stroke_width": 2.0,
+                        "line_style": "invalid",
+                    },
+                },
+            },
+        }
+    )
+
+    assert raw["canvas"]["elec_cable_line_style"]["EK-2"] == "dash"
+    assert raw["canvas"]["elec_cable_line_style"]["EK-9"] == "solid"
+    assert raw["params"]["elec_cables"]["EK-9"]["line_style"] == "solid"
+
+    profiles = raw["params"].get("elec_cable_type_styles", {})
+    assert profiles["3x1,5"] == {
+        "color": "#112233",
+        "stroke_width": 3.5,
+        "line_style": "dash",
+    }
+    assert profiles["5x1,5"] == {
+        "color": "#445566",
+        "stroke_width": 2.0,
+        "line_style": "solid",
+    }
+
+
 def test_save_document_embeds_asset_paths_as_data_uri(tmp_path: Path):
     images_dir = tmp_path / "images"
     icons_dir = tmp_path / "icons"

@@ -473,6 +473,15 @@
           "default": {},
           "description": "Strichstärke pro Kabel-ID (px). Default 2.0."
         },
+        "elec_cable_line_style": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["solid", "dash", "dot", "dashdot"]
+          },
+          "default": {},
+          "description": "Linientyp pro Kabel-ID. Erlaubt: solid, dash, dot, dashdot."
+        },
         "cable_start_ap": {
           "type": "object",
           "additionalProperties": { "type": "string" },
@@ -754,6 +763,24 @@
           "default": {},
           "description": "Zuletzt verwendete Kabel-Standardwerte."
         },
+        "elec_cable_type_styles": {
+          "type": "object",
+          "default": {},
+          "description": "Projektweite Darstellungsprofile je Kabeltyp (Farbe, Strichstärke, Linientyp).",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "color": { "$ref": "#/$defs/HexColor", "default": "#ff9800" },
+              "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 10.0, "default": 2.0 },
+              "line_style": {
+                "type": "string",
+                "enum": ["solid", "dash", "dot", "dashdot"],
+                "default": "solid"
+              }
+            }
+          }
+        },
         "bom": {
           "$ref": "#/$defs/BomSettings",
           "description": "Persistierte Metadaten für Stücklisten-Export und MCP-Reports."
@@ -979,6 +1006,12 @@
         "start_length_surcharge_m": { "type": "number", "minimum": 0.0, "default": 0.0, "description": "Zusätzlicher Längenaufschlag am Kabelanfang in Metern." },
         "end_length_surcharge_m": { "type": "number", "minimum": 0.0, "default": 0.0, "description": "Zusätzlicher Längenaufschlag am Kabelende in Metern." },
         "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 10.0, "default": 2.0, "description": "Strichstärke der Kabellinie in px." },
+        "line_style": {
+          "type": "string",
+          "enum": ["solid", "dash", "dot", "dashdot"],
+          "default": "solid",
+          "description": "Linientyp der Kabellinie."
+        },
         "kicad_project_uuid": { "type": "string", "default": "", "description": "KiCad Projekt-UUID der Importsource." },
         "kicad_sheet_uuid": { "type": "string", "default": "", "description": "KiCad Sheet-UUID des hierarchischen Anschlusses." },
         "kicad_pin_uuid": { "type": "string", "default": "", "description": "KiCad Pin-UUID des importierten Sheet-Pins." },

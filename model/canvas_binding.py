@@ -139,6 +139,8 @@ BINDINGS: tuple[Binding, ...] = (
             element_cls=ElecCable, default="", has_default=True),
     Binding("_elec_cable_stroke_width", "A4.4", "geom", "elec_cable_stroke_width",
             element_cls=ElecCable, default=2.0, has_default=True),
+    Binding("_elec_cable_line_style", "A4.4", "geom", "elec_cable_line_style",
+            element_cls=ElecCable, default="solid", has_default=True),
     Binding("_elec_cable_type_text", "A4.4", "geom", "elec_cable_type_text",
             element_cls=ElecCable, default="", has_default=True),
     Binding("_elec_cable_type_label_visible", "A4.4", "geom",

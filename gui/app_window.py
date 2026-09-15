@@ -122,6 +122,7 @@ _MAX_RECENT = 8
 _FILE_FILTER = "HRouting-Projekt (*.hrp);;Alle Dateien (*)"
 _IMAGE_FILTER = "Bilder (*.png *.jpg *.jpeg *.svg);;Alle Dateien (*)"
 _HELPER_NAV_ID_PREFIX = "NAV-HLP::"
+_VALID_CABLE_LINE_STYLES = {"solid", "dash", "dot", "dashdot"}
 
 
 def _parse_helper_nav_id(nav_id: str) -> tuple[str, str] | None:
@@ -789,6 +790,90 @@ class AppWindow(QMainWindow):
         self._on_property_changed(element_id, key, value)
 
     def _on_batch_property_changed(self, element_ids: list[str], key: str, _value) -> None:
+        if key in {"color", "stroke_width", "line_style", "type"}:
+            cable_ids = [
+                element_id
+                for element_id in element_ids
+                if element_id in self._document.elements.get("elec_cables", {})
+            ]
+            if cable_ids:
+                defer_updates = len(element_ids) >= 25
+                touched_types: set[str] = set()
+                source_by_type: dict[str, str] = {}
+                for cable_id in cable_ids:
+                    cable = self._document.elements["elec_cables"].get(cable_id)
+                    if cable is None:
+                        continue
+                    cable_type = str(cable.data.get("type") or cable.data.get("cable_type") or "").strip()
+                    if cable_type:
+                        touched_types.add(cable_type)
+                        source_by_type[cable_type] = cable_id
+                    elif key == "stroke_width":
+                        width = self._normalize_cable_stroke_width(cable.data.get("stroke_width", 2.0))
+                        cable.data["stroke_width"] = width
+                        cable.geom["elec_cable_stroke_width"] = width
+                        self.canvas.set_elec_cable_stroke_width(cable_id, width)
+                    elif key == "line_style":
+                        line_style = self._normalize_cable_line_style(cable.data.get("line_style", "solid"))
+                        cable.data["line_style"] = line_style
+                        cable.geom["elec_cable_line_style"] = line_style
+                        self.canvas.set_elec_cable_line_style(cable_id, line_style)
+                    elif key == "color":
+                        self.canvas.set_color(cable_id, QColor(str(cable.data.get("color") or "#ff9800")))
+                    if key == "type":
+                        cable.cable_type = cable_type
+                        cable.geom["elec_cable_type_text"] = cable_type
+                        self.canvas.set_elec_cable_type_text(cable_id, cable_type)
+                for cable_type in sorted(touched_types):
+                    profile = self._read_cable_type_style_profile(cable_type)
+                    if profile is None:
+                        profile = self._init_cable_type_style_profile_from_first_cable(cable_type)
+                    if profile is None:
+                        continue
+                    source_id = source_by_type.get(cable_type)
+                    source = self._document.elements["elec_cables"].get(source_id) if source_id else None
+                    if key == "color":
+                        if source is None:
+                            continue
+                        self._apply_cable_type_style_to_all(
+                            cable_type,
+                            color=source.data.get("color", "#ff9800"),
+                            defer_updates=True,
+                        )
+                    elif key == "stroke_width":
+                        if source is None:
+                            continue
+                        self._apply_cable_type_style_to_all(
+                            cable_type,
+                            stroke_width=source.data.get("stroke_width", 2.0),
+                            defer_updates=True,
+                        )
+                    elif key == "line_style":
+                        if source is None:
+                            continue
+                        self._apply_cable_type_style_to_all(
+                            cable_type,
+                            line_style=source.data.get("line_style", "solid"),
+                            defer_updates=True,
+                        )
+                    else:
+                        self._apply_cable_type_style_to_all(
+                            cable_type,
+                            color=profile.get("color", "#ff9800"),
+                            stroke_width=profile.get("stroke_width", 2.0),
+                            line_style=profile.get("line_style", "solid"),
+                            defer_updates=True,
+                        )
+
+                for element_id in element_ids:
+                    if self._document.get(element_id) is None:
+                        continue
+                    self._document.element_changed.emit(element_id)
+                self.canvas.update()
+                self._refresh_schema_windows()
+                self._mark_dirty()
+                return
+
         defer_updates = len(element_ids) >= 25
         touched = 0
         refresh_navigator = False
@@ -823,6 +908,156 @@ class AppWindow(QMainWindow):
             if ap_id == start_ap_id or ap_id == end_ap_id:
                 cable_ids.append(cable_id)
         return cable_ids
+
+    @staticmethod
+    def _normalize_cable_line_style(style: object) -> str:
+        value = str(style or "solid").strip().lower()
+        return value if value in _VALID_CABLE_LINE_STYLES else "solid"
+
+    @staticmethod
+    def _normalize_cable_stroke_width(width: object) -> float:
+        try:
+            numeric = float(width)
+        except (TypeError, ValueError):
+            numeric = 2.0
+        return max(0.5, min(10.0, numeric))
+
+    def _cable_ids_by_type(self, cable_type: str) -> list[str]:
+        normalized = str(cable_type or "").strip()
+        if not normalized:
+            return []
+        matches: list[str] = []
+        for cable_id, cable in self._document.elements.get("elec_cables", {}).items():
+            current_type = str(cable.data.get("type") or cable.data.get("cable_type") or "").strip()
+            if current_type == normalized:
+                matches.append(cable_id)
+        return sorted(matches)
+
+    def _read_cable_type_style_profile(self, cable_type: str) -> dict[str, object] | None:
+        cable_type = str(cable_type or "").strip()
+        if not cable_type:
+            return None
+        settings = self._document.settings
+        raw_profiles = settings.get("elec_cable_type_styles")
+        profiles = raw_profiles if isinstance(raw_profiles, dict) else {}
+        if not isinstance(raw_profiles, dict):
+            settings["elec_cable_type_styles"] = profiles
+
+        profile = profiles.get(cable_type)
+        if not isinstance(profile, dict):
+            return None
+        return {
+            "color": str(profile.get("color") or "#ff9800"),
+            "stroke_width": self._normalize_cable_stroke_width(profile.get("stroke_width", 2.0)),
+            "line_style": self._normalize_cable_line_style(profile.get("line_style", "solid")),
+        }
+
+    def _write_cable_type_style_profile(
+        self,
+        cable_type: str,
+        *,
+        color: object | None = None,
+        stroke_width: object | None = None,
+        line_style: object | None = None,
+    ) -> dict[str, object] | None:
+        cable_type = str(cable_type or "").strip()
+        if not cable_type:
+            return None
+        settings = self._document.settings
+        raw_profiles = settings.get("elec_cable_type_styles")
+        profiles = raw_profiles if isinstance(raw_profiles, dict) else {}
+        if not isinstance(raw_profiles, dict):
+            settings["elec_cable_type_styles"] = profiles
+
+        existing = profiles.get(cable_type)
+        if not isinstance(existing, dict):
+            existing = {}
+        updated = {
+            "color": str(color if color is not None else existing.get("color") or "#ff9800"),
+            "stroke_width": self._normalize_cable_stroke_width(
+                stroke_width if stroke_width is not None else existing.get("stroke_width", 2.0)
+            ),
+            "line_style": self._normalize_cable_line_style(
+                line_style if line_style is not None else existing.get("line_style", "solid")
+            ),
+        }
+        profiles[cable_type] = updated
+        return updated
+
+    def _init_cable_type_style_profile_from_first_cable(self, cable_type: str) -> dict[str, object] | None:
+        cable_ids = self._cable_ids_by_type(cable_type)
+        if not cable_ids:
+            return None
+        first_id = cable_ids[0]
+        cable = self._document.elements.get("elec_cables", {}).get(first_id)
+        if cable is None:
+            return None
+        return self._write_cable_type_style_profile(
+            cable_type,
+            color=str(cable.data.get("color") or "#ff9800"),
+            stroke_width=cable.data.get("stroke_width", cable.geom.get("elec_cable_stroke_width", 2.0)),
+            line_style=cable.data.get("line_style", cable.geom.get("elec_cable_line_style", "solid")),
+        )
+
+    def _ensure_cable_type_style_profile(
+        self,
+        cable_type: str,
+        *,
+        seed_color: object = "#ff9800",
+        seed_stroke_width: object = 2.0,
+        seed_line_style: object = "solid",
+    ) -> dict[str, object] | None:
+        profile = self._read_cable_type_style_profile(cable_type)
+        if profile is None:
+            profile = self._init_cable_type_style_profile_from_first_cable(cable_type)
+        if profile is None:
+            profile = self._write_cable_type_style_profile(
+                cable_type,
+                color=seed_color,
+                stroke_width=seed_stroke_width,
+                line_style=seed_line_style,
+            )
+        return profile
+
+    def _apply_cable_type_style_to_all(
+        self,
+        cable_type: str,
+        *,
+        color: object | None = None,
+        stroke_width: object | None = None,
+        line_style: object | None = None,
+        defer_updates: bool = False,
+    ) -> list[str]:
+        profile = self._write_cable_type_style_profile(
+            cable_type,
+            color=color,
+            stroke_width=stroke_width,
+            line_style=line_style,
+        )
+        if profile is None:
+            return []
+
+        changed: list[str] = []
+        for cable_id in self._cable_ids_by_type(cable_type):
+            cable = self._document.elements.get("elec_cables", {}).get(cable_id)
+            if cable is None:
+                continue
+            cable.data["color"] = str(profile["color"])
+            cable.data["stroke_width"] = float(profile["stroke_width"])
+            cable.data["line_style"] = str(profile["line_style"])
+
+            cable.geom["elec_cable_stroke_width"] = float(profile["stroke_width"])
+            cable.geom["elec_cable_line_style"] = str(profile["line_style"])
+
+            self.canvas.set_color(cable_id, QColor(str(profile["color"])))
+            self.canvas.set_elec_cable_stroke_width(cable_id, float(profile["stroke_width"]))
+            self.canvas.set_elec_cable_line_style(cable_id, str(profile["line_style"]))
+            self._document.element_changed.emit(cable_id)
+            changed.append(cable_id)
+
+        if changed and not defer_updates:
+            self.canvas.update()
+        return changed
 
     def _sync_cable_auto_name(self, cable: ElecCable) -> str:
         """Setzt den standardisierten Kabelnamen aus Start/End-AP."""
@@ -872,7 +1107,11 @@ class AppWindow(QMainWindow):
         if element is None:
             return effects
 
-        if key == "color" and element_id not in self._document.floorplans:
+        if (
+            key == "color"
+            and element_id not in self._document.floorplans
+            and element_id not in self._document.elements.get("elec_cables", {})
+        ):
             color_value = str(element.data.get("color") or "").strip()
             if color_value:
                 self.canvas.set_color(element_id, QColor(color_value))
@@ -928,7 +1167,7 @@ class AppWindow(QMainWindow):
                 else:
                     effects["refresh_navigator"] = True
 
-        if key in ("type", "type_label_visible") and element_id in self._document.elements.get("elec_cables", {}):
+        if key in ("type", "type_label_visible", "stroke_width", "line_style", "color") and element_id in self._document.elements.get("elec_cables", {}):
             cable = self._document.elements["elec_cables"].get(element_id)
             if cable is not None:
                 cable_type = str(cable.data.get("type") or cable.data.get("cable_type") or "").strip()
@@ -942,6 +1181,56 @@ class AppWindow(QMainWindow):
                     element_id,
                     bool(cable.geom.get("elec_cable_type_label_visible", False)),
                 )
+
+                if key == "type":
+                    profile = self._ensure_cable_type_style_profile(cable_type)
+                    if profile is not None:
+                        self._apply_cable_type_style_to_all(
+                            cable_type,
+                            color=profile.get("color", "#ff9800"),
+                            stroke_width=profile.get("stroke_width", 2.0),
+                            line_style=profile.get("line_style", "solid"),
+                            defer_updates=defer_updates,
+                        )
+                elif key == "color":
+                    if cable_type:
+                        self._apply_cable_type_style_to_all(
+                            cable_type,
+                            color=cable.data.get("color", "#ff9800"),
+                            defer_updates=defer_updates,
+                        )
+                    else:
+                        self.canvas.set_color(element_id, QColor(str(cable.data.get("color", "#ff9800"))))
+                elif key == "stroke_width":
+                    if cable_type:
+                        self._apply_cable_type_style_to_all(
+                            cable_type,
+                            stroke_width=cable.data.get("stroke_width", 2.0),
+                            defer_updates=defer_updates,
+                        )
+                    else:
+                        width = self._normalize_cable_stroke_width(cable.data.get("stroke_width", 2.0))
+                        cable.data["stroke_width"] = width
+                        cable.geom["elec_cable_stroke_width"] = width
+                        self.canvas.set_elec_cable_stroke_width(element_id, width)
+                elif key == "line_style":
+                    if cable_type:
+                        self._apply_cable_type_style_to_all(
+                            cable_type,
+                            line_style=cable.data.get("line_style", "solid"),
+                            defer_updates=defer_updates,
+                        )
+                    else:
+                        line_style = self._normalize_cable_line_style(cable.data.get("line_style", "solid"))
+                        cable.data["line_style"] = line_style
+                        cable.geom["elec_cable_line_style"] = line_style
+                        self.canvas.set_elec_cable_line_style(element_id, line_style)
+                elif key == "type_label_visible":
+                    self.canvas.set_elec_cable_type_label_visible(
+                        element_id,
+                        bool(cable.geom.get("elec_cable_type_label_visible", False)),
+                    )
+
                 if not defer_updates:
                     self.canvas.update()
 
@@ -3482,23 +3771,37 @@ class AppWindow(QMainWindow):
             return
         self._push_undo()
         eid = self._document.new_id(ElecCable)
+        cable_type = "5x1,5"
+        profile = self._ensure_cable_type_style_profile(cable_type)
+        if profile is None:
+            profile = {"color": "#ff9800", "stroke_width": 2.0, "line_style": "solid"}
         cable = ElecCable.create(
             eid,
             floor_plan_id=fp_id,
             name=format_auto_cable_name("", ""),
-            color="#ffb300",
+            color=str(profile.get("color", "#ff9800")),
             visible=True,
             label_visible=True,
             label_size=12.0,
-            type="",
+            type=cable_type,
             comment="",
+            line_style=str(profile.get("line_style", "solid")),
+            stroke_width=float(profile.get("stroke_width", 2.0)),
             start_ap="",
             end_ap="",
             start_length_surcharge_input="+ AP Höhe",
             end_length_surcharge_input="+ AP Höhe",
         )
+        cable.geom["elec_cable_stroke_width"] = float(profile.get("stroke_width", 2.0))
+        cable.geom["elec_cable_line_style"] = str(profile.get("line_style", "solid"))
+        cable.geom["elec_cable_type_text"] = cable_type
+        cable.geom["elec_cable_type_label_visible"] = False
         self._document.add(cable)
         self.canvas.register_element(eid)
+        self.canvas.set_color(eid, QColor(str(profile.get("color", "#ff9800"))) )
+        self.canvas.set_elec_cable_stroke_width(eid, float(profile.get("stroke_width", 2.0)))
+        self.canvas.set_elec_cable_line_style(eid, str(profile.get("line_style", "solid")))
+        self.canvas.set_elec_cable_type_text(eid, cable_type)
         self._emit_structure_changed()
         self.navigator.select(eid)
         self.canvas.start_draw_elec_cable(eid)
@@ -3525,23 +3828,37 @@ class AppWindow(QMainWindow):
 
         self._push_undo()
         eid = self._document.new_id(ElecCable)
+        cable_type = "5x1,5"
+        profile = self._ensure_cable_type_style_profile(cable_type)
+        if profile is None:
+            profile = {"color": "#ff9800", "stroke_width": 2.0, "line_style": "solid"}
         cable = ElecCable.create(
             eid,
             floor_plan_id=fp_id,
             name=format_auto_cable_name(str(point.name or ap_id), ""),
-            color="#ffb300",
+            color=str(profile.get("color", "#ff9800")),
             visible=True,
             label_visible=True,
             label_size=12.0,
-            type="",
+            type=cable_type,
             comment="",
+            line_style=str(profile.get("line_style", "solid")),
+            stroke_width=float(profile.get("stroke_width", 2.0)),
             start_ap=ap_id,
             end_ap="",
             start_length_surcharge_input="+ AP Höhe",
             end_length_surcharge_input="+ AP Höhe",
         )
+        cable.geom["elec_cable_stroke_width"] = float(profile.get("stroke_width", 2.0))
+        cable.geom["elec_cable_line_style"] = str(profile.get("line_style", "solid"))
+        cable.geom["elec_cable_type_text"] = cable_type
+        cable.geom["elec_cable_type_label_visible"] = False
         self._document.add(cable)
         self.canvas.register_element(eid)
+        self.canvas.set_color(eid, QColor(str(profile.get("color", "#ff9800"))) )
+        self.canvas.set_elec_cable_stroke_width(eid, float(profile.get("stroke_width", 2.0)))
+        self.canvas.set_elec_cable_line_style(eid, str(profile.get("line_style", "solid")))
+        self.canvas.set_elec_cable_type_text(eid, cable_type)
         self._emit_structure_changed()
         self.navigator.select(eid)
         self.canvas.start_draw_elec_cable_from_ap(eid, ap_id)
@@ -4567,6 +4884,7 @@ class AppWindow(QMainWindow):
                 length_m=length_m,
                 color=str(cable.color or "#ff9800"),
                 stroke_width_px=float(cable.geom.get("elec_cable_stroke_width", 2.0) or 2.0),
+                line_style=str(cable.data.get("line_style", cable.geom.get("elec_cable_line_style", "solid")) or "solid"),
                 start_ap_id=str(cable.start_ap or cable.geom.get("cable_start_ap") or ""),
                 end_ap_id=str(cable.end_ap or cable.geom.get("cable_end_ap") or ""),
                 visible=bool(cable.visible),
@@ -4779,6 +5097,18 @@ class AppWindow(QMainWindow):
             stroke_width = float(payload.get("stroke_width", 2.0))
         except (TypeError, ValueError):
             stroke_width = 2.0
+        line_style = self._normalize_cable_line_style(payload.get("line_style", "solid"))
+
+        profile = self._ensure_cable_type_style_profile(
+            cable_type,
+            seed_color=color,
+            seed_stroke_width=stroke_width,
+            seed_line_style=line_style,
+        )
+        if profile is not None:
+            color = str(profile.get("color", color))
+            stroke_width = float(profile.get("stroke_width", stroke_width))
+            line_style = self._normalize_cable_line_style(profile.get("line_style", line_style))
 
         cable = ElecCable.create(
             cable_id,
@@ -4789,11 +5119,14 @@ class AppWindow(QMainWindow):
             label_visible=True,
             label_size=12.0,
             type=cable_type,
+            stroke_width=stroke_width,
+            line_style=line_style,
             comment="",
             start_ap=start_ap_id,
             end_ap=end_ap_id,
         )
         cable.geom["elec_cable_stroke_width"] = stroke_width
+        cable.geom["elec_cable_line_style"] = line_style
         cable.geom["elec_cable_type_text"] = cable_type
         cable.geom["elec_cable_type_label_visible"] = False
         cable.geom["cable_start_ap"] = start_ap_id
@@ -4805,6 +5138,7 @@ class AppWindow(QMainWindow):
         self.canvas.register_element(cable_id, True)
         self.canvas.set_color(cable_id, color)
         self.canvas.set_elec_cable_stroke_width(cable_id, stroke_width)
+        self.canvas.set_elec_cable_line_style(cable_id, line_style)
         self.canvas.set_elec_cable_type_text(cable_id, cable_type)
 
         self._emit_structure_changed()
@@ -4919,6 +5253,9 @@ class AppWindow(QMainWindow):
             stroke_width = float(payload.get("stroke_width", cable.geom.get("elec_cable_stroke_width", 2.0) or 2.0))
         except (TypeError, ValueError):
             stroke_width = 2.0
+        line_style = self._normalize_cable_line_style(
+            payload.get("line_style", cable.data.get("line_style", cable.geom.get("elec_cable_line_style", "solid")))
+        )
 
         start_ap = str(payload.get("start_ap_id") or "").strip()
         end_ap = str(payload.get("end_ap_id") or "").strip()
@@ -4928,10 +5265,13 @@ class AppWindow(QMainWindow):
         cable.geom["cable_end_ap"] = end_ap
         self._sync_cable_auto_name(cable)
         cable.geom["elec_cable_stroke_width"] = stroke_width
+        cable.geom["elec_cable_line_style"] = line_style
         cable.geom["elec_cable_type_text"] = str(cable.cable_type)
         cable.geom["elec_cable_type_label_visible"] = bool(payload.get("type_label_visible", False))
         cable.geom["elec_cable_notes"] = str(cable.comment)
         cable.geom["elec_visible"] = bool(cable.visible)
+        cable.data["stroke_width"] = stroke_width
+        cable.data["line_style"] = line_style
         self._rebuild_schema_cable_geometry(cable, start_ap, end_ap)
 
         fp_id = self._resolve_schema_cable_floorplan(start_ap, end_ap)
@@ -4939,8 +5279,18 @@ class AppWindow(QMainWindow):
             cable.floor_plan_id = fp_id
 
         self.canvas.set_element_visible(cable_id, bool(cable.visible))
-        self.canvas.set_color(cable_id, str(cable.color))
-        self.canvas.set_elec_cable_stroke_width(cable_id, stroke_width)
+        if str(cable.cable_type or "").strip():
+            self._apply_cable_type_style_to_all(
+                str(cable.cable_type),
+                color=str(cable.color),
+                stroke_width=stroke_width,
+                line_style=line_style,
+                defer_updates=True,
+            )
+        else:
+            self.canvas.set_color(cable_id, str(cable.color))
+            self.canvas.set_elec_cable_stroke_width(cable_id, stroke_width)
+            self.canvas.set_elec_cable_line_style(cable_id, line_style)
         self.canvas.set_elec_cable_type_text(cable_id, str(cable.cable_type))
         self.canvas.set_elec_cable_type_label_visible(
             cable_id,

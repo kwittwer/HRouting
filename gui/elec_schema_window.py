@@ -76,13 +76,25 @@ class CableEdge:
     length_m: float
     color: str
     stroke_width_px: float
-    start_ap_id: str
-    end_ap_id: str
+    line_style: str = "solid"
+    start_ap_id: str = ""
+    end_ap_id: str = ""
     visible: bool = True
     label_visible: bool = True
     type_label_visible: bool = False
     label_size: float = 12.0
     comment: str = ""
+
+
+def _line_style_to_pen_style(style_key: str):
+    style = str(style_key or "solid").strip().lower()
+    if style == "dash":
+        return Qt.PenStyle.DashLine
+    if style == "dot":
+        return Qt.PenStyle.DotLine
+    if style == "dashdot":
+        return Qt.PenStyle.DashDotLine
+    return Qt.PenStyle.SolidLine
 
 
 class _AddApDialog(QDialog):
@@ -176,6 +188,14 @@ class _AddCableDialog(QDialog):
         self.sb_stroke.setSuffix(" px")
         form.addRow("Linienstärke:", self.sb_stroke)
 
+        self.cmb_line_style = QComboBox()
+        self.cmb_line_style.addItem("Durchgezogen", "solid")
+        self.cmb_line_style.addItem("Gestrichelt", "dash")
+        self.cmb_line_style.addItem("Gepunktet", "dot")
+        self.cmb_line_style.addItem("Strich-Punkt", "dashdot")
+        self.cmb_line_style.setCurrentIndex(0)
+        form.addRow("Linientyp:", self.cmb_line_style)
+
         sorted_aps = [
             (pid, format_elec_point_choice_label(pid, n.name or ""))
             for pid, n in all_ap_nodes.items()
@@ -208,6 +228,7 @@ class _AddCableDialog(QDialog):
             "type": self.le_type.text().strip() or "5x1,5",
             "color": self.cmb_color.currentText().strip() or "#ff9800",
             "stroke_width": float(self.sb_stroke.value()),
+            "line_style": str(self.cmb_line_style.currentData() or "solid"),
             "start_ap_id": str(self.cmb_start_ap.currentData() or ""),
             "end_ap_id": str(self.cmb_end_ap.currentData() or ""),
         }
@@ -580,6 +601,15 @@ class _EditCableDialog(QDialog):
         self.sb_stroke.setSuffix(" px")
         form.addRow("Linienst\u00e4rke:", self.sb_stroke)
 
+        self.cmb_line_style = QComboBox()
+        self.cmb_line_style.addItem("Durchgezogen", "solid")
+        self.cmb_line_style.addItem("Gestrichelt", "dash")
+        self.cmb_line_style.addItem("Gepunktet", "dot")
+        self.cmb_line_style.addItem("Strich-Punkt", "dashdot")
+        style_idx = self.cmb_line_style.findData(str(edge.line_style or "solid"))
+        self.cmb_line_style.setCurrentIndex(style_idx if style_idx >= 0 else 0)
+        form.addRow("Linientyp:", self.cmb_line_style)
+
         self.sb_label_size = QDoubleSpinBox()
         self.sb_label_size.setRange(0.1, 999999.0)
         self.sb_label_size.setSingleStep(1.0)
@@ -636,6 +666,7 @@ class _EditCableDialog(QDialog):
             "type_label_visible": self.chk_type_label_visible.isChecked(),
             "label_size": float(self.sb_label_size.value()),
             "stroke_width": float(self.sb_stroke.value()),
+            "line_style": str(self.cmb_line_style.currentData() or "solid"),
             "start_ap_id": str(self.cmb_start_ap.currentData() or ""),
             "end_ap_id": str(self.cmb_end_ap.currentData() or ""),
             "comment": self.te_comment.toPlainText(),
@@ -1273,6 +1304,7 @@ class ElecSchemaWindow(QMainWindow):
             "type_label_visible": edge.type_label_visible,
             "label_size": edge.label_size,
             "stroke_width": edge.stroke_width_px,
+            "line_style": edge.line_style,
             "start_ap_id": start_ap_id,
             "end_ap_id": end_ap_id,
             "comment": edge.comment,
@@ -2011,6 +2043,7 @@ class ElecSchemaWindow(QMainWindow):
                     "type_label_visible": edge.type_label_visible,
                     "label_size": edge.label_size,
                     "stroke_width": edge.stroke_width_px,
+                    "line_style": edge.line_style,
                     "start_ap_id": edge.start_ap_id,
                     "end_ap_id": edge.end_ap_id,
                     "comment": edge.comment,
@@ -2375,6 +2408,7 @@ class ElecSchemaWindow(QMainWindow):
                 pen_color = pen_color.lighter(165)
             pen_width = max(0.5, float(edge.stroke_width_px)) + (1.8 if is_selected else 0.0)
             pen = QPen(pen_color, pen_width)
+            pen.setStyle(_line_style_to_pen_style(edge.line_style))
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             item.setPen(pen)

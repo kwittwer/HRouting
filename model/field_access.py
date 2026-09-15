@@ -65,6 +65,7 @@ _MIRRORED_GEOM_FIELDS: dict[type[Element], dict[str, str]] = {
         "visible": "elec_visible",
         "comment": "elec_cable_notes",
         "stroke_width": "elec_cable_stroke_width",
+        "line_style": "elec_cable_line_style",
         "type": "elec_cable_type_text",
         "type_label_visible": "elec_cable_type_label_visible",
         "start_ap": "cable_start_ap",

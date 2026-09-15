@@ -180,6 +180,234 @@ def test_ap_rename_updates_connected_cable_auto_name(app, monkeypatch):
         window.deleteLater()
 
 
+def test_cable_style_changes_propagate_to_same_type_immediately(app, monkeypatch):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [80.0, 10.0], "AP-3": [160.0, 10.0]},
+                    "elec_cables": {
+                        "EK-1": [[10.0, 10.0], [80.0, 10.0]],
+                        "EK-2": [[80.0, 10.0], [160.0, 10.0]],
+                    },
+                    "cable_start_ap": {"EK-1": "AP-1", "EK-2": "AP-2"},
+                    "cable_end_ap": {"EK-1": "AP-2", "EK-2": "AP-3"},
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "A", "visible": True},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "B", "visible": True},
+                        "AP-3": {"point_id": "AP-3", "floor_plan_id": "grundriss-1", "name": "C", "visible": True},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "K1",
+                            "type": "5x1,5",
+                            "color": "#ff9800",
+                            "stroke_width": 2.0,
+                            "line_style": "solid",
+                            "visible": True,
+                        },
+                        "EK-2": {
+                            "cable_id": "EK-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "K2",
+                            "type": "5x1,5",
+                            "color": "#ff9800",
+                            "stroke_width": 2.0,
+                            "line_style": "solid",
+                            "visible": True,
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+
+        cable_1 = doc.elements["elec_cables"]["EK-1"]
+        cable_1.data["color"] = "#00aa44"
+        window._on_property_changed("EK-1", "color", "#00aa44")
+        assert doc.elements["elec_cables"]["EK-2"].data["color"] == "#00aa44"
+
+        cable_1.data["stroke_width"] = 4.5
+        window._on_property_changed("EK-1", "stroke_width", 4.5)
+        assert doc.elements["elec_cables"]["EK-2"].data["stroke_width"] == 4.5
+        assert window.canvas._elec_cable_stroke_width["EK-2"] == 4.5
+
+        cable_1.data["line_style"] = "dashdot"
+        window._on_property_changed("EK-1", "line_style", "dashdot")
+        assert doc.elements["elec_cables"]["EK-2"].data["line_style"] == "dashdot"
+        assert window.canvas._elec_cable_line_style["EK-2"] == "dashdot"
+    finally:
+        window.deleteLater()
+
+
+def test_cable_type_change_adopts_target_type_profile(app, monkeypatch):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [80.0, 10.0], "AP-3": [160.0, 10.0]},
+                    "elec_cables": {
+                        "EK-1": [[10.0, 10.0], [80.0, 10.0]],
+                        "EK-2": [[80.0, 10.0], [160.0, 10.0]],
+                    },
+                    "cable_start_ap": {"EK-1": "AP-1", "EK-2": "AP-2"},
+                    "cable_end_ap": {"EK-1": "AP-2", "EK-2": "AP-3"},
+                    "elec_cable_stroke_width": {"EK-1": 1.5, "EK-2": 3.0},
+                    "elec_cable_line_style": {"EK-1": "dot", "EK-2": "dash"},
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "A", "visible": True},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "B", "visible": True},
+                        "AP-3": {"point_id": "AP-3", "floor_plan_id": "grundriss-1", "name": "C", "visible": True},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "K1",
+                            "type": "3x1,5",
+                            "color": "#123456",
+                            "stroke_width": 1.5,
+                            "line_style": "dot",
+                            "visible": True,
+                        },
+                        "EK-2": {
+                            "cable_id": "EK-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "K2",
+                            "type": "5x1,5",
+                            "color": "#abcdef",
+                            "stroke_width": 3.0,
+                            "line_style": "dash",
+                            "visible": True,
+                        },
+                    },
+                    "elec_cable_type_styles": {
+                        "3x1,5": {"color": "#123456", "stroke_width": 1.5, "line_style": "dot"},
+                        "5x1,5": {"color": "#abcdef", "stroke_width": 3.0, "line_style": "dash"},
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+
+        cable_1 = doc.elements["elec_cables"]["EK-1"]
+        cable_1.data["type"] = "5x1,5"
+        window._on_property_changed("EK-1", "type", "5x1,5")
+
+        assert cable_1.data["color"] == "#abcdef"
+        assert cable_1.data["stroke_width"] == 3.0
+        assert cable_1.data["line_style"] == "dash"
+        assert window.canvas._elec_cable_stroke_width["EK-1"] == 3.0
+        assert window.canvas._elec_cable_line_style["EK-1"] == "dash"
+    finally:
+        window.deleteLater()
+
+
+def test_batch_color_uses_per_type_source_for_mixed_types(app, monkeypatch):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {
+                        "AP-1": [10.0, 10.0],
+                        "AP-2": [80.0, 10.0],
+                        "AP-3": [160.0, 10.0],
+                        "AP-4": [240.0, 10.0],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[10.0, 10.0], [80.0, 10.0]],
+                        "EK-2": [[80.0, 10.0], [160.0, 10.0]],
+                        "EK-3": [[160.0, 10.0], [240.0, 10.0]],
+                    },
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "A", "visible": True},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "B", "visible": True},
+                        "AP-3": {"point_id": "AP-3", "floor_plan_id": "grundriss-1", "name": "C", "visible": True},
+                        "AP-4": {"point_id": "AP-4", "floor_plan_id": "grundriss-1", "name": "D", "visible": True},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "K1",
+                            "type": "3x1,5",
+                            "color": "#111111",
+                            "stroke_width": 2.0,
+                            "line_style": "solid",
+                            "visible": True,
+                        },
+                        "EK-2": {
+                            "cable_id": "EK-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "K2",
+                            "type": "5x1,5",
+                            "color": "#222222",
+                            "stroke_width": 2.0,
+                            "line_style": "solid",
+                            "visible": True,
+                        },
+                        "EK-3": {
+                            "cable_id": "EK-3",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "K3",
+                            "type": "3x1,5",
+                            "color": "#111111",
+                            "stroke_width": 2.0,
+                            "line_style": "solid",
+                            "visible": True,
+                        },
+                    },
+                    "elec_cable_type_styles": {
+                        "3x1,5": {"color": "#111111", "stroke_width": 2.0, "line_style": "solid"},
+                        "5x1,5": {"color": "#222222", "stroke_width": 2.0, "line_style": "solid"},
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+
+        doc.elements["elec_cables"]["EK-1"].data["color"] = "#aa0000"
+        doc.elements["elec_cables"]["EK-2"].data["color"] = "#00aa00"
+        window._on_batch_property_changed(["EK-1", "EK-2"], "color", None)
+
+        assert doc.elements["elec_cables"]["EK-3"].data["color"] == "#aa0000"
+        assert doc.elements["elec_cables"]["EK-2"].data["color"] == "#00aa00"
+    finally:
+        window.deleteLater()
+
+
 def test_app_window_floating_docks_have_min_max_hints(app, monkeypatch):
     from PySide6.QtCore import QSettings, Qt  # noqa: PLC0415
 
