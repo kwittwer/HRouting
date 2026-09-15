@@ -35,9 +35,23 @@ from logic.elec_schematic import default_elec_schematic, sanitize_elec_schematic
 # ── Custom Spinbox: Completely disable mouse wheel ────────────── #
 class SafeDoubleSpinBox(QDoubleSpinBox):
     """QDoubleSpinBox that never responds to mouse wheel scrolling.
-    Prevents accidental value changes completely - only direct input allowed."""
+    Prevents accidental value changes completely - only direct input allowed.
+    Arrow keys double/halve the value instead of using setSingleStep."""
     def wheelEvent(self, event):
         event.ignore()
+
+    def stepBy(self, steps: int) -> None:
+        """Override to double (up arrow) or halve (down arrow) the value."""
+        current = self.value()
+        if steps > 0:
+            # Up arrow: double the value
+            new_value = current * 2.0
+        elif steps < 0:
+            # Down arrow: halve the value
+            new_value = current / 2.0
+        else:
+            return
+        self.setValue(max(self.minimum(), min(self.maximum(), new_value)))
 
 class SafeComboBox(QComboBox):
     """QComboBox that never responds to mouse wheel scrolling.

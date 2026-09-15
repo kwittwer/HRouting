@@ -524,7 +524,7 @@ class CanvasWidget(QWidget):
         self.update()
 
     def set_grid_spacing_mm(self, spacing_mm: float) -> None:
-        self._grid_spacing_mm = max(1.0, float(spacing_mm))
+        self._grid_spacing_mm = max(0.001, float(spacing_mm))
         self.update()
 
     def set_grid_color(self, color) -> None:
@@ -10640,7 +10640,9 @@ class CanvasWidget(QWidget):
         if self._mm_per_px <= 0:
             return
         spacing_px = self._grid_spacing_mm / self._mm_per_px
-        if spacing_px < 2:
+        # Check visibility using scaled size (how big it appears on screen)
+        spacing_px_scaled = spacing_px * self._scale
+        if spacing_px_scaled < 2:
             return  # too dense to draw
 
         # Compute the visible canvas rectangle from the viewport
@@ -11360,7 +11362,9 @@ class CanvasWidget(QWidget):
         if not self._grid_visible or self._mm_per_px <= 0:
             return pt
         spacing_px = self._grid_spacing_mm / self._mm_per_px
-        if spacing_px < 1.0:
+        # Check visibility using scaled size
+        spacing_px_scaled = spacing_px * self._scale
+        if spacing_px_scaled < 1.0:
             return pt
         x = round(pt.x() / spacing_px) * spacing_px
         y = round(pt.y() / spacing_px) * spacing_px

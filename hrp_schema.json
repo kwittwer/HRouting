@@ -279,7 +279,7 @@
         },
         "grid_spacing_mm": {
           "type": "number",
-          "minimum": 1,
+          "minimum": 0.001,
           "default": 100,
           "description": "Rasterabstand in Millimetern."
         },

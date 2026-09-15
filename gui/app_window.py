@@ -93,6 +93,7 @@ from .color_dialog_state import (
 )
 from .pdf_export_dialog import PdfExportConfigDialog
 from .schaltplan_window import SchaltplanWindow
+from .parameter_panel import SafeDoubleSpinBox
 from logic.schaltplan_generator import build_uv_hierarchy, get_uv_circuits
 
 from . import layout_store
@@ -543,10 +544,10 @@ class AppWindow(QMainWindow):
         self._grid_cb.toggled.connect(self._on_grid_toggled)
         self._grid_toolbar.addWidget(self._grid_cb)
 
-        self._grid_spin = QDoubleSpinBox(self._grid_toolbar)
-        self._grid_spin.setRange(0.01, 1000.0)
-        self._grid_spin.setDecimals(2)
-        self._grid_spin.setSingleStep(0.05)
+        self._grid_spin = SafeDoubleSpinBox(self._grid_toolbar)
+        self._grid_spin.setRange(0.001, 1000.0)
+        self._grid_spin.setDecimals(3)
+        self._grid_spin.setSingleStep(0.001)
         self._grid_spin.setSuffix(" m")
         self._grid_spin.setToolTip("Rasterabstand")
         self._grid_spin.valueChanged.connect(self._on_grid_spacing_changed)
