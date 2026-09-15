@@ -38,6 +38,9 @@ from .elements import (
 )
 
 
+ChoiceOption = str | tuple[str, str]
+
+
 class FieldKind(str, Enum):
     """Darstellungsform eines Feldes."""
 
@@ -71,15 +74,15 @@ class FieldSpec:
     unit: str = ""
     default: Any = None
     #: Feste Auswahlmöglichkeiten oder Callable ohne Argumente
-    options: tuple[str, ...] | Callable[[], tuple[str, ...]] = ()
+    options: tuple[ChoiceOption, ...] | Callable[[], tuple[ChoiceOption, ...]] = ()
     #: Auswahl, die vom Projektinhalt abhängt (z. B. Namen aller Verteiler)
-    document_options: Callable[[Any], tuple[str, ...]] | None = None
+    document_options: Callable[[Any], tuple[ChoiceOption, ...]] | None = None
     tooltip: str = ""
     #: Gruppenüberschrift im Formular
     group: str = ""
     file_filter: str = ""
 
-    def resolve_options(self, document: Any = None) -> tuple[str, ...]:
+    def resolve_options(self, document: Any = None) -> tuple[ChoiceOption, ...]:
         """Alle wählbaren Werte; ``document`` speist dynamische Listen."""
         if self.document_options is not None and document is not None:
             return tuple(self.document_options(document))
@@ -177,10 +180,29 @@ def _hkv_name_options(document: Any) -> tuple[str, ...]:
     return ("", *names)
 
 
+def format_elec_point_choice_label(point_id: str, point_name: str = "") -> str:
+    """Formatiert APs konsistent als ``Name (ID)`` mit ID-Fallback."""
+    name = str(point_name or "").strip()
+    point_id = str(point_id or "").strip()
+    return f"{name} ({point_id})" if name else point_id
+
+
 def _elec_point_id_options(document: Any) -> tuple[str, ...]:
     """IDs aller Anschlusspunkte (leere Auswahl zuerst)."""
     ids = sorted(document.elements.get("elec_points", {}).keys())
     return ("", *ids)
+
+
+def _elec_point_choice_options(document: Any) -> tuple[ChoiceOption, ...]:
+    """Lesbare AP-Auswahl als ``Name (ID)`` bei unverändertem Speicherwert."""
+    points = document.elements.get("elec_points", {})
+    options: list[ChoiceOption] = [""]
+    for point_id in sorted(points.keys()):
+        point = points.get(point_id)
+        name = "" if point is None else str(getattr(point, "name", "") or "")
+        label = format_elec_point_choice_label(point_id, name)
+        options.append((point_id, label))
+    return tuple(options)
 
 
 AP_POSITIONS = ("Wand", "Decke", "Boden")
@@ -407,10 +429,10 @@ ELEC_CABLE_SCHEMA = ElementSchema(
     fields=(
         *_common_fields("#ff9800"),
         FieldSpec("start_ap", "Start-AP", FieldKind.CHOICE,
-                  document_options=_elec_point_id_options, default="",
+                  document_options=_elec_point_choice_options, default="",
                   group="Verbindungen"),
         FieldSpec("end_ap", "End-AP", FieldKind.CHOICE,
-                  document_options=_elec_point_id_options, default="",
+                  document_options=_elec_point_choice_options, default="",
                   group="Verbindungen"),
         FieldSpec(
             "start_length_surcharge_input",

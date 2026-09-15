@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.parameter_panel import BUILTIN_SYMBOLS, UvConfigDialog, UpDistributionDialog
+from model.schema import format_elec_point_choice_label
 from storage.asset_data_uri import is_data_uri, is_svg_asset_ref, parse_data_uri
 
 
@@ -173,14 +174,16 @@ class _AddCableDialog(QDialog):
         self.sb_stroke.setSuffix(" px")
         form.addRow("Linienstärke:", self.sb_stroke)
 
-        sorted_aps = [(pid, n.name or pid) for pid, n in all_ap_nodes.items()]
+        sorted_aps = [
+            (pid, format_elec_point_choice_label(pid, n.name or ""))
+            for pid, n in all_ap_nodes.items()
+        ]
         sorted_aps.sort(key=lambda value: value[1].lower())
         self.cmb_start_ap = QComboBox()
         self.cmb_end_ap = QComboBox()
         self.cmb_start_ap.addItem("(keiner)", "")
         self.cmb_end_ap.addItem("(keiner)", "")
-        for ap_id, ap_name in sorted_aps:
-            label_text = ap_name or ap_id
+        for ap_id, label_text in sorted_aps:
             self.cmb_start_ap.addItem(label_text, ap_id)
             self.cmb_end_ap.addItem(label_text, ap_id)
         form.addRow("Start-AP:", self.cmb_start_ap)
@@ -570,14 +573,17 @@ class _EditCableDialog(QDialog):
         self.lbl_length = QLabel(f"{edge.length_m:.2f} m")
         form.addRow("Länge:", self.lbl_length)
 
-        sorted_aps = [("" , "(keiner)")] + sorted(
-            [(pid, n.name or pid) for pid, n in all_ap_nodes.items()],
+        sorted_aps = [("", "(keiner)")] + sorted(
+            [
+                (pid, format_elec_point_choice_label(pid, n.name or ""))
+                for pid, n in all_ap_nodes.items()
+            ],
             key=lambda v: v[1].lower(),
         )
         self.cmb_start_ap = QComboBox()
         self.cmb_end_ap = QComboBox()
-        for ap_id, ap_name in sorted_aps:
-            label_text = (ap_name or ap_id) if ap_id else "(keiner)"
+        for ap_id, label_text in sorted_aps:
+            label_text = label_text if ap_id else "(keiner)"
             self.cmb_start_ap.addItem(label_text, ap_id)
             self.cmb_end_ap.addItem(label_text, ap_id)
         for cmb, target in [(self.cmb_start_ap, edge.start_ap_id), (self.cmb_end_ap, edge.end_ap_id)]:

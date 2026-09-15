@@ -62,7 +62,7 @@ from model.elements import (
     HkvLine,
     TextAnnotation,
 )
-from model.schema import schema_for
+from model.schema import format_elec_point_choice_label, schema_for
 from storage.asset_data_uri import is_data_uri
 from storage.hrp_io import load_document, repair_and_save_hrp, save_document
 from logic.kicad_import import (
@@ -75,6 +75,7 @@ from logic.kicad_import import (
     scan_kicad_project,
     suggest_ap_matches,
 )
+from logic.kicad_export import export_project_to_kicad
 from logic.hrp_import import import_selected_elements, iter_import_candidates
 from .elec_schema_window import ApNode, CableEdge, ElecSchemaWindow
 from .hrp_import_dialog import HrpImportDialog
@@ -513,6 +514,7 @@ class AppWindow(QMainWindow):
         self._add_action(self.export_menu, "PDF exportieren…", self._export_pdf)
         self._add_action(self.export_menu, "SVG exportieren…", self._export_svg)
         self._add_action(self.export_menu, "Längen & Stückliste…", self._export_lengths)
+        self._add_action(self.export_menu, "KiCad exportieren…", self._export_to_kicad)
 
         import_menu = bar.addMenu("&Import")
         self._add_action(import_menu, "Aus HRP importieren…", self._import_hrp_elements)
@@ -7204,6 +7206,41 @@ class AppWindow(QMainWindow):
         self.log.success(f"PDF exportiert: {path}")
         self.statusBar().showMessage(f"PDF exportiert: {path}", 4000)
 
+    def _export_to_kicad(self) -> None:
+        if self._project_path is None:
+            QMessageBox.warning(
+                self,
+                "Projekt nicht gespeichert",
+                "Bitte speichern Sie das Projekt zuerst bevor Sie es exportieren.",
+            )
+            return
+
+        suggested_name = f"{self._project_path.stem}_export.kicad_sch"
+        export_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportieren zu KiCad",
+            str(self._project_path.parent / suggested_name),
+            "KiCad Schaltplan (*.kicad_sch);;Alle Dateien (*)",
+        )
+        if not export_path:
+            return
+
+        success, message = export_project_to_kicad(self._document.to_dict(), export_path)
+        if success:
+            QMessageBox.information(
+                self,
+                "Export erfolgreich",
+                f"Projekt erfolgreich zu KiCad exportiert:\n{export_path}",
+            )
+            self.statusBar().showMessage(message, 3000)
+            return
+
+        QMessageBox.critical(
+            self,
+            "Export fehlgeschlagen",
+            f"Fehler beim Exportieren:\n{message}",
+        )
+
     def _export_pdf(self) -> None:
         config = self._open_pdf_export_config_dialog()
         if config is None:
@@ -7884,13 +7921,14 @@ class AppWindow(QMainWindow):
         }
         choices: list[tuple[str, str]] = []
         for point_id, point in self._document.elements["elec_points"].items():
-            point_name = str(point.name or "").strip() or point_id
+            point_name = str(point.name or "").strip()
             room_id = self._resolve_existing_ap_room_id(point)
             room_name = room_names.get(room_id, room_id) if room_id else ""
+            point_label = format_elec_point_choice_label(point_id, point_name)
             label = (
-                f"{room_name} / {point_name} ({point_id})"
+                f"{room_name} / {point_label}"
                 if room_name
-                else f"(kein Raum) / {point_name} ({point_id})"
+                else f"(kein Raum) / {point_label}"
             )
             choices.append((point_id, label))
         choices.sort(key=lambda item: item[1].lower())

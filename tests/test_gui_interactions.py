@@ -21,7 +21,13 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from gui.app_window import AppWindow  # noqa: E402
-from gui.elec_schema_window import ApNode, CableEdge, ElecSchemaWindow  # noqa: E402
+from gui.elec_schema_window import (  # noqa: E402
+    ApNode,
+    CableEdge,
+    ElecSchemaWindow,
+    _AddCableDialog,
+    _EditCableDialog,
+)
 from gui.pdf_export_dialog import PdfExportConfigDialog  # noqa: E402
 from gui.schaltplan_window import SchaltplanWindow  # noqa: E402
 from model.document import Document  # noqa: E402
@@ -215,6 +221,89 @@ def test_elec_schema_window_renders_and_delete_signals(app):
         window._delete_ids(["AP-1"], ["EK-1"])
         assert deleted_aps == ["AP-1"]
         assert deleted_cables == ["EK-1"]
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_elec_schema_cable_dialogs_show_ap_name_with_id(app):
+    ap_nodes = {
+        "AP-UV": _sample_uv_node(),
+        "AP-1": _sample_consumer_node(),
+    }
+    edge = _sample_cable()
+
+    add_dialog = _AddCableDialog(ap_nodes)
+    edit_dialog = _EditCableDialog(edge, ap_nodes)
+    try:
+        add_options = {add_dialog.cmb_start_ap.itemText(i) for i in range(add_dialog.cmb_start_ap.count())}
+        edit_options = {edit_dialog.cmb_end_ap.itemText(i) for i in range(edit_dialog.cmb_end_ap.count())}
+
+        assert "UV EG (AP-UV)" in add_options
+        assert "Steckdose Küche (AP-1)" in add_options
+        assert "UV EG (AP-UV)" in edit_options
+        assert "Steckdose Küche (AP-1)" in edit_options
+        assert edit_dialog.cmb_start_ap.currentText() == "UV EG (AP-UV)"
+        assert edit_dialog.cmb_end_ap.currentText() == "Steckdose Küche (AP-1)"
+    finally:
+        add_dialog.deleteLater()
+        edit_dialog.deleteLater()
+
+
+@pytest.mark.gui
+def test_kicad_ap_choices_keep_room_prefix_and_name_id_suffix(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10, 10], "AP-2": [20, 20]},
+                    "elec_rooms": {
+                        "ER-1": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                    },
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose Küche",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                    "elec_rooms": {
+                        "ER-1": {
+                            "room_id": "ER-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Küche",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        choices = window._kicad_elec_point_choices_with_rooms()
+
+        assert ("AP-1", "Küche / Steckdose Küche (AP-1)") in choices
+        assert ("AP-2", "Küche / AP-2") in choices
     finally:
         window.deleteLater()
 

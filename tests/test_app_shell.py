@@ -1856,7 +1856,7 @@ def test_export_menu_hides_kicad_and_qet_actions(app, monkeypatch):
         assert "PDF exportieren…" in labels
         assert "SVG exportieren…" in labels
         assert "Längen & Stückliste…" in labels
-        assert "KiCad exportieren…" not in labels
+        assert "KiCad exportieren…" in labels
         assert "QElectroTech exportieren…" not in labels
     finally:
         window.deleteLater()

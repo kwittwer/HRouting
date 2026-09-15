@@ -17,6 +17,7 @@ from logic.kicad_import import (
     build_import_preview,
     build_kicad_cable_key,
     build_textfield_candidate_from_scan,
+    parse_textfield_metadata,
     scan_kicad_project,
     suggest_ap_matches,
     suggest_cable_from_candidates,
@@ -181,6 +182,25 @@ def test_build_import_preview_matches_ap_group_with_ap_prefix_normalization(tmp_
     assert preview.ap_import_action == "AP wiederverwenden"
     assert preview.ap_match_status == "matched"
     assert preview.ap_matches[0].point_id == "AP-77"
+
+
+def test_parse_textfield_metadata_supports_new_ap_export_format():
+    metadata = parse_textfield_metadata(
+        "\n".join(
+            [
+                "HRP:AP_ID: AP-1",
+                "AP_NAME: Steckdose Küche",
+                "AP_SYMBOL: Steckdose",
+                "HEIGHT_FROM_FLOOR_MM: 300",
+            ]
+        )
+    )
+
+    assert metadata is not None
+    assert metadata.ap_id == "AP-1"
+    assert metadata.ap_name == "Steckdose Küche"
+    assert metadata.ap_symbol == "Steckdose"
+    assert metadata.height_from_floor_mm == "300"
 
 
 def test_scan_kicad_project_recurses_into_nested_child_sheets(tmp_path):

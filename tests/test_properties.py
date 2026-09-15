@@ -32,6 +32,7 @@ from model.schema import (  # noqa: E402
     FieldSpec,
     FieldKind,
     groups_of,
+    _elec_point_choice_options,
     schema_for,
 )
 from storage.hrp_io import load_raw  # noqa: E402
@@ -73,6 +74,13 @@ def test_choice_options_resolve():
     options = covering.resolve_options()
     assert options
     assert "Fliesen / Keramik" in options
+
+
+def test_cable_ap_choice_options_include_name_and_id(document):
+    options = _elec_point_choice_options(document)
+    assert options[0] == ""
+    assert ("AP-1", "Steckdose Wohnzimmer (AP-1)") in options
+    assert ("AP-2", "Steckdose 2 Wohnzimmer (AP-2)") in options
 
 
 def test_groups_preserve_order():
@@ -199,6 +207,21 @@ def test_widget_created_for_every_field_kind(app):
         spec = FieldSpec("k", "L", kind, options=("a", "b"))
         widget = create_field_widget(spec)
         assert widget is not None
+        widget.deleteLater()
+
+
+def test_choice_widget_keeps_storage_value_for_label_value_options(app):
+    from gui.properties.field_widgets import create_field_widget  # noqa: PLC0415
+
+    spec = FieldSpec("start_ap", "Start-AP", FieldKind.CHOICE)
+    widget = create_field_widget(
+        spec,
+        options=("", ("AP-1", "Steckdose Wohnzimmer (AP-1)")),
+    )
+    try:
+        widget.set_value("AP-1")
+        assert widget.value() == "AP-1"
+    finally:
         widget.deleteLater()
 
 
@@ -822,7 +845,11 @@ def test_all_editable_fields_survive_roundtrip(app, document, tmp_path):
                 continue  # Pfade werden beim Speichern umgeschrieben
             else:
                 options = spec.resolve_options(document)
-                value = options[-1] if options else f"wert-{spec.key}"
+                if options:
+                    last_option = options[-1]
+                    value = last_option[0] if isinstance(last_option, tuple) else last_option
+                else:
+                    value = f"wert-{spec.key}"
             set_field(element, spec, value)
             changed[(element.id, spec.key)] = value
 

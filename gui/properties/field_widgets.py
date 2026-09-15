@@ -25,7 +25,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from model.schema import FieldKind, FieldSpec
+from model.schema import ChoiceOption, FieldKind, FieldSpec
+
+
+def _option_parts(option: ChoiceOption) -> tuple[str, str]:
+    if isinstance(option, tuple):
+        return str(option[0]), str(option[1])
+    text = str(option)
+    return text, text
 
 
 class FieldWidget(QWidget):
@@ -185,33 +192,38 @@ class ChoiceFieldWidget(FieldWidget):
         spec: FieldSpec,
         editable: bool = False,
         parent: QWidget | None = None,
-        options: tuple[str, ...] | None = None,
+        options: tuple[ChoiceOption, ...] | None = None,
     ) -> None:
         super().__init__(spec, parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._combo = QComboBox(self)
         self._combo.setEditable(editable)
-        self._combo.addItems(list(options if options is not None else spec.resolve_options()))
+        self._set_combo_options(options if options is not None else spec.resolve_options())
         if editable:
             self._combo.editTextChanged.connect(self._emit)
         else:
-            self._combo.currentTextChanged.connect(self._emit)
+            self._combo.currentIndexChanged.connect(lambda _index: self._emit(self.value()))
         layout.addWidget(self._combo)
 
-    def set_options(self, options: tuple[str, ...]) -> None:
+    def _set_combo_options(self, options: tuple[ChoiceOption, ...]) -> None:
+        self._combo.clear()
+        for option in options:
+            value, label = _option_parts(option)
+            self._combo.addItem(label, value)
+
+    def set_options(self, options: tuple[ChoiceOption, ...]) -> None:
         """Tauscht die Auswahlliste aus und hält den aktuellen Wert."""
         current = self.value()
         self._updating = True
         try:
-            self._combo.clear()
-            self._combo.addItems(list(options))
+            self._set_combo_options(options)
             # For non-editable combos we must not re-insert stale values that
             # were removed from the source options (e.g. deleted distributors).
             if self._combo.isEditable():
                 self.set_value(current)
             else:
-                index = self._combo.findText(str(current))
+                index = self._combo.findData("" if current is None else str(current))
                 if index >= 0:
                     self._combo.setCurrentIndex(index)
                 elif self._combo.count() > 0:
@@ -220,17 +232,22 @@ class ChoiceFieldWidget(FieldWidget):
             self._updating = False
 
     def value(self) -> Any:
-        return self._combo.currentText()
+        if self._combo.isEditable():
+            return self._combo.currentText()
+        data = self._combo.currentData()
+        return self._combo.currentText() if data is None else data
 
     def set_value(self, value: Any) -> None:
         text = "" if value is None else str(value)
-        index = self._combo.findText(text)
+        index = self._combo.findData(text)
+        if index < 0:
+            index = self._combo.findText(text)
         if index >= 0:
             self._combo.setCurrentIndex(index)
         elif self._combo.isEditable():
             self._combo.setEditText(text)
         elif text:
-            self._combo.addItem(text)
+            self._combo.addItem(text, text)
             self._combo.setCurrentIndex(self._combo.count() - 1)
 
 
@@ -299,7 +316,7 @@ _FACTORY = {
 def create_field_widget(
     spec: FieldSpec,
     parent: QWidget | None = None,
-    options: tuple[str, ...] | None = None,
+    options: tuple[ChoiceOption, ...] | None = None,
 ) -> FieldWidget:
     """Erzeugt das zum Feldtyp passende Widget.
 

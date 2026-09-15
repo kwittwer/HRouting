@@ -42,6 +42,9 @@ class KiCadTextFieldMetadata:
     """Parsed AP-import metadata from HRouting text annotation."""
     text_id: str
     ap_name: str
+    ap_id: str = ""
+    ap_symbol: str = ""
+    height_from_floor_mm: str = ""
     room: str = ""
     floor_plan_id: str = ""
 
@@ -2120,14 +2123,20 @@ def _segments_intersect(
 
 
 def parse_textfield_metadata(content: str) -> KiCadTextFieldMetadata | None:
-    """Parse AP_NAME and optional ROOM from text field content.
+    """Parse AP export metadata from text field content.
     
     Format (case-insensitive):
+    HRP:AP_ID: AP-1
     AP_NAME: Flur
+    AP_SYMBOL: Steckdose
+    HEIGHT_FROM_FLOOR_MM: 300
     ROOM: Wohnzimmer
     """
     lines = (line.strip() for line in (content or "").split("\n"))
+    ap_id = ""
     ap_name = ""
+    ap_symbol = ""
+    height_from_floor_mm = ""
     room = ""
     
     for line in lines:
@@ -2136,9 +2145,20 @@ def parse_textfield_metadata(content: str) -> KiCadTextFieldMetadata | None:
         key, _, value = line.partition(":")
         key_norm = key.strip().upper()
         val_norm = value.strip()
+
+        if key_norm == "HRP" and ":" in val_norm:
+            nested_key, _, nested_value = val_norm.partition(":")
+            key_norm = f"HRP:{nested_key.strip().upper()}"
+            val_norm = nested_value.strip()
         
-        if key_norm == "AP_NAME":
+        if key_norm == "HRP:AP_ID":
+            ap_id = val_norm
+        elif key_norm == "AP_NAME":
             ap_name = val_norm
+        elif key_norm == "AP_SYMBOL":
+            ap_symbol = val_norm
+        elif key_norm == "HEIGHT_FROM_FLOOR_MM":
+            height_from_floor_mm = val_norm
         elif key_norm == "ROOM":
             room = val_norm
     
@@ -2148,6 +2168,9 @@ def parse_textfield_metadata(content: str) -> KiCadTextFieldMetadata | None:
     return KiCadTextFieldMetadata(
         text_id="",  # set by caller
         ap_name=ap_name,
+        ap_id=ap_id,
+        ap_symbol=ap_symbol,
+        height_from_floor_mm=height_from_floor_mm,
         room=room,
     )
 
@@ -2233,6 +2256,9 @@ def build_textfield_candidate_from_scan(
     metadata = KiCadTextFieldMetadata(
         text_id=text_id,
         ap_name=metadata.ap_name,
+        ap_id=metadata.ap_id,
+        ap_symbol=metadata.ap_symbol,
+        height_from_floor_mm=metadata.height_from_floor_mm,
         room=metadata.room,
         floor_plan_id=metadata.floor_plan_id,
     )
