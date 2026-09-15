@@ -11,6 +11,7 @@ import math
 import re
 
 from .asset_data_uri import is_data_uri
+from model.schema import format_auto_cable_name
 
 #: Schlüssel, unter dem die alte UI ihren Fensterzustand in params ablegte.
 LEGACY_UI_STATE_KEY = "_ui_state"
@@ -40,6 +41,7 @@ def migrate_raw(raw: dict) -> dict:
     params = raw["params"]
 
     _migrate_color_dialog_custom_colors(params)
+    _migrate_auto_cable_names(params, canvas)
 
     # Bekannte Altversionen werden immer auf das aktuelle Format gehoben.
     if detected_version <= LEGACY_HRP_FORMAT_VERSION:
@@ -207,6 +209,39 @@ def _migrate_legacy_electrical_ids(canvas: dict, params: dict) -> None:
 
     _migrate_cable_id_references_in_point_configs(params, cable_map)
     _migrate_cable_endpoint_refs(params, canvas)
+
+
+def _migrate_auto_cable_names(params: dict, canvas: dict) -> None:
+    """Normalisiert Kabelnamen auf den systemweiten Auto-Standard."""
+    cables = params.get("elec_cables")
+    if not isinstance(cables, dict):
+        return
+
+    points = params.get("elec_points") if isinstance(params.get("elec_points"), dict) else {}
+
+    start_map = canvas.get("cable_start_ap") if isinstance(canvas.get("cable_start_ap"), dict) else {}
+    end_map = canvas.get("cable_end_ap") if isinstance(canvas.get("cable_end_ap"), dict) else {}
+
+    for cable_id, entry in cables.items():
+        if not isinstance(entry, dict):
+            continue
+        start_ap_id = str(entry.get("start_ap") or start_map.get(cable_id, "") or "").strip()
+        end_ap_id = str(entry.get("end_ap") or end_map.get(cable_id, "") or "").strip()
+        start_name = ""
+        end_name = ""
+        if start_ap_id:
+            start_entry = points.get(start_ap_id)
+            if isinstance(start_entry, dict):
+                start_name = str(start_entry.get("name", "") or "").strip() or start_ap_id
+            else:
+                start_name = start_ap_id
+        if end_ap_id:
+            end_entry = points.get(end_ap_id)
+            if isinstance(end_entry, dict):
+                end_name = str(end_entry.get("name", "") or "").strip() or end_ap_id
+            else:
+                end_name = end_ap_id
+        entry["name"] = format_auto_cable_name(start_name, end_name)
 
 
 def _migrate_params_bucket_ids(

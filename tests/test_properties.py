@@ -31,6 +31,7 @@ from model.schema import (  # noqa: E402
     SCHEMAS,
     FieldSpec,
     FieldKind,
+    format_auto_cable_name,
     groups_of,
     _elec_point_choice_options,
     schema_for,
@@ -95,6 +96,21 @@ def test_scale_converts_mm_to_cm():
     spacing = next(f for f in schema.fields if f.key == "spacing")
     assert spacing.to_display(150.0) == 15.0
     assert spacing.to_storage(15.0) == 150.0
+
+
+def test_auto_cable_name_format():
+    assert format_auto_cable_name("Dose", "Leuchte") == "KBL_Dose:Leuchte"
+    assert format_auto_cable_name("Dose", "") == "KBL_Dose:?"
+    assert format_auto_cable_name("", "") == "KBL_?:?"
+
+
+def test_cable_schema_name_is_readonly():
+    from model.elements import ElecCable  # noqa: PLC0415
+
+    schema = schema_for(ElecCable)
+    name_field = next(f for f in schema.fields if f.key == "name")
+    assert name_field.kind is FieldKind.READONLY
+    assert name_field.label == "Name (automatisch)"
 
 
 # ---------------------------------------------------------------------------

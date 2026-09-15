@@ -2687,13 +2687,29 @@ def _create_mcp(window: MainWindow, bridge):
             from model.computed import cable_length_details  # noqa: PLC0415
             from model.document import Document  # noqa: PLC0415
             from model.elements import ElecCable  # noqa: PLC0415
+            from model.schema import format_auto_cable_name  # noqa: PLC0415
+
+            def _ap_name(ap_id: str) -> str:
+                ap_id = str(ap_id or "").strip()
+                if not ap_id:
+                    return ""
+                model_doc = getattr(w, "_document", None)
+                if isinstance(model_doc, Document):
+                    point = model_doc.elements.get("elec_points", {}).get(ap_id)
+                    if point is not None:
+                        return str(getattr(point, "name", "") or "").strip() or ap_id
+                panel = w.param_panel.elec_point_panels.get(ap_id)
+                if panel is not None:
+                    return str(panel.get_parameters().get("name", "") or "").strip() or ap_id
+                return ap_id
 
             w = window
             w._elec_cable_counter += 1
             kid = f"KV-{w._elec_cable_counter}"
+            auto_name = format_auto_cable_name(_ap_name(start_ap_id), _ap_name(end_ap_id))
 
             panel = w._create_elec_cable_panel(
-                kid, fp_id=floor_plan_id or None, name=name)
+                kid, fp_id=floor_plan_id or None, name=auto_name)
 
             # Polylinie setzen
             w.canvas._elec_cables[kid] = [
@@ -2701,7 +2717,7 @@ def _create_mcp(window: MainWindow, bridge):
             w.canvas._elec_visible[kid] = True
             w.canvas._elec_cable_notes[kid] = comment
             w.canvas.set_color(kid, QC(color))
-            w.canvas._label_map[kid] = name
+            w.canvas._label_map[kid] = auto_name
             w.canvas._ensure_color(kid)
 
             # Strichstärke setzen
@@ -2715,7 +2731,7 @@ def _create_mcp(window: MainWindow, bridge):
                 w.canvas._cable_end_ap[kid] = end_ap_id
 
             # Panel-Parameter setzen
-            panel.le_name.setText(name)
+            panel.le_name.setText(auto_name)
             panel.set_type_text(cable_type)
             panel.te_comment.setPlainText(comment)
             panel._color = QC(color)
@@ -2746,7 +2762,7 @@ def _create_mcp(window: MainWindow, bridge):
 
             return {
                 "cable_id": kid,
-                "name": name,
+                "name": auto_name,
                 "polyline_points": len(polyline),
                 "length_mm": round(length_mm, 1),
                 "valid_scale": bool(length_info["valid_scale"]),
@@ -2795,6 +2811,21 @@ def _create_mcp(window: MainWindow, bridge):
             from model.computed import cable_length_details  # noqa: PLC0415
             from model.document import Document  # noqa: PLC0415
             from model.elements import ElecCable  # noqa: PLC0415
+            from model.schema import format_auto_cable_name  # noqa: PLC0415
+
+            def _ap_name(ap_id: str) -> str:
+                ap_id = str(ap_id or "").strip()
+                if not ap_id:
+                    return ""
+                model_doc = getattr(window, "_document", None)
+                if isinstance(model_doc, Document):
+                    point = model_doc.elements.get("elec_points", {}).get(ap_id)
+                    if point is not None:
+                        return str(getattr(point, "name", "") or "").strip() or ap_id
+                panel_for_ap = window.param_panel.elec_point_panels.get(ap_id)
+                if panel_for_ap is not None:
+                    return str(panel_for_ap.get_parameters().get("name", "") or "").strip() or ap_id
+                return ap_id
 
             panel = window.param_panel.elec_cable_panels.get(cable_id)
             if not panel:
@@ -2829,6 +2860,12 @@ def _create_mcp(window: MainWindow, bridge):
                 else:
                     window.canvas._cable_end_ap.pop(cable_id, None)
                 window._update_cable_ap_labels(cable_id)
+
+            resolved_start_ap = str(window.canvas._cable_start_ap.get(cable_id, "") or "").strip()
+            resolved_end_ap = str(window.canvas._cable_end_ap.get(cable_id, "") or "").strip()
+            auto_name = format_auto_cable_name(_ap_name(resolved_start_ap), _ap_name(resolved_end_ap))
+            panel.le_name.setText(auto_name)
+            window.canvas._label_map[cable_id] = auto_name
             if visible is not None:
                 panel.chk_visible.setChecked(visible)
                 window.canvas._elec_visible[cable_id] = visible

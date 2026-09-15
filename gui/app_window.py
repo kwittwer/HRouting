@@ -62,9 +62,15 @@ from model.elements import (
     HkvLine,
     TextAnnotation,
 )
-from model.schema import format_elec_point_choice_label, schema_for
+from model.schema import format_auto_cable_name, format_elec_point_choice_label, schema_for
 from storage.asset_data_uri import is_data_uri
-from storage.hrp_io import load_document, repair_and_save_hrp, save_document
+from storage.hrp_io import (
+    create_hrp_backup,
+    load_document_with_migration_info,
+    repair_and_save_hrp,
+    save_document,
+    save_raw,
+)
 from logic.kicad_import import (
     KiCadBusCableCandidate,
     KiCadCableCandidate,
@@ -818,6 +824,42 @@ class AppWindow(QMainWindow):
                 cable_ids.append(cable_id)
         return cable_ids
 
+    def _sync_cable_auto_name(self, cable: ElecCable) -> str:
+        """Setzt den standardisierten Kabelnamen aus Start/End-AP."""
+        start_ap_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "").strip()
+        end_ap_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "").strip()
+        points = self._document.elements.get("elec_points", {}) if self._document is not None else {}
+        start_point = points.get(start_ap_id)
+        end_point = points.get(end_ap_id)
+        start_name = str(getattr(start_point, "name", "") or "").strip() or start_ap_id
+        end_name = str(getattr(end_point, "name", "") or "").strip() or end_ap_id
+        auto_name = format_auto_cable_name(start_name, end_name)
+        cable.name = auto_name
+        self.canvas._label_map[cable.id] = auto_name
+        return auto_name
+
+    def _refresh_connected_cable_names(self, ap_id: str) -> list[str]:
+        """Aktualisiert Namen aller Kabel, die an einem AP hängen."""
+        updated: list[str] = []
+        for cable_id in self._connected_cable_ids_for_ap(ap_id):
+            cable = self._document.elements["elec_cables"].get(cable_id)
+            if cable is None:
+                continue
+            self._sync_cable_auto_name(cable)
+            self._document.element_changed.emit(cable_id)
+            self.properties.refresh_element(cable_id)
+            updated.append(cable_id)
+        if updated:
+            for dock in (
+                self.overview_electro,
+                self.overview_electro_materials,
+                self.overview_electro_rooms,
+                self.overview_electro_cables,
+            ):
+                dock.refresh_now()
+            self.properties.refresh_current()
+        return updated
+
     def _apply_property_side_effects(
         self,
         element_id: str,
@@ -836,7 +878,14 @@ class AppWindow(QMainWindow):
                 self.canvas.set_color(element_id, QColor(color_value))
 
         if key == "name":
-            name = str(element.data.get("name") or "").strip()
+            if element_id in self._document.elements.get("elec_cables", {}):
+                cable = self._document.elements["elec_cables"].get(element_id)
+                name = self._sync_cable_auto_name(cable) if cable is not None else ""
+            else:
+                name = str(element.data.get("name") or "").strip()
+                if element_id in self._document.elements.get("elec_points", {}):
+                    if self._refresh_connected_cable_names(element_id):
+                        effects["refresh_navigator"] = True
             self.canvas._label_map[element_id] = name if name else element_id
             if not defer_updates:
                 self.canvas.update()
@@ -870,9 +919,14 @@ class AppWindow(QMainWindow):
                 cable.end_ap = end_ap_id
                 cable.geom["cable_start_ap"] = start_ap_id
                 cable.geom["cable_end_ap"] = end_ap_id
+                self._sync_cable_auto_name(cable)
                 self._rebuild_schema_cable_geometry(cable, start_ap_id, end_ap_id)
                 if not defer_updates:
+                    self.properties.refresh_current()
                     self.canvas.update()
+                    self.navigator.set_document(self._document)
+                else:
+                    effects["refresh_navigator"] = True
 
         if key in ("type", "type_label_visible") and element_id in self._document.elements.get("elec_cables", {}):
             cable = self._document.elements["elec_cables"].get(element_id)
@@ -2072,6 +2126,8 @@ class AppWindow(QMainWindow):
                     cable.geom["cable_end_ap"] = ""
                     changed = True
                 if changed:
+                    self._sync_cable_auto_name(cable)
+                    self._rebuild_schema_cable_geometry(cable, cable.start_ap, cable.end_ap)
                     document.element_changed.emit(cable.id)
 
         # HKV entfernen: Heizkreiszuordnung und Leitungsknoten lösen.
@@ -2166,6 +2222,7 @@ class AppWindow(QMainWindow):
         if isinstance(source, ElecCable):
             data["start_ap"] = ""
             data["end_ap"] = ""
+            data["name"] = format_auto_cable_name("", "")
             geom["cable_start_ap"] = ""
             geom["cable_end_ap"] = ""
         if isinstance(source, HkvLine):
@@ -3428,7 +3485,7 @@ class AppWindow(QMainWindow):
         cable = ElecCable.create(
             eid,
             floor_plan_id=fp_id,
-            name=f"Kabel {eid.rsplit('-', 1)[-1]}",
+            name=format_auto_cable_name("", ""),
             color="#ffb300",
             visible=True,
             label_visible=True,
@@ -3471,7 +3528,7 @@ class AppWindow(QMainWindow):
         cable = ElecCable.create(
             eid,
             floor_plan_id=fp_id,
-            name=f"Kabel {eid.rsplit('-', 1)[-1]}",
+            name=format_auto_cable_name(str(point.name or ap_id), ""),
             color="#ffb300",
             visible=True,
             label_visible=True,
@@ -3566,18 +3623,38 @@ class AppWindow(QMainWindow):
 
     def open_project_file(self, path: Path) -> bool:
         """Öffnet ein Projekt ohne Dialog (z. B. per Kommandozeile)."""
+        migration_message = ""
         try:
-            document = load_document(path)
+            document, migrated = load_document_with_migration_info(path)
         except Exception as exc:  # noqa: BLE001 - Nutzerfeedback statt Absturz
             QMessageBox.critical(self, "Fehler", f"Projekt konnte nicht geladen werden:\n{exc}")
             self.log.error(f"Laden fehlgeschlagen: {exc}")
             return False
+
+        if migrated:
+            try:
+                backup_path = create_hrp_backup(path)
+                save_raw(document.to_dict(), path)
+                self.log.info(f"Automigration gespeichert: {path}")
+                migration_message = f"Projekt automatisch migriert, Backup: {backup_path.name}"
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "Automigration nicht gespeichert",
+                    (
+                        "Das Projekt wurde migriert und geladen, konnte aber nicht automatisch"
+                        f" gespeichert werden:\n{exc}"
+                    ),
+                )
+                self.log.warning(f"Automigration für {path} konnte nicht gespeichert werden: {exc}")
         self._project_path = Path(path)
         self._dirty = False
         self._set_document(document)
         self._remember_project_path(self._project_path)
         self._update_git_action_state()
         self.log.success(f"Projekt geladen: {path}")
+        if migration_message:
+            self.statusBar().showMessage(migration_message, 7000)
         return True
 
     def _save_project(self) -> bool:
@@ -4691,7 +4768,11 @@ class AppWindow(QMainWindow):
 
         self._push_undo()
         cable_id = self._document.new_id(ElecCable)
-        name = (payload.get("name") or "").strip() or cable_id
+        start_point = self._document.elements["elec_points"].get(start_ap_id)
+        end_point = self._document.elements["elec_points"].get(end_ap_id)
+        start_name = str(getattr(start_point, "name", "") or "").strip() or start_ap_id
+        end_name = str(getattr(end_point, "name", "") or "").strip() or end_ap_id
+        name = format_auto_cable_name(start_name, end_name)
         cable_type = (payload.get("type") or "").strip() or "5x1,5"
         color = str(payload.get("color") or "#ff9800")
         try:
@@ -4811,8 +4892,11 @@ class AppWindow(QMainWindow):
         point.geom["elec_point_smarthome_device_color"] = str(point.smarthome_device_color)
         point.geom["elec_visible"] = bool(point.visible)
 
+        self._refresh_connected_cable_names(point_id)
+
         self._document.element_changed.emit(point_id)
         self.properties.refresh_element(point_id)
+        self.navigator.set_document(self._document)
         self.canvas.update()
         self._mark_dirty()
 
@@ -4822,7 +4906,6 @@ class AppWindow(QMainWindow):
             return
 
         self._push_undo()
-        cable.name = str(payload.get("name") or cable.name or cable_id)
         cable.cable_type = str(payload.get("type") or cable.cable_type or "")
         cable.color = str(payload.get("color") or cable.color or "#ff9800")
         cable.visible = bool(payload.get("visible", cable.visible))
@@ -4843,6 +4926,7 @@ class AppWindow(QMainWindow):
         cable.end_ap = end_ap
         cable.geom["cable_start_ap"] = start_ap
         cable.geom["cable_end_ap"] = end_ap
+        self._sync_cable_auto_name(cable)
         cable.geom["elec_cable_stroke_width"] = stroke_width
         cable.geom["elec_cable_type_text"] = str(cable.cable_type)
         cable.geom["elec_cable_type_label_visible"] = bool(payload.get("type_label_visible", False))
@@ -4914,7 +4998,8 @@ class AppWindow(QMainWindow):
                 new_cable.geom["cable_start_ap"] = new_start
                 new_cable.geom["cable_end_ap"] = new_end
                 self._rebuild_schema_cable_geometry(new_cable, new_start, new_end)
-                self._document.element_changed.emit(new_cable_id)
+            self._sync_cable_auto_name(new_cable)
+            self._document.element_changed.emit(new_cable_id)
             new_ids.append(new_cable_id)
 
         if new_ids:
@@ -7694,7 +7779,7 @@ class AppWindow(QMainWindow):
                     if cable is None:
                         skipped += 1
                         continue
-                    cable.name = cable_name
+                    self._sync_cable_auto_name(cable)
                     cable.data["type"] = cable_type
                     if resolved_start_ap_id and not cable.start_ap:
                         cable.start_ap = resolved_start_ap_id
@@ -7716,7 +7801,10 @@ class AppWindow(QMainWindow):
                 cable = ElecCable.create(
                     eid,
                     floor_plan_id=default_floor_plan_id,
-                    name=cable_name,
+                    name=format_auto_cable_name(
+                        str(getattr(self._document.elements["elec_points"].get(resolved_start_ap_id), "name", "") or resolved_start_ap_id),
+                        str(getattr(self._document.elements["elec_points"].get(resolved_end_ap_id), "name", "") or resolved_end_ap_id),
+                    ),
                     color="#ffb300",
                     visible=True,
                     label_visible=True,
@@ -7761,7 +7849,7 @@ class AppWindow(QMainWindow):
                     if cable is None:
                         skipped += 1
                         continue
-                    cable.name = cable_name
+                    self._sync_cable_auto_name(cable)
                     cable.data["type"] = cable_type
                     if resolved_start_ap_id:
                         cable.start_ap = resolved_start_ap_id
@@ -7781,7 +7869,10 @@ class AppWindow(QMainWindow):
                 cable = ElecCable.create(
                     eid,
                     floor_plan_id=default_floor_plan_id,
-                    name=cable_name,
+                    name=format_auto_cable_name(
+                        str(getattr(self._document.elements["elec_points"].get(resolved_start_ap_id), "name", "") or resolved_start_ap_id),
+                        str(getattr(self._document.elements["elec_points"].get(resolved_end_ap_id), "name", "") or resolved_end_ap_id),
+                    ),
                     color="#ffb300",
                     visible=True,
                     label_visible=True,
@@ -7818,7 +7909,7 @@ class AppWindow(QMainWindow):
                     if cable is None:
                         skipped += 1
                         continue
-                    cable.name = cable_name
+                    self._sync_cable_auto_name(cable)
                     cable.data["type"] = cable_type
                     cable.data["kicad_cable_key"] = sync_key
                     if cable_floor_plan_id:
@@ -7834,7 +7925,10 @@ class AppWindow(QMainWindow):
                 cable = ElecCable.create(
                     eid,
                     floor_plan_id=cable_floor_plan_id,
-                    name=cable_name,
+                    name=format_auto_cable_name(
+                        str(getattr(self._document.elements["elec_points"].get(text_ap_id), "name", "") or text_ap_id),
+                        "",
+                    ),
                     color="#ffb300",
                     visible=True,
                     label_visible=True,

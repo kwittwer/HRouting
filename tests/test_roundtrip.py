@@ -283,6 +283,31 @@ def test_migration_keeps_future_format_version_untouched():
         }
     )
     assert raw["format_version"] == 99
+    
+def test_migration_normalizes_existing_cable_names_to_auto_format():
+    raw = migrate_raw(
+        {
+            "canvas": {
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+            },
+            "params": {
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "name": "Dose"},
+                    "AP-2": {"point_id": "AP-2", "name": "Leuchte"},
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "name": "Altname",
+                        "start_ap": "AP-1",
+                        "end_ap": "AP-2",
+                    }
+                }
+            },
+        }
+    )
+    assert raw["params"]["elec_cables"]["EK-1"]["name"] == "KBL_Dose:Leuchte"
 
 
 def test_save_document_embeds_asset_paths_as_data_uri(tmp_path: Path):

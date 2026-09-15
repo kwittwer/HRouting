@@ -16,9 +16,16 @@ from .hrp_repair import repair_hrp_data
 
 def load_raw(path: str | Path) -> dict:
     """Liest eine .hrp-Datei und migriert sie auf die aktuelle Struktur."""
+    raw, _changed = load_raw_with_migration_info(path)
+    return raw
+
+
+def load_raw_with_migration_info(path: str | Path) -> tuple[dict, bool]:
+    """Liest eine .hrp-Datei und meldet, ob die Migration Daten geändert hat."""
     with open(path, "r", encoding="utf-8") as handle:
-        raw = json.load(handle)
-    return migrate_raw(raw)
+        original = json.load(handle)
+    migrated = migrate_raw(original)
+    return migrated, migrated != original
 
 
 def save_raw(raw: dict, path: str | Path) -> None:
@@ -32,9 +39,15 @@ def save_raw(raw: dict, path: str | Path) -> None:
 
 
 def load_document(path: str | Path) -> Document:
-    doc = Document.from_dict(load_raw(path))
-    doc.source_path = Path(path)  # type: ignore[attr-defined]
+    doc, _changed = load_document_with_migration_info(path)
     return doc
+
+
+def load_document_with_migration_info(path: str | Path) -> tuple[Document, bool]:
+    raw, changed = load_raw_with_migration_info(path)
+    doc = Document.from_dict(raw)
+    doc.source_path = Path(path)  # type: ignore[attr-defined]
+    return doc, changed
 
 
 def save_document(doc: Document, path: str | Path) -> None:

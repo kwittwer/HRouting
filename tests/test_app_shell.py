@@ -73,6 +73,112 @@ def test_app_window_builds_and_switches_workspaces(app, tmp_path, monkeypatch):
     finally:
         window.deleteLater()
 
+def test_open_project_file_auto_migrates_cable_names_and_persists_backup(app, monkeypatch, tmp_path):
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from storage.hrp_io import load_raw, save_raw  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    hrp_file = tmp_path / "auto_migrate_cables.hrp"
+    raw = {
+        "canvas": {
+            "floor_plans": [{"fp_id": "grundriss-1"}],
+            "cable_start_ap": {"EK-1": "AP-1"},
+            "cable_end_ap": {"EK-1": "AP-2"},
+        },
+        "params": {
+            "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+            "elec_points": {
+                "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Dose", "visible": True},
+                "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Leuchte", "visible": True},
+            },
+            "elec_cables": {
+                "EK-1": {
+                    "cable_id": "EK-1",
+                    "name": "Altname",
+                    "floor_plan_id": "grundriss-1",
+                    "type": "3x1,5",
+                    "start_ap": "AP-1",
+                    "end_ap": "AP-2",
+                    "visible": True,
+                }
+            },
+            "circuits": {},
+            "hkv_points": {},
+            "hkv_lines": {},
+            "elec_rooms": {},
+            "text_annotations": {},
+            "furniture": {},
+        },
+    }
+    save_raw(raw, hrp_file)
+
+    window = AppWindow()
+    try:
+        assert window.open_project_file(hrp_file)
+
+        cable = window._document.elements["elec_cables"]["EK-1"]
+        assert cable.name == "KBL_Dose:Leuchte"
+
+        backup = hrp_file.with_suffix(".hrp.bak")
+        assert backup.exists()
+        assert "Projekt automatisch migriert" in window.statusBar().currentMessage()
+        assert backup.name in window.statusBar().currentMessage()
+
+        written = load_raw(hrp_file)
+        assert written["params"]["elec_cables"]["EK-1"]["name"] == "KBL_Dose:Leuchte"
+    finally:
+        window.deleteLater()
+
+
+def test_ap_rename_updates_connected_cable_auto_name(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict({
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [50.0, 10.0]},
+                "elec_cables": {"EK-1": [[10.0, 10.0], [50.0, 10.0]]},
+                "cable_start_ap": {"EK-1": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-2"},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                "elec_points": {
+                    "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Dose 1", "visible": True},
+                    "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Dose 2", "visible": True},
+                },
+                "elec_cables": {
+                    "EK-1": {
+                        "cable_id": "EK-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "KBL_Dose 1:Dose 2",
+                        "type": "5x1,5",
+                        "start_ap": "AP-1",
+                        "end_ap": "AP-2",
+                        "visible": True,
+                    }
+                },
+            },
+        })
+        window._set_document(doc)
+        doc.elements["elec_points"]["AP-1"].data["name"] = "UV Küche"
+
+        window._on_property_changed("AP-1", "name", "UV Küche")
+
+        assert doc.elements["elec_points"]["AP-1"].name == "UV Küche"
+        assert doc.elements["elec_cables"]["EK-1"].name == "KBL_UV Küche:Dose 2"
+    finally:
+        window.deleteLater()
+
 
 def test_app_window_floating_docks_have_min_max_hints(app, monkeypatch):
     from PySide6.QtCore import QSettings, Qt  # noqa: PLC0415
@@ -5257,7 +5363,7 @@ def test_schema_edit_cable_writes_document(app, monkeypatch):
             },
         )
         cable = document.elements["elec_cables"]["EK-1"]
-        assert cable.name == "Kabel Neu"
+        assert cable.name == "KBL_Dose 2:Dose 1"
         assert cable.cable_type == "3x1,5"
         assert cable.start_ap == "AP-2"
         assert cable.end_ap == "AP-1"
@@ -6695,7 +6801,7 @@ def test_kicad_sheet_cable_creates_visible_line_between_two_matching_aps(app, mo
         assert summary["created"] == 1
         assert len(window._document.elements["elec_cables"]) == 1
         cable = next(iter(window._document.elements["elec_cables"].values()))
-        assert cable.name == "HWR2"
+        assert cable.name == "KBL_HWR2 AP Alpha:HWR2 AP Beta"
         assert cable.start_ap == ap1_id
         assert cable.end_ap == ap2_id
         assert cable.path == [[100.0, 100.0], [300.0, 300.0]]

@@ -239,12 +239,20 @@ def test_elec_schema_cable_dialogs_show_ap_name_with_id(app):
         add_options = {add_dialog.cmb_start_ap.itemText(i) for i in range(add_dialog.cmb_start_ap.count())}
         edit_options = {edit_dialog.cmb_end_ap.itemText(i) for i in range(edit_dialog.cmb_end_ap.count())}
 
+        assert add_dialog.le_name.isReadOnly() is True
+        assert edit_dialog.le_name.isReadOnly() is True
         assert "UV EG (AP-UV)" in add_options
         assert "Steckdose Küche (AP-1)" in add_options
         assert "UV EG (AP-UV)" in edit_options
         assert "Steckdose Küche (AP-1)" in edit_options
+        assert add_dialog.le_name.text() == "KBL_?:?"
         assert edit_dialog.cmb_start_ap.currentText() == "UV EG (AP-UV)"
         assert edit_dialog.cmb_end_ap.currentText() == "Steckdose Küche (AP-1)"
+        assert edit_dialog.le_name.text() == "KBL_UV EG:Steckdose Küche"
+
+        add_dialog.cmb_start_ap.setCurrentIndex(add_dialog.cmb_start_ap.findData("AP-UV"))
+        add_dialog.cmb_end_ap.setCurrentIndex(add_dialog.cmb_end_ap.findData("AP-1"))
+        assert add_dialog.le_name.text() == "KBL_UV EG:Steckdose Küche"
     finally:
         add_dialog.deleteLater()
         edit_dialog.deleteLater()
@@ -370,6 +378,258 @@ def test_properties_edit_name_updates_document_and_undo_redo(app, monkeypatch):
 
         window._redo()
         assert document.elements["circuits"]["HK-1"].data["name"] == "Kueche"
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_properties_ap_rename_updates_connected_cable_name(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [110.0, 10.0]},
+                    "elec_cables": {"EK-1": [[10.0, 10.0], [110.0, 10.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 2",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "KBL_Dose 1:Dose 2",
+                            "type": "3x1,5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_element("AP-1")
+
+        ap_editor = window.properties._editors["AP-1"]
+        name_widget = ap_editor._widgets["name"]
+        name_widget._edit.setText("UV Küche")
+        name_widget._edit.editingFinished.emit()
+        app.processEvents()
+
+        assert document.elements["elec_points"]["AP-1"].name == "UV Küche"
+        assert document.elements["elec_cables"]["EK-1"].name == "KBL_UV Küche:Dose 2"
+
+        window.properties.show_element("EK-1")
+        cable_editor = window.properties._editors["EK-1"]
+        assert cable_editor._widgets["name"].value() == "KBL_UV Küche:Dose 2"
+
+        overview_name = window.overview_electro_cables._elec_cable_table.item(0, 0)
+        assert overview_name is not None
+        assert overview_name.text() == "KBL_UV Küche:Dose 2"
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_navigator_keeps_renamed_ap_selected(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.navigator.select("AP-1")
+        window.properties.show_element("AP-1")
+
+        ap_editor = window.properties._editors["AP-1"]
+        name_widget = ap_editor._widgets["name"]
+        name_widget._edit.setText("UV Küche")
+        name_widget._edit.editingFinished.emit()
+        app.processEvents()
+
+        assert window.navigator.selected_ids() == ["AP-1"]
+        item = window.navigator._find_item_by_id("AP-1")
+        assert item is not None
+        assert item.text(0) == "UV Küche"
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_open_cable_properties_refreshes_after_ap_rename(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [110.0, 10.0]},
+                    "elec_cables": {"EK-1": [[10.0, 10.0], [110.0, 10.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 2",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "KBL_Dose 1:Dose 2",
+                            "type": "3x1,5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_element("EK-1")
+
+        cable_editor = window.properties._editors["EK-1"]
+        assert cable_editor._widgets["name"].value() == "KBL_Dose 1:Dose 2"
+
+        document.elements["elec_points"]["AP-1"].data["name"] = "UV Küche"
+        window._on_property_changed("AP-1", "name", "UV Küche")
+        app.processEvents()
+
+        assert cable_editor._widgets["name"].value() == "KBL_UV Küche:Dose 2"
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_open_cable_properties_refreshes_name_after_endpoint_change(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {
+                        "AP-1": [10.0, 10.0],
+                        "AP-2": [110.0, 10.0],
+                        "AP-3": [210.0, 10.0],
+                    },
+                    "elec_cables": {"EK-1": [[10.0, 10.0], [110.0, 10.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Dose 1", "builtin_symbol": "Steckdose", "visible": True},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Dose 2", "builtin_symbol": "Steckdose", "visible": True},
+                        "AP-3": {"point_id": "AP-3", "floor_plan_id": "grundriss-1", "name": "Dose 3", "builtin_symbol": "Steckdose", "visible": True},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "KBL_Dose 1:Dose 2",
+                            "type": "3x1,5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                            "visible": True,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.properties.show_element("EK-1")
+
+        cable_editor = window.properties._editors["EK-1"]
+        assert cable_editor._widgets["name"].value() == "KBL_Dose 1:Dose 2"
+
+        end_widget = cable_editor._widgets["end_ap"]
+        end_widget._combo.setCurrentIndex(end_widget._combo.findData("AP-3"))
+        app.processEvents()
+
+        assert document.elements["elec_cables"]["EK-1"].end_ap == "AP-3"
+        assert cable_editor._widgets["name"].value() == "KBL_Dose 1:Dose 3"
     finally:
         window.deleteLater()
 

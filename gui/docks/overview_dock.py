@@ -509,6 +509,10 @@ class ProjectOverviewDock(QDockWidget):
     def _schedule_refresh(self, *_args) -> None:
         self._refresh_timer.start()
 
+    def refresh_now(self) -> None:
+        self._refresh_timer.stop()
+        self._do_refresh()
+
     # ── Refresh ──────────────────────────────────────────────────────
 
     def _do_refresh(self) -> None:
@@ -844,7 +848,7 @@ class ProjectOverviewDock(QDockWidget):
             self._elec_cable_row_ids[r] = cable_id
 
             name_item = _str_item(cable.get("name", ""))
-            self._set_item_editable(name_item, bool(cable_id))
+            self._set_item_editable(name_item, False)
             tbl.setItem(r, 0, name_item)
 
             current_type = str(cable.get("type", "") or "")
@@ -918,9 +922,6 @@ class ProjectOverviewDock(QDockWidget):
         cable_id = str(self._elec_cable_row_ids.get(row, "") or "").strip()
         if not cable_id:
             return
-        if col == 0:
-            self.pre_change.emit()
-            self.element_field_changed.emit(cable_id, "name", str(item.text() or "").strip())
 
     def _on_elec_cable_type_changed(self, cable_id: str, value: str) -> None:
         if self._updating_electro_tables:

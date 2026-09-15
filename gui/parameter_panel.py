@@ -151,7 +151,7 @@ class HeatingCircuitPanel(QWidget):
         self.le_name.textChanged.connect(
             lambda value: self.name_changed.emit(self.circuit_id, value)
         )
-        form.addRow("Name:", self.le_name)
+        form.addRow("Name (automatisch):", self.le_name)
 
         self.btn_color = QPushButton("Farbe")
         self.btn_color.clicked.connect(self._choose_color)
@@ -2779,6 +2779,8 @@ class ElektroCablePanel(QWidget):
         form.addRow(self.chk_type_label_visible)
 
         self.le_name = QLineEdit(self._name)
+        self.le_name.setReadOnly(True)
+        self.le_name.setToolTip("Wird automatisch aus Start-AP und End-AP erzeugt.")
         self.le_name.textChanged.connect(
             lambda v: self.name_changed.emit(self.cable_id, v)
         )

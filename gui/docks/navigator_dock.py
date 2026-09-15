@@ -312,6 +312,11 @@ class NavigatorDock(QDockWidget):
 
     # ------------------------------------------------------------------
     def rebuild(self, *_args) -> None:
+        previous_selected_ids = [
+            element_id
+            for element_id in self._selected_ids
+            if element_id
+        ]
         self._suspend_item_events = True
         self._tree.blockSignals(True)
         self._tree.clear()
@@ -348,8 +353,25 @@ class NavigatorDock(QDockWidget):
         self._highlight_active()
         self._apply_filter(self._filter.text())
         self._restore_expanded_state()
+        self._restore_selection(previous_selected_ids)
         self._tree.blockSignals(False)
         self._suspend_item_events = False
+
+    def _restore_selection(self, selected_ids: list[str]) -> None:
+        restored: list[str] = []
+        first_item: QTreeWidgetItem | None = None
+        for element_id in selected_ids:
+            item = self._items.get(element_id) or self._find_item_by_id(element_id)
+            if item is None:
+                continue
+            item.setSelected(True)
+            if first_item is None:
+                first_item = item
+            restored.append(element_id)
+        if first_item is not None:
+            self._tree.setCurrentItem(first_item)
+            self._tree.scrollToItem(first_item)
+        self._selected_ids = restored
 
     def _add_element_item(self, parent: QTreeWidgetItem, element: Element) -> None:
         label = element.name or element.id

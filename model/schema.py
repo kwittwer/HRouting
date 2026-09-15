@@ -187,6 +187,13 @@ def format_elec_point_choice_label(point_id: str, point_name: str = "") -> str:
     return f"{name} ({point_id})" if name else point_id
 
 
+def format_auto_cable_name(start_ap_name: str = "", end_ap_name: str = "") -> str:
+    """Erzeugt den systemweiten Standardnamen ``KBL_StartAP:ZielAP``."""
+    start = str(start_ap_name or "").strip() or "?"
+    end = str(end_ap_name or "").strip() or "?"
+    return f"KBL_{start}:{end}"
+
+
 def _elec_point_id_options(document: Any) -> tuple[str, ...]:
     """IDs aller Anschlusspunkte (leere Auswahl zuerst)."""
     ids = sorted(document.elements.get("elec_points", {}).keys())
@@ -427,7 +434,11 @@ ELEC_CABLE_SCHEMA = ElementSchema(
     element_cls=ElecCable,
     title="Elektro-Kabel",
     fields=(
-        *_common_fields("#ff9800"),
+        FieldSpec("name", "Name (automatisch)", FieldKind.READONLY, group="Allgemein"),
+        FieldSpec("color", "Farbe", FieldKind.COLOR, default="#ff9800",
+                  group="Allgemein"),
+        FieldSpec("visible", "Sichtbar", FieldKind.BOOL, default=True,
+                  group="Allgemein"),
         FieldSpec("start_ap", "Start-AP", FieldKind.CHOICE,
                   document_options=_elec_point_choice_options, default="",
                   group="Verbindungen"),

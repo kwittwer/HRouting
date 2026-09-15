@@ -54,6 +54,7 @@ from logic.elec_schematic import sanitize_elec_schematic, infer_elec_schematic_f
 from logic.svg_parser import parse_svg_dimensions
 from logic.heating_calc import calc_circuit, calc_balancing, FLOOR_COVERINGS
 from logic.kicad_export import export_project_to_kicad
+from model.schema import format_auto_cable_name
 
 _SETTINGS = QSettings("HRouting", "HRouting")
 _LAST_PROJECT_KEY = "last_project_path"
@@ -2529,6 +2530,10 @@ class MainWindow(QMainWindow):
 
     def _on_elec_point_name_changed(self, point_id: str, name: str):
         self.canvas._label_map[point_id] = name
+        for cable_id in list(self.param_panel.elec_cable_panels.keys()):
+            start_ap_id, end_ap_id = self.canvas.get_cable_ap(cable_id)
+            if point_id in {start_ap_id, end_ap_id}:
+                self._update_cable_ap_labels(cable_id)
         self.canvas.update()
         self._refresh_elec_schema_window()
 
@@ -2763,6 +2768,7 @@ class MainWindow(QMainWindow):
                         if ap_panel else end_ap_id)
         panel.set_start_ap(start_name)
         panel.set_end_ap(end_name)
+        panel.le_name.setText(format_auto_cable_name(start_name, end_name))
 
     def _on_elec_cable_name_changed(self, cable_id: str, name: str):
         self.canvas._label_map[cable_id] = name

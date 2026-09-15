@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.parameter_panel import BUILTIN_SYMBOLS, UvConfigDialog, UpDistributionDialog
-from model.schema import format_elec_point_choice_label
+from model.schema import format_auto_cable_name, format_elec_point_choice_label
 from storage.asset_data_uri import is_data_uri, is_svg_asset_ref, parse_data_uri
 
 
@@ -96,7 +96,7 @@ class _AddApDialog(QDialog):
 
         self.le_name = QLineEdit()
         self.le_name.setPlaceholderText("z. B. Steckdose Küche")
-        form.addRow("Name:", self.le_name)
+        form.addRow("Name (automatisch):", self.le_name)
 
         self.cmb_symbol = QComboBox()
         for label in BUILTIN_SYMBOLS.keys():
@@ -147,6 +147,7 @@ class _AddApDialog(QDialog):
 class _AddCableDialog(QDialog):
     def __init__(self, all_ap_nodes: dict[str, ApNode], parent=None):
         super().__init__(parent)
+        self._all_ap_nodes = dict(all_ap_nodes)
         self.setWindowTitle("Kabel hinzufügen")
         self.resize(420, 340)
 
@@ -154,8 +155,9 @@ class _AddCableDialog(QDialog):
         form = QFormLayout()
 
         self.le_name = QLineEdit()
-        self.le_name.setPlaceholderText("z. B. Zuleitung Küche")
-        form.addRow("Name:", self.le_name)
+        self.le_name.setReadOnly(True)
+        self.le_name.setToolTip("Wird automatisch aus Start-AP und End-AP erzeugt.")
+        form.addRow("Name (automatisch):", self.le_name)
 
         self.le_type = QLineEdit("5x1,5")
         form.addRow("Kabeltyp:", self.le_type)
@@ -186,6 +188,9 @@ class _AddCableDialog(QDialog):
         for ap_id, label_text in sorted_aps:
             self.cmb_start_ap.addItem(label_text, ap_id)
             self.cmb_end_ap.addItem(label_text, ap_id)
+        self.cmb_start_ap.currentIndexChanged.connect(lambda _idx: self._update_auto_name())
+        self.cmb_end_ap.currentIndexChanged.connect(lambda _idx: self._update_auto_name())
+        self._update_auto_name()
         form.addRow("Start-AP:", self.cmb_start_ap)
         form.addRow("End-AP:", self.cmb_end_ap)
 
@@ -206,6 +211,16 @@ class _AddCableDialog(QDialog):
             "start_ap_id": str(self.cmb_start_ap.currentData() or ""),
             "end_ap_id": str(self.cmb_end_ap.currentData() or ""),
         }
+
+    def _ap_name(self, ap_id: str) -> str:
+        ap_id = str(ap_id or "").strip()
+        node = self._all_ap_nodes.get(ap_id)
+        return str(node.name if node is not None else ap_id or "")
+
+    def _update_auto_name(self) -> None:
+        start_id = str(self.cmb_start_ap.currentData() or "")
+        end_id = str(self.cmb_end_ap.currentData() or "")
+        self.le_name.setText(format_auto_cable_name(self._ap_name(start_id), self._ap_name(end_id)))
 
 
 class _EditApDialog(QDialog):
@@ -524,6 +539,7 @@ class _EditCableDialog(QDialog):
     """Dialog zum Bearbeiten aller Kabel-Eigenschaften."""
     def __init__(self, edge: "CableEdge", all_ap_nodes: "dict[str, ApNode]", parent=None):
         super().__init__(parent)
+        self._all_ap_nodes = dict(all_ap_nodes)
         self.setWindowTitle(f"Kabel bearbeiten \u2013 {edge.name or edge.cable_id}")
         self.resize(460, 460)
 
@@ -543,7 +559,8 @@ class _EditCableDialog(QDialog):
         form.addRow(self.chk_type_label_visible)
 
         self.le_name = QLineEdit(edge.name or "")
-        self.le_name.setPlaceholderText("z. B. Zuleitung K\u00fcche")
+        self.le_name.setReadOnly(True)
+        self.le_name.setToolTip("Wird automatisch aus Start-AP und End-AP erzeugt.")
         form.addRow("Name:", self.le_name)
 
         self.le_type = QLineEdit(edge.cable_type or "5x1,5")
@@ -590,6 +607,9 @@ class _EditCableDialog(QDialog):
             idx = cmb.findData((target or "").strip())
             if idx >= 0:
                 cmb.setCurrentIndex(idx)
+        self.cmb_start_ap.currentIndexChanged.connect(lambda _idx: self._update_auto_name())
+        self.cmb_end_ap.currentIndexChanged.connect(lambda _idx: self._update_auto_name())
+        self._update_auto_name()
         form.addRow("Start-AP:", self.cmb_start_ap)
         form.addRow("End-AP:", self.cmb_end_ap)
 
@@ -620,6 +640,16 @@ class _EditCableDialog(QDialog):
             "end_ap_id": str(self.cmb_end_ap.currentData() or ""),
             "comment": self.te_comment.toPlainText(),
         }
+
+    def _ap_name(self, ap_id: str) -> str:
+        ap_id = str(ap_id or "").strip()
+        node = self._all_ap_nodes.get(ap_id)
+        return str(node.name if node is not None else ap_id or "")
+
+    def _update_auto_name(self) -> None:
+        start_id = str(self.cmb_start_ap.currentData() or "")
+        end_id = str(self.cmb_end_ap.currentData() or "")
+        self.le_name.setText(format_auto_cable_name(self._ap_name(start_id), self._ap_name(end_id)))
 
 
 class _DeleteSelectDialog(QDialog):
