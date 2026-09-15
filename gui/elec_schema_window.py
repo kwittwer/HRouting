@@ -4,7 +4,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QByteArray
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QByteArray, QSignalBlocker
 from PySide6.QtGui import QColor, QPen, QBrush, QPainterPath, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -987,6 +987,14 @@ class ElecSchemaWindow(QMainWindow):
         self._rewire_drop_tolerance_px = 56.0
         self._handle_radius = 6.5
         self._is_rendering = False
+        self._selected_root_ap_id = ""
+        self._tree_edge_ids: set[str] = set()
+        self._cross_edge_ids: set[str] = set()
+        self._compact_view_enabled = True
+        self._show_all_cable_labels = False
+        self._layout_mode = "radial"
+        self._show_room_zones = True
+        self._room_zone_defs: list[dict] = []
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -1003,6 +1011,20 @@ class ElecSchemaWindow(QMainWindow):
         self.btn_zoom_out = QPushButton("－")
         self.btn_zoom_reset = QPushButton("100%")
         self.btn_fit = QPushButton("Auf Inhalt einpassen")
+        self.lbl_root = QLabel("Root:")
+        self.cmb_root_ap = QComboBox()
+        self.cmb_root_ap.setMinimumWidth(240)
+        self.lbl_layout = QLabel("Layout:")
+        self.cmb_layout_mode = QComboBox()
+        self.cmb_layout_mode.addItem("Radial-Baum", "radial")
+        self.cmb_layout_mode.addItem("Hierarchisch", "hier")
+        self.cmb_layout_mode.setCurrentIndex(0)
+        self.chk_compact = QCheckBox("Kompakt")
+        self.chk_compact.setChecked(True)
+        self.chk_cable_labels = QCheckBox("Kabeltexte")
+        self.chk_cable_labels.setChecked(False)
+        self.chk_rooms = QCheckBox("Raeume")
+        self.chk_rooms.setChecked(True)
         self.lbl_zoom = QLabel("100%")
         self.lbl_zoom.setMinimumWidth(52)
         self.lbl_zoom.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1014,6 +1036,14 @@ class ElecSchemaWindow(QMainWindow):
         top.addWidget(self.btn_add_cable)
         top.addWidget(self.btn_del_ap)
         top.addWidget(self.btn_del_cable)
+        top.addSpacing(8)
+        top.addWidget(self.lbl_root)
+        top.addWidget(self.cmb_root_ap)
+        top.addWidget(self.lbl_layout)
+        top.addWidget(self.cmb_layout_mode)
+        top.addWidget(self.chk_rooms)
+        top.addWidget(self.chk_compact)
+        top.addWidget(self.chk_cable_labels)
         top.addStretch(1)
         top.addWidget(self.btn_zoom_out)
         top.addWidget(self.btn_zoom_in)
@@ -1039,7 +1069,9 @@ class ElecSchemaWindow(QMainWindow):
         )
         root.addWidget(self.view, 1)
 
-        self.lbl_hint = QLabel("Anzeige: AP-Name, Raum, Verteilerfunktion, Anschlussstatus | Kabel: Name, Typ, Länge")
+        self.lbl_hint = QLabel(
+            "Anzeige: Baumkanten klar, Nebenverbindungen gestrichelt | AP-Name, Raum, Verteilerfunktion, Anschlussstatus"
+        )
         root.addWidget(self.lbl_hint)
 
         self.setCentralWidget(central)
@@ -1054,6 +1086,11 @@ class ElecSchemaWindow(QMainWindow):
         self.btn_zoom_out.clicked.connect(self._zoom_out)
         self.btn_zoom_reset.clicked.connect(self._zoom_reset)
         self.btn_fit.clicked.connect(self._fit_to_content)
+        self.cmb_root_ap.currentIndexChanged.connect(self._on_root_changed)
+        self.cmb_layout_mode.currentIndexChanged.connect(self._on_layout_mode_changed)
+        self.chk_rooms.toggled.connect(self._on_room_zones_toggled)
+        self.chk_compact.toggled.connect(self._on_compact_view_toggled)
+        self.chk_cable_labels.toggled.connect(self._on_show_cable_labels_toggled)
         self._update_zoom_label()
         self._update_mode_indicator()
 
@@ -1075,19 +1112,74 @@ class ElecSchemaWindow(QMainWindow):
             if pick_cable_id not in self._cable_edges:
                 self._cancel_cable_pick_mode()
         self._room_choices = list(room_choices or [])
-        if manual_positions is not None:
-            sanitized: dict[str, tuple[float, float]] = {}
-            for point_id, pos in manual_positions.items():
-                if point_id not in self._ap_nodes:
-                    continue
-                if not isinstance(pos, (list, tuple)) or len(pos) != 2:
-                    continue
-                try:
-                    sanitized[point_id] = (float(pos[0]), float(pos[1]))
-                except (TypeError, ValueError):
-                    continue
-            self._manual_positions = sanitized
+        self._manual_positions = {}
+        self._refresh_root_choices()
         self._render()
+
+    def _refresh_root_choices(self):
+        previous = self._selected_root_ap_id if self._selected_root_ap_id in self._ap_nodes else ""
+        labels = [
+            (point_id, format_elec_point_choice_label(point_id, node.name or ""))
+            for point_id, node in self._ap_nodes.items()
+        ]
+        labels.sort(key=lambda value: value[1].lower())
+
+        blocker = QSignalBlocker(self.cmb_root_ap)
+        self.cmb_root_ap.clear()
+        self.cmb_root_ap.addItem("Automatisch (UV/zentral)", "")
+        for point_id, text in labels:
+            self.cmb_root_ap.addItem(text, point_id)
+
+        if not previous:
+            previous = self._guess_root_ap_id(set(self._ap_nodes.keys()))
+        index = self.cmb_root_ap.findData(previous)
+        if index < 0:
+            index = 0
+            previous = ""
+        self.cmb_root_ap.setCurrentIndex(index)
+        self._selected_root_ap_id = str(previous or "")
+        del blocker
+
+    def _on_root_changed(self, _index: int):
+        self._selected_root_ap_id = str(self.cmb_root_ap.currentData() or "")
+        self._render()
+
+    def _on_layout_mode_changed(self, _index: int):
+        self._layout_mode = str(self.cmb_layout_mode.currentData() or "radial")
+        self._render()
+
+    def _on_room_zones_toggled(self, checked: bool):
+        self._show_room_zones = bool(checked)
+        self._render()
+
+    def _on_compact_view_toggled(self, checked: bool):
+        self._compact_view_enabled = bool(checked)
+        self._render()
+
+    def _on_show_cable_labels_toggled(self, checked: bool):
+        self._show_all_cable_labels = bool(checked)
+        self._render()
+
+    def _guess_root_ap_id(self, node_ids: set[str]) -> str:
+        if not node_ids:
+            return ""
+        adjacency: dict[str, set[str]] = defaultdict(set)
+        for edge in self._cable_edges.values():
+            a = edge.start_ap_id.strip()
+            b = edge.end_ap_id.strip()
+            if a in node_ids and b in node_ids and a and b and a != b:
+                adjacency[a].add(b)
+                adjacency[b].add(a)
+        uv_candidates = [nid for nid in node_ids if self._ap_nodes[nid].ap_type == "uv"]
+        if uv_candidates:
+            return max(uv_candidates, key=lambda nid: len(adjacency[nid]))
+        return max(
+            sorted(node_ids),
+            key=lambda nid: (
+                len(adjacency[nid]),
+                -len(str(self._ap_nodes[nid].name or nid)),
+            ),
+        )
 
     def _open_add_ap_dialog(self):
         dlg = _AddApDialog(self._room_choices, self)
@@ -1378,6 +1470,7 @@ class ElecSchemaWindow(QMainWindow):
         self._ap_items.clear()
         self._cable_items.clear()
         self._cable_handle_items.clear()
+        self._room_zone_defs = []
         self.scene.clear()
         if not self._ap_nodes and not self._cable_edges:
             self.scene.addSimpleText("Keine APs/Kabel vorhanden.")
@@ -1385,6 +1478,8 @@ class ElecSchemaWindow(QMainWindow):
             return
 
         positions = self._compute_layout_positions()
+        if self._show_room_zones:
+            self._draw_room_zones()
         self._draw_cables(positions)
         self._draw_nodes(positions)
 
@@ -1434,21 +1529,19 @@ class ElecSchemaWindow(QMainWindow):
         self.lbl_zoom.setText(f"{percent}%")
 
     def _compute_layout_positions(self) -> dict[str, tuple[float, float]]:
-        """Hierarchisches Layout mit UV als Ursprung.
-        Ebene 0 ist die Unterverteilung (ap_type == "uv").
-        Die Hierarchie wird über den Graph-Abstand zur UV aufgebaut,
-        und die Reihenfolge innerhalb der Ebene über Verbindungsanzahl bestimmt.
-        """
+        """Berechnet ein baumartiges Layout mit separaten Nebenverbindungen."""
         positions: dict[str, tuple[float, float]] = {}
 
         nodes = set(self._ap_nodes.keys())
         adjacency: dict[str, set[str]] = defaultdict(set)
+        edge_lookup: dict[frozenset[str], list[str]] = defaultdict(list)
         for edge in self._cable_edges.values():
             a = edge.start_ap_id.strip()
             b = edge.end_ap_id.strip()
             if a and b and a in nodes and b in nodes and a != b:
                 adjacency[a].add(b)
                 adjacency[b].add(a)
+                edge_lookup[frozenset((a, b))].append(edge.cable_id)
 
         unvisited = set(nodes)
         components: list[list[str]] = []
@@ -1466,32 +1559,47 @@ class ElecSchemaWindow(QMainWindow):
                         queue.append(nxt)
             components.append(component)
 
-        level_gap_y = 260.0
-        node_gap_x = 220.0
-        component_gap_x = 260.0
-        isolated_cols = 4
+        self._tree_edge_ids.clear()
+        self._cross_edge_ids.clear()
+
+        max_node_h = max((max(56.0, float(node.height_px)) for node in self._ap_nodes.values()), default=56.0)
+        level_gap_y = max(180.0, max_node_h + 120.0)
+        base_gap_x = 48.0
+        component_gap_x = 220.0
+
+        def _node_span_x(node_id: str) -> float:
+            box_w, _box_h = self._node_collision_size(self._ap_nodes[node_id])
+            return box_w + 24.0
+
+        def _node_sort_key(node_id: str) -> tuple[int, str]:
+            return (-len(adjacency[node_id]), str(self._ap_nodes[node_id].name or node_id).lower())
 
         base_x = 0.0
         for component in sorted(components, key=lambda c: len(c), reverse=True):
-            if len(component) == 1 and len(adjacency[component[0]]) == 0:
-                node_id = component[0]
-                positions[node_id] = (base_x, 0.0)
-                base_x += component_gap_x
-                continue
-
-            uv_candidates = [nid for nid in component if self._ap_nodes[nid].ap_type == "uv"]
-            if uv_candidates:
-                root = max(uv_candidates, key=lambda nid: len(adjacency[nid]))
+            component_set = set(component)
+            if self._selected_root_ap_id and self._selected_root_ap_id in component_set:
+                root = self._selected_root_ap_id
             else:
-                root = max(component, key=lambda nid: len(adjacency[nid]))
+                root = self._guess_root_ap_id(component_set)
 
             levels: dict[str, int] = {root: 0}
+            parents: dict[str, str] = {root: ""}
+            tree_adj: dict[str, set[str]] = defaultdict(set)
             queue = deque([root])
+            visited = {root}
             while queue:
                 cur = queue.popleft()
-                for nxt in adjacency[cur]:
-                    if nxt not in levels:
+                neighbors = sorted(adjacency[cur], key=_node_sort_key)
+                for nxt in neighbors:
+                    if nxt not in visited:
+                        visited.add(nxt)
                         levels[nxt] = levels[cur] + 1
+                        parents[nxt] = cur
+                        tree_adj[cur].add(nxt)
+                        tree_adj[nxt].add(cur)
+                        ids = sorted(edge_lookup.get(frozenset((cur, nxt)), []))
+                        if ids:
+                            self._tree_edge_ids.add(ids[0])
                         queue.append(nxt)
 
             for node_id in component:
@@ -1504,12 +1612,7 @@ class ElecSchemaWindow(QMainWindow):
 
             max_level = max(level_nodes.keys()) if level_nodes else 0
             for level in range(max_level + 1):
-                level_nodes[level].sort(
-                    key=lambda nid: (
-                        -len(adjacency[nid]),
-                        str(self._ap_nodes[nid].name or nid).lower(),
-                    )
-                )
+                level_nodes[level].sort(key=_node_sort_key)
 
             def _ordered_neighbor_positions(target_level: int) -> dict[str, int]:
                 return {node_id: idx for idx, node_id in enumerate(level_nodes[target_level])}
@@ -1519,7 +1622,7 @@ class ElecSchemaWindow(QMainWindow):
                     prev_order = _ordered_neighbor_positions(level - 1)
 
                     def _down_key(nid: str):
-                        neigh = [prev_order[n] for n in adjacency[nid] if levels[n] == level - 1]
+                        neigh = [prev_order[n] for n in tree_adj[nid] if levels[n] == level - 1]
                         if neigh:
                             return (sum(neigh) / len(neigh), -len(adjacency[nid]))
                         return (1e9, -len(adjacency[nid]))
@@ -1530,51 +1633,434 @@ class ElecSchemaWindow(QMainWindow):
                     next_order = _ordered_neighbor_positions(level + 1)
 
                     def _up_key(nid: str):
-                        neigh = [next_order[n] for n in adjacency[nid] if levels[n] == level + 1]
+                        neigh = [next_order[n] for n in tree_adj[nid] if levels[n] == level + 1]
                         if neigh:
                             return (sum(neigh) / len(neigh), -len(adjacency[nid]))
                         return (1e9, -len(adjacency[nid]))
 
                     level_nodes[level].sort(key=_up_key)
 
-            max_count = max((len(v) for v in level_nodes.values()), default=1)
-            component_width = max_count * node_gap_x
-            component_left = base_x - component_width / 2.0
+            if self._layout_mode == "radial":
+                level_index: dict[str, int] = {}
+                for level in range(max_level + 1):
+                    for idx, node_id in enumerate(level_nodes[level]):
+                        level_index[node_id] = idx
 
-            for level in range(max_level + 1):
-                group = level_nodes[level]
-                group_width = max(1, len(group)) * node_gap_x
-                x0 = component_left + (component_width - group_width) / 2.0
-                y = level * level_gap_y
-                for idx, node_id in enumerate(group):
-                    positions[node_id] = (x0 + idx * node_gap_x, y)
+                children: dict[str, list[str]] = defaultdict(list)
+                for node_id, parent_id in parents.items():
+                    if parent_id:
+                        children[parent_id].append(node_id)
+                for parent_id in children.keys():
+                    children[parent_id].sort(key=lambda nid: level_index.get(nid, 0))
+
+                leaf_weight_cache: dict[str, float] = {}
+
+                def _leaf_weight(node_id: str) -> float:
+                    cached = leaf_weight_cache.get(node_id)
+                    if cached is not None:
+                        return cached
+                    kids = children.get(node_id, [])
+                    if not kids:
+                        leaf_weight_cache[node_id] = 1.0
+                        return 1.0
+                    value = sum(_leaf_weight(child_id) for child_id in kids)
+                    leaf_weight_cache[node_id] = max(1.0, value)
+                    return leaf_weight_cache[node_id]
+
+                node_angle: dict[str, float] = {}
+
+                def _assign_angles(node_id: str, start_angle: float, end_angle: float):
+                    mid = (start_angle + end_angle) / 2.0
+                    node_angle[node_id] = mid
+                    kids = children.get(node_id, [])
+                    if not kids:
+                        return
+                    total = sum(_leaf_weight(child_id) for child_id in kids)
+                    cursor = start_angle
+                    for child_id in kids:
+                        span = (end_angle - start_angle) * (_leaf_weight(child_id) / max(1e-9, total))
+                        _assign_angles(child_id, cursor, cursor + span)
+                        cursor += span
+
+                _assign_angles(root, -math.pi, math.pi)
+
+                radii: dict[int, float] = {0: 0.0}
+                radial_min_step = max(150.0, max_node_h + 60.0)
+                for level in range(1, max_level + 1):
+                    count = max(1, len(level_nodes[level]))
+                    max_span = max(
+                        (2.0 * self._node_collision_radius(node_id) for node_id in level_nodes[level]),
+                        default=120.0,
+                    )
+                    min_radius_for_spacing = (count * (max_span + 30.0)) / (2.0 * math.pi)
+                    radii[level] = max(radii[level - 1] + radial_min_step, min_radius_for_spacing)
+
+                center_x = base_x
+                center_y = 0.0
+                for node_id in component:
+                    angle = node_angle.get(node_id, 0.0)
+                    radius = radii.get(levels[node_id], 0.0)
+                    positions[node_id] = (
+                        center_x + radius * math.cos(angle),
+                        center_y + radius * math.sin(angle),
+                    )
+
+                self._arrange_component_by_rooms(component, positions, root)
+
+                self._resolve_component_overlaps(
+                    component,
+                    positions,
+                    root,
+                    center=(center_x, center_y),
+                    levels=levels,
+                    radial_level_min_radius=radii,
+                )
+
+                min_x = float("inf")
+                max_x = float("-inf")
+                for node_id in component:
+                    px, _py = positions[node_id]
+                    node_w, _node_h = self._node_collision_size(self._ap_nodes[node_id])
+                    half_w = node_w / 2.0
+                    min_x = min(min_x, px - half_w)
+                    max_x = max(max_x, px + half_w)
+
+                component_radius = max(radii.values(), default=0.0) + 220.0
+                estimated_width = max(260.0, component_radius * 2.0)
+                component_width = max(estimated_width, (max_x - min_x) + 120.0)
+            else:
+                level_widths: dict[int, float] = {}
+                for level in range(max_level + 1):
+                    spans = [_node_span_x(node_id) for node_id in level_nodes[level]]
+                    level_widths[level] = max(1.0, sum(spans) + max(0, len(spans) - 1) * base_gap_x)
+
+                component_width = max(level_widths.values(), default=220.0)
+                component_left = base_x - component_width / 2.0
+
+                for level in range(max_level + 1):
+                    group = level_nodes[level]
+                    spans = [_node_span_x(node_id) for node_id in group]
+                    group_width = level_widths.get(level, component_width)
+                    x0 = component_left + (component_width - group_width) / 2.0
+                    y = level * level_gap_y
+                    cursor_x = x0
+                    for node_id, span in zip(group, spans):
+                        positions[node_id] = (cursor_x + span / 2.0, y)
+                        cursor_x += span + base_gap_x
+
+                self._arrange_component_by_rooms(component, positions, root)
+
+                self._resolve_component_overlaps(component, positions, root)
+
+                min_x = float("inf")
+                max_x = float("-inf")
+                for node_id in component:
+                    px, _py = positions[node_id]
+                    node_w, _node_h = self._node_collision_size(self._ap_nodes[node_id])
+                    half_w = node_w / 2.0
+                    min_x = min(min_x, px - half_w)
+                    max_x = max(max_x, px + half_w)
+                component_width = max(component_width, (max_x - min_x) + 120.0)
+
+            for edge in self._cable_edges.values():
+                a = edge.start_ap_id.strip()
+                b = edge.end_ap_id.strip()
+                if edge.cable_id in self._tree_edge_ids:
+                    continue
+                if a in component_set and b in component_set and a and b and a != b:
+                    self._cross_edge_ids.add(edge.cable_id)
 
             base_x += component_width + component_gap_x
 
-        isolated = [
-            node_id
-            for node_id in sorted(self._ap_nodes.keys())
-            if len(adjacency[node_id]) == 0
-        ]
-        if isolated:
-            max_y = max((pos[1] for pos in positions.values()), default=0.0)
-            x0 = -((isolated_cols - 1) * node_gap_x) / 2.0
-            y0 = max_y + level_gap_y
-            for idx, node_id in enumerate(isolated):
-                if node_id in self._manual_positions:
-                    continue
-                col = idx % max(1, isolated_cols)
-                row = idx // max(1, isolated_cols)
-                positions[node_id] = (x0 + col * node_gap_x, y0 + row * 150.0)
-
-        for point_id, pos in self._manual_positions.items():
-            if point_id in positions:
-                positions[point_id] = (float(pos[0]), float(pos[1]))
+        self._room_zone_defs = self._build_room_zone_defs(positions)
 
         return positions
 
+    @staticmethod
+    def _alternating_lane_slot(index: int) -> int:
+        if index <= 0:
+            return 0
+        step = (index + 1) // 2
+        return step if index % 2 == 1 else -step
+
+    @staticmethod
+    def _compact_text(value: str, max_chars: int = 22) -> str:
+        text = str(value or "").strip()
+        if len(text) <= max_chars:
+            return text
+        return text[: max(1, max_chars - 3)] + "..."
+
+    def _node_collision_size(self, node: ApNode) -> tuple[float, float]:
+        icon_w = max(56.0, float(node.width_px))
+        icon_h = max(56.0, float(node.height_px))
+        if self._compact_view_enabled:
+            compact_name = self._compact_text(node.name or node.point_id)
+            label = f"{compact_name} ({node.point_id})"
+            label_w = max(56.0, len(label) * 6.4 + 12.0)
+            label_h = 16.0
+            return max(icon_w, label_w), icon_h + label_h + 8.0
+
+        lines = [
+            str(node.name or node.point_id),
+            f"Raum: {node.room or '(ohne Raum)'}",
+            f"Verteilerfunktion: {'Ja' if node.has_distributor_function else 'Nein'}",
+            f"Status: {'angeschlossen' if node.is_connected else 'nicht angeschlossen'}",
+        ]
+        label_w = max((len(line) for line in lines), default=10) * 6.4 + 10.0
+        label_h = max(16.0, len(lines) * 15.0)
+        return icon_w + 8.0 + label_w, max(icon_h, label_h)
+
+    def _node_collision_radius(self, node_id: str) -> float:
+        node = self._ap_nodes[node_id]
+        box_w, box_h = self._node_collision_size(node)
+        return max(30.0, 0.5 * math.hypot(box_w, box_h))
+
+    def _resolve_component_overlaps(
+        self,
+        component: list[str],
+        positions: dict[str, tuple[float, float]],
+        root_id: str,
+        center: tuple[float, float] | None = None,
+        levels: dict[str, int] | None = None,
+        radial_level_min_radius: dict[int, float] | None = None,
+    ):
+        if len(component) <= 1:
+            return
+
+        ids = [node_id for node_id in component if node_id in positions]
+        if len(ids) <= 1:
+            return
+
+        radii = {node_id: self._node_collision_radius(node_id) for node_id in ids}
+
+        for _ in range(140):
+            delta: dict[str, list[float]] = {node_id: [0.0, 0.0] for node_id in ids}
+            moved = 0.0
+            for left_idx in range(len(ids)):
+                left_id = ids[left_idx]
+                x1, y1 = positions[left_id]
+                r1 = radii[left_id]
+                for right_idx in range(left_idx + 1, len(ids)):
+                    right_id = ids[right_idx]
+                    x2, y2 = positions[right_id]
+                    r2 = radii[right_id]
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    dist = math.hypot(dx, dy)
+                    required = r1 + r2 + 18.0
+                    if dist >= required:
+                        continue
+
+                    if dist <= 1e-9:
+                        seed = (left_idx * 1103515245 + right_idx * 12345) % 360
+                        angle = math.radians(float(seed))
+                        ux = math.cos(angle)
+                        uy = math.sin(angle)
+                    else:
+                        ux = dx / dist
+                        uy = dy / dist
+
+                    push = (required - dist) * 0.54
+                    left_weight = 0.5
+                    right_weight = 0.5
+                    if left_id == root_id and right_id != root_id:
+                        left_weight = 0.12
+                        right_weight = 0.88
+                    elif right_id == root_id and left_id != root_id:
+                        left_weight = 0.88
+                        right_weight = 0.12
+
+                    delta[left_id][0] -= ux * push * left_weight
+                    delta[left_id][1] -= uy * push * left_weight
+                    delta[right_id][0] += ux * push * right_weight
+                    delta[right_id][1] += uy * push * right_weight
+                    moved += push
+
+            for node_id in ids:
+                x, y = positions[node_id]
+                dx, dy = delta[node_id]
+                positions[node_id] = (x + dx, y + dy)
+
+            if center is not None and levels is not None and radial_level_min_radius is not None:
+                cx, cy = center
+                for node_id in ids:
+                    if node_id == root_id:
+                        positions[node_id] = (cx, cy)
+                        continue
+                    level = int(levels.get(node_id, 0))
+                    min_radius = float(radial_level_min_radius.get(level, 0.0))
+                    x, y = positions[node_id]
+                    vx = x - cx
+                    vy = y - cy
+                    dist = math.hypot(vx, vy)
+                    if dist < max(1.0, min_radius):
+                        if dist <= 1e-9:
+                            angle = ((sum(ord(ch) for ch in node_id) % 360) / 180.0) * math.pi
+                            vx = math.cos(angle)
+                            vy = math.sin(angle)
+                            dist = 1.0
+                        scale = min_radius / max(1e-9, dist)
+                        positions[node_id] = (cx + vx * scale, cy + vy * scale)
+
+            if moved < 0.2:
+                break
+
+    @staticmethod
+    def _normalize_room_name(room_name: str) -> str:
+        text = str(room_name or "").strip()
+        if not text or text == "(ohne Raum)":
+            return ""
+        return text
+
+    def _arrange_room_nodes(
+        self,
+        node_ids: list[str],
+        positions: dict[str, tuple[float, float]],
+        root_id: str,
+    ):
+        if not node_ids:
+            return
+
+        anchor_x = sum(positions[node_id][0] for node_id in node_ids) / max(1, len(node_ids))
+        anchor_y = sum(positions[node_id][1] for node_id in node_ids) / max(1, len(node_ids))
+
+        max_r = max((self._node_collision_radius(node_id) for node_id in node_ids), default=40.0)
+        root_in_room = root_id in node_ids
+        outer_nodes = [node_id for node_id in node_ids if node_id != root_id] if root_in_room else list(node_ids)
+        if not outer_nodes:
+            positions[root_id] = (anchor_x, anchor_y)
+            return
+
+        target_count = len(outer_nodes)
+        rx = max(110.0, (target_count * (max_r * 1.8)) / (2.0 * math.pi) + 20.0)
+        ry = max(80.0, rx * 0.68)
+
+        outer_nodes.sort(
+            key=lambda node_id: math.atan2(
+                positions[node_id][1] - anchor_y,
+                positions[node_id][0] - anchor_x,
+            )
+        )
+
+        if root_in_room:
+            positions[root_id] = (anchor_x, anchor_y)
+
+        for idx, node_id in enumerate(outer_nodes):
+            angle = -math.pi / 2.0 + (2.0 * math.pi * idx / max(1, target_count))
+            positions[node_id] = (
+                anchor_x + rx * math.cos(angle),
+                anchor_y + ry * math.sin(angle),
+            )
+
+    def _arrange_component_by_rooms(
+        self,
+        component: list[str],
+        positions: dict[str, tuple[float, float]],
+        root_id: str,
+    ):
+        grouped: dict[str, list[str]] = defaultdict(list)
+        for node_id in component:
+            room_key = self._normalize_room_name(self._ap_nodes[node_id].room)
+            if room_key:
+                grouped[room_key].append(node_id)
+
+        for room_nodes in grouped.values():
+            if len(room_nodes) <= 1:
+                continue
+            self._arrange_room_nodes(room_nodes, positions, root_id)
+
+    def _build_room_zone_defs(self, positions: dict[str, tuple[float, float]]) -> list[dict]:
+        grouped: dict[str, list[str]] = defaultdict(list)
+        for node_id, node in self._ap_nodes.items():
+            if node_id not in positions:
+                continue
+            room_key = self._normalize_room_name(node.room)
+            if not room_key:
+                continue
+            grouped[room_key].append(node_id)
+
+        zones: list[dict] = []
+        for room_name, node_ids in grouped.items():
+            min_x = float("inf")
+            min_y = float("inf")
+            max_x = float("-inf")
+            max_y = float("-inf")
+            for node_id in node_ids:
+                x, y = positions[node_id]
+                box_w, box_h = self._node_collision_size(self._ap_nodes[node_id])
+                half_w = box_w / 2.0
+                half_h = box_h / 2.0
+                min_x = min(min_x, x - half_w)
+                min_y = min(min_y, y - half_h)
+                max_x = max(max_x, x + half_w)
+                max_y = max(max_y, y + half_h)
+
+            pad_x = 52.0
+            pad_y = 44.0
+            zones.append(
+                {
+                    "room": room_name,
+                    "cx": (min_x + max_x) / 2.0,
+                    "cy": (min_y + max_y) / 2.0,
+                    "rx": max(72.0, (max_x - min_x) / 2.0 + pad_x),
+                    "ry": max(56.0, (max_y - min_y) / 2.0 + pad_y),
+                    "count": len(node_ids),
+                }
+            )
+        return zones
+
+    def _draw_room_zones(self):
+        for idx, zone in enumerate(self._room_zone_defs):
+            cx = float(zone["cx"])
+            cy = float(zone["cy"])
+            rx = float(zone["rx"])
+            ry = float(zone["ry"])
+            room_name = str(zone["room"])
+            rect = QRectF(cx - rx, cy - ry, 2.0 * rx, 2.0 * ry)
+
+            hue = (sum(ord(ch) for ch in room_name) + idx * 37) % 360
+            stroke = QColor.fromHsv(hue, 120, 235, 200)
+            fill = QColor.fromHsv(hue, 70, 140, 38)
+
+            ellipse = QGraphicsEllipseItem(rect)
+            ellipse.setPen(QPen(stroke, 1.8, Qt.PenStyle.DashLine))
+            ellipse.setBrush(QBrush(fill))
+            ellipse.setZValue(-30.0)
+            ellipse.setData(0, "room-zone")
+            self.scene.addItem(ellipse)
+
+            title = QGraphicsSimpleTextItem(room_name)
+            f = title.font()
+            f.setPointSizeF(max(9.0, self._uniform_font_pt))
+            title.setFont(f)
+            title.setBrush(QBrush(stroke))
+            title.setPos(cx - rx + 12.0, cy - ry + 8.0)
+            title.setZValue(-20.0)
+            title.setData(0, "room-zone-label")
+            self.scene.addItem(title)
+
     def _draw_cables(self, positions: dict[str, tuple[float, float]]):
         pair_lane_index: dict[tuple[str, str], int] = defaultdict(int)
+        incident_edges: dict[str, list[tuple[str, float, float]]] = defaultdict(list)
+        for edge in self._cable_edges.values():
+            start = edge.start_ap_id.strip()
+            end = edge.end_ap_id.strip()
+            if not start or not end or start not in positions or end not in positions or start == end:
+                continue
+            x1, y1 = positions[start]
+            x2, y2 = positions[end]
+            incident_edges[start].append((edge.cable_id, x2, y2))
+            incident_edges[end].append((edge.cable_id, x1, y1))
+
+        fan_offsets: dict[str, dict[str, float]] = defaultdict(dict)
+        fan_step = 16.0
+        for point_id, links in incident_edges.items():
+            ordered = sorted(links, key=lambda item: (item[2], item[1], item[0]))
+            half = (len(ordered) - 1) / 2.0
+            for idx, (cable_id, _ox, _oy) in enumerate(ordered):
+                fan_offsets[point_id][cable_id] = (idx - half) * fan_step
+
+        tree_lane_index: dict[tuple[int, int], int] = defaultdict(int)
         for edge in self._cable_edges.values():
             points: list[tuple[float, float]] = []
             start = edge.start_ap_id.strip()
@@ -1586,19 +2072,82 @@ class ElecSchemaWindow(QMainWindow):
 
             if len(points) == 2:
                 (x1, y1), (x2, y2) = points
+                is_cross_edge = edge.cable_id in self._cross_edge_ids
                 key_a, key_b = sorted([start or edge.cable_id, end or edge.cable_id])
                 pair_key = (key_a, key_b)
                 lane = pair_lane_index[pair_key]
                 pair_lane_index[pair_key] += 1
 
-                lane_step = 22.0
+                lane_step = 14.0 if is_cross_edge else 18.0
                 lane_offset = (lane - (pair_lane_index[pair_key] - 1) / 2.0) * lane_step
                 path = QPainterPath()
-                path.moveTo(x1, y1 + lane_offset)
-                path.lineTo(x2, y2 + lane_offset)
+                if self._layout_mode == "radial":
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    length = math.hypot(dx, dy)
+                    nx = -dy / length if length > 1e-9 else 0.0
+                    ny = dx / length if length > 1e-9 else 0.0
+                    start_x = x1 + nx * lane_offset * 0.65
+                    start_y = y1 + ny * lane_offset * 0.65
+                    end_x = x2 + nx * lane_offset * 0.65
+                    end_y = y2 + ny * lane_offset * 0.65
+                    if is_cross_edge:
+                        ctrl_x = (start_x + end_x) / 2.0 + nx * 44.0
+                        ctrl_y = (start_y + end_y) / 2.0 + ny * 44.0
+                        path.moveTo(start_x, start_y)
+                        path.quadTo(ctrl_x, ctrl_y, end_x, end_y)
+                        label_x = ctrl_x + 6.0
+                        label_y = ctrl_y - 12.0
+                    else:
+                        path.moveTo(start_x, start_y)
+                        path.lineTo(end_x, end_y)
+                        label_x = (start_x + end_x) / 2.0 + 6.0
+                        label_y = (start_y + end_y) / 2.0 - 12.0
+                    start_pos = QPointF(start_x, start_y)
+                    end_pos = QPointF(end_x, end_y)
+                elif is_cross_edge:
+                    ctrl_x = (x1 + x2) / 2.0
+                    ctrl_y = min(y1, y2) - 90.0 - abs(lane_offset)
+                    path.moveTo(x1, y1)
+                    path.quadTo(ctrl_x, ctrl_y, x2, y2)
+                    label_x = ctrl_x + 6.0
+                    label_y = (ctrl_y + (y1 + y2) / 2.0) / 2.0 - 8.0
+                    start_pos = QPointF(x1, y1)
+                    end_pos = QPointF(x2, y2)
+                else:
+                    start_fan = fan_offsets.get(start, {}).get(edge.cable_id, 0.0)
+                    end_fan = fan_offsets.get(end, {}).get(edge.cable_id, 0.0)
+                    y_dir = 1.0 if y2 >= y1 else -1.0
+                    stem = 26.0
+                    inner_start_y = y1 + y_dir * stem
+                    inner_end_y = y2 - y_dir * stem
+                    if (y_dir > 0 and inner_start_y > inner_end_y) or (y_dir < 0 and inner_start_y < inner_end_y):
+                        mid_y = (y1 + y2) / 2.0
+                        inner_start_y = mid_y
+                        inner_end_y = mid_y
 
-                label_x = (x1 + x2) / 2.0 + 6.0
-                label_y = (y1 + y2) / 2.0 + lane_offset - 18.0
+                    low_band = int(round(min(y1, y2) / 80.0))
+                    high_band = int(round(max(y1, y2) / 80.0))
+                    lane_key = (low_band, high_band)
+                    lane_i = tree_lane_index[lane_key]
+                    tree_lane_index[lane_key] += 1
+                    lane_slot = self._alternating_lane_slot(lane_i)
+                    lane_x = (x1 + x2) / 2.0 + lane_slot * 28.0 + lane_offset * 0.45
+
+                    start_stub_y = y1 + y_dir * 12.0
+                    end_stub_y = y2 - y_dir * 12.0
+                    path.moveTo(x1, y1)
+                    path.lineTo(x1 + start_fan, start_stub_y)
+                    path.lineTo(x1 + start_fan, inner_start_y)
+                    path.lineTo(lane_x, inner_start_y)
+                    path.lineTo(lane_x, inner_end_y)
+                    path.lineTo(x2 + end_fan, inner_end_y)
+                    path.lineTo(x2 + end_fan, end_stub_y)
+                    path.lineTo(x2, y2)
+                    label_x = lane_x + 6.0
+                    label_y = (inner_start_y + inner_end_y) / 2.0 - 12.0
+                    start_pos = QPointF(x1, y1)
+                    end_pos = QPointF(x2, y2)
             elif len(points) == 1:
                 x1, y1 = points[0]
                 x2, y2 = x1 + 180.0, y1 + 40.0
@@ -1608,11 +2157,12 @@ class ElecSchemaWindow(QMainWindow):
 
                 label_x = (x1 + x2) / 2.0 + 6.0
                 label_y = (y1 + y2) / 2.0 - 18.0
+                lane_offset = 0.0
+                start_pos = QPointF(x1, y1)
+                end_pos = QPointF(x2, y2)
             else:
                 continue
 
-            start_pos = QPointF(x1, y1 + lane_offset) if len(points) == 2 else QPointF(x1, y1)
-            end_pos = QPointF(x2, y2 + lane_offset) if len(points) == 2 else QPointF(x2, y2)
             self._cable_endpoints_scene[edge.cable_id] = (start_pos, end_pos)
 
             item = _CablePathItem(
@@ -1625,28 +2175,37 @@ class ElecSchemaWindow(QMainWindow):
             )
             self._cable_items[edge.cable_id] = item
             is_selected = edge.cable_id in self._selected_cable_ids
+            is_cross_edge = edge.cable_id in self._cross_edge_ids
             pen_color = QColor(edge.color)
+            if is_cross_edge:
+                pen_color.setAlpha(150)
             if is_selected:
                 pen_color = pen_color.lighter(165)
-            pen_width = max(0.5, float(edge.stroke_width_px)) + (1.8 if is_selected else 0.0)
+            base_width = max(0.5, float(edge.stroke_width_px))
+            if is_cross_edge:
+                base_width = max(0.8, base_width * 0.85)
+            pen_width = base_width + (1.8 if is_selected else 0.0)
             pen = QPen(pen_color, pen_width)
+            pen.setStyle(Qt.PenStyle.DashLine if is_cross_edge else _line_style_to_pen_style(edge.line_style))
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             item.setPen(pen)
-            item.setZValue(10.0)
+            item.setZValue(6.0 if is_cross_edge else 10.0)
             self.scene.addItem(item)
 
             label = (
                 f"{edge.name or edge.cable_id} | {edge.cable_type or '-'} | "
                 f"{edge.length_m:.2f} m"
             )
-            text = QGraphicsSimpleTextItem(label)
-            font = text.font()
-            font.setPointSizeF(self._uniform_font_pt)
-            text.setFont(font)
-            text.setBrush(QBrush(QColor("#ffffff")))
-            text.setPos(label_x, label_y)
-            self.scene.addItem(text)
+            show_label = self._show_all_cable_labels or is_selected
+            if show_label:
+                text = QGraphicsSimpleTextItem(label)
+                font = text.font()
+                font.setPointSizeF(self._uniform_font_pt)
+                text.setFont(font)
+                text.setBrush(QBrush(QColor("#ffffff")))
+                text.setPos(label_x, label_y)
+                self.scene.addItem(text)
 
             if len(points) == 1:
                 open_tag = QGraphicsSimpleTextItem("(offen)")
@@ -1724,6 +2283,7 @@ class ElecSchemaWindow(QMainWindow):
             )
             self._ap_items[node.point_id] = base
             base.setPos(x, y)
+            base.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
             base.setBrush(QBrush(fill))
             base.setPen(QPen(color, 3.0 if node.point_id in self._selected_ap_ids else 2.0))
             base.setZValue(20.0)
@@ -1733,18 +2293,25 @@ class ElecSchemaWindow(QMainWindow):
 
             distributor = "Ja" if node.has_distributor_function else "Nein"
             connected = "angeschlossen" if node.is_connected else "nicht angeschlossen"
-            label = (
-                f"{node.name or node.point_id}\n"
-                f"Raum: {node.room or '(ohne Raum)'}\n"
-                f"Verteilerfunktion: {distributor}\n"
-                f"Status: {connected}"
-            )
+            if self._compact_view_enabled:
+                compact_name = self._compact_text(node.name or node.point_id)
+                label = f"{compact_name} ({node.point_id})"
+            else:
+                label = (
+                    f"{node.name or node.point_id}\n"
+                    f"Raum: {node.room or '(ohne Raum)'}\n"
+                    f"Verteilerfunktion: {distributor}\n"
+                    f"Status: {connected}"
+                )
             text = QGraphicsSimpleTextItem(label, base)
             font = text.font()
             font.setPointSizeF(self._uniform_font_pt)
             text.setFont(font)
             text.setBrush(QBrush(QColor("#ffffff")))
-            text.setPos(w / 2 + 8.0, -h / 2)
+            if self._compact_view_enabled:
+                text.setPos(-w / 2, h / 2 + 6.0)
+            else:
+                text.setPos(w / 2 + 8.0, -h / 2)
             text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
     def _draw_symbol(self, parent_item: QGraphicsRectItem, rect: QRectF, node: ApNode):
@@ -1860,18 +2427,7 @@ class ElecSchemaWindow(QMainWindow):
                 self._set_selection(set(self._selected_ap_ids), set(self._selected_cable_ids), self._active_cable_id)
             else:
                 self._set_selection({point_id}, set(), None)
-
-        if point_id not in self._selected_ap_ids:
-            return False
-
-        self._group_drag_anchor_id = point_id
-        self._group_drag_active = True
-        self._group_drag_orig_positions = {
-            pid: QPointF(self._ap_items[pid].pos())
-            for pid in self._selected_ap_ids
-            if pid in self._ap_items
-        }
-        return True
+        return False
 
     def _on_ap_node_position_change(self, point_id: str, target_pos: QPointF) -> QPointF:
         if (
@@ -2072,22 +2628,7 @@ class ElecSchemaWindow(QMainWindow):
         event.accept()
 
     def _start_cable_group_drag(self, scene_pos: QPointF):
-        ap_ids = self._collect_ap_ids_for_group_move()
-
-        if not ap_ids:
-            self._cable_drag_state = None
-            return
-
-        self._cable_drag_state = {
-            "cable_id": self._active_cable_id,
-            "start_scene": QPointF(scene_pos),
-            "ap_ids": ap_ids,
-            "orig_positions": {
-                point_id: QPointF(self._ap_items[point_id].pos())
-                for point_id in ap_ids
-                if point_id in self._ap_items
-            },
-        }
+        self._cable_drag_state = None
 
     def _collect_ap_ids_for_group_move(self) -> set[str]:
         ap_ids = set(self._selected_ap_ids)
@@ -2118,19 +2659,8 @@ class ElecSchemaWindow(QMainWindow):
         return rect
 
     def _start_view_group_drag(self, scene_pos: QPointF):
-        ap_ids = self._collect_ap_ids_for_group_move()
-        if not ap_ids:
-            self._view_group_drag_state = None
-            return False
-        self._view_group_drag_state = {
-            "start_scene": QPointF(scene_pos),
-            "orig_positions": {
-                point_id: QPointF(self._ap_items[point_id].pos())
-                for point_id in ap_ids
-                if point_id in self._ap_items
-            },
-        }
-        return True
+        self._view_group_drag_state = None
+        return False
 
     def _update_view_group_drag(self, scene_pos: QPointF):
         state = self._view_group_drag_state

@@ -5392,15 +5392,10 @@ class AppWindow(QMainWindow):
             return
         ap_nodes, cable_edges, room_map = self._build_schema_data()
         if self._elec_schema_window is not None:
-            # Keep only manual positions of currently existing APs.
-            valid = {node.point_id for node in ap_nodes}
-            self._elec_schema_ap_positions = {
-                pid: pos for pid, pos in self._elec_schema_ap_positions.items() if pid in valid
-            }
+            self._elec_schema_ap_positions = {}
             self._elec_schema_window.set_data(
                 ap_nodes,
                 cable_edges,
-                manual_positions=self._elec_schema_ap_positions,
                 room_choices=self._collect_room_choices(),
             )
         if self._schaltplan_window is not None:
