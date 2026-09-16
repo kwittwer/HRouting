@@ -19,7 +19,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QGraphicsSimpleTextItem  # noqa: E402
 
 from gui.app_window import AppWindow  # noqa: E402
 from gui.elec_schema_window import (  # noqa: E402
@@ -101,7 +101,7 @@ def _sample_consumer_node() -> ApNode:
 def _sample_cable() -> CableEdge:
     return CableEdge(
         cable_id="EK-1",
-        name="Küche Zuleitung",
+        name="Küche Zuleitung:UV_HWR",
         cable_type="NYM 3x1,5",
         length_m=8.5,
         color="#ff9800",
@@ -109,6 +109,14 @@ def _sample_cable() -> CableEdge:
         start_ap_id="AP-UV",
         end_ap_id="AP-1",
     )
+
+
+def _scene_texts(window: ElecSchemaWindow) -> list[str]:
+    return [item.text() for item in window.scene.items() if isinstance(item, QGraphicsSimpleTextItem)]
+
+
+def _count_scene_tag(window: ElecSchemaWindow, tag: str) -> int:
+    return sum(1 for item in window.scene.items() if item.data(0) == tag)
 
 
 @pytest.mark.gui
@@ -212,8 +220,16 @@ def test_elec_schema_window_renders_and_delete_signals(app):
         )
 
         assert len(window.scene.items()) > 0
+        assert window._layout_mode == "radial"
         assert window.cmb_root_ap.count() >= 3
         assert window.cmb_root_ap.findData("AP-UV") >= 0
+        assert hasattr(window, "chk_rooms")
+        assert not hasattr(window, "cmb_layout_mode")
+        assert not hasattr(window, "chk_compact")
+        assert not hasattr(window, "chk_room_colors")
+        assert not hasattr(window, "btn_pack_tight")
+        assert not hasattr(window, "chk_cable_labels")
+        assert not hasattr(window, "btn_refresh")
 
         zoom_before = window.lbl_zoom.text()
         QTest.mouseClick(window.btn_zoom_in, Qt.MouseButton.LeftButton)
@@ -228,7 +244,7 @@ def test_elec_schema_window_renders_and_delete_signals(app):
 
 
 @pytest.mark.gui
-def test_elec_schema_layout_avoids_ap_overlaps(app):
+def test_elec_schema_renders_state_cards_with_attributes(app):
     window = ElecSchemaWindow()
     try:
         ap_nodes = [
@@ -279,18 +295,23 @@ def test_elec_schema_layout_avoids_ap_overlaps(app):
 
         window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges, room_choices=[])
 
-        rects = {
-            point_id: item.sceneBoundingRect().adjusted(2.0, 2.0, -2.0, -2.0)
-            for point_id, item in window._ap_items.items()
-        }
-        for (left_id, left_rect), (right_id, right_rect) in itertools.combinations(rects.items(), 2):
-            assert not left_rect.intersects(right_rect), f"AP-Überlappung: {left_id} vs {right_id}"
+        texts = _scene_texts(window)
+        assert any("UV (AP-UV)" in text for text in texts)
+        assert any("Raum: EG" in text for text in texts)
+        assert any("Typ: Standard" in text for text in texts)
+        assert any("Status: angeschlossen" in text for text in texts)
+        xs = [point.x() for point in window._ap_scene_positions.values()]
+        ys = [point.y() for point in window._ap_scene_positions.values()]
+        assert abs(window._ap_scene_positions["AP-UV"].x()) < 1e-6
+        assert abs(window._ap_scene_positions["AP-UV"].y()) < 1e-6
+        assert max(xs) - min(xs) < 700.0
+        assert max(ys) - min(ys) < 900.0
     finally:
         window.deleteLater()
 
 
 @pytest.mark.gui
-def test_elec_schema_dense_radial_layout_avoids_ap_overlaps(app):
+def test_elec_schema_places_disconnected_components_in_grid(app):
     window = ElecSchemaWindow()
     try:
         ap_nodes = [
@@ -308,51 +329,110 @@ def test_elec_schema_dense_radial_layout_avoids_ap_overlaps(app):
                 height_px=72.0,
             )
         ]
-        cable_edges: list[CableEdge] = []
-        for idx in range(1, 31):
-            point_id = f"AP-{idx}"
-            ap_nodes.append(
+        cable_edges: list[CableEdge] = [
+            CableEdge(
+                cable_id="EK-1",
+                name="Kabel 1",
+                cable_type="NYM 3x1,5",
+                length_m=10.0,
+                color="#ff9800",
+                stroke_width_px=2.0,
+                start_ap_id="AP-UV",
+                end_ap_id="AP-1",
+            )
+        ]
+        ap_nodes.append(
+            ApNode(
+                point_id="AP-1",
+                name="Verbraucher 1",
+                room="EG",
+                ap_type="standard",
+                has_distributor_function=False,
+                is_connected=True,
+                color="#ff9800",
+                icon_path="",
+                builtin_symbol="Steckdose",
+                width_px=72.0,
+                height_px=72.0,
+            )
+        )
+        ap_nodes.extend(
+            [
                 ApNode(
-                    point_id=point_id,
-                    name=f"Sehr langer Verbrauchername Nummer {idx}",
-                    room="EG",
+                    point_id="AP-2",
+                    name="Neben 2",
+                    room="Garage",
                     ap_type="standard",
                     has_distributor_function=False,
                     is_connected=True,
-                    color="#ff9800",
+                    color="#43aa8b",
                     icon_path="",
                     builtin_symbol="Steckdose",
                     width_px=72.0,
                     height_px=72.0,
-                )
-            )
-            cable_edges.append(
-                CableEdge(
-                    cable_id=f"EK-{idx}",
-                    name=f"Kabel {idx}",
-                    cable_type="NYM 3x1,5",
-                    length_m=10.0,
-                    color="#ff9800",
-                    stroke_width_px=2.0,
-                    start_ap_id="AP-UV",
-                    end_ap_id=point_id,
-                )
-            )
-
+                ),
+                ApNode(
+                    point_id="AP-3",
+                    name="Neben 3",
+                    room="Garage",
+                    ap_type="standard",
+                    has_distributor_function=False,
+                    is_connected=True,
+                    color="#43aa8b",
+                    icon_path="",
+                    builtin_symbol="Steckdose",
+                    width_px=72.0,
+                    height_px=72.0,
+                ),
+            ]
+        )
         window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges, room_choices=[])
 
-        rects = {
-            point_id: item.sceneBoundingRect().adjusted(3.0, 3.0, -3.0, -3.0)
-            for point_id, item in window._ap_items.items()
-        }
-        for (left_id, left_rect), (right_id, right_rect) in itertools.combinations(rects.items(), 2):
-            assert not left_rect.intersects(right_rect), f"Dichtes Layout mit AP-Überlappung: {left_id} vs {right_id}"
+        root_point = window._ap_scene_positions["AP-UV"]
+        side_left = window._ap_scene_positions["AP-2"]
+        side_right = window._ap_scene_positions["AP-3"]
+        assert window._layout_mode == "radial"
+        assert abs(root_point.x()) < 1e-6
+        assert abs(root_point.y()) < 1e-6
+        assert side_left.y() > 200.0
+        assert side_right.y() > 200.0
+        assert abs(side_left.y() - side_right.y()) < 80.0
+        assert abs(side_left.x() - side_right.x()) > 120.0
+        assert len(window._ap_items) == 4
+        assert len(window._cable_items) == 1
     finally:
         window.deleteLater()
 
 
 @pytest.mark.gui
-def test_elec_schema_draws_room_ellipses_and_contains_room_aps(app):
+def test_elec_schema_cable_label_with_colon_renders(app):
+    window = ElecSchemaWindow()
+    try:
+        ap_nodes = [_sample_uv_node(), _sample_consumer_node()]
+        cable_edges = [
+            CableEdge(
+                cable_id="EK-1",
+                name="KBL_UV_Zählerschrank:UV_HWR",
+                cable_type="NYM 5x10",
+                length_m=3.0,
+                color="#ff9800",
+                stroke_width_px=2.0,
+                start_ap_id="AP-UV",
+                end_ap_id="AP-1",
+            )
+        ]
+
+        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges, room_choices=[])
+        window._set_selection(set(), {"EK-1"}, "EK-1")
+
+        texts = _scene_texts(window)
+        assert any("KBL_UV_Zählerschrank:UV_HWR" in text for text in texts)
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_elec_schema_room_controls_and_zones(app):
     window = ElecSchemaWindow()
     try:
         ap_nodes = [
@@ -360,6 +440,7 @@ def test_elec_schema_draws_room_ellipses_and_contains_room_aps(app):
                 point_id="AP-1",
                 name="Steckdose Wohnen",
                 room="Wohnzimmer",
+                room_id="room-wohnen",
                 ap_type="standard",
                 has_distributor_function=False,
                 is_connected=True,
@@ -373,6 +454,7 @@ def test_elec_schema_draws_room_ellipses_and_contains_room_aps(app):
                 point_id="AP-2",
                 name="Lampe Wohnen",
                 room="Wohnzimmer",
+                room_id="room-wohnen",
                 ap_type="standard",
                 has_distributor_function=False,
                 is_connected=True,
@@ -386,6 +468,7 @@ def test_elec_schema_draws_room_ellipses_and_contains_room_aps(app):
                 point_id="AP-3",
                 name="Steckdose Kueche",
                 room="Kueche",
+                room_id="room-kueche",
                 ap_type="standard",
                 has_distributor_function=False,
                 is_connected=True,
@@ -409,28 +492,28 @@ def test_elec_schema_draws_room_ellipses_and_contains_room_aps(app):
             )
         ]
 
-        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges, room_choices=[])
+        window.set_data(
+            ap_nodes=ap_nodes,
+            cable_edges=cable_edges,
+            room_choices=[],
+            room_styles={
+                "room-wohnen": {"name": "Wohnzimmer", "color": "#3366cc"},
+                "room-kueche": {"name": "Kueche", "color": "#00aa88"},
+            },
+        )
 
-        room_zone_items = [
-            item
-            for item in window.scene.items()
-            if hasattr(item, "data") and item.data(0) == "room-zone"
-        ]
-        assert len(room_zone_items) >= 2
+        zones_before = _count_scene_tag(window, "room-zone")
+        assert zones_before >= 2
+        assert _count_scene_tag(window, "room-zone-label") == 0
+        window.chk_rooms.setChecked(False)
+        assert _count_scene_tag(window, "room-zone") == 0
 
-        assert len(window._room_zone_defs) >= 2
-        room_to_zone = {str(zone["room"]): zone for zone in window._room_zone_defs}
-        assert "Wohnzimmer" in room_to_zone
+        window.chk_rooms.setChecked(True)
+        assert _count_scene_tag(window, "room-zone") >= 2
+        assert _count_scene_tag(window, "room-zone-label") == 0
 
-        for point_id in ("AP-1", "AP-2"):
-            x, y = window._ap_scene_positions[point_id].x(), window._ap_scene_positions[point_id].y()
-            zone = room_to_zone["Wohnzimmer"]
-            cx = float(zone["cx"])
-            cy = float(zone["cy"])
-            rx = float(zone["rx"])
-            ry = float(zone["ry"])
-            value = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2
-            assert value <= 1.0
+        texts = _scene_texts(window)
+        assert any("Steckdose Wohnen (AP-1)" in text for text in texts)
     finally:
         window.deleteLater()
 

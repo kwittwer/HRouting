@@ -4741,6 +4741,15 @@ class AppWindow(QMainWindow):
             choices.append((room_id, room.name or room_id))
         return sorted(choices, key=lambda entry: entry[1].lower())
 
+    def _collect_room_styles(self) -> dict[str, dict[str, str]]:
+        styles: dict[str, dict[str, str]] = {}
+        for room_id, room in self._document.elements["elec_rooms"].items():
+            styles[room_id] = {
+                "name": str(room.name or room_id),
+                "color": str(room.color or ""),
+            }
+        return styles
+
     def _collect_floorplan_choices(self) -> list[tuple[str, str]]:
         names_by_id: dict[str, str] = {}
         for fp_id, floorplan in self._document.floorplans.items():
@@ -4838,6 +4847,7 @@ class AppWindow(QMainWindow):
                 point_id=point_id,
                 name=point.name or point_id,
                 room=room_map.get(point_id, "(ohne Raum)"),
+                room_id=self._resolve_existing_ap_room_id(point),
                 ap_type=ap_type,
                 has_distributor_function=ap_type in {"uv", "up_distribution", "hak", "zaehler"},
                 is_connected=point_id in connected_points,
@@ -5397,6 +5407,7 @@ class AppWindow(QMainWindow):
                 ap_nodes,
                 cable_edges,
                 room_choices=self._collect_room_choices(),
+                room_styles=self._collect_room_styles(),
             )
         if self._schaltplan_window is not None:
             self._schaltplan_window.set_data(
