@@ -47,7 +47,7 @@ from gui.color_dialog_state import (
     capture_custom_colors,
 )
 from gui.pdf_export_dialog import PdfExportConfigDialog
-from gui.elec_schema_window import ElecSchemaWindow, ApNode, CableEdge
+from gui.elec_topology_types import ApNode, CableEdge
 from gui.schaltplan_window import SchaltplanWindow
 from logic.schaltplan_generator import build_uv_hierarchy, get_uv_circuits
 from logic.elec_schematic import sanitize_elec_schematic, infer_elec_schematic_from_legacy
@@ -84,7 +84,6 @@ class MainWindow(QMainWindow):
         self._furniture_counter = 0
         self._pdf_export_pages: list[dict] = []
         self._pdf_export_dialog = None
-        self._elec_schema_window: ElecSchemaWindow | None = None
         self._elec_schema_ap_positions: dict[str, list[float]] = {}
         self._schaltplan_window: SchaltplanWindow | None = None
         self._elec_point_room_map: dict[str, str] = {}
@@ -387,7 +386,6 @@ class MainWindow(QMainWindow):
 
         # ── Extras ──
         extras_menu = mb.addMenu("&Extras")
-        extras_menu.addAction("🧠 Elektro-Strangschema…", self._open_elec_schema_window)
         extras_menu.addAction("📐 Schaltplan…", self._open_schaltplan_window)
         extras_menu.addSeparator()
         extras_menu.addAction("📤 KiCad exportieren…", self._export_to_kicad)
@@ -569,7 +567,6 @@ class MainWindow(QMainWindow):
         main_state["sidebar_width"] = int(self.param_panel.width())
         return {
             "main_window": main_state,
-            "elec_schema_window": self._capture_window_state(self._elec_schema_window),
             "schaltplan_window": self._capture_window_state(self._schaltplan_window),
             "pdf_export_dialog": self._capture_window_state(self._pdf_export_dialog),
         }
@@ -590,10 +587,6 @@ class MainWindow(QMainWindow):
             ):
                 self._main_splitter.setSizes([int(splitter_sizes[0]), int(splitter_sizes[1])])
 
-        self._restore_window_state(
-            self._elec_schema_window,
-            self._project_ui_state.get("elec_schema_window", {}),
-        )
         self._restore_window_state(
             self._schaltplan_window,
             self._project_ui_state.get("schaltplan_window", {}),
@@ -758,7 +751,7 @@ class MainWindow(QMainWindow):
             self.setUpdatesEnabled(window_updates_enabled)
             self.canvas.update()
             self._suspend_schema_refresh = False
-            self._refresh_elec_schema_window()
+            self._refresh_electrical_aux_windows()
             # _undo_blocked stays True – caller or QTimer will reset it
             self._refresh_schaltplan_window()
 
@@ -1070,8 +1063,8 @@ class MainWindow(QMainWindow):
         self._main_splitter.splitterMoved.connect(self._mark_dirty_debounced)
 
         # Elektro-Strangschema live aktualisieren
-        self.canvas.elec_point_placed.connect(self._refresh_elec_schema_window)
-        self.canvas.elec_cable_changed.connect(self._refresh_elec_schema_window)
+        self.canvas.elec_point_placed.connect(self._refresh_electrical_aux_windows)
+        self.canvas.elec_cable_changed.connect(self._refresh_electrical_aux_windows)
 
         # Schaltplan live aktualisieren
         self.canvas.elec_point_placed.connect(self._refresh_schaltplan_window)
@@ -2335,12 +2328,12 @@ class MainWindow(QMainWindow):
     def _on_label_size_changed(self, item_id: str, size: float):
         self.canvas.set_label_font_size(item_id, size)
         if item_id in self.param_panel.elec_point_panels or item_id in self.param_panel.elec_cable_panels:
-            self._refresh_elec_schema_window()
+            self._refresh_electrical_aux_windows()
 
     def _on_label_visibility_changed(self, item_id: str, visible: bool):
         self.canvas.set_label_visible(item_id, visible)
         if item_id in self.param_panel.elec_point_panels or item_id in self.param_panel.elec_cable_panels:
-            self._refresh_elec_schema_window()
+            self._refresh_electrical_aux_windows()
 
     def _compute_polygon_area_mm2(self, circuit_id: str) -> float | None:
         px_points = self.canvas.get_polygon_px(circuit_id)
@@ -2509,7 +2502,7 @@ class MainWindow(QMainWindow):
     def _on_elec_point_placed(self, point_id: str):
         self._update_elec_point_room_assignments()
         self._update_up_distribution_cable_choices_for_point(point_id)
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
         self.status.showMessage(
             f"✅ Anschlusspunkt {point_id} platziert.")
 
@@ -2518,15 +2511,15 @@ class MainWindow(QMainWindow):
         if params:
             self.canvas.update_elec_point_size(
                 point_id, params["width"], params["height"])
-            self._refresh_elec_schema_window()
+            self._refresh_electrical_aux_windows()
 
     def _on_elec_point_icon_changed(self, point_id: str, path: str):
         self.canvas.set_elec_point_icon(point_id, path)
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_color_changed(self, point_id: str, color: str):
         self.canvas.set_color(point_id, QColor(color))
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_name_changed(self, point_id: str, name: str):
         self.canvas._label_map[point_id] = name
@@ -2535,49 +2528,49 @@ class MainWindow(QMainWindow):
             if point_id in {start_ap_id, end_ap_id}:
                 self._update_cable_ap_labels(cable_id)
         self.canvas.update()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_position_changed(self, point_id: str, position: str):
         self.canvas._elec_point_position[point_id] = position
         self._mark_dirty()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_height_changed(self, point_id: str, height: float):
         self.canvas._elec_point_height[point_id] = height
         self._mark_dirty()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_note_changed(self, point_id: str, note: str):
         self.canvas._elec_point_notes[point_id] = note
         self._mark_dirty_debounced()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_smarthome_changed(self, point_id: str, device: str):
         self.canvas._elec_point_smarthome_device[point_id] = device
         self._mark_dirty_debounced()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_smarthome_color_changed(self, point_id: str, color: str):
         self.canvas._elec_point_smarthome_device_color[point_id] = color
         self._mark_dirty_debounced()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_ap_type_changed(self, point_id: str, ap_type: str):
         self._mark_dirty()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_uv_config_changed(self, point_id: str):
         self._mark_dirty()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_point_up_distribution_changed(self, point_id: str):
         self._mark_dirty()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_visibility_changed(self, item_id: str, visible: bool):
         self.canvas._elec_visible[item_id] = visible
         self.canvas.update()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _delete_elec_point(self, point_id: str):
         self.canvas.delete_elec_point(point_id)
@@ -2586,7 +2579,7 @@ class MainWindow(QMainWindow):
         self._elec_schema_ap_positions.pop(point_id, None)
         self._update_up_distribution_cable_choices_all()
         self._update_elec_point_room_assignments()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
         self.status.showMessage(f"🗑️ Anschlusspunkt {point_id} gelöscht.")
 
     def _add_elec_room(self, fp_id: str = ""):
@@ -2658,7 +2651,7 @@ class MainWindow(QMainWindow):
                 panel.set_room_name("")
                 self.param_panel.set_elec_point_room_assignment(pid, "", "")
             self.param_panel.sort_elec_point_room_groups()
-            self._refresh_elec_schema_window()
+            self._refresh_electrical_aux_windows()
             return
 
         for pid, panel in self.param_panel.elec_point_panels.items():
@@ -2688,7 +2681,7 @@ class MainWindow(QMainWindow):
                 self._elec_point_room_map[pid] = assigned_room_id
             self.param_panel.set_elec_point_room_assignment(pid, assigned_room_id, assigned_name)
         self.param_panel.sort_elec_point_room_groups()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _add_elec_cable(self, fp_id: str = ""):
         self._elec_cable_counter += 1
@@ -2745,7 +2738,7 @@ class MainWindow(QMainWindow):
         self._update_cable_ap_labels(cable_id)
         self.param_panel.update_all_elec_point_uv_cable_choices()
         self._update_up_distribution_cable_choices_all()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
         self.status.showMessage(
             f"✅ {cable_id}: Kabel aktualisiert ({length_mm / 1000:.2f} m)")
 
@@ -2774,60 +2767,39 @@ class MainWindow(QMainWindow):
         self.canvas._label_map[cable_id] = name
         self.canvas.update()
         self._update_up_distribution_cable_choices_all()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_cable_color_changed(self, cable_id: str, color: str):
         self.canvas.set_color(cable_id, QColor(color))
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_cable_type_changed(self, cable_id: str, cable_type: str):
         self.canvas.set_elec_cable_type_text(cable_id, cable_type)
         self._mark_dirty_debounced()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_cable_type_label_visibility_changed(self, cable_id: str, visible: bool):
         self.canvas.set_elec_cable_type_label_visible(cable_id, visible)
         self._mark_dirty_debounced()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_cable_comment_changed(self, cable_id: str, comment: str):
         self.canvas._elec_cable_notes[cable_id] = comment
         self._mark_dirty_debounced()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_elec_cable_stroke_width_changed(self, cable_id: str, width: float):
         self.canvas.set_elec_cable_stroke_width(cable_id, width)
         self._mark_dirty_debounced()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _delete_elec_cable(self, cable_id: str):
         self.canvas.delete_elec_cable(cable_id)
         self.param_panel.remove_elec_cable_panel(cable_id)
         self.param_panel.update_all_elec_point_uv_cable_choices()
         self._update_up_distribution_cable_choices_all()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
         self.status.showMessage(f"🗑️ Kabelverbindung {cable_id} gelöscht.")
-
-    def _open_elec_schema_window(self):
-        if self._elec_schema_window is None:
-            self._elec_schema_window = ElecSchemaWindow(self)
-            self._elec_schema_window.add_ap_requested.connect(self._on_schema_add_ap)
-            self._elec_schema_window.add_cable_requested.connect(self._on_schema_add_cable)
-            self._elec_schema_window.delete_ap_requested.connect(self._delete_elec_point)
-            self._elec_schema_window.delete_cable_requested.connect(self._delete_elec_cable)
-            self._elec_schema_window.ap_position_changed.connect(self._on_schema_ap_position_changed)
-            self._elec_schema_window.ap_positions_changed.connect(self._on_schema_ap_positions_changed)
-            self._elec_schema_window.edit_ap_requested.connect(self._on_schema_edit_ap)
-            self._elec_schema_window.edit_cable_requested.connect(self._on_schema_edit_cable)
-            self._elec_schema_window.duplicate_selection_requested.connect(self._on_schema_duplicate_selection)
-            self._restore_window_state(
-                self._elec_schema_window,
-                self._project_ui_state.get("elec_schema_window", {}),
-            )
-        self._refresh_elec_schema_window()
-        self._elec_schema_window.show()
-        self._elec_schema_window.raise_()
-        self._elec_schema_window.activateWindow()
 
     def _collect_elec_room_choices(self) -> list[tuple[str, str]]:
         choices: list[tuple[str, str]] = []
@@ -2951,7 +2923,7 @@ class MainWindow(QMainWindow):
             self._place_schema_elec_point(point_id, room_target[0])
         else:
             self._on_place_elec_point(point_id)
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
 
     def _on_schema_add_cable(self, payload: dict):
         start_ap_id = str(payload.get("start_ap_id") or "").strip()
@@ -2986,27 +2958,11 @@ class MainWindow(QMainWindow):
         self._rebuild_schema_cable_geometry(cable_id, start_ap_id, end_ap_id)
         self.canvas.update()
         self.canvas.elec_cable_changed.emit(cable_id)
-        self._refresh_elec_schema_window()
-        if needs_pick_mode and self._elec_schema_window is not None:
-            self._elec_schema_window.start_cable_pick_mode(cable_id)
+        self._refresh_electrical_aux_windows()
 
-    def _refresh_elec_schema_window(self, *_args):
+    def _refresh_electrical_aux_windows(self, *_args):
         if self._suspend_schema_refresh:
             return
-        if self._elec_schema_window is not None:
-            valid_ids = set(self.param_panel.elec_point_panels.keys())
-            self._elec_schema_ap_positions = {
-                pid: pos
-                for pid, pos in self._elec_schema_ap_positions.items()
-                if pid in valid_ids
-            }
-            ap_nodes, cable_edges = self._build_elec_schema_data()
-            self._elec_schema_window.set_data(
-                ap_nodes,
-                cable_edges,
-                manual_positions=self._elec_schema_ap_positions,
-                room_choices=self._collect_elec_room_choices(),
-            )
         self._refresh_schaltplan_window()
 
     def _open_schaltplan_window(self):
@@ -3101,7 +3057,7 @@ class MainWindow(QMainWindow):
             return
 
         self.canvas.update()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
         self._mark_dirty()
 
     def _on_schema_edit_ap(self, point_id: str, payload: dict):
@@ -3184,7 +3140,7 @@ class MainWindow(QMainWindow):
         finally:
             panel.blockSignals(False)
         self._mark_dirty()
-        self._refresh_elec_schema_window()
+        self._refresh_electrical_aux_windows()
         self._refresh_schaltplan_window()
         self._refresh_schaltplan_window()
 

@@ -22,13 +22,8 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QGraphicsSimpleTextItem  # noqa: E402
 
 from gui.app_window import AppWindow  # noqa: E402
-from gui.elec_schema_window import (  # noqa: E402
-    ApNode,
-    CableEdge,
-    ElecSchemaWindow,
-    _AddCableDialog,
-    _EditCableDialog,
-)
+from gui.docks.topology_dock import ElecTopologyWidget  # noqa: E402
+from gui.elec_topology_types import ApNode, CableEdge  # noqa: E402
 from gui.pdf_export_dialog import PdfExportConfigDialog  # noqa: E402
 from gui.schaltplan_window import SchaltplanWindow  # noqa: E402
 from model.document import Document  # noqa: E402
@@ -111,12 +106,12 @@ def _sample_cable() -> CableEdge:
     )
 
 
-def _scene_texts(window: ElecSchemaWindow) -> list[str]:
-    return [item.text() for item in window.scene.items() if isinstance(item, QGraphicsSimpleTextItem)]
+def _scene_texts(widget: ElecTopologyWidget) -> list[str]:
+    return [item.text() for item in widget.scene.items() if isinstance(item, QGraphicsSimpleTextItem)]
 
 
-def _count_scene_tag(window: ElecSchemaWindow, tag: str) -> int:
-    return sum(1 for item in window.scene.items() if item.data(0) == tag)
+def _count_scene_text(widget: ElecTopologyWidget, text: str) -> int:
+    return sum(1 for item in widget.scene.items() if isinstance(item, QGraphicsSimpleTextItem) and item.text() == text)
 
 
 @pytest.mark.gui
@@ -173,6 +168,59 @@ def test_pdf_export_dialog_add_heating_circuit_page(app):
 
 
 @pytest.mark.gui
+def test_pdf_export_dialog_add_topology_page(app):
+    dialog = PdfExportConfigDialog(
+        pages=[_sample_page()],
+        floor_plans=[("grundriss-1", "EG")],
+        svg_size=(1000.0, 700.0),
+        topology_roots=[("AP-UV", "UV EG (AP-UV)"), ("AP-1", "Steckdose Küche (AP-1)")],
+    )
+    try:
+        initial_count = dialog.tree.topLevelItemCount()
+        QTest.mouseClick(dialog.btn_add_topology, Qt.MouseButton.LeftButton)
+
+        assert dialog.tree.topLevelItemCount() == initial_count + 1
+        current = dialog.tree.currentItem()
+        assert current is not None
+        page = current.data(0, Qt.UserRole)
+        assert isinstance(page, dict)
+        assert page.get("type") == "elektro_topology"
+        assert page.get("root_ap_id") == ""
+    finally:
+        dialog.deleteLater()
+
+
+@pytest.mark.gui
+def test_pdf_export_dialog_topology_page_root_selection(app):
+    dialog = PdfExportConfigDialog(
+        pages=[
+            {
+                "id": "topology-1",
+                "type": "elektro_topology",
+                "title": "Topologie",
+                "enabled": True,
+                "root_ap_id": "AP-1",
+            }
+        ],
+        floor_plans=[("grundriss-1", "EG")],
+        svg_size=(1000.0, 700.0),
+        topology_roots=[("AP-UV", "UV EG (AP-UV)"), ("AP-1", "Steckdose Küche (AP-1)")],
+    )
+    try:
+        page = dialog._current_page()
+        assert page is not None
+        assert dialog.cb_topology_root.currentData() == "AP-1"
+
+        dialog.cb_topology_root.setCurrentIndex(dialog.cb_topology_root.findData("AP-UV"))
+
+        updated = dialog._current_page()
+        assert updated is not None
+        assert updated.get("root_ap_id") == "AP-UV"
+    finally:
+        dialog.deleteLater()
+
+
+@pytest.mark.gui
 def test_schaltplan_window_updates_uv_selection_and_tabs(app):
     window = SchaltplanWindow()
     try:
@@ -202,50 +250,29 @@ def test_schaltplan_window_updates_uv_selection_and_tabs(app):
 
 
 @pytest.mark.gui
-def test_elec_schema_window_renders_and_delete_signals(app):
-    window = ElecSchemaWindow()
+def test_elec_topology_widget_renders_summary_and_nodes(app):
+    window = ElecTopologyWidget()
     try:
         ap_nodes = [_sample_uv_node(), _sample_consumer_node()]
         cable_edges = [_sample_cable()]
 
-        deleted_aps: list[str] = []
-        deleted_cables: list[str] = []
-        window.delete_ap_requested.connect(deleted_aps.append)
-        window.delete_cable_requested.connect(deleted_cables.append)
-
-        window.set_data(
-            ap_nodes=ap_nodes,
-            cable_edges=cable_edges,
-            room_choices=[("ER-1", "Küche")],
-        )
+        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges)
 
         assert len(window.scene.items()) > 0
-        assert window._layout_mode == "radial"
-        assert window.cmb_root_ap.count() >= 3
-        assert window.cmb_root_ap.findData("AP-UV") >= 0
-        assert hasattr(window, "chk_rooms")
-        assert not hasattr(window, "cmb_layout_mode")
-        assert not hasattr(window, "chk_compact")
-        assert not hasattr(window, "chk_room_colors")
-        assert not hasattr(window, "btn_pack_tight")
-        assert not hasattr(window, "chk_cable_labels")
-        assert not hasattr(window, "btn_refresh")
-
-        zoom_before = window.lbl_zoom.text()
-        QTest.mouseClick(window.btn_zoom_in, Qt.MouseButton.LeftButton)
-        zoom_after = window.lbl_zoom.text()
-        assert zoom_before != zoom_after
-
-        window._delete_ids(["AP-1"], ["EK-1"])
-        assert deleted_aps == ["AP-1"]
-        assert deleted_cables == ["EK-1"]
+        assert window._summary_label.text() == "Topologie: 2 APs, 1 Kabel"
+        assert _count_scene_text(window, "UV EG") == 1
+        assert _count_scene_text(window, "Steckdose Küche") == 1
+        root_pos = window._node_positions.get("AP-UV")
+        assert root_pos is not None
+        assert abs(root_pos[0]) < 1e-6
+        assert abs(root_pos[1]) < 1e-6
     finally:
         window.deleteLater()
 
 
 @pytest.mark.gui
-def test_elec_schema_renders_state_cards_with_attributes(app):
-    window = ElecSchemaWindow()
+def test_elec_topology_renders_multiple_connected_nodes(app):
+    window = ElecTopologyWidget()
     try:
         ap_nodes = [
             ApNode(
@@ -293,26 +320,32 @@ def test_elec_schema_renders_state_cards_with_attributes(app):
                 )
             )
 
-        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges, room_choices=[])
+        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges)
 
         texts = _scene_texts(window)
-        assert any("UV (AP-UV)" in text for text in texts)
-        assert any("Raum: EG" in text for text in texts)
-        assert any("Typ: Standard" in text for text in texts)
-        assert any("Status: angeschlossen" in text for text in texts)
-        xs = [point.x() for point in window._ap_scene_positions.values()]
-        ys = [point.y() for point in window._ap_scene_positions.values()]
-        assert abs(window._ap_scene_positions["AP-UV"].x()) < 1e-6
-        assert abs(window._ap_scene_positions["AP-UV"].y()) < 1e-6
-        assert max(xs) - min(xs) < 700.0
-        assert max(ys) - min(ys) < 900.0
+        assert any("UV" == text for text in texts)
+        assert any("Verbraucher 1" == text for text in texts)
+        assert window._summary_label.text() == "Topologie: 7 APs, 6 Kabel"
+        root_pos = window._node_positions.get("AP-UV")
+        assert root_pos is not None
+        assert abs(root_pos[0]) < 1e-6
+        assert abs(root_pos[1]) < 1e-6
+        node_positions = [window._node_positions[f"AP-{idx}"] for idx in range(1, 7)]
+        radii = [((x * x) + (y * y)) ** 0.5 for x, y in node_positions]
+        assert min(radii) >= 120.0
+        min_gap = min(
+            (((ax - bx) ** 2) + ((ay - by) ** 2)) ** 0.5
+            for index, (ax, ay) in enumerate(node_positions)
+            for bx, by in node_positions[index + 1 :]
+        )
+        assert min_gap >= 80.0
     finally:
         window.deleteLater()
 
 
 @pytest.mark.gui
-def test_elec_schema_places_disconnected_components_in_grid(app):
-    window = ElecSchemaWindow()
+def test_elec_topology_places_disconnected_components(app):
+    window = ElecTopologyWidget()
     try:
         ap_nodes = [
             ApNode(
@@ -386,169 +419,101 @@ def test_elec_schema_places_disconnected_components_in_grid(app):
                 ),
             ]
         )
-        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges, room_choices=[])
-
-        root_point = window._ap_scene_positions["AP-UV"]
-        side_left = window._ap_scene_positions["AP-2"]
-        side_right = window._ap_scene_positions["AP-3"]
-        assert window._layout_mode == "radial"
-        assert abs(root_point.x()) < 1e-6
-        assert abs(root_point.y()) < 1e-6
-        assert side_left.y() > 200.0
-        assert side_right.y() > 200.0
-        assert abs(side_left.y() - side_right.y()) < 80.0
-        assert abs(side_left.x() - side_right.x()) > 120.0
-        assert len(window._ap_items) == 4
-        assert len(window._cable_items) == 1
-    finally:
-        window.deleteLater()
-
-
-@pytest.mark.gui
-def test_elec_schema_cable_label_with_colon_renders(app):
-    window = ElecSchemaWindow()
-    try:
-        ap_nodes = [_sample_uv_node(), _sample_consumer_node()]
-        cable_edges = [
-            CableEdge(
-                cable_id="EK-1",
-                name="KBL_UV_Zählerschrank:UV_HWR",
-                cable_type="NYM 5x10",
-                length_m=3.0,
-                color="#ff9800",
-                stroke_width_px=2.0,
-                start_ap_id="AP-UV",
-                end_ap_id="AP-1",
-            )
-        ]
-
-        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges, room_choices=[])
-        window._set_selection(set(), {"EK-1"}, "EK-1")
+        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges)
 
         texts = _scene_texts(window)
-        assert any("KBL_UV_Zählerschrank:UV_HWR" in text for text in texts)
+        assert "UV Hauptverteiler" in texts
+        assert "Neben 2" in texts
+        assert "Neben 3" in texts
+        assert window._summary_label.text() == "Topologie: 4 APs, 1 Kabel"
     finally:
         window.deleteLater()
 
 
 @pytest.mark.gui
-def test_elec_schema_room_controls_and_zones(app):
-    window = ElecSchemaWindow()
+def test_elec_topology_hides_disconnected_aps(app):
+    window = ElecTopologyWidget()
     try:
         ap_nodes = [
-            ApNode(
-                point_id="AP-1",
-                name="Steckdose Wohnen",
-                room="Wohnzimmer",
-                room_id="room-wohnen",
-                ap_type="standard",
-                has_distributor_function=False,
-                is_connected=True,
-                color="#4fc3f7",
-                icon_path="",
-                builtin_symbol="Steckdose",
-                width_px=64.0,
-                height_px=64.0,
-            ),
+            _sample_uv_node(),
+            _sample_consumer_node(),
             ApNode(
                 point_id="AP-2",
-                name="Lampe Wohnen",
-                room="Wohnzimmer",
-                room_id="room-wohnen",
+                name="Nicht verbunden",
+                room="Keller",
                 ap_type="standard",
                 has_distributor_function=False,
-                is_connected=True,
-                color="#ff9800",
+                is_connected=False,
+                color="#43aa8b",
                 icon_path="",
-                builtin_symbol="Licht",
-                width_px=64.0,
-                height_px=64.0,
+                builtin_symbol="Steckdose",
+                width_px=30.0,
+                height_px=30.0,
             ),
+        ]
+        cable_edges = [_sample_cable()]
+
+        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges)
+
+        texts = _scene_texts(window)
+        assert "Nicht verbunden" not in texts
+        assert window._summary_label.text() == "Topologie: 2 APs, 1 Kabel"
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_topology_dock_root_combo_controls_layout(app):
+    from gui.docks.topology_dock import TopologyDock  # noqa: PLC0415
+
+    dock = TopologyDock()
+    try:
+        ap_nodes = [
+            _sample_uv_node(),
+            _sample_consumer_node(),
             ApNode(
-                point_id="AP-3",
-                name="Steckdose Kueche",
-                room="Kueche",
-                room_id="room-kueche",
+                point_id="AP-2",
+                name="Lampe Flur",
+                room="Flur",
                 ap_type="standard",
                 has_distributor_function=False,
                 is_connected=True,
                 color="#43aa8b",
                 icon_path="",
-                builtin_symbol="Steckdose",
-                width_px=64.0,
-                height_px=64.0,
+                builtin_symbol="Licht",
+                width_px=30.0,
+                height_px=30.0,
             ),
         ]
         cable_edges = [
+            _sample_cable(),
             CableEdge(
-                cable_id="EK-1",
-                name="Wohnen",
+                cable_id="EK-2",
+                name="Flur",
                 cable_type="NYM 3x1,5",
-                length_m=5.0,
+                length_m=4.0,
                 color="#ff9800",
                 stroke_width_px=2.0,
                 start_ap_id="AP-1",
                 end_ap_id="AP-2",
-            )
+            ),
         ]
 
-        window.set_data(
-            ap_nodes=ap_nodes,
-            cable_edges=cable_edges,
-            room_choices=[],
-            room_styles={
-                "room-wohnen": {"name": "Wohnzimmer", "color": "#3366cc"},
-                "room-kueche": {"name": "Kueche", "color": "#00aa88"},
-            },
-        )
+        dock.set_topology_data(ap_nodes, cable_edges)
+        assert dock._root_combo.findData("AP-1") >= 0
 
-        zones_before = _count_scene_tag(window, "room-zone")
-        assert zones_before >= 2
-        assert _count_scene_tag(window, "room-zone-label") == 0
-        window.chk_rooms.setChecked(False)
-        assert _count_scene_tag(window, "room-zone") == 0
+        dock.set_root_ap_id("AP-1")
 
-        window.chk_rooms.setChecked(True)
-        assert _count_scene_tag(window, "room-zone") >= 2
-        assert _count_scene_tag(window, "room-zone-label") == 0
-
-        texts = _scene_texts(window)
-        assert any("Steckdose Wohnen (AP-1)" in text for text in texts)
+        assert dock.root_ap_id() == "AP-1"
+        assert dock._widget.root_ap_id() == "AP-1"
+        root_pos = dock._widget._node_positions.get("AP-1")
+        assert root_pos is not None
+        assert abs(root_pos[0]) < 1e-6
+        assert abs(root_pos[1]) < 1e-6
     finally:
-        window.deleteLater()
+        dock.deleteLater()
 
 
-@pytest.mark.gui
-def test_elec_schema_cable_dialogs_show_ap_name_with_id(app):
-    ap_nodes = {
-        "AP-UV": _sample_uv_node(),
-        "AP-1": _sample_consumer_node(),
-    }
-    edge = _sample_cable()
-
-    add_dialog = _AddCableDialog(ap_nodes)
-    edit_dialog = _EditCableDialog(edge, ap_nodes)
-    try:
-        add_options = {add_dialog.cmb_start_ap.itemText(i) for i in range(add_dialog.cmb_start_ap.count())}
-        edit_options = {edit_dialog.cmb_end_ap.itemText(i) for i in range(edit_dialog.cmb_end_ap.count())}
-
-        assert add_dialog.le_name.isReadOnly() is True
-        assert edit_dialog.le_name.isReadOnly() is True
-        assert "UV EG (AP-UV)" in add_options
-        assert "Steckdose Küche (AP-1)" in add_options
-        assert "UV EG (AP-UV)" in edit_options
-        assert "Steckdose Küche (AP-1)" in edit_options
-        assert add_dialog.le_name.text() == "KBL_?:?"
-        assert edit_dialog.cmb_start_ap.currentText() == "UV EG (AP-UV)"
-        assert edit_dialog.cmb_end_ap.currentText() == "Steckdose Küche (AP-1)"
-        assert edit_dialog.le_name.text() == "KBL_UV EG:Steckdose Küche"
-
-        add_dialog.cmb_start_ap.setCurrentIndex(add_dialog.cmb_start_ap.findData("AP-UV"))
-        add_dialog.cmb_end_ap.setCurrentIndex(add_dialog.cmb_end_ap.findData("AP-1"))
-        assert add_dialog.le_name.text() == "KBL_UV EG:Steckdose Küche"
-    finally:
-        add_dialog.deleteLater()
-        edit_dialog.deleteLater()
 
 
 @pytest.mark.gui

@@ -6,5 +6,13 @@ from .properties_dock import PropertiesDock
 from .log_dock import LogDock
 
 from .overview_dock import ProjectOverviewDock
+from .topology_dock import TopologyDock
 
-__all__ = ["NavigatorDock", "ToolsDock", "PropertiesDock", "LogDock", "ProjectOverviewDock"]
+__all__ = [
+	"NavigatorDock",
+	"ToolsDock",
+	"PropertiesDock",
+	"LogDock",
+	"ProjectOverviewDock",
+	"TopologyDock",
+]

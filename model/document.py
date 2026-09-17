@@ -44,7 +44,15 @@ _PARAMS_NON_ELEMENT_KEYS = {"floorplans_order"}
 
 #: canvas-Schlüssel, die separat behandelt werden
 _CANVAS_STRUCTURAL_KEYS = {"floor_plans", "floor_plan_order"}
-_TOP_LEVEL_KNOWN_KEYS = {"svg_path", "canvas", "params", "pdf_export_pages", "pdf_export_meta", "format_version"}
+_TOP_LEVEL_KNOWN_KEYS = {
+    "svg_path",
+    "canvas",
+    "params",
+    "pdf_export_pages",
+    "pdf_export_meta",
+    "format_version",
+    "active_floorplan_id",
+}
 
 
 def _all_geom_keys() -> set[str]:
@@ -91,6 +99,7 @@ class Document:
 
         self.ids = IdAllocator()
         self._active_floorplan_id: str = ""
+        self._active_floorplan_explicit: bool = False
 
         # Signale
         self.element_added = Emitter()      # (element_id)
@@ -113,6 +122,7 @@ class Document:
         if fp_id == self._active_floorplan_id:
             return
         self._active_floorplan_id = fp_id
+        self._active_floorplan_explicit = True
         self.active_floorplan_changed.emit(fp_id)
 
     def container(self, cls: type[Element]) -> dict[str, Element]:
@@ -245,6 +255,7 @@ class Document:
         doc.top_level_extras = {
             k: v for k, v in raw.items() if k not in _TOP_LEVEL_KNOWN_KEYS
         }
+        active_floorplan_id = str(raw.get("active_floorplan_id", "") or "").strip()
 
         geom_keys = _all_geom_keys()
 
@@ -328,8 +339,12 @@ class Document:
             if k not in geom_keys and k not in _CANVAS_STRUCTURAL_KEYS
         }
 
-        if doc.floorplan_order:
+        if active_floorplan_id and active_floorplan_id in doc.floorplans:
+            doc._active_floorplan_id = active_floorplan_id
+            doc._active_floorplan_explicit = True
+        elif doc.floorplan_order:
             doc._active_floorplan_id = doc.floorplan_order[0]
+            doc._active_floorplan_explicit = False
         return doc
 
     def to_dict(self) -> dict:
@@ -389,6 +404,10 @@ class Document:
             "pdf_export_pages": copy.deepcopy(self.pdf_export_pages),
             "pdf_export_meta": copy.deepcopy(self.pdf_export_meta),
         }
+        if self._active_floorplan_explicit or (
+            self._active_floorplan_id and self._active_floorplan_id not in self.floorplans
+        ):
+            result["active_floorplan_id"] = self.active_floorplan_id
         if self.format_version is not None:
             result["format_version"] = int(self.format_version)
         result.update(copy.deepcopy(self.top_level_extras))

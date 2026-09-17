@@ -20,7 +20,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from gui.workspaces import WORKSPACES, workspace  # noqa: E402
+from gui.workspaces import DockId, WORKSPACES, workspace  # noqa: E402
 from gui.tool_registry import TOOLS, TOOLS_BY_ID  # noqa: E402
 from model.layers import LayerId  # noqa: E402
 
@@ -70,6 +70,135 @@ def test_app_window_builds_and_switches_workspaces(app, tmp_path, monkeypatch):
             assert window.canvas._selectable_layers == {
                 layer.value for layer in definition.selectable_layers
             }
+    finally:
+        window.deleteLater()
+
+
+def test_app_window_wires_topology_dock_and_populates_graph(app, monkeypatch):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [120.0, 10.0]},
+                    "elec_cables": {"EK-1": [[10.0, 10.0], [120.0, 10.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 2",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "KBL_Dose 1:Dose 2",
+                            "type": "3x1,5",
+                            "color": "#ff9800",
+                            "visible": True,
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        }
+                    },
+                },
+            }
+        )
+
+        window._set_document(document)
+        window._apply_workspace("electrical")
+        app.processEvents()
+
+        assert DockId.TOPOLOGY in window._docks
+        assert window._docks[DockId.TOPOLOGY] is window.topology
+        assert window.topology.isVisible()
+        assert window.topology._widget._summary_label.text() == "Topologie: 2 APs, 1 Kabel"
+        assert len(window.topology._widget.scene.items()) > 0
+    finally:
+        window.deleteLater()
+
+
+def test_topology_dock_exports_svg(app, monkeypatch, tmp_path):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [120.0, 10.0]},
+                    "elec_cables": {"EK-1": [[10.0, 10.0], [120.0, 10.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 2",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "KBL_Dose 1:Dose 2",
+                            "type": "3x1,5",
+                            "color": "#ff9800",
+                            "visible": True,
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        }
+                    },
+                },
+            }
+        )
+
+        window._set_document(document)
+        svg_path = tmp_path / "topology.svg"
+
+        assert window.topology.export_svg(str(svg_path)) is True
+        assert svg_path.exists()
+        assert "<svg" in svg_path.read_text(encoding="utf-8", errors="ignore")
     finally:
         window.deleteLater()
 
@@ -2033,6 +2162,210 @@ def test_selecting_measurement_syncs_properties_and_active_floorplan(app, monkey
         window.deleteLater()
 
 
+def test_navigator_drop_targets_floorplan_from_child_item(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_rooms": {
+                        "ER-1": {"room_id": "ER-1", "floor_plan_id": "grundriss-1", "name": "Raum"},
+                    },
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Dose"},
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        child_item = window.navigator._find_item_by_id("AP-1")
+        assert child_item is not None
+
+        floorplan_item = window.navigator._tree._floorplan_item_for_target(child_item)
+        assert floorplan_item is not None
+        assert floorplan_item is window.navigator._items["grundriss-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_batch_floorplan_reassign_moves_multiple_elements_once(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True},
+                        {"fp_id": "grundriss-2", "visible": True},
+                    ],
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                        "grundriss-2": {"name": "OG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Dose 1"},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Dose 2"},
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        undo_calls = {"count": 0}
+
+        def _counting_push_undo():
+            undo_calls["count"] += 1
+
+        monkeypatch.setattr(window, "_push_undo", _counting_push_undo)
+
+        window._on_reassign_floorplan_batch(["AP-1", "AP-2"], "grundriss-2")
+
+        assert undo_calls["count"] == 1
+        assert window._document.elements["elec_points"]["AP-1"].floor_plan_id == "grundriss-2"
+        assert window._document.elements["elec_points"]["AP-2"].floor_plan_id == "grundriss-2"
+    finally:
+        window.deleteLater()
+
+
+def test_set_document_normalizes_inconsistent_cable_endpoint_mirrors(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {
+                        "AP-1": [100.0, 100.0],
+                        "AP-2": [300.0, 200.0],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[300.0, 200.0], [300.0, 200.0]],
+                    },
+                    "cable_start_ap": {"EK-1": "AP-2"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Start"},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Ende"},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel",
+                            "visible": True,
+                            "start_ap": "AP-1",
+                            "end_ap": "",
+                        }
+                    },
+                },
+            }
+        )
+
+        window._set_document(document)
+
+        cable = window._document.elements["elec_cables"]["EK-1"]
+        assert cable.start_ap == "AP-1"
+        assert cable.end_ap == "AP-2"
+        assert cable.geom["cable_start_ap"] == "AP-1"
+        assert cable.geom["cable_end_ap"] == "AP-2"
+        assert cable.geom["elec_cables"] == [[100.0, 100.0], [300.0, 200.0]]
+        assert window.canvas._cable_start_ap["EK-1"] == "AP-1"
+        assert window.canvas._cable_end_ap["EK-1"] == "AP-2"
+    finally:
+        window.deleteLater()
+
+
+def test_set_document_normalization_preserves_routed_cable_path(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {
+                        "AP-1": [100.0, 100.0],
+                        "AP-2": [300.0, 200.0],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[180.0, 110.0], [220.0, 260.0], [310.0, 215.0]],
+                    },
+                    "cable_start_ap": {"EK-1": "AP-2"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Start"},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Ende"},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel",
+                            "visible": True,
+                            "start_ap": "AP-1",
+                            "end_ap": "",
+                        }
+                    },
+                },
+            }
+        )
+
+        window._set_document(document)
+
+        cable = window._document.elements["elec_cables"]["EK-1"]
+        assert cable.geom["elec_cables"] == [[100.0, 100.0], [220.0, 260.0], [300.0, 200.0]]
+    finally:
+        window.deleteLater()
+
+
 def test_sync_canvas_to_document_persists_measurements(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -2869,6 +3202,40 @@ def test_pdf_export_normalizes_elektro_room_page(app, monkeypatch):
         window.deleteLater()
 
 
+def test_pdf_export_normalizes_elektro_topology_page(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "topology-1",
+                    "type": "topology",
+                    "title": "Elektro Topologie",
+                    "enabled": True,
+                    "root_ap_id": "AP-1",
+                }
+            ]
+        )
+
+        assert len(pages) == 1
+        page = pages[0]
+        assert page["type"] == "elektro_topology"
+        assert page["title"] == "Elektro Topologie"
+        assert page["enabled"] is True
+        assert page["root_ap_id"] == "AP-1"
+    finally:
+        window.deleteLater()
+
+
 def test_pdf_export_uses_ap_height_in_cm(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -3161,6 +3528,91 @@ def test_pdf_export_elektro_room_writes_pdf_and_persists_config(app, monkeypatch
         assert pdf_path.stat().st_size > 0
         assert window._pdf_export_pages and window._pdf_export_pages[0]["type"] == "elektro_room"
         assert window._pdf_export_pages[0].get("room_ids") == ["ER-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_elektro_topology_writes_pdf_and_persists_config(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [40.0, 40.0], "AP-2": [120.0, 40.0]},
+                    "elec_cables": {"EK-1": [[40.0, 40.0], [120.0, 40.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose A",
+                            "builtin_symbol": "Steckdose",
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose B",
+                            "builtin_symbol": "Steckdose",
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel intern",
+                            "type": "NYM-J 3x1,5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        pdf_path = tmp_path / "elektro_topology_report.pdf"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(pdf_path), "PDF (*.pdf)")),
+        )
+
+        pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "topology-page-1",
+                    "type": "elektro_topology",
+                    "title": "Elektro Topologie",
+                    "enabled": True,
+                }
+            ]
+        )
+        meta = window._normalize_pdf_export_meta({}, pages)
+
+        monkeypatch.setattr(window, "_open_pdf_export_config_dialog", lambda: (pages, meta))
+        window._export_pdf()
+
+        assert pdf_path.exists()
+        assert pdf_path.stat().st_size > 0
+        assert window._pdf_export_pages and window._pdf_export_pages[0]["type"] == "elektro_topology"
     finally:
         window.deleteLater()
 
@@ -5484,120 +5936,13 @@ def test_schema_windows_open_and_refresh(app, monkeypatch):
     window = AppWindow()
     try:
         window._set_document(document)
-        window._open_elec_schema_window()
         window._open_schaltplan_window()
-        assert window._elec_schema_window is not None
         assert window._schaltplan_window is not None
         window._refresh_schema_windows()
     finally:
         window.deleteLater()
 
 
-def test_schema_add_ap_writes_document(app, monkeypatch):
-    from PySide6.QtCore import QSettings  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        QSettings, "value", lambda self, key, default=None, **kw: default
-    )
-    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
-
-    from gui.app_window import AppWindow  # noqa: PLC0415
-    from model.document import Document  # noqa: PLC0415
-
-    document = Document.from_dict(
-        {
-            "canvas": {"floor_plans": [{"fp_id": "grundriss-1"}]},
-            "params": {"floorplans": {"grundriss-1": {"name": "EG"}}},
-        }
-    )
-
-    window = AppWindow()
-    try:
-        window._set_document(document)
-        window._on_schema_add_ap(
-            {
-                "name": "Schema AP",
-                "symbol": "Steckdose",
-                "color": "#4fc3f7",
-                "ap_type": "uv",
-                "room_id": "",
-            }
-        )
-        assert len(document.elements["elec_points"]) == 1
-        point = next(iter(document.elements["elec_points"].values()))
-        assert point.name == "Schema AP"
-        assert point.ap_type == "uv"
-    finally:
-        window.deleteLater()
-
-
-def test_schema_edit_cable_writes_document(app, monkeypatch):
-    from PySide6.QtCore import QSettings  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        QSettings, "value", lambda self, key, default=None, **kw: default
-    )
-    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
-
-    from gui.app_window import AppWindow  # noqa: PLC0415
-    from model.document import Document  # noqa: PLC0415
-
-    document = Document.from_dict(
-        {
-            "canvas": {
-                "floor_plans": [{"fp_id": "grundriss-1"}],
-                "elec_points": {"AP-1": [10.0, 20.0], "AP-2": [100.0, 20.0]},
-                "elec_cables": {"EK-1": [[10.0, 20.0], [100.0, 20.0]]},
-                "cable_start_ap": {"EK-1": "AP-1"},
-                "cable_end_ap": {"EK-1": "AP-2"},
-            },
-            "params": {
-                "floorplans": {"grundriss-1": {"name": "EG"}},
-                "elec_points": {
-                    "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "Dose 1"},
-                    "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Dose 2"},
-                },
-                "elec_cables": {
-                    "EK-1": {
-                        "cable_id": "EK-1",
-                        "floor_plan_id": "grundriss-1",
-                        "name": "Kabel 1",
-                        "type": "5x1,5",
-                        "start_ap": "AP-1",
-                        "end_ap": "AP-2",
-                    }
-                },
-            },
-        }
-    )
-
-    window = AppWindow()
-    try:
-        window._set_document(document)
-        window._on_schema_edit_cable(
-            "EK-1",
-            {
-                "name": "Kabel Neu",
-                "type": "3x1,5",
-                "color": "#e53935",
-                "visible": True,
-                "label_visible": True,
-                "type_label_visible": True,
-                "label_size": 14.0,
-                "stroke_width": 3.0,
-                "start_ap_id": "AP-2",
-                "end_ap_id": "AP-1",
-                "comment": "gedreht",
-            },
-        )
-        cable = document.elements["elec_cables"]["EK-1"]
-        assert cable.name == "KBL_Dose 2:Dose 1"
-        assert cable.cable_type == "3x1,5"
-        assert cable.start_ap == "AP-2"
-        assert cable.end_ap == "AP-1"
-        assert cable.geom.get("elec_cable_stroke_width") == 3.0
-    finally:
-        window.deleteLater()
 
 
 def test_e3_configure_uv_action_persists_config(app, monkeypatch):
@@ -5790,12 +6135,12 @@ def test_e7_schema_with_planung_linda_has_uv_and_cables(app, monkeypatch):
         assert any(node.ap_type == "uv" for node in ap_nodes)
         assert any(edge.length_m >= 0.0 for edge in cable_edges)
 
-        window._open_elec_schema_window()
-        assert window._elec_schema_window is not None
+        window._show_topology_dock()
+        assert window.topology is not None
         window._refresh_schema_windows()
 
-        schema_nodes = window._elec_schema_window._ap_nodes
-        schema_edges = window._elec_schema_window._cable_edges
+        schema_nodes = window.topology._ap_nodes
+        schema_edges = window.topology._cable_edges
         assert len(schema_nodes) == len(ap_nodes)
         assert len(schema_edges) == len(cable_edges)
     finally:
@@ -7037,6 +7382,129 @@ def test_kicad_sheet_cable_creates_visible_line_between_two_matching_aps(app, mo
         window.deleteLater()
 
 
+def test_kicad_sheet_cable_uses_selected_floorplan_when_active_differs(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from logic.kicad_import import KiCadCableCandidate, KiCadScanResult, KiCadSheetPinRef  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+    from model.elements import ElecPoint  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [
+                        {"fp_id": "grundriss-1", "visible": True},
+                        {"fp_id": "grundriss-2", "visible": True},
+                    ]
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "file_path": ""},
+                        "grundriss-2": {"name": "OG", "file_path": ""},
+                    },
+                    "floorplans_order": ["grundriss-1", "grundriss-2"],
+                },
+            }
+        )
+        doc.active_floorplan_id = "grundriss-2"
+        window._set_document(doc)
+
+        ap1_id = window._document.new_id(ElecPoint)
+        ap1 = ElecPoint.create(
+            ap1_id,
+            floor_plan_id="grundriss-2",
+            name="Selected AP Alpha",
+            color="#4fc3f7",
+            width=30.0,
+            height=30.0,
+            icon_path="",
+            builtin_symbol="Steckdose",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            position="Wand",
+            height_from_floor=30.0,
+            smarthome_device="",
+            smarthome_device_color="",
+            note="",
+            ap_type="standard",
+            uv_config={},
+            up_distribution_config={},
+            hak_config={},
+            zaehler_config={},
+        )
+        ap1.geom["elec_points"] = [100.0, 100.0]
+        ap1.geom["elec_point_size_px"] = [30.0, 30.0]
+        ap1.geom["elec_visible"] = True
+        window._document.add(ap1)
+        window.canvas.register_element(ap1_id)
+
+        ap2_id = window._document.new_id(ElecPoint)
+        ap2 = ElecPoint.create(
+            ap2_id,
+            floor_plan_id="grundriss-2",
+            name="Selected AP Beta",
+            color="#4fc3f7",
+            width=30.0,
+            height=30.0,
+            icon_path="",
+            builtin_symbol="Steckdose",
+            visible=True,
+            label_visible=True,
+            label_size=12.0,
+            position="Wand",
+            height_from_floor=30.0,
+            smarthome_device="",
+            smarthome_device_color="",
+            note="",
+            ap_type="standard",
+            uv_config={},
+            up_distribution_config={},
+            hak_config={},
+            zaehler_config={},
+        )
+        ap2.geom["elec_points"] = [300.0, 300.0]
+        ap2.geom["elec_point_size_px"] = [30.0, 30.0]
+        ap2.geom["elec_visible"] = True
+        window._document.add(ap2)
+        window.canvas.register_element(ap2_id)
+
+        scan_result = KiCadScanResult(root_path=ROOT, project_uuid="proj-1")
+        candidate = KiCadCableCandidate(
+            key="Selected{5x1_5}",
+            base_name="Selected",
+            pin_name_raw="Selected{5x1_5}",
+            spec_raw="5x1_5",
+            normalized_spec="5x1,5",
+            spec_kind="count_x_spec",
+        )
+        candidate.pin_refs.append(
+            KiCadSheetPinRef(
+                sheet_uuid="sheet-1",
+                sheet_name="Sheet",
+                sheet_file="Sheet.kicad_sch",
+                pin_uuid="pin-1",
+                pin_name_raw="Selected{5x1_5}",
+                pin_direction="output",
+                hierarchy_path=(),
+            )
+        )
+        scan_result.candidates[candidate.key] = candidate
+
+        summary = window._apply_kicad_cable_import(scan_result, [candidate.key], prepare_textfield_aps=False)
+
+        assert summary["created"] == 1
+        cable = next(iter(window._document.elements["elec_cables"].values()))
+        assert cable.floor_plan_id == "grundriss-2"
+    finally:
+        window.deleteLater()
+
+
 def test_export_qet_creates_file(app, tmp_path, monkeypatch):
     from gui.app_window import AppWindow  # noqa: PLC0415
 
@@ -7452,7 +7920,7 @@ def test_all1_undo_redo_up_config_action(app, monkeypatch):
         window.deleteLater()
 
 
-def test_all2_schema_duplicate_selection_remaps_and_undoes_as_single_step(app, monkeypatch):
+def test_duplicate_selected_duplicates_current_ap_and_undoes(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
     monkeypatch.setattr(
@@ -7510,17 +7978,14 @@ def test_all2_schema_duplicate_selection_remaps_and_undoes_as_single_step(app, m
         window._undo_stack.clear()
         window._redo_stack.clear()
 
-        window._on_schema_duplicate_selection(["AP-1", "AP-2"], ["EK-1"])
+        window.navigator.select("AP-1")
+        window.canvas.set_selected_item("AP-1")
+        window._duplicate_selected()
 
         ap_ids = sorted(document.elements["elec_points"].keys())
         cable_ids = sorted(document.elements["elec_cables"].keys())
-        assert len(ap_ids) == 4
-        assert len(cable_ids) == 2
-
-        new_cable_id = next(cid for cid in cable_ids if cid != "EK-1")
-        new_cable = document.elements["elec_cables"][new_cable_id]
-        assert new_cable.start_ap in ap_ids and new_cable.start_ap != "AP-1"
-        assert new_cable.end_ap in ap_ids and new_cable.end_ap != "AP-2"
+        assert len(ap_ids) == 3
+        assert cable_ids == ["EK-1"]
         assert len(window._undo_stack) >= 1
 
         window._undo()
@@ -7528,8 +7993,8 @@ def test_all2_schema_duplicate_selection_remaps_and_undoes_as_single_step(app, m
         assert sorted(document.elements["elec_cables"].keys()) == ["EK-1"]
 
         window._redo()
-        assert len(document.elements["elec_points"]) == 4
-        assert len(document.elements["elec_cables"]) == 2
+        assert len(document.elements["elec_points"]) == 3
+        assert sorted(document.elements["elec_cables"].keys()) == ["EK-1"]
     finally:
         window.deleteLater()
 
@@ -7743,80 +8208,80 @@ def _make_heating_window(monkeypatch, app, with_circuit=False):
 def test_h1_add_circuit_creates_element_and_starts_draw(app, monkeypatch):
     window = _make_heating_window(monkeypatch, app)
     try:
-        from gui.canvas_widget import ToolMode  # noqa: PLC0415
-        window._add_circuit()
-        circuits = window._document.elements["circuits"]
-        assert len(circuits) == 1
-        cid = next(iter(circuits))
-        assert circuits[cid].floor_plan_id == next(iter(window._document.floorplans))
-        assert window.canvas.tool_mode() == ToolMode.DRAW_POLY
-    finally:
-        window.deleteLater()
-
-
-def test_h2_draw_polygon_via_property_action(app, monkeypatch):
-    from PySide6.QtCore import QSettings  # noqa: PLC0415
-    from gui.canvas_widget import ToolMode  # noqa: PLC0415
-
-    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
-
-    from gui.app_window import AppWindow  # noqa: PLC0415
-    from model.document import Document  # noqa: PLC0415
-
-    window = AppWindow()
-    try:
-        doc = Document.from_dict({
-            "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}]},
-            "params": {
-                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
-                "circuits": {"HK-1": {"circuit_id": "HK-1", "floor_plan_id": "grundriss-1", "name": "Wohnzimmer"}},
-            },
-        })
-        window._set_document(doc)
-
-        drawn = []
-        monkeypatch.setattr(window.canvas, "start_drawing", lambda cid: drawn.append(cid))
-        window._on_property_action("HK-1", "draw_polygon")
-
-        assert drawn == ["HK-1"]
-    finally:
-        window.deleteLater()
-
-
-def test_h3_draw_route_action_passes_circuit_params(app, monkeypatch):
-    from PySide6.QtCore import QSettings  # noqa: PLC0415
-    from PySide6.QtCore import QPointF  # noqa: PLC0415
-
-    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
-
-    from gui.app_window import AppWindow  # noqa: PLC0415
-    from model.document import Document  # noqa: PLC0415
-
-    window = AppWindow()
-    try:
-        doc = Document.from_dict({
-            "canvas": {
-                "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
-                "polygons": {"HK-1": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]]},
-                "start_points": {"HK-1": [10.0, 10.0]},
-            },
-            "params": {
-                "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
-                "circuits": {
-                    "HK-1": {
-                        "circuit_id": "HK-1",
-                        "floor_plan_id": "grundriss-1",
-                        "name": "Wohnzimmer",
-                        "wall_dist": 200.0,
-                        "spacing": 150.0,
-                    }
+        from PySide6.QtCore import QSettings  # noqa: PLC0415
+        monkeypatch.setattr(
+            QSettings, "value", lambda self, key, default=None, **kw: default
+        )
+        monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+        from gui.app_window import AppWindow  # noqa: PLC0415
+        from model.document import Document  # noqa: PLC0415
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1"}],
+                    "elec_points": {
+                        "AP-1": [10.0, 10.0],
+                        "AP-2": [70.0, 10.0],
+                    },
+                    "elec_cables": {
+                        "EK-1": [[10.0, 10.0], [70.0, 10.0]],
+                    },
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
                 },
-            },
-        })
-        window._set_document(doc)
-
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 2",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel 1",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        }
+                    },
+                },
+            }
+        )
+        window = AppWindow()
+        try:
+            window._set_document(document)
+            window._undo_group_timer.stop()
+            window._finish_undo_group()
+            window._undo_stack.clear()
+            window._redo_stack.clear()
+            window._duplicate_selected()
+            ap_ids = sorted(document.elements["elec_points"].keys())
+            cable_ids = sorted(document.elements["elec_cables"].keys())
+            assert len(ap_ids) == 4
+            assert len(cable_ids) == 2
+            assert len(window._undo_stack) >= 1
+            window._undo()
+            assert sorted(document.elements["elec_points"].keys()) == ["AP-1", "AP-2"]
+            assert sorted(document.elements["elec_cables"].keys()) == ["EK-1"]
+            window._redo()
+            assert len(document.elements["elec_points"]) == 4
+            assert len(document.elements["elec_cables"]) == 2
+        finally:
+            window.deleteLater()
         calls = []
         monkeypatch.setattr(
             window.canvas, "start_route_drawing",

@@ -22,6 +22,7 @@ class DockId:
     TOOLS = "tools"
     RESULTS = "results"
     SCHEMA = "schema"
+    TOPOLOGY = "topology"
     SCHALTPLAN = "schaltplan"
     LOG = "log"
     OVERVIEW_GENERAL = "overview_general"
@@ -84,7 +85,7 @@ WORKSPACES: tuple[WorkspaceDefinition, ...] = (
         id="electrical",
         label="Elektro",
         layer=LayerId.ELECTRICAL,
-        default_docks=BASE_DOCKS + (DockId.SCHEMA,),
+        default_docks=BASE_DOCKS + (DockId.TOPOLOGY,),
     ),
     WorkspaceDefinition(
         id="furniture",

@@ -46,6 +46,58 @@ def test_document_roundtrip_is_stable(example: Path):
     assert _normalize(first) == _normalize(second)
 
 
+def test_document_persists_active_floorplan_id():
+    raw = {
+        "canvas": {
+            "floor_plans": [
+                {"fp_id": "grundriss-1", "visible": True},
+                {"fp_id": "grundriss-2", "visible": True},
+            ]
+        },
+        "params": {
+            "floorplans": {
+                "grundriss-1": {"name": "EG", "file_path": ""},
+                "grundriss-2": {"name": "OG", "file_path": ""},
+            },
+            "floorplans_order": ["grundriss-1", "grundriss-2"],
+        },
+        "active_floorplan_id": "grundriss-2",
+    }
+
+    doc = Document.from_dict(raw)
+    assert doc.active_floorplan_id == "grundriss-2"
+
+    saved = doc.to_dict()
+    assert saved["active_floorplan_id"] == "grundriss-2"
+    assert Document.from_dict(saved).active_floorplan_id == "grundriss-2"
+
+
+def test_document_persists_active_floorplan_change_after_load():
+    raw = {
+        "canvas": {
+            "floor_plans": [
+                {"fp_id": "grundriss-1", "visible": True},
+                {"fp_id": "grundriss-2", "visible": True},
+            ]
+        },
+        "params": {
+            "floorplans": {
+                "grundriss-1": {"name": "EG", "file_path": ""},
+                "grundriss-2": {"name": "OG", "file_path": ""},
+            },
+            "floorplans_order": ["grundriss-1", "grundriss-2"],
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    assert doc.active_floorplan_id == "grundriss-1"
+
+    doc.active_floorplan_id = "grundriss-2"
+    saved = doc.to_dict()
+    assert saved["active_floorplan_id"] == "grundriss-2"
+    assert Document.from_dict(saved).active_floorplan_id == "grundriss-2"
+
+
 @pytest.mark.parametrize("example", EXAMPLES, ids=lambda p: p.name)
 def test_saved_file_is_valid(example: Path, tmp_path: Path):
     from validate_hrp import (  # noqa: PLC0415

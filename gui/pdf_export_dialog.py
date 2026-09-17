@@ -62,6 +62,7 @@ class PdfExportConfigDialog(QDialog):
         svg_size: tuple[float, float],
         elec_rooms: list[tuple[str, str]] | None = None,
         heating_circuits: list[tuple[str, str]] | None = None,
+        topology_roots: list[tuple[str, str]] | None = None,
         export_meta: dict | None = None,
         hrouting_version: str = "",
         canvas=None,
@@ -76,6 +77,7 @@ class PdfExportConfigDialog(QDialog):
         self._floor_plans = list(floor_plans)
         self._elec_rooms = list(elec_rooms or [])
         self._heating_circuits = list(heating_circuits or [])
+        self._topology_roots = list(topology_roots or [])
         self._svg_w = float(svg_size[0] if svg_size else 0.0)
         self._svg_h = float(svg_size[1] if svg_size else 0.0)
         self._hrouting_version = str(hrouting_version or "")
@@ -199,11 +201,14 @@ class PdfExportConfigDialog(QDialog):
         self.btn_add_heating_circuit.clicked.connect(self._on_add_heating_circuit_page)
         self.btn_add_elektro_room = QPushButton("Elektro-Raumseite einfügen")
         self.btn_add_elektro_room.clicked.connect(self._on_add_elektro_room_page)
+        self.btn_add_topology = QPushButton("Topologie-Seite einfügen")
+        self.btn_add_topology.clicked.connect(self._on_add_topology_page)
         self.btn_remove = QPushButton("Seite entfernen")
         self.btn_remove.clicked.connect(self._on_remove_selected)
         left_btns.addWidget(self.btn_add_plan)
         left_btns.addWidget(self.btn_add_heating_circuit)
         left_btns.addWidget(self.btn_add_elektro_room)
+        left_btns.addWidget(self.btn_add_topology)
         left_btns.addWidget(self.btn_remove)
         left.addLayout(left_btns)
 
@@ -217,6 +222,13 @@ class PdfExportConfigDialog(QDialog):
         self.cb_enabled = QCheckBox("Seite exportieren")
         self.cb_enabled.toggled.connect(self._on_enabled_changed)
         self.form.addRow("Aktiv", self.cb_enabled)
+
+        self.cb_topology_root = QComboBox()
+        self.cb_topology_root.addItem("Automatisch", "")
+        for point_id, label in self._topology_roots:
+            self.cb_topology_root.addItem(label, point_id)
+        self.cb_topology_root.currentIndexChanged.connect(self._on_topology_root_changed)
+        self.form.addRow("Topologie-Wurzel", self.cb_topology_root)
 
         self.plan_group = QGroupBox("Plan-Einstellungen")
         right.addWidget(self.plan_group)
@@ -343,6 +355,7 @@ class PdfExportConfigDialog(QDialog):
             "hydraulics": "Hydraulik",
             "elektro": "Elektro",
             "elektro_room": "Elektro-Raum",
+            "elektro_topology": "Elektro-Topologie",
         }.get(ptype, ptype)
 
     @staticmethod
@@ -498,14 +511,26 @@ class PdfExportConfigDialog(QDialog):
             self.cb_enabled.setChecked(bool(page.get("enabled", True)))
 
             ptype = page.get("type", "plan")
-            is_plan_like = ptype in ("plan", "heating", "elektro", "elektro_room", "heating_circuit")
+            is_plan_like = ptype in (
+                "plan",
+                "heating",
+                "elektro",
+                "elektro_room",
+                "heating_circuit",
+                "elektro_topology",
+            )
             supports_tables = ptype in ("heating", "elektro")
             supports_room_selection = ptype == "elektro_room"
             supports_circuit_selection = ptype == "heating_circuit"
+            supports_topology_root = ptype == "elektro_topology"
             self.plan_group.setVisible(is_plan_like)
             self.table_group.setVisible(supports_tables)
             self.room_group.setVisible(supports_room_selection)
             self.circuit_group.setVisible(supports_circuit_selection)
+            self.cb_topology_root.setVisible(supports_topology_root)
+            label = self.form.labelForField(self.cb_topology_root)
+            if label is not None:
+                label.setVisible(supports_topology_root)
             self.lbl_no_rooms.setVisible(not bool(self._room_checks))
             self.lbl_no_circuits.setVisible(not bool(self._circuit_checks))
             self.lbl_non_plan.setVisible(not is_plan_like)
@@ -541,6 +566,11 @@ class PdfExportConfigDialog(QDialog):
                 selected_set = {str(v) for v in selected_circuit_ids}
                 for circuit_id, cb in self._circuit_checks.items():
                     cb.setChecked(circuit_id in selected_set)
+
+            if supports_topology_root:
+                root_ap_id = str(page.get("root_ap_id") or "")
+                idx = self.cb_topology_root.findData(root_ap_id)
+                self.cb_topology_root.setCurrentIndex(max(0, idx))
 
             if supports_tables:
                 allowed = self._allowed_table_sections(ptype)
@@ -621,6 +651,11 @@ class PdfExportConfigDialog(QDialog):
             ]
 
         self._update_current_page(updater)
+
+    def _on_topology_root_changed(self, _index: int):
+        self._update_current_page(
+            lambda p: p.__setitem__("root_ap_id", self.cb_topology_root.currentData())
+        )
 
 
 
@@ -714,6 +749,31 @@ class PdfExportConfigDialog(QDialog):
             "floor_plan_id": None,
             "source_rect": None,
             "circuit_ids": selected_circuits,
+        }
+        item = QTreeWidgetItem(self.tree)
+        item.setText(0, page["title"])
+        item.setText(1, self._page_type_label(page))
+        item.setFlags(
+            item.flags()
+            | Qt.ItemIsUserCheckable
+            | Qt.ItemIsEditable
+            | Qt.ItemIsDragEnabled
+            | Qt.ItemIsDropEnabled
+            | Qt.ItemIsSelectable
+            | Qt.ItemIsEnabled
+        )
+        item.setCheckState(0, Qt.Checked)
+        item.setData(0, Qt.UserRole, page)
+        self.tree.setCurrentItem(item)
+        self._update_page_count_field()
+
+    def _on_add_topology_page(self):
+        page = {
+            "id": f"elektro-topology-{uuid.uuid4().hex[:8]}",
+            "type": "elektro_topology",
+            "title": "Elektro – Topologie",
+            "enabled": True,
+            "root_ap_id": "",
         }
         item = QTreeWidgetItem(self.tree)
         item.setText(0, page["title"])

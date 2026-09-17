@@ -83,7 +83,7 @@ from logic.kicad_import import (
 )
 from logic.kicad_export import export_project_to_kicad
 from logic.hrp_import import import_selected_elements, iter_import_candidates
-from .elec_schema_window import ApNode, CableEdge, ElecSchemaWindow
+from .elec_topology_types import ApNode, CableEdge
 from .hrp_import_dialog import HrpImportDialog
 from .kicad_import_dialog import KiCadImportDialog
 from .color_dialog_state import (
@@ -99,7 +99,7 @@ from logic.schaltplan_generator import build_uv_hierarchy, get_uv_circuits
 from . import layout_store
 from .canvas_widget import CanvasWidget, ToolMode
 from .docks import LogDock, NavigatorDock, PropertiesDock, ToolsDock
-from .docks import ProjectOverviewDock
+from .docks import ProjectOverviewDock, TopologyDock
 from .workspaces import (
     DEFAULT_WORKSPACE_ID,
     DockId,
@@ -295,9 +295,7 @@ class AppWindow(QMainWindow):
         self._git_pull_action: QAction | None = None
         self._recent_menu: QMenu | None = None
         self._grid_toolbar: QToolBar | None = None
-        self._elec_schema_window: ElecSchemaWindow | None = None
         self._schaltplan_window: SchaltplanWindow | None = None
-        self._elec_schema_ap_positions: dict[str, list[float]] = {}
         self._pdf_export_pages: list[dict] = []
         self._pdf_export_meta: dict[str, str] = {}
         self._annotation_live_value_cache: dict[str, tuple] = {}
@@ -394,6 +392,10 @@ class AppWindow(QMainWindow):
             visible_tabs=("Elektro",),
             visible_electro_sections=("cables",),
         )
+        self.topology = TopologyDock(self)
+        self.topology.set_data_provider(
+            lambda: self._build_schema_data()[:2]
+        )
         # Backward compatibility for tests/extensions that still use `window.overview`.
         self.overview = self.overview_heating
 
@@ -407,6 +409,7 @@ class AppWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro_materials)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro_rooms)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro_cables)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.topology)
         self.log.hide()
         self.overview_general.hide()
         self.overview_heating.hide()
@@ -414,6 +417,7 @@ class AppWindow(QMainWindow):
         self.overview_electro_materials.hide()
         self.overview_electro_rooms.hide()
         self.overview_electro_cables.hide()
+        self.topology.hide()
 
         self._docks = {
             DockId.NAVIGATOR: self.navigator,
@@ -426,6 +430,7 @@ class AppWindow(QMainWindow):
             DockId.OVERVIEW_ELECTRO_MATERIALS: self.overview_electro_materials,
             DockId.OVERVIEW_ELECTRO_ROOMS: self.overview_electro_rooms,
             DockId.OVERVIEW_ELECTRO_CABLES: self.overview_electro_cables,
+            DockId.TOPOLOGY: self.topology,
         }
 
         for dock in self._docks.values():
@@ -513,7 +518,7 @@ class AppWindow(QMainWindow):
             action.setObjectName(f"toggle_{dock_id}")
             view_menu.addAction(action)
         view_menu.addSeparator()
-        self._add_action(view_menu, "Elektro-Strangschema…", self._open_elec_schema_window)
+        self._add_action(view_menu, "Elektro-Topologie anzeigen", self._show_topology_dock)
         self._add_action(view_menu, "Schaltplan…", self._open_schaltplan_window)
         view_menu.addSeparator()
         self._add_action(view_menu, "Layout zurücksetzen", self._reset_layout)
@@ -605,6 +610,7 @@ class AppWindow(QMainWindow):
         self.navigator.visibility_changed.connect(self._on_visibility_changed)
         self.navigator.context_requested.connect(self._on_navigator_context)
         self.navigator.reassign_floorplan.connect(self._on_reassign_floorplan)
+        self.navigator.drop_selection_onto_floorplan.connect(self._on_reassign_floorplan_batch)
         self.navigator.floorplan_order_changed.connect(self._on_navigator_floorplan_order_changed)
         self.tools.tool_activated.connect(self._on_tool_activated)
         self.canvas.object_clicked.connect(self._on_canvas_object_clicked)
@@ -1867,6 +1873,8 @@ class AppWindow(QMainWindow):
         self.overview_electro_materials.set_document(document)
         self.overview_electro_rooms.set_document(document)
         self.overview_electro_cables.set_document(document)
+        self.topology.set_document(document)
+        self._normalize_loaded_cable_bindings(document)
 
         # Globale Ansichtsdaten (Zoom, Raster, Grundriss-Transformationen,
         # Hilfslinien, Messungen) in den Canvas übertragen …
@@ -1890,6 +1898,30 @@ class AppWindow(QMainWindow):
         self._refresh_schema_windows()
         self._update_title()
         self._last_document_snapshot = self._document.snapshot()
+
+    def _normalize_loaded_cable_bindings(self, document: Document) -> None:
+        """Bring mirrored cable endpoint fields back into sync on load.
+
+        Legacy or partially edited projects may store different values in
+        `params.start_ap/end_ap` and `canvas.cable_start_ap/cable_end_ap`.
+        The properties UI resolves these mixed values already; normalize the
+        document to that resolved state before binding the canvas so the plan
+        draws the same cable endpoints the UI shows.
+        """
+        points = document.elements.get("elec_points", {})
+        for cable in document.elements.get("elec_cables", {}).values():
+            start_ap_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "").strip()
+            end_ap_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "").strip()
+            if start_ap_id and start_ap_id not in points:
+                start_ap_id = ""
+            if end_ap_id and end_ap_id not in points:
+                end_ap_id = ""
+            cable.start_ap = start_ap_id
+            cable.end_ap = end_ap_id
+            cable.geom["cable_start_ap"] = start_ap_id
+            cable.geom["cable_end_ap"] = end_ap_id
+            self._sync_cable_auto_name(cable)
+            self._rebuild_schema_cable_geometry(cable, start_ap_id, end_ap_id)
 
     def _on_property_action(self, element_id: str, action_id: str) -> None:
         """Führt eine Schaltflächen-Aktion aus dem Eigenschaften-Dock aus."""
@@ -3414,34 +3446,57 @@ class AppWindow(QMainWindow):
 
     def _on_reassign_floorplan(self, element_id: str, new_fp_id: str) -> None:
         """Ordnet ein Element per Drag-and-Drop einem anderen Grundriss zu."""
+        self._on_reassign_floorplan_batch([element_id], new_fp_id)
+
+    def _on_reassign_floorplan_batch(self, element_ids: list[str], new_fp_id: str) -> None:
+        """Ordnet mehrere Elemente per Drag-and-Drop einem anderen Grundriss zu."""
         document = self._document
         if document is None or new_fp_id not in document.floorplans:
             return
 
-        # Hilfslinien: physisch im Canvas verschieben (canvas-seitig gespeichert)
-        helper_ref = _parse_helper_nav_id(element_id)
-        if helper_ref is not None:
-            old_fp_id, helper_id = helper_ref
-            if old_fp_id == new_fp_id:
-                return
-            self._push_undo()
-            self.canvas.move_helper_line(old_fp_id, helper_id, new_fp_id)
-            self._mark_dirty()
-            fp_name = (document.floorplans.get(new_fp_id) or object()).name or new_fp_id
-            self.statusBar().showMessage(f"Hilfslinie {helper_id} → {fp_name}", 2500)
+        if not element_ids:
             return
 
-        # Alle anderen Elemente (inkl. Messungen): floor_plan_id ändern
-        element = document.get(element_id)
-        if element is None or element.floor_plan_id == new_fp_id:
+        helper_moves: list[tuple[str, str]] = []
+        element_moves: list[tuple[str, object]] = []
+        changed_labels: list[str] = []
+        helper_count = 0
+        for element_id in element_ids:
+            # Hilfslinien: physisch im Canvas verschieben (canvas-seitig gespeichert)
+            helper_ref = _parse_helper_nav_id(element_id)
+            if helper_ref is not None:
+                old_fp_id, helper_id = helper_ref
+                if old_fp_id == new_fp_id:
+                    continue
+                helper_moves.append((old_fp_id, helper_id))
+                helper_count += 1
+                changed_labels.append(f"Hilfslinie {helper_id}")
+                continue
+
+            # Alle anderen Elemente (inkl. Messungen): floor_plan_id ändern
+            element = document.get(element_id)
+            if element is None or element.floor_plan_id == new_fp_id:
+                continue
+            element_moves.append((element_id, element))
+            changed_labels.append(element.name or element_id)
+
+        if not changed_labels:
             return
+
         self._push_undo()
-        element.floor_plan_id = new_fp_id
+        for old_fp_id, helper_id in helper_moves:
+            self.canvas.move_helper_line(old_fp_id, helper_id, new_fp_id)
+        for _element_id, element in element_moves:
+            element.floor_plan_id = new_fp_id
+
         self._emit_structure_changed()
         self._mark_dirty()
         fp_name = (document.floorplans.get(new_fp_id) or object()).name or new_fp_id
-        label = element.name or element_id
-        self.statusBar().showMessage(f"{label} → {fp_name}", 2500)
+        if len(changed_labels) == 1:
+            self.statusBar().showMessage(f"{changed_labels[0]} → {fp_name}", 2500)
+        else:
+            prefix = f"{helper_count} Hilfslinien, " if helper_count else ""
+            self.statusBar().showMessage(f"{prefix}{len(changed_labels)} Elemente → {fp_name}", 2500)
 
     def _apply_canvas_visibility(self, element_id: str, visible: bool) -> None:
         """Spiegelt die Sichtbarkeit in den Canvas.
@@ -4986,16 +5041,35 @@ class AppWindow(QMainWindow):
         start_pos = self._point_position(start_ap_id) if start_ap_id else None
         end_pos = self._point_position(end_ap_id) if end_ap_id else None
 
+        def _with_start(points: list[list[float]], point: list[float]) -> list[list[float]]:
+            if not points:
+                return [point]
+            return [point] + points[1:]
+
+        def _with_end(points: list[list[float]], point: list[float]) -> list[list[float]]:
+            if not points:
+                return [point]
+            return points[:-1] + [point]
+
         if start_pos and end_pos:
-            cable.geom["elec_cables"] = [start_pos, end_pos]
+            if len(existing_points) >= 2:
+                cable.geom["elec_cables"] = _with_end(_with_start(existing_points, start_pos), end_pos)
+            else:
+                cable.geom["elec_cables"] = [start_pos, end_pos]
             return
         if start_pos:
-            fallback = existing_points[-1] if existing_points else [start_pos[0] + 120.0, start_pos[1] + 40.0]
-            cable.geom["elec_cables"] = [start_pos, fallback]
+            if len(existing_points) >= 2:
+                cable.geom["elec_cables"] = _with_start(existing_points, start_pos)
+            else:
+                fallback = existing_points[-1] if existing_points else [start_pos[0] + 120.0, start_pos[1] + 40.0]
+                cable.geom["elec_cables"] = [start_pos, fallback]
             return
         if end_pos:
-            fallback = existing_points[0] if existing_points else [end_pos[0] - 120.0, end_pos[1] - 40.0]
-            cable.geom["elec_cables"] = [fallback, end_pos]
+            if len(existing_points) >= 2:
+                cable.geom["elec_cables"] = _with_end(existing_points, end_pos)
+            else:
+                fallback = existing_points[0] if existing_points else [end_pos[0] - 120.0, end_pos[1] - 40.0]
+                cable.geom["elec_cables"] = [fallback, end_pos]
             return
         if existing_points:
             cable.geom["elec_cables"] = existing_points
@@ -5020,374 +5094,10 @@ class AppWindow(QMainWindow):
             return [120.0, 120.0]
         return [max(xs) + 60.0, max(ys) + 30.0]
 
-    def _on_schema_add_ap(self, payload: dict) -> None:
-        fp_id = self._active_floorplan_id()
-        room_id = str(payload.get("room_id") or "").strip()
-        room_target = self._resolve_schema_room_center(room_id) if room_id else None
-        if room_target is not None:
-            center, room_fp_id = room_target
-            if room_fp_id:
-                fp_id = room_fp_id
-            position = center
-        else:
-            position = self._suggest_schema_point_position(fp_id)
-
-        if not fp_id:
-            fp_id = self._require_floorplan()
-        if not fp_id:
-            return
-
-        from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
-
-        self._push_undo()
-        point_id = self._document.new_id(ElecPoint)
-        name = (payload.get("name") or "").strip() or point_id
-        color = str(payload.get("color") or "#4fc3f7")
-        symbol = str(payload.get("symbol") or "Steckdose")
-        ap_type = str(payload.get("ap_type") or "standard")
-        icon_path = str(BUILTIN_SYMBOLS.get(symbol, "") or "")
-
-        point = ElecPoint.create(
-            point_id,
-            floor_plan_id=fp_id,
-            name=name,
-            color=color,
-            width=100.0,
-            height=100.0,
-            icon_path=icon_path,
-            builtin_symbol=symbol,
-            visible=True,
-            label_visible=True,
-            label_size=12.0,
-            position="Wand",
-            height_from_floor=30.0,
-            smarthome_device="",
-            smarthome_device_color="",
-            note="",
-            ap_type=ap_type,
-            uv_config={},
-            up_distribution_config={},
-            hak_config={},
-            zaehler_config={},
-        )
-        point.geom["elec_points"] = [float(position[0]), float(position[1])]
-        point.geom["elec_point_size_px"] = [100.0, 100.0]
-        point.geom["elec_visible"] = True
-
-        self._document.add(point)
-        self.canvas.register_element(point_id, True)
-        self.canvas.set_elec_point_icon(point_id, icon_path)
-        self.canvas.set_color(point_id, color)
-
-        self._emit_structure_changed()
-        self.navigator.select(point_id)
-        self.properties.show_element(point_id)
-        self.canvas.set_selected_item(point_id)
-        self.canvas.update()
-        self._mark_dirty()
-
-    def _on_schema_add_cable(self, payload: dict) -> None:
-        start_ap_id = str(payload.get("start_ap_id") or "").strip()
-        end_ap_id = str(payload.get("end_ap_id") or "").strip()
-        fp_id = self._resolve_schema_cable_floorplan(start_ap_id, end_ap_id)
-        if not fp_id:
-            fp_id = self._require_floorplan()
-        if not fp_id:
-            return
-
-        self._push_undo()
-        cable_id = self._document.new_id(ElecCable)
-        start_point = self._document.elements["elec_points"].get(start_ap_id)
-        end_point = self._document.elements["elec_points"].get(end_ap_id)
-        start_name = str(getattr(start_point, "name", "") or "").strip() or start_ap_id
-        end_name = str(getattr(end_point, "name", "") or "").strip() or end_ap_id
-        name = format_auto_cable_name(start_name, end_name)
-        cable_type = (payload.get("type") or "").strip() or "5x1,5"
-        color = str(payload.get("color") or "#ff9800")
-        try:
-            stroke_width = float(payload.get("stroke_width", 2.0))
-        except (TypeError, ValueError):
-            stroke_width = 2.0
-        line_style = self._normalize_cable_line_style(payload.get("line_style", "solid"))
-
-        profile = self._ensure_cable_type_style_profile(
-            cable_type,
-            seed_color=color,
-            seed_stroke_width=stroke_width,
-            seed_line_style=line_style,
-        )
-        if profile is not None:
-            color = str(profile.get("color", color))
-            stroke_width = float(profile.get("stroke_width", stroke_width))
-            line_style = self._normalize_cable_line_style(profile.get("line_style", line_style))
-
-        cable = ElecCable.create(
-            cable_id,
-            floor_plan_id=fp_id,
-            name=name,
-            color=color,
-            visible=True,
-            label_visible=True,
-            label_size=12.0,
-            type=cable_type,
-            stroke_width=stroke_width,
-            line_style=line_style,
-            comment="",
-            start_ap=start_ap_id,
-            end_ap=end_ap_id,
-        )
-        cable.geom["elec_cable_stroke_width"] = stroke_width
-        cable.geom["elec_cable_line_style"] = line_style
-        cable.geom["elec_cable_type_text"] = cable_type
-        cable.geom["elec_cable_type_label_visible"] = False
-        cable.geom["cable_start_ap"] = start_ap_id
-        cable.geom["cable_end_ap"] = end_ap_id
-        cable.geom["elec_visible"] = True
-        self._rebuild_schema_cable_geometry(cable, start_ap_id, end_ap_id)
-
-        self._document.add(cable)
-        self.canvas.register_element(cable_id, True)
-        self.canvas.set_color(cable_id, color)
-        self.canvas.set_elec_cable_stroke_width(cable_id, stroke_width)
-        self.canvas.set_elec_cable_line_style(cable_id, line_style)
-        self.canvas.set_elec_cable_type_text(cable_id, cable_type)
-
-        self._emit_structure_changed()
-        self.navigator.select(cable_id)
-        self.properties.show_element(cable_id)
-        self.canvas.set_selected_item(cable_id)
-        self.canvas.update()
-        self._mark_dirty()
-
-        if self._elec_schema_window is not None and (not start_ap_id or not end_ap_id):
-            self._elec_schema_window.start_cable_pick_mode(cable_id)
-
-    def _on_schema_ap_position_changed(self, point_id: str, x: float, y: float) -> None:
-        self._elec_schema_ap_positions[point_id] = [float(x), float(y)]
-        self._mark_dirty()
-
-    def _on_schema_ap_positions_changed(self, positions: dict) -> None:
-        changed = False
-        for point_id, pos in positions.items():
-            if not isinstance(pos, (list, tuple)) or len(pos) != 2:
-                continue
-            try:
-                nx = float(pos[0])
-                ny = float(pos[1])
-            except (TypeError, ValueError):
-                continue
-            current = self._elec_schema_ap_positions.get(point_id)
-            if current is not None and len(current) == 2:
-                if abs(float(current[0]) - nx) <= 0.01 and abs(float(current[1]) - ny) <= 0.01:
-                    continue
-            self._elec_schema_ap_positions[point_id] = [nx, ny]
-            changed = True
-        if changed:
-            self._mark_dirty()
-
-    def _on_schema_edit_ap(self, point_id: str, payload: dict) -> None:
-        point = self._document.elements["elec_points"].get(point_id)
-        if point is None:
-            return
-        from gui.parameter_panel import BUILTIN_SYMBOLS  # noqa: PLC0415
-
-        self._push_undo()
-        point.name = str(payload.get("name") or point.name or point_id)
-        symbol = str(payload.get("symbol") or point.builtin_symbol or "")
-        point.builtin_symbol = symbol
-        icon_path = str(payload.get("icon_path") or "").strip()
-        if not icon_path:
-            icon_path = str(BUILTIN_SYMBOLS.get(symbol, "") or "")
-        point.icon_path = icon_path
-        point.color = str(payload.get("color") or point.color or "#4fc3f7")
-        try:
-            point.width = float(payload.get("width", point.width or 30.0))
-            point.height = float(payload.get("height", point.height or 30.0))
-        except (TypeError, ValueError):
-            pass
-        point.visible = bool(payload.get("visible", point.visible))
-        point.label_visible = bool(payload.get("label_visible", point.label_visible))
-        try:
-            point.label_size = float(payload.get("label_size", point.label_size or 12.0))
-        except (TypeError, ValueError):
-            pass
-        point.ap_type = str(payload.get("ap_type") or point.ap_type or "standard")
-        point.position = str(payload.get("position") or point.position or "Wand")
-        try:
-            point.height_from_floor = float(payload.get("height_from_floor", point.height_from_floor or 0.0))
-        except (TypeError, ValueError):
-            pass
-        point.smarthome_device = str(payload.get("smarthome_device") or point.smarthome_device or "")
-        point.smarthome_device_color = str(payload.get("smarthome_device_color") or point.smarthome_device_color or "")
-        point.note = str(payload.get("note") or point.note or "")
-
-        point.data["uv_config"] = copy.deepcopy(payload.get("uv_config") or {})
-        point.data["up_distribution_config"] = copy.deepcopy(payload.get("up_distribution_config") or {})
-        point.data["hak_config"] = copy.deepcopy(payload.get("hak_config") or {})
-        point.data["zaehler_config"] = copy.deepcopy(payload.get("zaehler_config") or {})
-
-        self.canvas.set_element_visible(point_id, bool(point.visible))
-        self.canvas.set_elec_point_icon(point_id, icon_path)
-        self.canvas.set_color(point_id, str(point.color))
-        self.canvas.update_elec_point_size(point_id, float(point.width), float(point.height))
-        point.geom["elec_point_position"] = str(point.position)
-        point.geom["elec_point_height"] = float(point.height_from_floor)
-        point.geom["elec_point_notes"] = str(point.note)
-        point.geom["elec_point_smarthome_device"] = str(point.smarthome_device)
-        point.geom["elec_point_smarthome_device_color"] = str(point.smarthome_device_color)
-        point.geom["elec_visible"] = bool(point.visible)
-
-        self._refresh_connected_cable_names(point_id)
-
-        self._document.element_changed.emit(point_id)
-        self.properties.refresh_element(point_id)
-        self.navigator.set_document(self._document)
-        self.canvas.update()
-        self._mark_dirty()
-
-    def _on_schema_edit_cable(self, cable_id: str, payload: dict) -> None:
-        cable = self._document.elements["elec_cables"].get(cable_id)
-        if cable is None:
-            return
-
-        self._push_undo()
-        cable.cable_type = str(payload.get("type") or cable.cable_type or "")
-        cable.color = str(payload.get("color") or cable.color or "#ff9800")
-        cable.visible = bool(payload.get("visible", cable.visible))
-        cable.label_visible = bool(payload.get("label_visible", cable.label_visible))
-        try:
-            cable.label_size = float(payload.get("label_size", cable.label_size or 12.0))
-        except (TypeError, ValueError):
-            pass
-        cable.comment = str(payload.get("comment") or cable.comment or "")
-        try:
-            stroke_width = float(payload.get("stroke_width", cable.geom.get("elec_cable_stroke_width", 2.0) or 2.0))
-        except (TypeError, ValueError):
-            stroke_width = 2.0
-        line_style = self._normalize_cable_line_style(
-            payload.get("line_style", cable.data.get("line_style", cable.geom.get("elec_cable_line_style", "solid")))
-        )
-
-        start_ap = str(payload.get("start_ap_id") or "").strip()
-        end_ap = str(payload.get("end_ap_id") or "").strip()
-        cable.start_ap = start_ap
-        cable.end_ap = end_ap
-        cable.geom["cable_start_ap"] = start_ap
-        cable.geom["cable_end_ap"] = end_ap
-        self._sync_cable_auto_name(cable)
-        cable.geom["elec_cable_stroke_width"] = stroke_width
-        cable.geom["elec_cable_line_style"] = line_style
-        cable.geom["elec_cable_type_text"] = str(cable.cable_type)
-        cable.geom["elec_cable_type_label_visible"] = bool(payload.get("type_label_visible", False))
-        cable.geom["elec_cable_notes"] = str(cable.comment)
-        cable.geom["elec_visible"] = bool(cable.visible)
-        cable.data["stroke_width"] = stroke_width
-        cable.data["line_style"] = line_style
-        self._rebuild_schema_cable_geometry(cable, start_ap, end_ap)
-
-        fp_id = self._resolve_schema_cable_floorplan(start_ap, end_ap)
-        if fp_id:
-            cable.floor_plan_id = fp_id
-
-        self.canvas.set_element_visible(cable_id, bool(cable.visible))
-        if str(cable.cable_type or "").strip():
-            self._apply_cable_type_style_to_all(
-                str(cable.cable_type),
-                color=str(cable.color),
-                stroke_width=stroke_width,
-                line_style=line_style,
-                defer_updates=True,
-            )
-        else:
-            self.canvas.set_color(cable_id, str(cable.color))
-            self.canvas.set_elec_cable_stroke_width(cable_id, stroke_width)
-            self.canvas.set_elec_cable_line_style(cable_id, line_style)
-        self.canvas.set_elec_cable_type_text(cable_id, str(cable.cable_type))
-        self.canvas.set_elec_cable_type_label_visible(
-            cable_id,
-            bool(cable.geom.get("elec_cable_type_label_visible", False)),
-        )
-
-        self._document.element_changed.emit(cable_id)
-        self.properties.refresh_element(cable_id)
-        self.canvas.update()
-        self._mark_dirty()
-
-    def _on_schema_duplicate_selection(self, ap_ids: list[str], cable_ids: list[str]) -> None:
-        selected_ap_ids = [pid for pid in ap_ids if pid in self._document.elements["elec_points"]]
-        selected_cable_ids = [cid for cid in cable_ids if cid in self._document.elements["elec_cables"]]
-        if not selected_ap_ids and not selected_cable_ids:
-            return
-
-        self._push_undo()
-
-        id_map: dict[str, str] = {}
-        new_ids: list[str] = []
-
-        for source_ap_id in selected_ap_ids:
-            new_ap_id = self._duplicate_element(source_ap_id, record_undo=False)
-            if not new_ap_id:
-                continue
-            id_map[source_ap_id] = new_ap_id
-            source_pos = self._elec_schema_ap_positions.get(source_ap_id)
-            if isinstance(source_pos, (list, tuple)) and len(source_pos) == 2:
-                try:
-                    self._elec_schema_ap_positions[new_ap_id] = [
-                        float(source_pos[0]) + 20.0,
-                        float(source_pos[1]) + 20.0,
-                    ]
-                except (TypeError, ValueError):
-                    pass
-            new_ids.append(new_ap_id)
-
-        for source_cable_id in selected_cable_ids:
-            new_cable_id = self._duplicate_element(source_cable_id, record_undo=False)
-            if not new_cable_id:
-                continue
-            new_cable = self._document.elements["elec_cables"].get(new_cable_id)
-            source_cable = self._document.elements["elec_cables"].get(source_cable_id)
-            if new_cable is None or source_cable is None:
-                continue
-
-            source_start = str(source_cable.start_ap or "").strip()
-            source_end = str(source_cable.end_ap or "").strip()
-            new_start = id_map.get(source_start, "")
-            new_end = id_map.get(source_end, "")
-            if new_start or new_end:
-                new_cable.start_ap = new_start
-                new_cable.end_ap = new_end
-                new_cable.geom["cable_start_ap"] = new_start
-                new_cable.geom["cable_end_ap"] = new_end
-                self._rebuild_schema_cable_geometry(new_cable, new_start, new_end)
-            self._sync_cable_auto_name(new_cable)
-            self._document.element_changed.emit(new_cable_id)
-            new_ids.append(new_cable_id)
-
-        if new_ids:
-            self.navigator.select(new_ids[-1])
-            self.properties.show_element(new_ids[-1])
-            self.canvas.set_selected_item(new_ids[-1])
-            self.canvas.update()
-            self._mark_dirty()
-
-    def _open_elec_schema_window(self) -> None:
-        if self._elec_schema_window is None:
-            self._elec_schema_window = ElecSchemaWindow(self)
-            self._elec_schema_window.add_ap_requested.connect(self._on_schema_add_ap)
-            self._elec_schema_window.add_cable_requested.connect(self._on_schema_add_cable)
-            self._elec_schema_window.delete_ap_requested.connect(self._delete_element)
-            self._elec_schema_window.delete_cable_requested.connect(self._delete_element)
-            self._elec_schema_window.ap_position_changed.connect(self._on_schema_ap_position_changed)
-            self._elec_schema_window.ap_positions_changed.connect(self._on_schema_ap_positions_changed)
-            self._elec_schema_window.edit_ap_requested.connect(self._on_schema_edit_ap)
-            self._elec_schema_window.edit_cable_requested.connect(self._on_schema_edit_cable)
-            self._elec_schema_window.duplicate_selection_requested.connect(
-                self._on_schema_duplicate_selection
-            )
+    def _show_topology_dock(self) -> None:
         self._refresh_schema_windows()
-        self._elec_schema_window.show()
-        self._elec_schema_window.raise_()
-        self._elec_schema_window.activateWindow()
+        self.topology.show()
+        self.topology.raise_()
 
     def _open_schaltplan_window(self) -> None:
         if self._schaltplan_window is None:
@@ -5398,17 +5108,10 @@ class AppWindow(QMainWindow):
         self._schaltplan_window.activateWindow()
 
     def _refresh_schema_windows(self) -> None:
-        if self._elec_schema_window is None and self._schaltplan_window is None:
+        if self._schaltplan_window is None and self.topology is None:
             return
         ap_nodes, cable_edges, room_map = self._build_schema_data()
-        if self._elec_schema_window is not None:
-            self._elec_schema_ap_positions = {}
-            self._elec_schema_window.set_data(
-                ap_nodes,
-                cable_edges,
-                room_choices=self._collect_room_choices(),
-                room_styles=self._collect_room_styles(),
-            )
+        self.topology.set_topology_data(ap_nodes, cable_edges)
         if self._schaltplan_window is not None:
             self._schaltplan_window.set_data(
                 {node.point_id: node for node in ap_nodes},
@@ -5613,6 +5316,8 @@ class AppWindow(QMainWindow):
             if not isinstance(src, dict):
                 continue
             ptype = str(src.get("type", "plan")).strip().lower()
+            if ptype == "topology":
+                ptype = "elektro_topology"
             if ptype not in (
                 "plan",
                 "heating",
@@ -5621,6 +5326,7 @@ class AppWindow(QMainWindow):
                 "hydraulics",
                 "elektro",
                 "elektro_room",
+                "elektro_topology",
             ):
                 continue
             page = {
@@ -5629,6 +5335,8 @@ class AppWindow(QMainWindow):
                 "title": str(src.get("title") or "Seite"),
                 "enabled": bool(src.get("enabled", True)),
             }
+            if ptype == "elektro_topology":
+                page["root_ap_id"] = str(src.get("root_ap_id") or "").strip()
             if ptype in ("plan", "heating", "heating_circuit", "elektro", "elektro_room"):
                 page["show_background"] = bool(src.get("show_background", True))
                 page["show_heating"] = bool(src.get("show_heating", True))
@@ -5742,6 +5450,7 @@ class AppWindow(QMainWindow):
             floor_plans=self._current_floor_plans_for_export_dialog(),
             elec_rooms=self._current_elec_rooms_for_export_dialog(),
             heating_circuits=self._current_heating_circuits_for_export_dialog(),
+            topology_roots=self._current_topology_roots_for_export_dialog(),
             svg_size=self.canvas._svg_size,
             export_meta=self._normalize_pdf_export_meta(self._pdf_export_meta, pages),
             hrouting_version=self._hrouting_program_version(),
@@ -5753,6 +5462,31 @@ class AppWindow(QMainWindow):
         out_pages = self._normalize_pdf_export_pages(dialog.get_pages())
         out_meta = self._normalize_pdf_export_meta(dialog.get_export_meta(), out_pages)
         return out_pages, out_meta
+
+    def _current_topology_roots_for_export_dialog(self) -> list[tuple[str, str]]:
+        ap_nodes, cable_edges, _room_map = self._build_schema_data()
+        node_by_id = {node.point_id: node for node in ap_nodes if node.visible}
+        connected_ids: set[str] = set()
+        for edge in cable_edges:
+            if not edge.visible:
+                continue
+            start_ap_id = str(edge.start_ap_id or "").strip()
+            end_ap_id = str(edge.end_ap_id or "").strip()
+            if not start_ap_id or not end_ap_id:
+                continue
+            if start_ap_id not in node_by_id or end_ap_id not in node_by_id:
+                continue
+            if start_ap_id == end_ap_id:
+                continue
+            connected_ids.add(start_ap_id)
+            connected_ids.add(end_ap_id)
+        return [
+            (point_id, f"{node_by_id[point_id].name or point_id} ({point_id})")
+            for point_id in sorted(
+                connected_ids,
+                key=lambda node_id: (node_by_id[node_id].name or node_id).lower(),
+            )
+        ]
 
     def _save_all_visibility(self) -> dict:
         return {
@@ -7191,6 +6925,33 @@ class AppWindow(QMainWindow):
             )
             return
 
+        if ptype == "elektro_topology":
+            page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+            _, content_rect = self._draw_pdf_title(painter, page_rect, title)
+            image_side_margin = max(28.0, content_rect.width() * 0.03)
+            image_top_bottom_margin = max(8.0, content_rect.height() * 0.01)
+            image_rect = content_rect.adjusted(
+                image_side_margin,
+                image_top_bottom_margin,
+                -image_side_margin,
+                -image_top_bottom_margin,
+            )
+            ap_nodes, cable_edges, _room_map = self._build_schema_data()
+            root_ap_id = str(page.get("root_ap_id") or "").strip()
+            if not self.topology.render_snapshot_to_painter(
+                painter,
+                image_rect,
+                ap_nodes,
+                cable_edges,
+                root_ap_id,
+            ):
+                painter.drawText(
+                    image_rect,
+                    Qt.AlignCenter | Qt.TextWordWrap,
+                    "Keine Elektro-Topologie vorhanden.",
+                )
+            return
+
         page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
         _, content_rect = self._draw_pdf_title(painter, page_rect, title)
         source_rect = self._effective_pdf_source_rect(page)
@@ -8079,7 +7840,7 @@ class AppWindow(QMainWindow):
             for cable_id, cable in self._document.elements["elec_cables"].items()
             if str(cable.kicad_cable_key or "").strip()
         }
-        default_floor_plan_id = self._active_floorplan_id()
+        default_floor_plan_id = self._selected_floorplan_id()
         first_touched_id = ""
         preview_by_key = dict(selected_preview_map or {})
 
@@ -8138,6 +7899,8 @@ class AppWindow(QMainWindow):
                         continue
                     self._sync_cable_auto_name(cable)
                     cable.data["type"] = cable_type
+                    if default_floor_plan_id and not cable.floor_plan_id:
+                        cable.floor_plan_id = default_floor_plan_id
                     if resolved_start_ap_id and not cable.start_ap:
                         cable.start_ap = resolved_start_ap_id
                     if resolved_end_ap_id and not cable.end_ap:
@@ -8208,6 +7971,8 @@ class AppWindow(QMainWindow):
                         continue
                     self._sync_cable_auto_name(cable)
                     cable.data["type"] = cable_type
+                    if default_floor_plan_id and not cable.floor_plan_id:
+                        cable.floor_plan_id = default_floor_plan_id
                     if resolved_start_ap_id:
                         cable.start_ap = resolved_start_ap_id
                     if resolved_end_ap_id:
