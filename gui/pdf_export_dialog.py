@@ -374,6 +374,8 @@ class PdfExportConfigDialog(QDialog):
 
     @staticmethod
     def _allowed_element_keys(ptype: str) -> set[str]:
+        if ptype == "elektro_topology":
+            return set()
         if ptype == "elektro_room":
             return {"background", "furniture", "ap", "room", "kv", "text"}
         if ptype == "heating_circuit":
@@ -517,7 +519,6 @@ class PdfExportConfigDialog(QDialog):
                 "elektro",
                 "elektro_room",
                 "heating_circuit",
-                "elektro_topology",
             )
             supports_tables = ptype in ("heating", "elektro")
             supports_room_selection = ptype == "elektro_room"
@@ -533,7 +534,7 @@ class PdfExportConfigDialog(QDialog):
                 label.setVisible(supports_topology_root)
             self.lbl_no_rooms.setVisible(not bool(self._room_checks))
             self.lbl_no_circuits.setVisible(not bool(self._circuit_checks))
-            self.lbl_non_plan.setVisible(not is_plan_like)
+            self.lbl_non_plan.setVisible((not is_plan_like) and (not supports_topology_root))
 
             if is_plan_like:
                 floor_plan_id = page.get("floor_plan_id")

@@ -5798,8 +5798,22 @@ class CanvasWidget(QWidget):
 
         # In Draw-Elec-Cable mode: double-click on last point finishes the cable
         if self._mode == ToolMode.DRAW_ELEC_CABLE and self._current_elec_cable_id and self._current_elec_cable_points:
+            finish_now = False
+            if len(self._current_elec_cable_points) == 1:
+                ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+                if ctrl_held:
+                    snapped = canvas_pt
+                else:
+                    snapped = self._snap_to_grid(self._apply_angle_snap_elec(canvas_pt))
+                ap = self._find_nearest_ap(snapped)
+                if ap:
+                    snapped = QPointF(self._elec_points[ap])
+                if _qdist(snapped, self._current_elec_cable_points[-1]) >= threshold:
+                    self._current_elec_cable_points.append(snapped)
+                    finish_now = True
+
             last_pt = self._current_elec_cable_points[-1]
-            if _qdist(canvas_pt, last_pt) < threshold:
+            if finish_now or _qdist(canvas_pt, last_pt) < threshold:
                 cid = self._current_elec_cable_id
                 if len(self._current_elec_cable_points) >= 2:
                     # Check last point for AP snap

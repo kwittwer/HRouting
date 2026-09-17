@@ -19,7 +19,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QGraphicsSimpleTextItem  # noqa: E402
+from PySide6.QtWidgets import QApplication, QGraphicsPathItem, QGraphicsSimpleTextItem  # noqa: E402
 
 from gui.app_window import AppWindow  # noqa: E402
 from gui.docks.topology_dock import ElecTopologyWidget  # noqa: E402
@@ -210,6 +210,9 @@ def test_pdf_export_dialog_topology_page_root_selection(app):
         page = dialog._current_page()
         assert page is not None
         assert dialog.cb_topology_root.currentData() == "AP-1"
+        assert dialog.plan_group.isHidden() is True
+        assert dialog.cb_topology_root.isHidden() is False
+        assert dialog.lbl_non_plan.isHidden() is True
 
         dialog.cb_topology_root.setCurrentIndex(dialog.cb_topology_root.findData("AP-UV"))
 
@@ -419,13 +422,25 @@ def test_elec_topology_places_disconnected_components(app):
                 ),
             ]
         )
+        cable_edges.append(
+            CableEdge(
+                cable_id="EK-2",
+                name="Nebengebäude",
+                cable_type="NYM 3x1,5",
+                length_m=6.0,
+                color="#43aa8b",
+                stroke_width_px=2.0,
+                start_ap_id="AP-2",
+                end_ap_id="AP-3",
+            )
+        )
         window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges)
 
         texts = _scene_texts(window)
         assert "UV Hauptverteiler" in texts
         assert "Neben 2" in texts
         assert "Neben 3" in texts
-        assert window._summary_label.text() == "Topologie: 4 APs, 1 Kabel"
+        assert window._summary_label.text() == "Topologie: 4 APs, 2 Kabel"
     finally:
         window.deleteLater()
 
@@ -512,6 +527,198 @@ def test_topology_dock_root_combo_controls_layout(app):
         assert abs(root_pos[1]) < 1e-6
     finally:
         dock.deleteLater()
+
+
+@pytest.mark.gui
+def test_elec_topology_keeps_single_branch_chain_on_one_ray(app):
+    window = ElecTopologyWidget()
+    try:
+        ap_nodes = [
+            _sample_uv_node(),
+            ApNode(
+                point_id="AP-2",
+                name="Zwischenpunkt",
+                room="Flur",
+                ap_type="standard",
+                has_distributor_function=False,
+                is_connected=True,
+                color="#43aa8b",
+                icon_path="",
+                builtin_symbol="Steckdose",
+                width_px=30.0,
+                height_px=30.0,
+            ),
+            ApNode(
+                point_id="AP-3",
+                name="Endpunkt",
+                room="Flur",
+                ap_type="standard",
+                has_distributor_function=False,
+                is_connected=True,
+                color="#ff9800",
+                icon_path="",
+                builtin_symbol="Steckdose",
+                width_px=30.0,
+                height_px=30.0,
+            ),
+        ]
+        cable_edges = [
+            CableEdge(
+                cable_id="EK-1",
+                name="Abschnitt 1",
+                cable_type="NYM 3x1,5",
+                length_m=4.0,
+                color="#ff9800",
+                stroke_width_px=2.0,
+                start_ap_id="AP-UV",
+                end_ap_id="AP-2",
+            ),
+            CableEdge(
+                cable_id="EK-2",
+                name="Abschnitt 2",
+                cable_type="NYM 3x1,5",
+                length_m=4.0,
+                color="#ff9800",
+                stroke_width_px=2.0,
+                start_ap_id="AP-2",
+                end_ap_id="AP-3",
+            ),
+        ]
+
+        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges)
+
+        root = window._node_positions["AP-UV"]
+        mid = window._node_positions["AP-2"]
+        end = window._node_positions["AP-3"]
+
+        vec1 = (mid[0] - root[0], mid[1] - root[1])
+        vec2 = (end[0] - root[0], end[1] - root[1])
+        cross = abs((vec1[0] * vec2[1]) - (vec1[1] * vec2[0]))
+        assert cross < 1e-3
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.gui
+def test_elec_topology_draws_non_tree_edges_as_secondary_arcs(app):
+    window = ElecTopologyWidget()
+    try:
+        ap_nodes = [
+            _sample_uv_node(),
+            ApNode(
+                point_id="AP-1",
+                name="Links",
+                room="EG",
+                ap_type="standard",
+                has_distributor_function=False,
+                is_connected=True,
+                color="#ff9800",
+                icon_path="",
+                builtin_symbol="Steckdose",
+                width_px=30.0,
+                height_px=30.0,
+            ),
+            ApNode(
+                point_id="AP-2",
+                name="Rechts",
+                room="EG",
+                ap_type="standard",
+                has_distributor_function=False,
+                is_connected=True,
+                color="#43aa8b",
+                icon_path="",
+                builtin_symbol="Steckdose",
+                width_px=30.0,
+                height_px=30.0,
+            ),
+            ApNode(
+                point_id="AP-3",
+                name="Links Ende",
+                room="EG",
+                ap_type="standard",
+                has_distributor_function=False,
+                is_connected=True,
+                color="#ff9800",
+                icon_path="",
+                builtin_symbol="Steckdose",
+                width_px=30.0,
+                height_px=30.0,
+            ),
+            ApNode(
+                point_id="AP-4",
+                name="Rechts Ende",
+                room="EG",
+                ap_type="standard",
+                has_distributor_function=False,
+                is_connected=True,
+                color="#43aa8b",
+                icon_path="",
+                builtin_symbol="Steckdose",
+                width_px=30.0,
+                height_px=30.0,
+            ),
+        ]
+        cable_edges = [
+            CableEdge(
+                cable_id="EK-1",
+                name="Links 1",
+                cable_type="NYM 3x1,5",
+                length_m=4.0,
+                color="#ff9800",
+                stroke_width_px=2.0,
+                start_ap_id="AP-UV",
+                end_ap_id="AP-1",
+            ),
+            CableEdge(
+                cable_id="EK-2",
+                name="Rechts 1",
+                cable_type="NYM 3x1,5",
+                length_m=4.0,
+                color="#43aa8b",
+                stroke_width_px=2.0,
+                start_ap_id="AP-UV",
+                end_ap_id="AP-2",
+            ),
+            CableEdge(
+                cable_id="EK-3",
+                name="Links 2",
+                cable_type="NYM 3x1,5",
+                length_m=4.0,
+                color="#ff9800",
+                stroke_width_px=2.0,
+                start_ap_id="AP-1",
+                end_ap_id="AP-3",
+            ),
+            CableEdge(
+                cable_id="EK-4",
+                name="Rechts 2",
+                cable_type="NYM 3x1,5",
+                length_m=4.0,
+                color="#43aa8b",
+                stroke_width_px=2.0,
+                start_ap_id="AP-2",
+                end_ap_id="AP-4",
+            ),
+            CableEdge(
+                cable_id="EK-5",
+                name="Quer",
+                cable_type="NYM 3x1,5",
+                length_m=4.0,
+                color="#bbbbbb",
+                stroke_width_px=2.0,
+                start_ap_id="AP-3",
+                end_ap_id="AP-4",
+            ),
+        ]
+
+        window.set_data(ap_nodes=ap_nodes, cable_edges=cable_edges)
+
+        path_items = [item for item in window.scene.items() if isinstance(item, QGraphicsPathItem)]
+        assert len(path_items) == len(cable_edges)
+        assert any(item.pen().style() == Qt.PenStyle.DashLine for item in path_items)
+        assert any(item.pen().style() == Qt.PenStyle.SolidLine for item in path_items)
+    finally:
+        window.deleteLater()
 
 
 

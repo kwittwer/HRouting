@@ -3617,6 +3617,184 @@ def test_pdf_export_elektro_topology_writes_pdf_and_persists_config(app, monkeyp
         window.deleteLater()
 
 
+def test_pdf_export_skips_dry_run_page_estimation(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [40.0, 40.0], "AP-2": [120.0, 40.0]},
+                    "elec_cables": {"EK-1": [[40.0, 40.0], [120.0, 40.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose A",
+                            "builtin_symbol": "Steckdose",
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose B",
+                            "builtin_symbol": "Steckdose",
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel intern",
+                            "type": "NYM-J 3x1,5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+
+        pdf_path = tmp_path / "no_dry_run_export.pdf"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(pdf_path), "PDF (*.pdf)")),
+        )
+
+        pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "topology-page-1",
+                    "type": "elektro_topology",
+                    "title": "Elektro Topologie",
+                    "enabled": True,
+                }
+            ]
+        )
+        meta = window._normalize_pdf_export_meta({}, pages)
+
+        monkeypatch.setattr(window, "_open_pdf_export_config_dialog", lambda: (pages, meta))
+        monkeypatch.setattr(
+            window,
+            "_estimate_pdf_total_pages",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dry run should not be called")),
+        )
+
+        window._export_pdf()
+
+        assert pdf_path.exists()
+        assert pdf_path.stat().st_size > 0
+    finally:
+        window.deleteLater()
+
+
+def test_pdf_export_restores_topology_dock_after_export(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QFileDialog  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [40.0, 40.0], "AP-2": [120.0, 40.0]},
+                    "elec_cables": {"EK-1": [[40.0, 40.0], [120.0, 40.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""},
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose A",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose B",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Kabel intern",
+                            "type": "NYM-J 3x1,5",
+                            "start_ap": "AP-1",
+                            "end_ap": "AP-2",
+                            "visible": True,
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        assert window.topology._widget._summary_label.text() == "Topologie: 2 APs, 1 Kabel"
+
+        pdf_path = tmp_path / "restore_topology_after_export.pdf"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(pdf_path), "PDF (*.pdf)")),
+        )
+
+        pages = window._normalize_pdf_export_pages(
+            [
+                {
+                    "id": "topology-page-1",
+                    "type": "elektro_topology",
+                    "title": "Elektro Topologie",
+                    "enabled": True,
+                }
+            ]
+        )
+        meta = window._normalize_pdf_export_meta({}, pages)
+        monkeypatch.setattr(window, "_open_pdf_export_config_dialog", lambda: (pages, meta))
+
+        window._export_pdf()
+
+        assert pdf_path.exists()
+        assert window.topology._widget._summary_label.text() == "Topologie: 2 APs, 1 Kabel"
+    finally:
+        window.deleteLater()
+
+
 def test_pdf_export_normalizes_heating_circuit_page(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -8565,6 +8743,72 @@ def test_e6_draw_cable_interaction_snaps_and_finishes(app, monkeypatch):
         assert window.canvas.tool_mode() == ToolMode.NONE
         assert window.canvas._current_elec_cable_id is None
         assert window.canvas.get_cable_ap(cable_id) == ("AP-1", "AP-2")
+        assert cable.name == "KBL_Steckdose 1:Steckdose 2"
+    finally:
+        window.deleteLater()
+
+
+def test_e6_draw_cable_from_ap_direct_double_click_sets_end_ap_and_name(app, monkeypatch):
+    from PySide6.QtCore import QPointF, Qt  # noqa: PLC0415
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [100.0, 100.0], "AP-2": [220.0, 100.0]},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {
+                            "name": "EG",
+                            "visible": True,
+                            "file_path": "",
+                        }
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Steckdose 2",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                        },
+                    },
+                },
+            }
+        )
+        window._set_document(doc)
+        monkeypatch.setattr(window, "_open_context_menu", lambda *a, **k: None)
+        window._add_elec_cable_from_ap("AP-1")
+        cable_id = window.canvas._current_elec_cable_id
+        assert cable_id
+        assert window.canvas.tool_mode() == ToolMode.DRAW_ELEC_CABLE
+        assert len(window.canvas._current_elec_cable_points) == 1
+
+        window.canvas.mouseDoubleClickEvent(
+            _MouseEventStub(QPointF(220.0, 100.0), button=Qt.LeftButton)
+        )
+
+        cable = window._document.elements["elec_cables"][cable_id]
+        assert window.canvas.tool_mode() == ToolMode.NONE
+        assert window.canvas._current_elec_cable_id is None
+        assert window.canvas.get_cable_ap(cable_id) == ("AP-1", "AP-2")
+        assert len(window.canvas._elec_cables[cable_id]) == 2
+        assert cable.path
+        assert cable.name == "KBL_Steckdose 1:Steckdose 2"
     finally:
         window.deleteLater()
 

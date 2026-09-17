@@ -59,6 +59,8 @@ class ElecTopologyWidget(QWidget):
         self._cable_edges: dict[str, CableEdge] = {}
         self._selected_root_ap_id = ""
         self._node_positions: dict[str, tuple[float, float]] = {}
+        self._tree_edge_ids: set[str] = set()
+        self._node_component_centers: dict[str, tuple[float, float]] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -158,6 +160,25 @@ class ElecTopologyWidget(QWidget):
         self.scene.render(painter, target_rect, scene_rect)
         return True
 
+    @classmethod
+    def render_snapshot_to_painter(
+        cls,
+        painter: QPainter,
+        target_rect: QRectF,
+        ap_nodes: list[ApNode],
+        cable_edges: list[CableEdge],
+        root_ap_id: str = "",
+    ) -> bool:
+        widget = cls()
+        try:
+            widget.set_data(ap_nodes, cable_edges, root_ap_id)
+            for item in widget.scene.items():
+                if isinstance(item, QGraphicsSimpleTextItem):
+                    item.setBrush(QBrush(QColor("#000000")))
+            return widget.render_to_painter(painter, target_rect)
+        finally:
+            widget.deleteLater()
+
     def fit_to_content(self) -> None:
         rect = self._scene_export_rect()
         if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
@@ -201,12 +222,15 @@ class ElecTopologyWidget(QWidget):
     def _compute_layout_positions(self) -> dict[str, tuple[float, float]]:
         node_ids = set(self._ap_nodes.keys())
         adjacency: dict[str, set[str]] = defaultdict(set)
+        edge_ids_by_pair: dict[tuple[str, str], list[str]] = defaultdict(list)
         for edge in self._cable_edges.values():
             start_ap_id = str(edge.start_ap_id or "").strip()
             end_ap_id = str(edge.end_ap_id or "").strip()
             if start_ap_id in node_ids and end_ap_id in node_ids and start_ap_id != end_ap_id:
                 adjacency[start_ap_id].add(end_ap_id)
                 adjacency[end_ap_id].add(start_ap_id)
+                pair = tuple(sorted((start_ap_id, end_ap_id)))
+                edge_ids_by_pair[pair].append(edge.cable_id)
 
         unvisited = set(node_ids)
         components: list[list[str]] = []
@@ -225,6 +249,8 @@ class ElecTopologyWidget(QWidget):
             components.append(component)
 
         positions: dict[str, tuple[float, float]] = {}
+        self._tree_edge_ids = set()
+        self._node_component_centers = {}
         component_roots: list[tuple[list[str], str]] = []
         for component in components:
             component_nodes = set(component)
@@ -257,24 +283,31 @@ class ElecTopologyWidget(QWidget):
             queue = deque([root_ap_id])
             while queue:
                 current = queue.popleft()
-                for neighbor in sorted(adjacency[current]):
+                for neighbor in sorted(
+                    adjacency[current],
+                    key=lambda node_id: (
+                        -len(adjacency[node_id]),
+                        (self._ap_nodes[node_id].name or node_id).lower(),
+                        node_id,
+                    ),
+                ):
                     if neighbor not in levels:
                         levels[neighbor] = levels[current] + 1
                         parents[neighbor] = current
                         queue.append(neighbor)
 
+            for node_id, parent_id in parents.items():
+                pair = tuple(sorted((node_id, parent_id)))
+                cable_ids = edge_ids_by_pair.get(pair, [])
+                if cable_ids:
+                    self._tree_edge_ids.add(cable_ids[0])
+
             children: dict[str, list[str]] = defaultdict(list)
             for node_id, parent_id in parents.items():
                 children[parent_id].append(node_id)
-            for node_id in children:
-                children[node_id].sort(
-                    key=lambda child_id: (
-                        -len(adjacency[child_id]),
-                        (self._ap_nodes[child_id].name or child_id).lower(),
-                    )
-                )
 
             subtree_weights: dict[str, float] = {}
+            subtree_nodes: dict[str, set[str]] = {}
 
             def _subtree_weight(node_id: str) -> float:
                 cached = subtree_weights.get(node_id)
@@ -288,7 +321,78 @@ class ElecTopologyWidget(QWidget):
                 subtree_weights[node_id] = max(weight, 1.0)
                 return subtree_weights[node_id]
 
+            def _subtree_node_set(node_id: str) -> set[str]:
+                cached = subtree_nodes.get(node_id)
+                if cached is not None:
+                    return cached
+                node_set = {node_id}
+                for child_id in children.get(node_id, []):
+                    node_set.update(_subtree_node_set(child_id))
+                subtree_nodes[node_id] = node_set
+                return node_set
+
             _subtree_weight(root_ap_id)
+            _subtree_node_set(root_ap_id)
+
+            non_tree_pairs = {
+                tuple(sorted((str(edge.start_ap_id or "").strip(), str(edge.end_ap_id or "").strip())))
+                for edge in self._cable_edges.values()
+                if edge.cable_id not in self._tree_edge_ids
+            }
+
+            def _branch_affinity(left_id: str, right_id: str) -> int:
+                left_nodes = subtree_nodes.get(left_id, {left_id})
+                right_nodes = subtree_nodes.get(right_id, {right_id})
+                score = 0
+                for start_id in left_nodes:
+                    for end_id in right_nodes:
+                        if tuple(sorted((start_id, end_id))) in non_tree_pairs:
+                            score += 1
+                return score
+
+            def _order_children(parent_id: str) -> list[str]:
+                child_ids = list(children.get(parent_id, []))
+                if len(child_ids) <= 1:
+                    return child_ids
+                remaining = sorted(
+                    child_ids,
+                    key=lambda child_id: (
+                        -len(adjacency[child_id]),
+                        -_subtree_weight(child_id),
+                        (self._ap_nodes[child_id].name or child_id).lower(),
+                        child_id,
+                    ),
+                )
+                if len(remaining) == 2:
+                    return remaining
+                totals = {
+                    child_id: sum(_branch_affinity(child_id, other_id) for other_id in child_ids if other_id != child_id)
+                    for child_id in child_ids
+                }
+                ordered = [max(remaining, key=lambda child_id: (totals[child_id], len(adjacency[child_id]), child_id))]
+                remaining.remove(ordered[0])
+                while remaining:
+                    candidate = max(
+                        remaining,
+                        key=lambda child_id: (
+                            max(_branch_affinity(child_id, ordered[0]), _branch_affinity(child_id, ordered[-1])),
+                            totals[child_id],
+                            len(adjacency[child_id]),
+                            child_id,
+                        ),
+                    )
+                    left_gain = _branch_affinity(candidate, ordered[0])
+                    right_gain = _branch_affinity(candidate, ordered[-1])
+                    if left_gain > right_gain:
+                        ordered.insert(0, candidate)
+                    else:
+                        ordered.append(candidate)
+                    remaining.remove(candidate)
+                return ordered
+
+            ordered_children: dict[str, list[str]] = {}
+            for node_id in children:
+                ordered_children[node_id] = _order_children(node_id)
 
             level_nodes: dict[int, list[str]] = defaultdict(list)
             for node_id, level in levels.items():
@@ -299,23 +403,40 @@ class ElecTopologyWidget(QWidget):
                 for node in self._ap_nodes.values()
             )
             min_arc_gap = max_diameter + 44.0
-            radial_gap = max_diameter + 96.0
+            radial_gap = max_diameter + 118.0
             center_x, center_y = component_centers[min(component_index, len(component_centers) - 1)]
 
+            for node_id in component:
+                self._node_component_centers[node_id] = (center_x, center_y)
+
             positions[root_ap_id] = (center_x, center_y)
+            node_angles: dict[str, float] = {root_ap_id: -math.pi / 2.0}
 
             def _assign_angles(node_id: str, start_angle: float, end_angle: float) -> None:
-                child_ids = children.get(node_id, [])
+                child_ids = ordered_children.get(node_id, [])
                 if not child_ids:
                     return
                 level = levels[node_id] + 1
                 radius = level * radial_gap
-                available_span = max(0.35, end_angle - start_angle)
+                parent_angle = node_angles.get(node_id, (start_angle + end_angle) / 2.0)
+                available_span = max(0.3, end_angle - start_angle)
+                if len(child_ids) == 1:
+                    child_id = child_ids[0]
+                    positions[child_id] = (
+                        center_x + (radius * math.cos(parent_angle)),
+                        center_y + (radius * math.sin(parent_angle)),
+                    )
+                    node_angles[child_id] = parent_angle
+                    child_span = max(min_arc_gap / max(radius, 1.0), 0.28)
+                    _assign_angles(child_id, parent_angle - (child_span / 2.0), parent_angle + (child_span / 2.0))
+                    return
                 required_span = 0.0
                 for child_id in child_ids:
                     required_span += max(min_arc_gap / max(radius, 1.0), 0.24) * _subtree_weight(child_id)
-                span = max(available_span, required_span)
-                cursor = ((start_angle + end_angle) / 2.0) - (span / 2.0)
+                span = max(min(available_span, required_span), min(available_span, math.tau - 0.24))
+                span = max(span, min(available_span, 0.45 * len(child_ids)))
+                cursor = parent_angle - (span / 2.0)
+                cursor = max(start_angle, min(cursor, end_angle - span))
                 total_weight = sum(_subtree_weight(child_id) for child_id in child_ids)
                 for child_id in child_ids:
                     share = span * (_subtree_weight(child_id) / max(total_weight, 1.0))
@@ -324,6 +445,7 @@ class ElecTopologyWidget(QWidget):
                         center_x + (radius * math.cos(child_mid)),
                         center_y + (radius * math.sin(child_mid)),
                     )
+                    node_angles[child_id] = child_mid
                     _assign_angles(child_id, cursor, cursor + share)
                     cursor += share
 
@@ -347,6 +469,8 @@ class ElecTopologyWidget(QWidget):
     def _render(self) -> None:
         self.scene.clear()
         self._node_positions = {}
+        self._tree_edge_ids = set()
+        self._node_component_centers = {}
         if not self._ap_nodes and not self._cable_edges:
             self.scene.addSimpleText("Keine APs/Kabel vorhanden.")
             self._summary_label.setText("Keine Topologie geladen")
@@ -383,19 +507,35 @@ class ElecTopologyWidget(QWidget):
 
             path = QPainterPath()
             path.moveTo(sx, sy)
-            mid_x = (sx + ex) / 2.0
-            path.cubicTo(mid_x, sy, mid_x, ey, ex, ey)
+            is_tree_edge = edge.cable_id in self._tree_edge_ids
+            if is_tree_edge or start_pos is None or end_pos is None:
+                path.lineTo(ex, ey)
+            else:
+                center_x, center_y = self._node_component_centers.get(start_ap_id, (0.0, 0.0))
+                start_angle = math.atan2(sy - center_y, sx - center_x)
+                end_angle = math.atan2(ey - center_y, ex - center_x)
+                start_radius = math.hypot(sx - center_x, sy - center_y)
+                end_radius = math.hypot(ex - center_x, ey - center_y)
+                outer_radius = max(start_radius, end_radius) + 90.0
+                c1x = center_x + (outer_radius * math.cos(start_angle))
+                c1y = center_y + (outer_radius * math.sin(start_angle))
+                c2x = center_x + (outer_radius * math.cos(end_angle))
+                c2y = center_y + (outer_radius * math.sin(end_angle))
+                path.cubicTo(c1x, c1y, c2x, c2y, ex, ey)
+            edge_color = QColor(edge.color or "#ff9800")
+            if not is_tree_edge:
+                edge_color.setAlpha(150)
             item = QGraphicsPathItem(path)
             item.setPen(
                 QPen(
-                    QColor(edge.color or "#ff9800"),
+                    edge_color,
                     max(1.0, float(edge.stroke_width_px or 2.0)),
-                    _line_style_to_pen_style(edge.line_style),
+                    Qt.PenStyle.SolidLine if is_tree_edge else Qt.PenStyle.DashLine,
                     Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin,
                 )
             )
-            item.setZValue(5.0)
+            item.setZValue(5.0 if is_tree_edge else 3.0)
             self.scene.addItem(item)
 
     def _draw_nodes(self, positions: dict[str, tuple[float, float]]) -> None:
@@ -569,19 +709,13 @@ class TopologyDock(QDockWidget):
         cable_edges: list[CableEdge],
         root_ap_id: str = "",
     ) -> bool:
-        previous_root_ap_id = self._selected_root_ap_id
-        previous_nodes = list(self._ap_nodes)
-        previous_edges = list(self._cable_edges)
-        try:
-            self._selected_root_ap_id = str(root_ap_id or "").strip()
-            self._widget.set_data(ap_nodes, cable_edges, self._selected_root_ap_id)
-            return self._widget.render_to_painter(painter, target_rect)
-        finally:
-            self._selected_root_ap_id = previous_root_ap_id
-            self._ap_nodes = previous_nodes
-            self._cable_edges = previous_edges
-            self._sync_root_combo()
-            self._widget.set_data(self._ap_nodes, self._cable_edges, self._selected_root_ap_id)
+        return ElecTopologyWidget.render_snapshot_to_painter(
+            painter,
+            target_rect,
+            ap_nodes,
+            cable_edges,
+            str(root_ap_id or "").strip(),
+        )
 
     def _schedule_refresh(self, *_args) -> None:
         self._refresh_timer.start()

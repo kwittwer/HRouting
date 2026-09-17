@@ -642,6 +642,7 @@ class AppWindow(QMainWindow):
         self.canvas.ref_line_set.connect(self._on_ref_line_set)
         self.canvas.route_changed.connect(self._on_route_changed)
         self.canvas.supply_line_changed.connect(self._on_supply_line_changed)
+        self.canvas.elec_cable_changed.connect(self._on_elec_cable_changed)
         self.canvas.hkv_line_changed.connect(self._on_hkv_line_changed)
         self.properties.field_changed.connect(self._on_property_changed)
         self.properties.batch_field_changed.connect(self._on_batch_property_changed)
@@ -1499,6 +1500,33 @@ class AppWindow(QMainWindow):
         self.properties.refresh_element(circuit_id)
         self.statusBar().showMessage(
             f"✅ {circuit_id}: Zuleitung aktualisiert ({supply_mm / 1000:.2f} m)",
+            2500,
+        )
+
+    def _on_elec_cable_changed(self, cable_id: str) -> None:
+        if self._document is None or self._restoring_snapshot:
+            return
+        cable = self._document.elements.get("elec_cables", {}).get(cable_id)
+        if cable is None:
+            return
+        points = self._document.elements.get("elec_points", {})
+        start_ap_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "").strip()
+        end_ap_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "").strip()
+        if start_ap_id and start_ap_id not in points:
+            start_ap_id = ""
+        if end_ap_id and end_ap_id not in points:
+            end_ap_id = ""
+        cable.start_ap = start_ap_id
+        cable.end_ap = end_ap_id
+        cable.geom["cable_start_ap"] = start_ap_id
+        cable.geom["cable_end_ap"] = end_ap_id
+        self._sync_cable_auto_name(cable)
+        self._document.element_changed.emit(cable_id)
+        self.properties.refresh_element(cable_id)
+        length_px = self.canvas.get_elec_cable_length_px(cable_id)
+        length_mm = length_px * self.canvas.get_mm_per_px()
+        self.statusBar().showMessage(
+            f"✅ {cable_id}: Kabel aktualisiert ({length_mm / 1000:.2f} m)",
             2500,
         )
 
@@ -4913,7 +4941,7 @@ class AppWindow(QMainWindow):
                 height_px=height_px,
                 width_mm=float(point.data.get("width", 30.0) or 30.0),
                 height_mm=float(point.data.get("height", 30.0) or 30.0),
-                visible=bool(point.visible),
+                visible=True,
                 label_visible=bool(point.label_visible),
                 label_size=float(point.label_size or 12.0),
                 position=str(point.data.get("position", "Wand") or "Wand"),
@@ -4953,7 +4981,7 @@ class AppWindow(QMainWindow):
                 line_style=str(cable.data.get("line_style", cable.geom.get("elec_cable_line_style", "solid")) or "solid"),
                 start_ap_id=str(cable.start_ap or cable.geom.get("cable_start_ap") or ""),
                 end_ap_id=str(cable.end_ap or cable.geom.get("cable_end_ap") or ""),
-                visible=bool(cable.visible),
+                visible=True,
                 label_visible=bool(cable.label_visible),
                 type_label_visible=bool(cable.geom.get("elec_cable_type_label_visible", False)),
                 label_size=float(cable.label_size or 12.0),
@@ -6456,6 +6484,7 @@ class AppWindow(QMainWindow):
 
         title_font = QFont("Arial", 14, QFont.Bold)
         painter.setFont(title_font)
+        painter.setPen(Qt.black)
         title_h = max(36.0, page_rect.height() * 0.06)
         title_rect = QRectF(page_rect.x(), page_rect.y(), page_rect.width(), title_h)
         painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, title)
@@ -6492,7 +6521,7 @@ class AppWindow(QMainWindow):
 
         painter.save()
         painter.setFont(footer_font)
-        painter.setPen(Qt.darkGray)
+        painter.setPen(Qt.black)
         painter.drawText(
             QRectF(page_rect.x(), page_rect.bottom() - footer_h, page_rect.width() * 0.4, footer_h),
             Qt.AlignLeft | Qt.AlignVCenter,
@@ -6595,7 +6624,8 @@ class AppWindow(QMainWindow):
             for idx, page in enumerate(enabled_pages):
                 if idx > 0:
                     self._pdf_new_page(painter, writer)
-                self._apply_page_visibility(page)
+                if str(page.get("type", "plan")).strip().lower() != "elektro_topology":
+                    self._apply_page_visibility(page)
                 self._render_pdf_export_page(
                     painter,
                     writer,
@@ -6616,6 +6646,9 @@ class AppWindow(QMainWindow):
                 self._restore_all_visibility(saved_vis)
                 self._pdf_counting_only = False
                 self.canvas.update()
+                self._refresh_schema_windows()
+                self.topology.refresh_now()
+                QApplication.processEvents()
         # +1 for generated title page
         return max(2, total + 1)
 
@@ -6644,6 +6677,7 @@ class AppWindow(QMainWindow):
         body_size = 9 if n_cols <= 6 else (8 if n_cols <= 8 else 7)
         body_font = QFont("Arial", body_size)
         painter.setFont(body_font)
+        painter.setPen(Qt.black)
 
         if col_widths and len(col_widths) == n_cols and sum(col_widths) > 0:
             total_w = float(sum(col_widths))
@@ -7349,27 +7383,17 @@ class AppWindow(QMainWindow):
             ap_rows, cable_rows = self._collect_pdf_electro_rows()
 
             meta = self._normalize_pdf_export_meta(export_meta, pages)
-            total_pages = self._estimate_pdf_total_pages(
-                writer,
-                enabled_pages,
-                hk_rows,
-                t_supply,
-                t_return,
-                ap_rows,
-                cable_rows,
-                export_data,
-            )
-            meta["page_count"] = str(total_pages)
-
-            # Reset footer state after dry-run counting so the real export starts at page 1.
             self._pdf_prepare_footer()
+            # Avoid a full dry-run render pass before export; it makes large projects appear hung.
+            meta["page_count"] = str(max(1, len(enabled_pages) + 1))
             self._draw_pdf_cover_page(painter, writer, meta)
             for idx, page in enumerate(enabled_pages):
                 if progress.wasCanceled():
                     cancelled = True
                     break
                 self._pdf_new_page(painter, writer)
-                self._apply_page_visibility(page)
+                if str(page.get("type", "plan")).strip().lower() != "elektro_topology":
+                    self._apply_page_visibility(page)
                 self._render_pdf_export_page(
                     painter,
                     writer,
@@ -7393,6 +7417,9 @@ class AppWindow(QMainWindow):
             finally:
                 self._restore_all_visibility(saved_vis)
                 self.canvas.update()
+                self._refresh_schema_windows()
+                self.topology.refresh_now()
+                QApplication.processEvents()
                 progress.close()
 
         if cancelled:
@@ -7405,6 +7432,7 @@ class AppWindow(QMainWindow):
 
         self._pdf_export_pages = pages
         self._pdf_export_meta = self._normalize_pdf_export_meta(export_meta, pages)
+        self._pdf_export_meta["page_count"] = str(int(getattr(self, "_pdf_footer_page_no", len(enabled_pages) + 1)))
         self._mark_dirty()
         self.log.success(f"PDF exportiert: {path}")
         self.statusBar().showMessage(f"PDF exportiert: {path}", 4000)
