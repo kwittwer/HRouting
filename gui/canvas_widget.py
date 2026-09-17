@@ -17,6 +17,7 @@
 import copy
 import math
 import os
+import time
 import hashlib
 from enum import Enum, auto
 from pathlib import Path
@@ -159,6 +160,9 @@ class CanvasWidget(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumSize(400, 400)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
 
         self._svg_renderer: Optional[QSvgRenderer] = None
         self._bg_pixmap: Optional[QPixmap] = None
@@ -326,6 +330,7 @@ class CanvasWidget(QWidget):
         self._label_visible:      Dict[str, bool]                 = {}
         self._label_rects:        Dict[str, QRectF]               = {}  # hit testing (transient)
         self._label_draw_pos:     Dict[str, QPointF]              = {}  # transient
+        self._label_metrics_cache: Dict[tuple[str, float], tuple[float, float, float]] = {}
         self._dragging_label:     Optional[str]                   = None
         self._label_drag_offset:  QPointF                         = QPointF(0, 0)
 
@@ -438,6 +443,10 @@ class CanvasWidget(QWidget):
         # Phase 1: Rendering throttle (60 Hz max during drag)
         self._last_drag_render_time: float = 0.0  # timestamp in milliseconds
         self._drag_render_interval_ms: float = 16.7  # ~60 Hz (1000/60)
+        self._last_hover_hit_test_time: float = 0.0
+        self._last_hover_screen_pos: Optional[QPointF] = None
+        self._hover_hit_test_interval_ms: float = 40.0
+        self._hover_hit_test_move_threshold_px: float = 3.0
         self._dirty_moved_elec_points: Set[str] = set()  # APs moved during drag, synced at release
         self._dirty_moved_elec_cables: Set[str] = set()  # Cables moved during drag
         self._dirty_moved_hkvs: Set[str] = set()  # HKVs moved during drag
@@ -2948,12 +2957,30 @@ class CanvasWidget(QWidget):
         Returns True if update() should be called, False to skip and throttle.
         This implements 60 Hz max rendering during drag operations.
         """
-        import time
         current_time_ms = time.time() * 1000.0
         if current_time_ms - self._last_drag_render_time >= self._drag_render_interval_ms:
             self._last_drag_render_time = current_time_ms
             return True
         return False
+
+    def _should_update_hover_hit_test(self, screen_pt: QPointF) -> bool:
+        """Throttle hover hit-tests during passive mouse movement.
+
+        This keeps the expensive full-scene hover scan from running on every
+        mouse-move event while still refreshing promptly when the cursor moves
+        meaningfully or enough time has elapsed.
+        """
+        current_time_ms = time.time() * 1000.0
+        if self._last_hover_screen_pos is not None:
+            dx = screen_pt.x() - self._last_hover_screen_pos.x()
+            dy = screen_pt.y() - self._last_hover_screen_pos.y()
+            if (dx * dx + dy * dy) ** 0.5 < self._hover_hit_test_move_threshold_px:
+                if current_time_ms - self._last_hover_hit_test_time < self._hover_hit_test_interval_ms:
+                    return False
+
+        self._last_hover_hit_test_time = current_time_ms
+        self._last_hover_screen_pos = QPointF(screen_pt)
+        return True
 
     def _get_grid_cell(self, pt: QPointF) -> Tuple[int, int]:
         """Convert canvas point to grid cell coordinates.
@@ -3524,6 +3551,7 @@ class CanvasWidget(QWidget):
         Objekte nicht aktiver Layer werden übersprungen (Workspace-Filter)."""
         threshold = self._px_to_canvas_units(HIT_POINT_RADIUS_PX)
         selectable = self._is_selectable
+        line_padding = threshold
 
         # 1. Electrical points (highest priority)
         ap = self._hit_elec_point(canvas_pt)
@@ -3540,6 +3568,9 @@ class CanvasWidget(QWidget):
             if not self._elec_visible.get(kid, True) or not selectable("elec_cable", kid):
                 continue
             if len(pts) >= 2:
+                bounds = self._points_bounds(pts, line_padding)
+                if bounds is None or not bounds.contains(canvas_pt):
+                    continue
                 for i in range(len(pts) - 1):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
@@ -3550,6 +3581,9 @@ class CanvasWidget(QWidget):
             if not self._hkv_line_visible.get(lid, True) or not selectable("hkv_line", lid):
                 continue
             if len(pts) >= 2:
+                bounds = self._points_bounds(pts, line_padding)
+                if bounds is None or not bounds.contains(canvas_pt):
+                    continue
                 for i in range(len(pts) - 1):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
@@ -3560,6 +3594,9 @@ class CanvasWidget(QWidget):
             if not self._circuit_visible.get(cid, True) or not selectable("supply_line", cid):
                 continue
             if len(pts) >= 2:
+                bounds = self._points_bounds(pts, line_padding)
+                if bounds is None or not bounds.contains(canvas_pt):
+                    continue
                 for i in range(len(pts) - 1):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
@@ -3570,6 +3607,9 @@ class CanvasWidget(QWidget):
             if not self._circuit_visible.get(cid, True) or not selectable("route", cid):
                 continue
             if len(pts) >= 2:
+                bounds = self._points_bounds(pts, line_padding)
+                if bounds is None or not bounds.contains(canvas_pt):
+                    continue
                 for i in range(len(pts) - 1):
                     proj = _project_on_segment(canvas_pt, pts[i], pts[i + 1])
                     if _qdist(canvas_pt, proj) < threshold:
@@ -3591,30 +3631,48 @@ class CanvasWidget(QWidget):
         for aid, shape in self._annotation_lines.items():
             if not self._is_object_visible("annotation_line", aid):
                 continue
+            bounds = self._annotation_bounds("annotation_line", shape, threshold)
+            if bounds is None or not bounds.contains(canvas_pt):
+                continue
             if selectable("annotation_line", aid) and self._hit_annotation_line(canvas_pt, shape):
                 return ("annotation_line", aid)
         for aid, shape in self._annotation_rectangles.items():
             if not self._is_object_visible("annotation_rectangle", aid):
+                continue
+            bounds = self._annotation_bounds("annotation_rectangle", shape, threshold)
+            if bounds is None or not bounds.contains(canvas_pt):
                 continue
             if selectable("annotation_rectangle", aid) and self._hit_annotation_rect(canvas_pt, shape):
                 return ("annotation_rectangle", aid)
         for aid, shape in self._annotation_polylines.items():
             if not self._is_object_visible("annotation_polyline", aid):
                 continue
+            bounds = self._annotation_bounds("annotation_polyline", shape, threshold)
+            if bounds is None or not bounds.contains(canvas_pt):
+                continue
             if selectable("annotation_polyline", aid) and self._hit_annotation_polyline(canvas_pt, shape):
                 return ("annotation_polyline", aid)
         for aid, shape in self._annotation_polygons.items():
             if not self._is_object_visible("annotation_polygon", aid):
+                continue
+            bounds = self._annotation_bounds("annotation_polygon", shape, threshold)
+            if bounds is None or not bounds.contains(canvas_pt):
                 continue
             if selectable("annotation_polygon", aid) and self._hit_annotation_polygon(canvas_pt, shape):
                 return ("annotation_polygon", aid)
         for aid, shape in self._annotation_circles.items():
             if not self._is_object_visible("annotation_circle", aid):
                 continue
+            bounds = self._annotation_bounds("annotation_circle", shape, threshold)
+            if bounds is None or not bounds.contains(canvas_pt):
+                continue
             if selectable("annotation_circle", aid) and self._hit_annotation_circle(canvas_pt, shape):
                 return ("annotation_circle", aid)
         for aid, shape in self._annotation_ellipses.items():
             if not self._is_object_visible("annotation_ellipse", aid):
+                continue
+            bounds = self._annotation_bounds("annotation_ellipse", shape, threshold)
+            if bounds is None or not bounds.contains(canvas_pt):
                 continue
             if selectable("annotation_ellipse", aid) and self._hit_annotation_ellipse(canvas_pt, shape):
                 return ("annotation_ellipse", aid)
@@ -3623,12 +3681,18 @@ class CanvasWidget(QWidget):
         for cid, poly in self._polygons.items():
             if not self._circuit_visible.get(cid, True) or not selectable("polygon", cid):
                 continue
+            bounds = self._points_bounds(poly, threshold)
+            if bounds is None or not bounds.contains(canvas_pt):
+                continue
             if self._point_in_polygon(canvas_pt, poly):
                 return ("polygon", cid)
 
         # 7b. Electrical room polygons
         for rid, poly in self._elec_room_polygons.items():
             if not self._elec_room_visible.get(rid, True) or not selectable("elec_room", rid):
+                continue
+            bounds = self._points_bounds(poly, threshold)
+            if bounds is None or not bounds.contains(canvas_pt):
                 continue
             if self._point_in_polygon(canvas_pt, poly):
                 return ("elec_room", rid)
@@ -4298,6 +4362,29 @@ class CanvasWidget(QWidget):
         if rx <= 0.0 or ry <= 0.0:
             return None
         return QPointF(rect.center()), rx, ry
+
+    def _points_bounds(self, points: list[QPointF], padding: float = 0.0) -> QRectF | None:
+        if not points:
+            return None
+        min_x = min(point.x() for point in points)
+        max_x = max(point.x() for point in points)
+        min_y = min(point.y() for point in points)
+        max_y = max(point.y() for point in points)
+        return QRectF(
+            min_x - padding,
+            min_y - padding,
+            (max_x - min_x) + padding * 2.0,
+            (max_y - min_y) + padding * 2.0,
+        )
+
+    def _annotation_bounds(self, kind: str, shape: dict, padding: float = 0.0) -> QRectF | None:
+        if kind in {"annotation_line", "annotation_rectangle", "annotation_circle", "annotation_ellipse"}:
+            rect = self._annotation_rect(shape)
+            return rect.adjusted(-padding, -padding, padding, padding) if rect is not None else None
+        points = self._annotation_points_from_shape(shape)
+        if len(points) < 2:
+            return None
+        return self._points_bounds(points, padding)
 
     def _annotation_hit_threshold(self) -> float:
         return self._px_to_canvas_units(max(HIT_POINT_RADIUS_PX, 8.0))
@@ -7370,6 +7457,8 @@ class CanvasWidget(QWidget):
         canvas_pt = self._to_canvas(pos)
         if self._mode != ToolMode.NONE:
             self._helper_hover_endpoint = None
+            self._last_hover_screen_pos = None
+            self._last_hover_hit_test_time = 0.0
         if self._mode == ToolMode.MEASURE_ANGLE:
             self._mouse_pos = self._snap_measure_point(canvas_pt)
         elif self._mode == ToolMode.MEASURE:
@@ -7444,18 +7533,19 @@ class CanvasWidget(QWidget):
             return
 
         if self._mode == ToolMode.NONE:
-            hover_obj = self._hit_any_object(canvas_pt)
-            if not hover_obj:
-                text_hit = self._hit_text_annotation(canvas_pt)
-                if text_hit:
-                    hover_obj = ("text", text_hit)
-            if not hover_obj:
-                label_hit = self._hit_label(canvas_pt)
-                if label_hit:
-                    hover_obj = ("label", label_hit)
-            if hover_obj != self._hover_object:
-                self._hover_object = hover_obj
-                self.update()
+            if self._should_update_hover_hit_test(pos):
+                hover_obj = self._hit_any_object(canvas_pt)
+                if not hover_obj:
+                    text_hit = self._hit_text_annotation(canvas_pt)
+                    if text_hit:
+                        hover_obj = ("text", text_hit)
+                if not hover_obj:
+                    label_hit = self._hit_label(canvas_pt)
+                    if label_hit:
+                        hover_obj = ("label", label_hit)
+                if hover_obj != self._hover_object:
+                    self._hover_object = hover_obj
+                    self.update()
         elif self._hover_object is not None:
             self._hover_object = None
             self.update()
@@ -10579,15 +10669,24 @@ class CanvasWidget(QWidget):
             size = size_override
         label_text = str(text or "")
         lines = label_text.split("\n") if label_text else [""]
+        font_size = round(size / self._scale, 3)
+        metrics_key = (label_text, font_size)
+        cached_metrics = self._label_metrics_cache.get(metrics_key)
         font = painter.font()
-        font.setPointSizeF(size / self._scale)
+        font.setPointSizeF(font_size)
         painter.setFont(font)
-        # background for readability
-        fm = painter.fontMetrics()
-        tw = max((fm.horizontalAdvance(line) for line in lines), default=0)
-        line_h = fm.height()
+        if cached_metrics is None:
+            fm = painter.fontMetrics()
+            tw = max((fm.horizontalAdvance(line) for line in lines), default=0)
+            line_h = fm.height()
+            ascent = fm.ascent()
+            cached_metrics = (float(tw), float(line_h), float(ascent))
+            if len(self._label_metrics_cache) > 4096:
+                self._label_metrics_cache.clear()
+            self._label_metrics_cache[metrics_key] = cached_metrics
+        tw, line_h, ascent = cached_metrics
         th = line_h * len(lines)
-        bg_rect = QRectF(pos.x() - 2, pos.y() - fm.ascent() - 1,
+        bg_rect = QRectF(pos.x() - 2, pos.y() - ascent - 1,
                          tw + 4, th + 2)
         bg = QColor("#2b2b2b")
         bg.setAlpha(160)

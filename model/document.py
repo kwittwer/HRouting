@@ -39,6 +39,18 @@ class Emitter:
             slot(*args)
 
 
+class RevisionEmitter(Emitter):
+    """Emitter that bumps the owning document revision before notifying."""
+
+    def __init__(self, bump_revision: Callable[[], None]) -> None:
+        super().__init__()
+        self._bump_revision = bump_revision
+
+    def emit(self, *args: Any) -> None:
+        self._bump_revision()
+        super().emit(*args)
+
+
 #: params-Schlüssel, die keine Elementcontainer sind
 _PARAMS_NON_ELEMENT_KEYS = {"floorplans_order"}
 
@@ -100,12 +112,13 @@ class Document:
         self.ids = IdAllocator()
         self._active_floorplan_id: str = ""
         self._active_floorplan_explicit: bool = False
+        self._revision: int = 0
 
         # Signale
-        self.element_added = Emitter()      # (element_id)
-        self.element_removed = Emitter()    # (element_id)
-        self.element_changed = Emitter()    # (element_id)
-        self.structure_changed = Emitter()  # ()
+        self.element_added = RevisionEmitter(self._bump_revision)      # (element_id)
+        self.element_removed = RevisionEmitter(self._bump_revision)    # (element_id)
+        self.element_changed = RevisionEmitter(self._bump_revision)    # (element_id)
+        self.structure_changed = RevisionEmitter(self._bump_revision)  # ()
         self.active_floorplan_changed = Emitter()  # (fp_id)
 
     # ------------------------------------------------------------------
@@ -131,6 +144,13 @@ class Document:
         if cls is Furniture:
             return self.furniture  # type: ignore[return-value]
         return self.elements[cls.PARAMS_KEY]
+
+    @property
+    def revision(self) -> int:
+        return self._revision
+
+    def _bump_revision(self) -> None:
+        self._revision += 1
 
     def all_elements(self) -> Iterator[Element]:
         yield from self.floorplans.values()

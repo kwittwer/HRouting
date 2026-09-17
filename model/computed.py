@@ -23,6 +23,9 @@ from .elements import (
 )
 
 
+_PROJECT_OVERVIEW_CACHE: dict[int, tuple[int, dict]] = {}
+
+
 def _points(value: Any) -> list[tuple[float, float]]:
     if not value:
         return []
@@ -615,6 +618,12 @@ def project_overview_data(document: Document) -> dict:
         t_supply      – Vorlauftemperatur [°C]
         t_return      – Rücklauftemperatur [°C]
     """
+    document_key = id(document)
+    current_revision = int(document.revision)
+    cached = _PROJECT_OVERVIEW_CACHE.get(document_key)
+    if cached is not None and cached[0] == current_revision:
+        return cached[1]
+
     from logic.heating_calc import calc_balancing  # noqa: PLC0415
 
     # ── Heizkreis-Zeilen + hydraulischer Abgleich ─────────────────────
@@ -701,7 +710,7 @@ def project_overview_data(document: Document) -> dict:
     if furn_count:
         general["Einrichtung"] = furn_count
 
-    return {
+    result = {
         "general": general,
         "heating_rows": heating_rows,
         "hkv_rows": hkv_rows,
@@ -710,3 +719,5 @@ def project_overview_data(document: Document) -> dict:
         "t_supply": t_supply,
         "t_return": t_return,
     }
+    _PROJECT_OVERVIEW_CACHE[document_key] = (current_revision, result)
+    return result

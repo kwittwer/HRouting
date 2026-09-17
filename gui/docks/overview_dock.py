@@ -141,6 +141,7 @@ class ProjectOverviewDock(QDockWidget):
         self.setMinimumWidth(360)
 
         self._document: Document | None = None
+        self._last_document_revision: int = -1
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(250)
@@ -501,6 +502,7 @@ class ProjectOverviewDock(QDockWidget):
             except RuntimeError:
                 pass
         self._document = document
+        self._last_document_revision = -1
         if document is not None:
             document.structure_changed.connect(self._schedule_refresh)
             document.element_changed.connect(self._schedule_refresh)
@@ -519,11 +521,16 @@ class ProjectOverviewDock(QDockWidget):
         if self._document is None:
             self._clear_all()
             return
+        current_revision = int(getattr(self._document, "revision", 0) or 0)
+        if current_revision == self._last_document_revision:
+            return
         try:
             from model.computed import project_overview_data  # noqa: PLC0415
             data = project_overview_data(self._document)
         except Exception:  # pragma: no cover
             return
+
+        self._last_document_revision = current_revision
 
         self._fill_general(data.get("general", {}))
         heating_rows = data.get("heating_rows", [])
