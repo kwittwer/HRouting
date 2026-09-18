@@ -3066,6 +3066,13 @@ class CanvasWidget(QWidget):
         """Clear all dirty flags after rendering."""
         self._dirty_layers.clear()
 
+    def is_elec_point_drag_active(self) -> bool:
+        """Whether AP geometry is being interactively moved (also Alt-drag)."""
+        return bool(
+            (self._mode == ToolMode.MOVE_ELEC_POINT and self._dragging_elec_point)
+            or any(kind == "elec_point" for kind, _ in self._dragging_multi)
+        )
+
     def _should_update_drag_render(self) -> bool:
         """Check if enough time has passed to trigger a canvas update during drag.
         
@@ -3094,10 +3101,12 @@ class CanvasWidget(QWidget):
 
     def focusOutEvent(self, event):
         self._finish_interaction_quality()
+        self._finish_elec_point_drag()
         super().focusOutEvent(event)
 
     def hideEvent(self, event):
         self._finish_interaction_quality()
+        self._finish_elec_point_drag()
         self._interaction_update_timer.stop()
         self._grid_layer_cache.clear()
         super().hideEvent(event)
@@ -3229,10 +3238,10 @@ class CanvasWidget(QWidget):
         return changed
 
     def _apply_deferred_drag_sync(self) -> None:
-        """Apply all deferred model syncs after a drag operation ends.
-        
-        This method is called in mouseReleaseEvent to finalize all the changes
-        that were tracked during mouseMoveEvent without full model sync.
+        """Finish cable endpoint sync after a drag operation ends.
+
+        AP positions already write through to the document during movement;
+        only dependent cable geometry and the spatial index are deferred.
         """
         # Sync all moved APs with their connected cables
         for ap_id in self._dirty_moved_elec_points:
@@ -3245,6 +3254,24 @@ class CanvasWidget(QWidget):
         self._dirty_moved_elec_points.clear()
         self._dirty_moved_elec_cables.clear()
         self._dirty_moved_hkvs.clear()
+
+    def _finish_elec_point_drag(self) -> None:
+        """Commit dependent geometry on release or an interrupted AP drag."""
+        if self._mode != ToolMode.MOVE_ELEC_POINT or not self._dragging_elec_point:
+            return
+        pid = self._dragging_elec_point
+        moved = pid in self._dirty_moved_elec_points
+        self._dragging_elec_point = None
+        self._mode = ToolMode.NONE
+        self.setCursor(Qt.ArrowCursor)
+        if moved:
+            self._apply_deferred_drag_sync()
+            self.elec_point_placed.emit(pid)
+            connected = {cid for cid, ap_id in self._cable_start_ap.items() if ap_id == pid}
+            connected.update(cid for cid, ap_id in self._cable_end_ap.items() if ap_id == pid)
+            for cid in connected:
+                self.elec_cable_changed.emit(cid)
+        self.update()
 
     def _apply_angle_snap_supply(self, target: QPointF) -> QPointF:
         if self._snap_angle <= 0 or not self._current_supply_points:
@@ -3402,6 +3429,17 @@ class CanvasWidget(QWidget):
         from model.canvas_binding import bind_canvas  # lokal: Zyklus vermeiden
 
         self._finish_interaction_quality()
+        self._interaction_update_timer.stop()
+        self._dragging_elec_point = None
+        if self._mode == ToolMode.MOVE_ELEC_POINT:
+            self._mode = ToolMode.NONE
+            self.setCursor(Qt.ArrowCursor)
+        self._dragging_multi.clear()
+        self._drag_multi_start_positions.clear()
+        self._drag_multi_anchor = None
+        self._dirty_moved_elec_points.clear()
+        self._dirty_moved_elec_cables.clear()
+        self._dirty_moved_hkvs.clear()
         self._grid_layer_cache.clear()
         self._document = document
         bind_canvas(self, document, stages, on_change=self._on_document_data_changed)
@@ -3562,6 +3600,8 @@ class CanvasWidget(QWidget):
             }
 
         # Laufende Drag-Operationen beenden, wenn ihr Layer nicht mehr aktiv ist.
+        if self._dragging_elec_point and not self._is_selectable("elec_point", self._dragging_elec_point):
+            self._finish_elec_point_drag()
         if self._dragging_route_point:
             owner_id, _idx = self._dragging_route_point
             if not self._is_selectable(self._owner_obj_type(owner_id), owner_id):
@@ -4567,7 +4607,18 @@ class CanvasWidget(QWidget):
         return visible_rect.adjusted(-padding, -padding, padding, padding).contains(point)
 
     def _bounds_visible_in_rect(self, bounds: QRectF | None, visible_rect: QRectF) -> bool:
-        return bounds is not None and visible_rect.intersects(bounds)
+        if bounds is None or visible_rect.isEmpty():
+            return False
+        # QRectF.intersects() rejects zero-area rectangles. A perfectly
+        # vertical/horizontal line (or a point) still has drawable geometry,
+        # so culling must compare inclusive coordinate intervals instead.
+        bounds = bounds.normalized()
+        return (
+            bounds.left() <= visible_rect.right()
+            and bounds.right() >= visible_rect.left()
+            and bounds.top() <= visible_rect.bottom()
+            and bounds.bottom() >= visible_rect.top()
+        )
 
     def _annotation_hit_threshold(self) -> float:
         return self._px_to_canvas_units(max(HIT_POINT_RADIUS_PX, 8.0))
@@ -8420,11 +8471,13 @@ class CanvasWidget(QWidget):
 
             ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
             pt = canvas_pt if ctrl_held else self._snap_to_grid(canvas_pt)
-            self._elec_points[pid] = pt
-            self._dirty_moved_elec_points.add(pid)  # Defer sync until mouseReleaseEvent
-            self._mark_dirty("elec_points", "elec_cables", "labels")
-            if self._should_update_drag_render():
-                self.update()
+            if self._elec_points.get(pid) != pt:
+                self._elec_points[pid] = pt
+                self._dirty_moved_elec_points.add(pid)  # Cable endpoint sync at release
+                self._mark_dirty("elec_points", "elec_cables", "labels")
+            # Retain a trailing frame even if the final move arrives within
+            # the render interval and the user keeps the button held.
+            self._request_interaction_update()
             return
 
         if self._mode == ToolMode.MOVE_HKV and self._dragging_hkv:
@@ -8959,20 +9012,7 @@ class CanvasWidget(QWidget):
                 self.update()
                 return
             if self._mode == ToolMode.MOVE_ELEC_POINT and self._dragging_elec_point:
-                pid = self._dragging_elec_point
-                self._dragging_elec_point = None
-                self._mode = ToolMode.NONE
-                self.setCursor(Qt.ArrowCursor)
-                # Apply deferred model syncs (sync connected cables)
-                self._apply_deferred_drag_sync()
-                self.elec_point_placed.emit(pid)
-                # Emit cable changed for every cable connected to this AP
-                for cid in list(self._cable_start_ap):
-                    if self._cable_start_ap[cid] == pid:
-                        self.elec_cable_changed.emit(cid)
-                for cid in list(self._cable_end_ap):
-                    if self._cable_end_ap[cid] == pid:
-                        self.elec_cable_changed.emit(cid)
+                self._finish_elec_point_drag()
                 return
             if self._dragging_route_point and self._mode == ToolMode.EDIT_ELEC_CABLE:
                 cid, idx = self._dragging_route_point
@@ -9237,6 +9277,9 @@ class CanvasWidget(QWidget):
                 return
 
         if event.key() == Qt.Key_Escape:
+            # AP positions already live in the document; finish their cable
+            # bindings before leaving the drag instead of leaving stale ends.
+            self._finish_elec_point_drag()
             self._mode           = ToolMode.NONE
             self._current_points = []
             self._current_furniture_id = None

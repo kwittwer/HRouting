@@ -164,8 +164,8 @@ def assert_offsets(actual, expected):
 
 @pytest.mark.parametrize("target", ["image", "grab"])
 def test_real_paint_validates_signature_once_for_many_visible_cables(canvas, monkeypatch, target):
-    # Both bounds dimensions are nonzero: horizontal lines currently get culled
-    # as empty QRectFs, which would make a paint-performance assertion vacuous.
+    # Diagonal overlapping pairs exercise lane geometry. Axis-aligned culling
+    # and actual line pixels are covered by test_canvas_axis_aligned_visibility.
     for index in range(48):
         group = index // 2
         x, y = 60 + (group % 6) * 120, 60 + (group // 6) * 130

@@ -289,7 +289,11 @@ class AppWindow(QMainWindow):
         self._restoring_snapshot = False
         self._undo_group_timer = QTimer(self)
         self._undo_group_timer.setSingleShot(True)
-        self._undo_group_timer.timeout.connect(self._finish_undo_group)
+        self._undo_group_timer.timeout.connect(self._finish_undo_group_when_idle)
+        self._pending_canvas_refresh_ids: set[str] = set()
+        self._canvas_refresh_timer = QTimer(self)
+        self._canvas_refresh_timer.setSingleShot(True)
+        self._canvas_refresh_timer.timeout.connect(self._flush_pending_canvas_refresh)
         self._undo_action: QAction | None = None
         self._redo_action: QAction | None = None
         self._save_git_action: QAction | None = None
@@ -1305,15 +1309,42 @@ class AppWindow(QMainWindow):
         if self._restoring_snapshot:
             return
         self._record_canvas_change()
-        self.properties.refresh_element(element_id)
-        self._refresh_schema_windows()
+        # Proxy writes are immediate, even while dragging. Keep undo/dirty
+        # tracking live, but do not rebuild the full topology for every pixel.
+        # Pending IDs also collect the connected-cable writes during release.
+        if self.canvas.is_elec_point_drag_active() or self._pending_canvas_refresh_ids:
+            self._pending_canvas_refresh_ids.add(element_id)
+            if not self._canvas_refresh_timer.isActive():
+                self._canvas_refresh_timer.start(50)
+        else:
+            self.properties.refresh_element(element_id)
+            self._refresh_schema_windows()
         if not self._dirty:
             self._dirty = True
             self._update_title()
 
+    def _flush_pending_canvas_refresh(self) -> None:
+        """Refresh secondary views once after the AP drag, not on its hot path."""
+        self._canvas_refresh_timer.stop()
+        if not self._pending_canvas_refresh_ids:
+            return
+        if self.canvas.is_elec_point_drag_active():
+            self._canvas_refresh_timer.start(50)
+            return
+        changed_ids = self._pending_canvas_refresh_ids
+        self._pending_canvas_refresh_ids = set()
+        for element_id in changed_ids:
+            if self._document.get(element_id) is not None:
+                self.properties.refresh_element(element_id)
+        self._refresh_schema_windows()
+
     def _on_canvas_mutation_signal(self, *_args) -> None:
         """Erfasst Canvas-Mutationen, die nicht über DocumentMapView laufen."""
         self._record_canvas_change()
+        if self._pending_canvas_refresh_ids and not self.canvas.is_elec_point_drag_active():
+            # Run after the complete release handler, including all cable
+            # notifications. Never rebuild secondary views inside that loop.
+            self._canvas_refresh_timer.start(0)
         if not self._dirty:
             self._dirty = True
             self._update_title()
@@ -1484,6 +1515,14 @@ class AppWindow(QMainWindow):
         self._undo_group_open = True
         self._undo_group_timer.start(_UNDO_GROUP_IDLE_MS)
 
+    def _finish_undo_group_when_idle(self) -> None:
+        # A pause with the button held is still the same drag. Avoid both an
+        # expensive snapshot and an extra undo step in the middle of it.
+        if self.canvas.is_elec_point_drag_active():
+            self._undo_group_timer.start(_UNDO_GROUP_IDLE_MS)
+            return
+        self._finish_undo_group()
+
     def _finish_undo_group(self) -> None:
         """Schließt die aktuelle Änderungsgruppe und aktualisiert die Baseline."""
         self._undo_group_open = False
@@ -1602,6 +1641,8 @@ class AppWindow(QMainWindow):
         """
         current_scale = float(self.canvas._scale)
         current_offset = QPointF(self.canvas._offset)
+        self._canvas_refresh_timer.stop()
+        self._pending_canvas_refresh_ids.clear()
         perf_mode = os.getenv("HROUTING_PERF", "0") in {"1", "true", "True", "yes", "on"}
         perf_started = time.perf_counter() if perf_mode else 0.0
         # Anzeigeeinstellungen sichern: diese sind kein Teil der Projekthistorie
@@ -1906,6 +1947,8 @@ class AppWindow(QMainWindow):
     # Dokument
     # ------------------------------------------------------------------
     def _set_document(self, document: Document) -> None:
+        self._canvas_refresh_timer.stop()
+        self._pending_canvas_refresh_ids.clear()
         self._document = document
         self._annotation_live_value_cache.clear()
         self._pending_annotation_refresh_id = ""

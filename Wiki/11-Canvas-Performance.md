@@ -258,10 +258,64 @@ Der bekannte unabhängige Kabelnamen-Roundtrip-Test blieb ausgeschlossen;
 die übrigen Hauptfenstertests wurden in diesem Zusatzlauf nicht ausgeführt.
 Anwendungseinstellungen waren isoliert, die Referenzdatei blieb unverändert.
 
+## Nachtrag: Verzögertes Ziehen von Anschlusspunkten
+
+Eine Messung im Hauptfenster zeigte: `_elec_points[pid] = pt` ist kein isolierter
+Canvas-Write. Die gebundene `DocumentMapView` schreibt sofort ins Dokument und
+löst synchron `document_data_changed` aus. Dadurch wurden bei **jeder Bewegung**
+Eigenschaften und der komplette Topologieplan neu aufgebaut – auch bei
+ausgeblendetem Dock. Die vorhandene verzögerte Kabelsynchronisation verhinderte
+diese AP-Callbacks nicht. Im ersten profilierten Lauf kostete das 105–152 ms je
+Bewegung; fast die gesamte Handlerzeit entfiel auf die Folgeaktualisierungen.
+
+Umgesetzt:
+
+- Modellposition, Änderungsstatus und Undo-Erfassung bleiben sofort aktuell.
+  Nur Eigenschaften-/Schemaansichten werden während des AP-Ziehens gesammelt.
+  Nach Abschluss werden die betroffenen Eigenschaften und **einmal** das Schema
+  aktualisiert. Ein leichter Timer prüft während des Ziehens nur den Zustand;
+  die Abschlussmeldung plant die Aktualisierung für die nächste Ereignisrunde.
+- Unveränderte, etwa aufs gleiche Rasterfeld geschnappte Bewegungen und reine
+  Auswahlklicks erzeugen keine AP-Änderung oder zusätzlichen Undo-Schritt.
+- Pausen bei gehaltener Maustaste schließen die Undo-Gruppe nicht vorzeitig.
+- Ein nachlaufender Repaint zeigt auch die letzte Position eines schnellen
+  Bewegungsblocks. Loslassen, Escape, Workspacewechsel, Fokusverlust und
+  Ausblenden schließen AP- und Kabelzustand konsistent ab. Dokumentwechsel und
+  Undo verwerfen ausstehende Ansichtsaktualisierungen des vorherigen Zustands.
+- Bestehende Kabelbindungen werden beim Abschluss beibehalten; eine Leitung,
+  deren beide Enden am selben AP liegen, wird nur einmal als geändert gemeldet.
+
+Native A/B-Stichprobe: Windows, Python 3.12.2, Hauptfenster 1280 × 800,
+zuletzt geöffnetes Projekt mit 145 APs, ein AP mit neun angeschlossenen Kabeln,
+Raster aus. Zwei Paare in der Reihenfolge vorher/nachher/nachher/vorher,
+jeweils 24 Bewegungen. Nur der alte Hauptfenster-Callback wurde für die
+Vorher-Läufe aus Git im Prozess eingesetzt; keine Quelldateien zurückgesetzt.
+
+| Messgröße | Vorher: Laufmediane | Nachher: Laufmediane |
+| --- | ---: | ---: |
+| Dauer des Bewegungshandlers | 54,92–70,17 ms | 0,23 ms |
+| Handler-Eingang bis folgendes Paint-Ende | 88,39–109,12 ms | 32,44–33,02 ms |
+
+Die Eingaben wurden im GUI-Thread erzeugt; das ist kein unabhängiger
+Hardware-Eingabestrom und keine Messung der Monitorpräsentation. Alle 24
+Bewegungen pro Lauf erhielten ein folgendes Paint. Der verbleibende Aufwand
+liegt überwiegend beim Zeichnen. Die einmalige Schemaaktualisierung nach dem
+Loslassen ist nicht Teil der Bewegungslatenz; die Arbeit entfällt nicht komplett.
+Die Projektdatei blieb per SHA-256 unverändert, Einstellungen waren isoliert.
+
+Validierung: **415 Canvas-/Modell-/Interaktionstests und 47 passende
+Hauptfenster-/Kabeltests bestanden**. Die neuen
+[AP-Drag-Regressionen](../tests/test_ap_drag_refresh.py) prüfen Live-Writes ohne
+Schemaaufbau pro Bewegung, echten Timerabschluss, Undo/Redo, Raster-No-ops,
+nachlaufendes Repaint und unterbrochene Drags. Ein vorhandener Pan-Timertest
+beobachtete im ersten Sammellauf ein zusätzliches Qualitäts-Repaint; der isolierte
+Neun-Test-Lauf und der abschließende 415-Test-Lauf waren ohne Änderungen an
+diesem Test erfolgreich. Die vollständige Suite wurde nicht erneut ausgeführt.
+
 ## Nächste Schritte
 
-1. Eigenschaften-/Schema-/Dockaktualisierungen bündeln und im vollständigen
-  Hauptfenster messen; der große Ladetest zeigt weiterhin wiederholte Topologiearbeit.
+1. Die AP-Drag-Bündelung auf weitere profilierte Interaktionen erweitern;
+  der große Ladetest zeigt weiterhin wiederholte Topologiearbeit.
 2. Wiederholte Punktkonvertierungen/Bounds reduzieren und den AP-Kabel-Reverse-
   Index vollständig absichern; weitere Geometrieoptimierungen profilgestützt wählen.
 3. Speicherbudgetierte Grundriss-/Symbolcaches und Hintergrund-LOD prüfen,
