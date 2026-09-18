@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import Qt, QPointF, Signal, QRectF, QByteArray
+from PySide6.QtCore import Qt, QPointF, Signal, QRectF, QByteArray, QTimer
 from PySide6.QtGui import (
     QPainter, QPen, QColor, QBrush, QPolygonF, QPainterPath, QPixmap, QFont,
 )
@@ -32,6 +32,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget, QApplication, QToolTip
 
 from storage.asset_data_uri import is_data_uri, is_svg_asset_ref, parse_data_uri
+from gui.grid_renderer import GridLayerCache
 
 Point = Tuple[float, float]
 
@@ -134,6 +135,7 @@ class CanvasWidget(QWidget):
     elec_room_polygon_changed = Signal(str)
     elec_point_placed  = Signal(str)
     elec_cable_changed = Signal(str)
+    will_insert_elec_cable_point = Signal()  # discrete edit: snapshot before insertion
     hkv_placed         = Signal(str)
     hkv_line_changed   = Signal(str)
     text_placed        = Signal(str)
@@ -184,6 +186,11 @@ class CanvasWidget(QWidget):
         self._elec_cable_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
         self._elec_cable_overlap_cache_key: Optional[tuple] = None
         self._elec_cable_segment_offset_cache: Dict[str, List[float]] = {}
+        self._elec_cable_offset_cache_scale = 1.0
+        # Content validation is shared by all cable draws in one paint only.
+        # Outside paint, validate every lookup (including legacy in-place edits).
+        self._painting_scene = False
+        self._elec_cable_paint_prepared = False
         self._hkv_line_path_cache: Dict[str, Tuple[tuple, QPainterPath]] = {}
 
         # Background color
@@ -193,6 +200,9 @@ class CanvasWidget(QWidget):
         self._grid_visible = False
         self._grid_spacing_mm = 100.0   # default 100 mm
         self._grid_color = QColor(255, 255, 255, 60)
+        self._grid_layer_cache = GridLayerCache()
+        self._interactive_quality = False
+        self._full_quality_render_depth = 0
 
         # Zoom & Pan
         self._scale  = 1.0
@@ -240,6 +250,8 @@ class CanvasWidget(QWidget):
         self._helper_target_length_mm: float                     = 1000.0
         self._helper_line_color: str                              = "#f8f32b"
         self._helper_line_intersections: List[tuple] = []  # [(intersection_pt, angle_deg, hid1, hid2), ...]
+        self._helper_intersection_signature: Optional[tuple] = None
+        self._helper_intersection_raw: Dict[str, List[tuple]] = {}
         self._manual_routes: Dict[str, List[QPointF]]            = {}
         self._route_wall_dist_px: Dict[str, float]               = {}
         self._route_line_dist_px: Dict[str, float]               = {}
@@ -333,10 +345,15 @@ class CanvasWidget(QWidget):
         self._label_metrics_cache: Dict[tuple[str, float], tuple[float, float, float]] = {}
         self._dragging_label:     Optional[str]                   = None
         self._label_drag_offset:  QPointF                         = QPointF(0, 0)
+        self._perf_overlay_enabled = os.getenv("HROUTING_PERF", "0") in {"1", "true", "True", "yes", "on"}
+        self._perf_last_paint_started_ms: float = 0.0
+        self._perf_last_paint_ms: float = 0.0
+        self._perf_last_fps: float = 0.0
 
         self._color_index   = 0
         self._dragging_start: Optional[str] = None
         self._dragging_route_point: Optional[Tuple[str, int]] = None
+        self._direct_cable_point_origin: Optional[QPointF] = None
         self._dragging_elec_cable_id: Optional[str] = None
         self._dragging_elec_cable_start: Optional[QPointF] = None
         self._dragging_elec_cable_origin: List[QPointF] = []
@@ -443,6 +460,14 @@ class CanvasWidget(QWidget):
         # Phase 1: Rendering throttle (60 Hz max during drag)
         self._last_drag_render_time: float = 0.0  # timestamp in milliseconds
         self._drag_render_interval_ms: float = 16.7  # ~60 Hz (1000/60)
+        self._interaction_update_timer = QTimer(self)
+        self._interaction_update_timer.setSingleShot(True)
+        self._interaction_update_timer.timeout.connect(self.update)
+        self._quality_idle_timer = QTimer(self)
+        self._quality_idle_timer.setSingleShot(True)
+        self._quality_idle_timer.setInterval(120)
+        self._quality_idle_timer.timeout.connect(self._finish_interaction_quality)
+        self.mode_changed.connect(self._finish_interaction_quality)
         self._last_hover_hit_test_time: float = 0.0
         self._last_hover_screen_pos: Optional[QPointF] = None
         self._hover_hit_test_interval_ms: float = 40.0
@@ -1621,6 +1646,7 @@ class CanvasWidget(QWidget):
         old_h = self.height()
         old_min_size = self.minimumSize()
 
+        self._full_quality_render_depth += 1
         try:
             self._scale = s
             self._offset = off
@@ -1628,6 +1654,7 @@ class CanvasWidget(QWidget):
             self.resize(output_w, output_h)
             pixmap = self.grab()
         finally:
+            self._full_quality_render_depth -= 1
             self._scale = old_scale
             self._offset = old_offset
             self.resize(old_w, old_h)
@@ -1991,6 +2018,36 @@ class CanvasWidget(QWidget):
             pts.insert(idx2, pt)
             self.route_changed.emit(cid)
             self.update()
+
+    def _insert_elec_cable_point_at(self, cable_id: str, canvas_pt: QPointF) -> bool:
+        """Insert at the clicked render edge, using its original segment index."""
+        if (not self._elec_visible.get(cable_id, True)
+                or not self._is_selectable("elec_cable", cable_id)
+                or self._hit_elec_cable_point(canvas_pt, cable_id) is not None):
+            return False
+        hit = self._hit_elec_cable_edge(canvas_pt, cable_id)
+        if hit is None:
+            return False
+
+        # Do not let the double-click's release finalize a stale drag against
+        # the newly indexed route. The new handle can be dragged normally.
+        if self._dragging_elec_cable_id == cable_id:
+            self._dragging_elec_cable_id = None
+            self._dragging_elec_cable_start = None
+            self._dragging_elec_cable_origin = []
+            self._dragging_elec_cable_fixed_indices = set()
+            self._apply_deferred_drag_sync()
+        if self._dragging_route_point and self._dragging_route_point[0] == cable_id:
+            self._dragging_route_point = None
+            self._direct_cable_point_origin = None
+        self.will_insert_elec_cable_point.emit()
+        # No grid snap or midpoint substitution: preserve the click position,
+        # including on offset lanes and AP approach bends. Endpoints stay put.
+        self._elec_cables[cable_id].insert(hit[1], QPointF(canvas_pt))
+        self.setCursor(Qt.CrossCursor if self._mode == ToolMode.EDIT_ELEC_CABLE else Qt.ArrowCursor)
+        self.elec_cable_changed.emit(cable_id)
+        self.update()
+        return True
 
     def context_insert_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF) -> bool:
         if self._mode != ToolMode.NONE and not (
@@ -2474,6 +2531,10 @@ class CanvasWidget(QWidget):
         if len(pts) < 2:
             return None
         seg_offsets = self._get_elec_cable_segment_offsets(cable_id, pts)
+        return self._hit_elec_cable_render_edge(canvas_pt, cable_id, pts, seg_offsets)
+
+    def _hit_elec_cable_render_edge(self, canvas_pt: QPointF, cable_id: str,
+                                    pts: List[QPointF], seg_offsets: List[float]) -> Optional[Tuple[int, int]]:
         render_pts, edge_owner_indices = self._build_elec_cable_render_geometry(
             cable_id, pts, seg_offsets
         )
@@ -2486,16 +2547,41 @@ class CanvasWidget(QWidget):
                 return (owner, owner + 1)
         return None
 
+    def _find_elec_cable_at(self, canvas_pt: QPointF, *, selectable_only: bool = False,
+                            include_points: bool = False) -> Optional[str]:
+        """One read-only hit-test pass; validate global lane geometry only once.
+
+        Keep insertion order and the rendered lane/AP-bend hit geometry. The
+        prepared offsets are reused only inside this synchronous, signal-free
+        scan; the next call still detects direct/in-place geometry edits.
+        """
+        prepared = False
+        for cid, pts in self._elec_cables.items():
+            if (not self._elec_visible.get(cid, True) or len(pts) < 2
+                    or (selectable_only and not self._is_selectable("elec_cable", cid))):
+                continue
+            if include_points:
+                threshold = self._px_to_canvas_units(HIT_CABLE_POINT_RADIUS_PX)
+                if any(_qdist(canvas_pt, pt) < threshold for pt in pts):
+                    return cid
+            if not prepared:
+                offsets = self._get_elec_cable_segment_offsets(cid, pts)
+                prepared = True
+            else:
+                offsets = self._cached_elec_cable_segment_offsets(cid, pts)
+            if self._hit_elec_cable_render_edge(canvas_pt, cid, pts, offsets) is not None:
+                return cid
+        return None
+
     def _build_elec_cable_overlap_signature(self, visible_cables: List[str]) -> tuple:
         payload: List[tuple] = []
         for cid in visible_cables:
             pts = self._elec_cables.get(cid, [])
-            pts_key = tuple((round(p.x(), 3), round(p.y(), 3)) for p in pts)
-            sw = round(float(self._elec_cable_stroke_width.get(cid, 2.0)), 3)
+            pts_key = tuple((p.x(), p.y()) for p in pts)
+            sw = float(self._elec_cable_stroke_width.get(cid, 2.0))
             payload.append((cid, sw, pts_key))
         return (
-            round(float(self._scale), 6),
-            round(float(self._elec_cable_overlap_gap_px), 3),
+            float(self._elec_cable_overlap_gap_px),
             tuple(payload),
         )
 
@@ -2613,13 +2699,27 @@ class CanvasWidget(QWidget):
             if ra != rb:
                 parent[rb] = ra
 
-        for i, key_a in enumerate(segment_keys):
+        # Sweep along X before the exact overlap predicate. This preserves
+        # connected components/lane ordering, but skips distant segment pairs.
+        sweep_keys = sorted(segment_keys, key=lambda key: segment_meta[key]["min_x"])
+        original_order = {key: index for index, key in enumerate(segment_keys)}
+        tolerance = ELEC_CABLE_OVERLAP_TOLERANCE_PX
+        for i, key_a in enumerate(sweep_keys):
             meta_a = segment_meta[key_a]
-            for key_b in segment_keys[i + 1:]:
+            for j in range(i + 1, len(sweep_keys)):
+                key_b = sweep_keys[j]
+                meta_b = segment_meta[key_b]
+                if meta_b["min_x"] > meta_a["max_x"] + tolerance:
+                    break
                 if key_a[0] == key_b[0]:
                     continue
-                meta_b = segment_meta[key_b]
-                if self._segments_overlap_for_lane(meta_a, meta_b):
+                if (meta_a["max_y"] + tolerance < meta_b["min_y"]
+                        or meta_b["max_y"] + tolerance < meta_a["min_y"]):
+                    continue
+                # The projection test is directional for near-parallel lines.
+                # Keep the legacy pair orientation despite sweep ordering.
+                first, second = (meta_a, meta_b) if original_order[key_a] < original_order[key_b] else (meta_b, meta_a)
+                if self._segments_overlap_for_lane(first, second):
                     _union(key_a, key_b)
 
         components: Dict[Tuple[str, int], List[Tuple[str, int]]] = {}
@@ -2652,20 +2752,35 @@ class CanvasWidget(QWidget):
         ):
             return [0.0] * max(len(points) - 1, 0)
 
-        visible_cables = sorted(
-            cid
-            for cid, pts in self._elec_cables.items()
-            if self._elec_visible.get(cid, True) and len(pts) >= 2
-        )
-        signature = self._build_elec_cable_overlap_signature(visible_cables)
-        if signature != self._elec_cable_overlap_cache_key:
-            self._elec_cable_overlap_cache_key = signature
-            self._elec_cable_segment_offset_cache = self._compute_elec_cable_segment_offsets(visible_cables)
+        if not self._painting_scene or not self._elec_cable_paint_prepared:
+            visible_cables = sorted(
+                cid
+                for cid, pts in self._elec_cables.items()
+                if self._elec_visible.get(cid, True) and len(pts) >= 2
+            )
+            signature = self._build_elec_cable_overlap_signature(visible_cables)
+            if signature != self._elec_cable_overlap_cache_key:
+                offsets = self._compute_elec_cable_segment_offsets(visible_cables)
+                self._elec_cable_segment_offset_cache = offsets
+                self._elec_cable_offset_cache_scale = max(self._scale, 1e-9)
+                self._elec_cable_overlap_cache_key = signature
+            self._elec_cable_paint_prepared = self._painting_scene
 
+        return self._cached_elec_cable_segment_offsets(cable_id, points)
+
+    def _cached_elec_cable_segment_offsets(self, cable_id: str,
+                                          points: List[QPointF]) -> List[float]:
+        """Read offsets after validation by a paint or a read-only hit pass."""
+        if (len(points) < 2 or self._mode == ToolMode.EDIT_ELEC_CABLE
+                or self._elec_cable_overlap_gap_px <= 0.0):
+            return [0.0] * max(len(points) - 1, 0)
         cached = self._elec_cable_segment_offset_cache.get(cable_id)
         if cached is None or len(cached) != len(points) - 1:
             return [0.0] * max(len(points) - 1, 0)
-        return list(cached)
+        # The overlap classification is world-space. Only lane spacing needs
+        # zoom conversion; retain the original cached scale to avoid drift.
+        ratio = self._elec_cable_offset_cache_scale / max(self._scale, 1e-9)
+        return [offset * ratio for offset in cached]
 
     def _build_elec_cable_offset_polyline(self,
                                           points: List[QPointF],
@@ -2957,11 +3072,50 @@ class CanvasWidget(QWidget):
         Returns True if update() should be called, False to skip and throttle.
         This implements 60 Hz max rendering during drag operations.
         """
-        current_time_ms = time.time() * 1000.0
+        current_time_ms = time.monotonic() * 1000.0
         if current_time_ms - self._last_drag_render_time >= self._drag_render_interval_ms:
             self._last_drag_render_time = current_time_ms
             return True
         return False
+
+    def _begin_interaction_quality(self) -> None:
+        """Reduce only the display grid until the next idle or release."""
+        if self._full_quality_render_depth:
+            return
+        self._interactive_quality = True
+        self._quality_idle_timer.start()
+
+    def _finish_interaction_quality(self) -> None:
+        self._quality_idle_timer.stop()
+        was_interactive = self._interactive_quality
+        self._interactive_quality = False
+        if was_interactive:
+            self.update()  # mandatory final, full-quality frame
+
+    def focusOutEvent(self, event):
+        self._finish_interaction_quality()
+        super().focusOutEvent(event)
+
+    def hideEvent(self, event):
+        self._finish_interaction_quality()
+        self._interaction_update_timer.stop()
+        self._grid_layer_cache.clear()
+        super().hideEvent(event)
+
+    def _request_interaction_update(self) -> None:
+        """Throttle high-frequency interaction repaints but keep a trailing frame."""
+        current_time_ms = time.monotonic() * 1000.0
+        elapsed_ms = current_time_ms - self._last_drag_render_time
+        if elapsed_ms >= self._drag_render_interval_ms:
+            self._last_drag_render_time = current_time_ms
+            if self._interaction_update_timer.isActive():
+                self._interaction_update_timer.stop()
+            self.update()
+            return
+
+        remaining_ms = max(1, int(math.ceil(self._drag_render_interval_ms - elapsed_ms)))
+        if not self._interaction_update_timer.isActive():
+            self._interaction_update_timer.start(remaining_ms)
 
     def _should_update_hover_hit_test(self, screen_pt: QPointF) -> bool:
         """Throttle hover hit-tests during passive mouse movement.
@@ -3060,12 +3214,18 @@ class CanvasWidget(QWidget):
                 continue
             start_ap = self._resolve_cable_ap_binding(cid, "start")
             end_ap = self._resolve_cable_ap_binding(cid, "end")
+            if start_ap != pid and end_ap != pid:
+                continue
+            # A bound WritebackList flushes the entire route per item write.
+            # Update both ends locally, then commit this cable only once.
+            updated = list(pts)
             if start_ap == pid:
-                pts[0] = QPointF(pos)
-                changed.add(cid)
+                updated[0] = QPointF(pos)
             if end_ap == pid:
-                pts[-1] = QPointF(pos)
-                changed.add(cid)
+                updated[-1] = QPointF(pos)
+            if updated != list(pts):
+                self._elec_cables[cid] = updated
+            changed.add(cid)
         return changed
 
     def _apply_deferred_drag_sync(self) -> None:
@@ -3241,6 +3401,8 @@ class CanvasWidget(QWidget):
         """
         from model.canvas_binding import bind_canvas  # lokal: Zyklus vermeiden
 
+        self._finish_interaction_quality()
+        self._grid_layer_cache.clear()
         self._document = document
         bind_canvas(self, document, stages, on_change=self._on_document_data_changed)
         self._rebuild_label_map()
@@ -3376,7 +3538,12 @@ class CanvasWidget(QWidget):
     def _on_document_data_changed(self, element_id: str) -> None:
         """Wird von den Views bei jeder Datenänderung aufgerufen."""
         if self._document is not None:
-            self._rebuild_label_map()
+            element = self._document.get(element_id)
+            if element is None:
+                self._label_map.pop(element_id, None)
+            else:
+                name = str(getattr(element, "name", "") or "").strip()
+                self._label_map[element_id] = name or element_id
         self.document_data_changed.emit(element_id)
 
     def set_selectable_layers(self, layers) -> None:
@@ -3386,6 +3553,7 @@ class CanvasWidget(QWidget):
         ``None`` hebt die Einschränkung auf. Die Sichtbarkeit bleibt
         unverändert – nicht aktive Elemente werden nur nicht selektierbar.
         """
+        self._finish_interaction_quality()
         if layers is None:
             self._selectable_layers = None
         else:
@@ -4385,6 +4553,21 @@ class CanvasWidget(QWidget):
         if len(points) < 2:
             return None
         return self._points_bounds(points, padding)
+
+    def _visible_canvas_rect(self, padding: float = 0.0) -> QRectF:
+        if self._scale <= 0:
+            return QRectF()
+        x0 = -self._offset.x() / self._scale
+        y0 = -self._offset.y() / self._scale
+        x1 = x0 + self.width() / self._scale
+        y1 = y0 + self.height() / self._scale
+        return QRectF(x0 - padding, y0 - padding, (x1 - x0) + padding * 2.0, (y1 - y0) + padding * 2.0)
+
+    def _point_visible_in_rect(self, point: QPointF, visible_rect: QRectF, padding: float = 0.0) -> bool:
+        return visible_rect.adjusted(-padding, -padding, padding, padding).contains(point)
+
+    def _bounds_visible_in_rect(self, bounds: QRectF | None, visible_rect: QRectF) -> bool:
+        return bounds is not None and visible_rect.intersects(bounds)
 
     def _annotation_hit_threshold(self) -> float:
         return self._px_to_canvas_units(max(HIT_POINT_RADIUS_PX, 8.0))
@@ -5777,6 +5960,10 @@ class CanvasWidget(QWidget):
         super().resizeEvent(event)
 
     def wheelEvent(self, event):
+        if event.angleDelta().y() == 0:
+            event.ignore()
+            return
+        self._begin_interaction_quality()
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         mouse  = QPointF(event.position())
         cp     = self._to_canvas(mouse)
@@ -5788,7 +5975,7 @@ class CanvasWidget(QWidget):
             mouse.x() - cp.x() * self._scale,
             mouse.y() - cp.y() * self._scale,
         )
-        self.update()
+        self._request_interaction_update()
 
     # ── Doppelklick → Bearbeitungsmodus ──
 
@@ -6066,15 +6253,7 @@ class CanvasWidget(QWidget):
                     self.elec_cable_changed.emit(cid)
                     self.update()
                 return
-            edge_hit = self._hit_elec_cable_edge(canvas_pt, cid)
-            if edge_hit is not None:
-                idx1, idx2 = edge_hit
-                pts = self._elec_cables[cid]
-                p1, p2 = pts[idx1], pts[idx2]
-                mid = QPointF((p1.x() + p2.x()) * 0.5, (p1.y() + p2.y()) * 0.5)
-                pts.insert(idx2, mid)
-                self.elec_cable_changed.emit(cid)
-                self.update()
+            self._insert_elec_cable_point_at(cid, canvas_pt)
             return
 
         if self._mode == ToolMode.EDIT_SUPPLY_LINE and self._edit_supply_cid:
@@ -6219,6 +6398,14 @@ class CanvasWidget(QWidget):
                 self.object_double_clicked.emit("annotation_ellipse", aid)
                 return
 
+        # Selected cable: add a directly draggable handle at the click, without
+        # entering another mode. APs retain priority; existing nodes/endpoints
+        # retain their previous behavior below. Test the selected render lane
+        # before other cables, which can share the same original geometry.
+        if (self._selected_item_type == "elec_cable" and self._selected_item_id
+                and self._insert_elec_cable_point_at(self._selected_item_id, canvas_pt)):
+            return
+
         # 4. Elektro-Kabel – Doppelklick auf Anfang oder Ende → Zeichenmodus fortsetzen
         for kid, pts in self._elec_cables.items():
             if not self._elec_visible.get(kid, True):
@@ -6351,6 +6538,8 @@ class CanvasWidget(QWidget):
     def mousePressEvent(self, event):
         pos       = QPointF(event.position())
         canvas_pt = self._to_canvas(pos)
+        if event.button() == Qt.LeftButton:
+            self._direct_cable_point_origin = None
 
         if event.button() == Qt.MiddleButton:
             self._pan_start = pos
@@ -6505,21 +6694,16 @@ class CanvasWidget(QWidget):
                         if _qdist(canvas_pt, pt) < threshold:
                             # Found a cable point - start dragging it
                             self._dragging_route_point = (cid, i)
+                            self._direct_cable_point_origin = QPointF(pt)
                             self.setCursor(Qt.ClosedHandCursor)
                             self.update()
                             return
 
             # Check cable edges for whole-cable drag
             if not prioritize_ap:
-                for cid, pts in self._elec_cables.items():
-                    if (
-                        not self._elec_visible.get(cid, True)
-                        or len(pts) < 2
-                        or not self._is_selectable("elec_cable", cid)
-                    ):
-                        continue
-                    if self._hit_elec_cable_edge(canvas_pt, cid) is None:
-                        continue
+                cid = self._find_elec_cable_at(canvas_pt, selectable_only=True)
+                if cid is not None:
+                    pts = self._elec_cables[cid]
                     self.object_clicked.emit("elec_cable", cid)
                     self._dragging_elec_cable_id = cid
                     self._dragging_elec_cable_start = QPointF(canvas_pt)
@@ -7455,6 +7639,28 @@ class CanvasWidget(QWidget):
     def mouseMoveEvent(self, event):
         pos       = QPointF(event.position())
         canvas_pt = self._to_canvas(pos)
+        if (self._panning or event.buttons() != Qt.NoButton
+            or self._mode != ToolMode.NONE):
+            self._begin_interaction_quality()
+        # Navigation must not run snapping, passive scene hit tests or writes
+        # to a drawing preview before reaching the pan handler.
+        if self._panning and self._pan_start is not None:
+            delta = pos - self._pan_start
+            self._offset += delta
+            self._pan_start = pos
+            self._mouse_pos = self._to_canvas(pos)
+            self._current_route_preview_end = None
+            self._constraint_violation_point = None
+            self._constraint_violation_line = None
+            self._constraint_violation_reason = ""
+            self._hover_object = None
+            self._helper_hover_endpoint = None
+            scroll_dx = int(round(delta.x()))
+            scroll_dy = int(round(delta.y()))
+            if scroll_dx or scroll_dy:
+                self.scroll(scroll_dx, scroll_dy)
+            self._request_interaction_update()
+            return
         if self._mode != ToolMode.NONE:
             self._helper_hover_endpoint = None
             self._last_hover_screen_pos = None
@@ -7532,7 +7738,10 @@ class CanvasWidget(QWidget):
             self.update()
             return
 
-        if self._mode == ToolMode.NONE:
+        if (self._mode == ToolMode.NONE and not (
+            self._dragging_multi or self._dragging_route_point
+            or self._dragging_elec_cable_id or self._dragging_label
+            or self._is_selecting_by_drag)):
             if self._should_update_hover_hit_test(pos):
                 hover_obj = self._hit_any_object(canvas_pt)
                 if not hover_obj:
@@ -7640,18 +7849,6 @@ class CanvasWidget(QWidget):
                 self.update()
             return
 
-        # ── Handle panning ──
-        if self._panning and self._pan_start:
-            delta = pos - self._pan_start
-            self._offset += delta
-            self._pan_start = pos
-            self._current_route_preview_end = None
-            self._constraint_violation_point = None
-            self._constraint_violation_line = None
-            self._constraint_violation_reason = ""
-            self.update()
-            return
-
         if self._mode == ToolMode.MEASURE:
             self.update()
             return
@@ -7743,6 +7940,8 @@ class CanvasWidget(QWidget):
             pts = self._elec_cables.get(cid)
             origin = self._dragging_elec_cable_origin
             if pts and len(pts) == len(origin):
+                original_points = list(pts)
+                pts = list(original_points)
                 dx = canvas_pt.x() - self._dragging_elec_cable_start.x()
                 dy = canvas_pt.y() - self._dragging_elec_cable_start.y()
                 for i, orig in enumerate(origin):
@@ -7760,9 +7959,10 @@ class CanvasWidget(QWidget):
                     if end_ap and end_ap in self._elec_points:
                         pts[-1] = QPointF(self._elec_points[end_ap])
 
+                if pts != original_points:
+                    self._elec_cables[cid] = pts
                 self._dirty_moved_elec_cables.add(cid)  # Defer sync
-                if self._should_update_drag_render():
-                    self.update()
+                self._request_interaction_update()
             return
 
         # ── Handle dragging of elec cable points (at any time, not just in edit mode) ──
@@ -8490,16 +8690,9 @@ class CanvasWidget(QWidget):
             tooltip_text = "\n".join(parts)
 
         if not tooltip_text:
-            for cid, pts in self._elec_cables.items():
-                if not self._elec_visible.get(cid, True) or len(pts) < 2:
-                    continue
-                hit_point = self._hit_elec_cable_point(canvas_pt, cid)
-                hit_edge = self._hit_elec_cable_edge(canvas_pt, cid)
-                if hit_point is not None or hit_edge is not None:
-                    note = self._elec_cable_notes.get(cid, "").strip()
-                    if note:
-                        tooltip_text = note
-                    break
+            cid = self._find_elec_cable_at(canvas_pt, include_points=True)
+            if cid is not None:
+                tooltip_text = self._elec_cable_notes.get(cid, "").strip()
 
         if not tooltip_text:
             text_hit = self._hit_text_annotation(canvas_pt)
@@ -8562,9 +8755,11 @@ class CanvasWidget(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
+        self._finish_interaction_quality()
         if event.button() == Qt.MiddleButton:
             self._panning   = False
             self._pan_start = None
+            self.update()
             return
 
         if event.button() == Qt.LeftButton:
@@ -8594,6 +8789,7 @@ class CanvasWidget(QWidget):
                 return
             if self._mode == ToolMode.NONE and self._dragging_elec_cable_id:
                 cid = self._dragging_elec_cable_id
+                changed = list(self._elec_cables.get(cid, [])) != self._dragging_elec_cable_origin
                 self._dragging_elec_cable_id = None
                 self._dragging_elec_cable_start = None
                 self._dragging_elec_cable_origin = []
@@ -8601,17 +8797,23 @@ class CanvasWidget(QWidget):
                 self.setCursor(Qt.ArrowCursor)
                 # Apply deferred model syncs
                 self._apply_deferred_drag_sync()
-                self.elec_cable_changed.emit(cid)
+                if changed:
+                    self.elec_cable_changed.emit(cid)
                 self.update()
                 return
 
             # ── Handle dragging of elec cable points (in NONE mode) ──
             if self._dragging_route_point and self._mode == ToolMode.NONE:
                 cid, idx = self._dragging_route_point
+                origin = self._direct_cable_point_origin
+                self._direct_cable_point_origin = None
                 self._dragging_route_point = None
                 self.setCursor(Qt.ArrowCursor)
                 # Update AP binding if first or last point was moved
                 pts = self._elec_cables.get(cid, [])
+                if origin is not None and 0 <= idx < len(pts) and pts[idx] == origin:
+                    self.update()
+                    return
                 if pts and (idx == 0 or idx == len(pts) - 1):
                     ap = self._find_nearest_ap(pts[idx])
                     if idx == 0:
@@ -8868,8 +9070,11 @@ class CanvasWidget(QWidget):
                 return
             self._panning   = False
             self._pan_start = None
+            self.update()
 
     def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Escape, Qt.Key_Return, Qt.Key_Enter):
+            self._finish_interaction_quality()
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             if self._mode == ToolMode.DRAW_POLY:
                 if len(self._current_points) >= 3:
@@ -9138,6 +9343,24 @@ class CanvasWidget(QWidget):
     # ------------------------------------------------------------------ #
 
     def paintEvent(self, event):
+        previous_painting = self._painting_scene
+        previous_prepared = self._elec_cable_paint_prepared
+        self._painting_scene = True
+        self._elec_cable_paint_prepared = False
+        try:
+            self._paint_scene(event)
+        finally:
+            self._painting_scene = previous_painting
+            # A nested paint may have changed the shared offset cache.
+            self._elec_cable_paint_prepared = previous_prepared and not previous_painting
+
+    def _paint_scene(self, event):
+        paint_started_ms = time.monotonic() * 1000.0
+        if self._perf_overlay_enabled and self._perf_last_paint_started_ms > 0.0:
+            delta_ms = paint_started_ms - self._perf_last_paint_started_ms
+            if delta_ms > 0.0:
+                self._perf_last_fps = 1000.0 / delta_ms
+        self._perf_last_paint_started_ms = paint_started_ms
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), self._bg_color)
@@ -9147,6 +9370,7 @@ class CanvasWidget(QWidget):
         painter.scale(self._scale, self._scale)
         self._label_rects.clear()
         self._label_draw_pos.clear()
+        visible_rect = self._visible_canvas_rect(padding=24.0 / max(self._scale, 1e-9))
 
         # Background: floor plan layers (back → front)
         # Each layer is scaled so its real-world size matches the global
@@ -9265,6 +9489,8 @@ class CanvasWidget(QWidget):
         for cid, pts in self._polygons.items():
             if not self._circuit_visible.get(cid, True):
                 continue
+            if not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                continue
             label = self._label_map.get(cid, cid)
             self._draw_polygon(painter, pts,
                                self._color_map.get(cid, QColor("blue")), label)
@@ -9272,6 +9498,8 @@ class CanvasWidget(QWidget):
         # Elektro-Raum-Polygone
         for rid, pts in self._elec_room_polygons.items():
             if not self._elec_room_visible.get(rid, True):
+                continue
+            if not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
                 continue
             label = self._label_map.get(rid, rid)
             self._draw_polygon(
@@ -9286,13 +9514,14 @@ class CanvasWidget(QWidget):
             drag_cid, drag_idx = self._dragging_route_point
             if (self._mode in (ToolMode.MOVE_ROUTE_POINT, ToolMode.EDIT_ROUTE)
                     and drag_cid in self._polygons):
-                self._draw_collision_zones(painter, drag_cid, drag_idx)
+                self._draw_collision_zones(painter, drag_cid, drag_idx, visible_rect)
         elif (self._mode == ToolMode.DRAW_ROUTE
               and self._current_route_cid
               and len(self._current_route_points) >= 1):
             self._draw_collision_zones(
                 painter, self._current_route_cid,
-                len(self._current_route_points) - 1)
+                len(self._current_route_points) - 1,
+                visible_rect)
 
         # Hilfslinien
         for cid, points in self._helper_lines.items():
@@ -9306,6 +9535,8 @@ class CanvasWidget(QWidget):
         for cid, points in self._manual_routes.items():
             if not self._circuit_visible.get(cid, True):
                 continue
+            if not self._bounds_visible_in_rect(self._points_bounds(points), visible_rect):
+                continue
             self._draw_manual_route(
                 painter,
                 cid,
@@ -9317,11 +9548,15 @@ class CanvasWidget(QWidget):
         for cid, pts in self._supply_lines.items():
             if not self._circuit_visible.get(cid, True):
                 continue
+            if not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                continue
             self._draw_supply_line(painter, cid, pts)
 
         # Startpunkte
         for cid, sp in self._start_points.items():
             if not self._circuit_visible.get(cid, True):
+                continue
+            if not self._point_visible_in_rect(sp, visible_rect, 8.0 / max(self._scale, 1e-9)):
                 continue
             self._draw_start_point(painter, sp,
                                    self._color_map.get(cid, QColor("white")))
@@ -9393,11 +9628,22 @@ class CanvasWidget(QWidget):
         # Heizkreisverteiler
         for hid in self._hkv_points:
             if self._hkv_visible.get(hid, True):
+                pos = self._hkv_points.get(hid)
+                if pos is None:
+                    continue
+                w, h = self._hkv_size_px.get(hid, (30, 30))
+                if not self._bounds_visible_in_rect(
+                    QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h),
+                    visible_rect,
+                ):
+                    continue
                 self._draw_hkv_point(painter, hid)
 
         # HKV Verbindungsleitungen
         for lid, pts in self._hkv_lines.items():
             if self._hkv_line_visible.get(lid, True):
+                if not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    continue
                 self._draw_hkv_line(painter, lid, pts)
 
         # HKV Leitung in Arbeit
@@ -9421,17 +9667,29 @@ class CanvasWidget(QWidget):
                 continue
             if highlighted_cable_id is not None and cid == highlighted_cable_id:
                 continue
+            if not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                continue
             self._draw_elec_cable(painter, cid, pts)
 
         # Elektro: Anschlusspunkte immer oberhalb normaler Kabel
         for pid in self._elec_points:
             if self._elec_visible.get(pid, True):
+                pos = self._elec_points.get(pid)
+                if pos is None:
+                    continue
+                w, h = self._elec_point_size_px.get(pid, (30, 30))
+                if not self._bounds_visible_in_rect(
+                    QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h),
+                    visible_rect,
+                ):
+                    continue
                 self._draw_elec_point(painter, pid)
 
         # Selektiertes (gehighlightetes) Kabel bewusst oberhalb der APs
         if highlighted_cable_id is not None:
             highlighted_points = self._elec_cables.get(highlighted_cable_id, [])
-            self._draw_elec_cable(painter, highlighted_cable_id, highlighted_points)
+            if self._bounds_visible_in_rect(self._points_bounds(highlighted_points), visible_rect):
+                self._draw_elec_cable(painter, highlighted_cable_id, highlighted_points)
 
         # Kabel in Arbeit
         if (self._mode == ToolMode.DRAW_ELEC_CABLE
@@ -9449,6 +9707,8 @@ class CanvasWidget(QWidget):
                 continue
             if not self._label_visible.get(cid, True):
                 continue
+            if not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                continue
             color = self._color_map.get(cid, QColor("blue"))
             text = self._label_map.get(cid, cid)
             default_pos = QPointF(
@@ -9462,6 +9722,8 @@ class CanvasWidget(QWidget):
             if not self._label_visible.get(rid, True):
                 continue
             if len(pts) < 3:
+                continue
+            if not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
                 continue
             text = self._label_map.get(rid, rid)
             default_pos = QPointF(
@@ -9482,6 +9744,11 @@ class CanvasWidget(QWidget):
                 continue
             pos = self._elec_points[pid]
             w, h = self._elec_point_size_px.get(pid, (30, 30))
+            if not self._bounds_visible_in_rect(
+                QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h),
+                visible_rect,
+            ):
+                continue
             default_pos = QPointF(pos.x(), pos.y() + h / 2 + 14.0)
             text = self._label_map.get(pid, pid)
             self._draw_item_label(painter, pid, default_pos, text,
@@ -9490,6 +9757,8 @@ class CanvasWidget(QWidget):
             if not self._elec_visible.get(kid, True):
                 continue
             if len(kpts) < 2:
+                continue
+            if not self._bounds_visible_in_rect(self._points_bounds(kpts), visible_rect):
                 continue
             mi = len(kpts) // 2
             if len(kpts) % 2 == 1:
@@ -9528,6 +9797,11 @@ class CanvasWidget(QWidget):
                 continue
             pos = self._hkv_points[hid]
             w, h = self._hkv_size_px.get(hid, (30, 30))
+            if not self._bounds_visible_in_rect(
+                QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h),
+                visible_rect,
+            ):
+                continue
             default_pos = QPointF(pos.x(), pos.y() + h / 2 + 14.0)
             text = self._label_map.get(hid, hid)
             self._draw_item_label(painter, hid, default_pos, text,
@@ -9540,6 +9814,8 @@ class CanvasWidget(QWidget):
                 continue
             if len(lpts) < 2:
                 continue
+            if not self._bounds_visible_in_rect(self._points_bounds(lpts), visible_rect):
+                continue
             mi = len(lpts) // 2
             if len(lpts) % 2 == 1:
                 mid = lpts[mi]
@@ -9551,17 +9827,17 @@ class CanvasWidget(QWidget):
             self._draw_item_label(painter, lid, mid, text, col)
 
         # ── Annotation shapes ─────────────────────────────────────
-        self._draw_annotation_shapes(painter)
+        self._draw_annotation_shapes(painter, visible_rect)
 
         # ── Text-Annotationen ─────────────────────────────────────
-        self._draw_text_annotations(painter)
+        self._draw_text_annotations(painter, visible_rect)
 
         # ── Messlinien ────────────────────────────────────────────
-        self._draw_measurements(painter)
-        self._draw_angle_measurements(painter)
-        self._draw_global_helper_lines(painter)
+        self._draw_measurements(painter, visible_rect)
+        self._draw_angle_measurements(painter, visible_rect)
+        self._draw_global_helper_lines(painter, visible_rect)
         self._calculate_helper_line_intersections()
-        self._draw_helper_line_angles(painter)
+        self._draw_helper_line_angles(painter, visible_rect)
 
         # ── Maße beim Verschieben anzeigen ────────────────────────
         self._draw_drag_distance_overlay(painter)
@@ -9573,13 +9849,16 @@ class CanvasWidget(QWidget):
         self._draw_placement_ghost(painter)
 
         # ── Selection highlight ────────────────────────────────────
-        self._draw_selection_highlight(painter)
-        self._draw_hover_highlight(painter)
+        self._draw_selection_highlight(painter, visible_rect)
+        self._draw_hover_highlight(painter, visible_rect)
         # Multi-selection must be drawn in the main paint path so it is
         # always visible (not only in polygon edit overlays).
-        self._draw_multi_selection_highlights(painter)
+        self._draw_multi_selection_highlights(painter, visible_rect)
 
         painter.restore()
+        if self._perf_overlay_enabled:
+            self._perf_last_paint_ms = (time.monotonic() * 1000.0) - paint_started_ms
+            self._draw_perf_overlay(painter)
 
     def _draw_placement_ghost(self, painter: QPainter):
         if not self._ghost_preview_pos:
@@ -9617,7 +9896,7 @@ class CanvasWidget(QWidget):
             painter.drawEllipse(gp, r, r)
         painter.restore()
 
-    def _draw_hover_highlight(self, painter: QPainter):
+    def _draw_hover_highlight(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         if not self._hover_object:
             return
         obj_type, obj_id = self._hover_object
@@ -9628,28 +9907,40 @@ class CanvasWidget(QWidget):
         if obj_type == "polygon":
             pts = self._polygons.get(obj_id, [])
             if len(pts) >= 3:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    return
                 painter.drawPolygon(QPolygonF(pts))
         elif obj_type == "elec_room":
             pts = self._elec_room_polygons.get(obj_id, [])
             if len(pts) >= 3:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    return
                 painter.drawPolygon(QPolygonF(pts))
         elif obj_type == "elec_point":
             pos = self._elec_points.get(obj_id)
             if pos:
                 w, h = self._elec_point_size_px.get(obj_id, (30.0, 30.0))
+                if visible_rect is not None and not visible_rect.intersects(QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h)):
+                    return
                 painter.drawRect(QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h))
         elif obj_type == "hkv":
             pos = self._hkv_points.get(obj_id)
             if pos:
                 w, h = self._hkv_size_px.get(obj_id, (30.0, 30.0))
+                if visible_rect is not None and not visible_rect.intersects(QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h)):
+                    return
                 painter.drawRect(QRectF(pos.x() - w / 2, pos.y() - h / 2, w, h))
         elif obj_type == "text":
             rect = self._text_rects.get(obj_id)
             if rect:
+                if visible_rect is not None and not visible_rect.intersects(rect):
+                    return
                 painter.drawRect(rect)
         elif obj_type == "label":
             rect = self._label_rects.get(obj_id)
             if rect:
+                if visible_rect is not None and not visible_rect.intersects(rect):
+                    return
                 painter.drawRect(rect)
         elif obj_type == "distance_measure":
             idx = self._measurement_obj_to_index(obj_id, "MSRD")
@@ -9666,7 +9957,7 @@ class CanvasWidget(QWidget):
 
     # ── Measurement drawing ───────────────────────────────────────── #
 
-    def _draw_measurements(self, painter: QPainter):
+    def _draw_measurements(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         self._normalize_measure_label_positions()
         r = 4.0 / self._scale
         base_font = painter.font()
@@ -9700,6 +9991,11 @@ class CanvasWidget(QWidget):
             measurement_id = f"MSRD-{idx + 1}"
             style = self._measurement_style(measurement_id)
             if not bool(style.get("visible", True)):
+                continue
+            if visible_rect is not None and not self._bounds_visible_in_rect(
+                self._points_bounds([p1, p2], 10.0 / max(self._scale, 1e-9)),
+                visible_rect,
+            ):
                 continue
             color = QColor(str(style.get("color", self._measure_color)))
             pen = QPen(
@@ -9740,6 +10036,11 @@ class CanvasWidget(QWidget):
         # Draw in-progress measurement
         if self._mode == ToolMode.MEASURE and self._measure_p1:
             p2 = self._mouse_pos if self._mouse_pos else self._measure_p1
+            if visible_rect is not None and not self._bounds_visible_in_rect(
+                self._points_bounds([self._measure_p1, p2], 10.0 / max(self._scale, 1e-9)),
+                visible_rect,
+            ):
+                return
             next_measurement_id = f"MSRD-{len(self._measure_lines) + 1}"
             next_style = self._measurement_style(next_measurement_id)
             color = QColor(str(next_style.get("color", self._measure_color)))
@@ -9764,7 +10065,7 @@ class CanvasWidget(QWidget):
                     text_color=color,
                 )
 
-    def _draw_angle_measurements(self, painter: QPainter):
+    def _draw_angle_measurements(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         r = 4.0 / self._scale
         base_font = painter.font()
 
@@ -9841,6 +10142,11 @@ class CanvasWidget(QWidget):
             style = self._measurement_style(measurement_id)
             if not bool(style.get("visible", True)):
                 continue
+            if visible_rect is not None and not self._bounds_visible_in_rect(
+                self._points_bounds([p1, p2, p3], 10.0 / max(self._scale, 1e-9)),
+                visible_rect,
+            ):
+                continue
             color = QColor(str(style.get("color", self._measure_color)))
             draw_triplet(
                 p1,
@@ -9860,6 +10166,11 @@ class CanvasWidget(QWidget):
                 p1 = self._angle_measure_p1
                 p2 = self._angle_measure_p2
                 p3 = self._mouse_pos if self._mouse_pos is not None else self._angle_measure_p2
+                if visible_rect is not None and not self._bounds_visible_in_rect(
+                    self._points_bounds([p1, p2, p3], 10.0 / max(self._scale, 1e-9)),
+                    visible_rect,
+                ):
+                    return
                 v1x, v1y = p1.x() - p2.x(), p1.y() - p2.y()
                 v2x, v2y = p3.x() - p2.x(), p3.y() - p2.y()
                 l1 = math.hypot(v1x, v1y)
@@ -9872,6 +10183,11 @@ class CanvasWidget(QWidget):
                 draw_triplet(p1, p2, p3, angle_deg, color, "dashdot", 2.0, 10.0, True)
             elif self._angle_measure_p1 is not None:
                 p2 = self._mouse_pos if self._mouse_pos is not None else self._angle_measure_p1
+                if visible_rect is not None and not self._bounds_visible_in_rect(
+                    self._points_bounds([self._angle_measure_p1, p2], 10.0 / max(self._scale, 1e-9)),
+                    visible_rect,
+                ):
+                    return
                 color = QColor(self._measure_color)
                 pen = QPen(color, 2.0 / self._scale, Qt.DashDotLine)
                 painter.setPen(pen)
@@ -9880,7 +10196,7 @@ class CanvasWidget(QWidget):
                 painter.drawEllipse(self._angle_measure_p1, r, r)
                 painter.drawEllipse(p2, r, r)
 
-    def _draw_global_helper_lines(self, painter: QPainter):
+    def _draw_global_helper_lines(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         r = 3.5 / self._scale
         font = painter.font()
         font.setPointSizeF(10.0 / self._scale)
@@ -9938,6 +10254,8 @@ class CanvasWidget(QWidget):
                 if not visible_map.get(hid, True) or len(pts) < 2:
                     continue
                 p1, p2 = pts[0], pts[1]
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds([p1, p2]), visible_rect):
+                    continue
                 pen = QPen(base_pen)
                 if hid == self._helper_selected_id and fid == self._helper_selected_floor_id:
                     pen.setColor(QColor("#ffd166"))
@@ -9986,6 +10304,8 @@ class CanvasWidget(QWidget):
             base_pen = QPen(color, width_px / self._scale, style)
             painter.setPen(base_pen)
             painter.setBrush(QBrush(base_pen.color()))
+            if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds([p1, p2]), visible_rect):
+                return
             painter.drawLine(p1, p2)
             painter.drawEllipse(p1, r, r)
             painter.drawEllipse(p2, r, r)
@@ -9997,61 +10317,69 @@ class CanvasWidget(QWidget):
     def _calculate_helper_line_intersections(self):
         """Berechne Schnittpunkte und Winkel zwischen allen Hilfslinien auf aktiven Floors."""
         self._helper_line_intersections.clear()
-        
-        for fid in self._floor_plan_order:
-            layer = self._floor_plans.get(fid)
-            if not layer or not layer.visible:
-                continue
-            
+        visible_floors = [
+            fid for fid in self._floor_plan_order
+            if (layer := self._floor_plans.get(fid)) and layer.visible
+        ]
+        # Snapshot values, not QPointF identities: edits/restores may reuse IDs
+        # and mutate endpoints in place. Keep only the latest visible geometry.
+        signature = tuple(
+            (fid, tuple(
+                (hid, tuple((pt.x(), pt.y()) for pt in pts))
+                for hid, pts in self._floor_helper_lines.get(fid, {}).items()
+            ))
+            for fid in visible_floors
+        )
+        rebuild = signature != self._helper_intersection_signature
+        raw_by_floor = {} if rebuild else self._helper_intersection_raw
+        # Replace the single cached snapshot even when no floors are visible.
+        self._helper_intersection_raw = raw_by_floor
+        self._helper_intersection_signature = signature
+        tol = 0.5 / self._scale if self._scale > 0 else 1.0
+
+        for fid in visible_floors:
             helper_lines = self._floor_helper_lines.get(fid, {})
-            hid_list = list(helper_lines.items())
-            
-            # Prüfe alle Paare von Hilfslinien
-            for i, (hid1, pts1) in enumerate(hid_list):
-                if len(pts1) < 2:
+            if rebuild:
+                raw = []
+                raw_by_floor[fid] = raw
+                hid_list = list(helper_lines.items())
+                # Static pairs historically include hidden helpers; only the
+                # preview below consults per-helper visibility.
+                for i, (hid1, pts1) in enumerate(hid_list):
+                    if len(pts1) < 2:
+                        continue
+                    for hid2, pts2 in hid_list[i+1:]:
+                        if len(pts2) < 2:
+                            continue
+                        p1_start, p1_end = pts1[0], pts1[1]
+                        p2_start, p2_end = pts2[0], pts2[1]
+                        intersection_pt = _line_line_intersection(p1_start, p1_end, p2_start, p2_end)
+                        if intersection_pt is None:
+                            continue
+
+                        proj1 = _project_on_segment(intersection_pt, p1_start, p1_end)
+                        proj2 = _project_on_segment(intersection_pt, p2_start, p2_end)
+                        dist1 = _qdist(intersection_pt, proj1)
+                        dist2 = _qdist(intersection_pt, proj2)
+                        v1x = p1_end.x() - p1_start.x()
+                        v1y = p1_end.y() - p1_start.y()
+                        v2x = p2_end.x() - p2_start.x()
+                        v2y = p2_end.y() - p2_start.y()
+                        len1 = math.hypot(v1x, v1y)
+                        len2 = math.hypot(v2x, v2y)
+                        if len1 > 1e-9 and len2 > 1e-9:
+                            dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (len1 * len2)))
+                            angle_deg = math.degrees(math.acos(dot))
+                            if angle_deg > 90:
+                                angle_deg = 180 - angle_deg
+                            raw.append((intersection_pt, angle_deg, hid1, hid2, dist1, dist2))
+
+            # Filter raw infinite-line intersections on EVERY call: endpoint
+            # tolerance changes with zoom, even when geometry stays unchanged.
+            for intersection_pt, angle_deg, hid1, hid2, dist1, dist2 in raw_by_floor[fid]:
+                if dist1 > tol or dist2 > tol:
                     continue
-                for j, (hid2, pts2) in enumerate(hid_list[i+1:], start=i+1):
-                    if len(pts2) < 2:
-                        continue
-                    
-                    # Berechne Schnittpunkt
-                    p1_start, p1_end = pts1[0], pts1[1]
-                    p2_start, p2_end = pts2[0], pts2[1]
-                    
-                    intersection_pt = _line_line_intersection(p1_start, p1_end, p2_start, p2_end)
-                    if intersection_pt is None:
-                        continue
-                    
-                    # Prüfe, ob der Schnittpunkt innerhalb beider Strecken liegt
-                    proj1 = _project_on_segment(intersection_pt, p1_start, p1_end)
-                    proj2 = _project_on_segment(intersection_pt, p2_start, p2_end)
-                    
-                    dist1 = _qdist(intersection_pt, proj1)
-                    dist2 = _qdist(intersection_pt, proj2)
-                    
-                    # Toleranz für Schnittpunkt-Position
-                    tol = 0.5 / self._scale if self._scale > 0 else 1.0
-                    if dist1 > tol or dist2 > tol:
-                        continue
-                    
-                    # Berechne Winkel zwischen den Linien
-                    v1x = p1_end.x() - p1_start.x()
-                    v1y = p1_end.y() - p1_start.y()
-                    v2x = p2_end.x() - p2_start.x()
-                    v2y = p2_end.y() - p2_start.y()
-                    
-                    len1 = math.hypot(v1x, v1y)
-                    len2 = math.hypot(v2x, v2y)
-                    
-                    if len1 > 1e-9 and len2 > 1e-9:
-                        dot = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (len1 * len2)))
-                        angle_rad = math.acos(dot)
-                        angle_deg = math.degrees(angle_rad)
-                        # Wähle den kleineren Winkel (akut oder recht)
-                        if angle_deg > 90:
-                            angle_deg = 180 - angle_deg
-                        
-                        self._helper_line_intersections.append((intersection_pt, angle_deg, hid1, hid2, fid))
+                self._helper_line_intersections.append((QPointF(intersection_pt), angle_deg, hid1, hid2, fid))
 
             # Live-Vorschau: während des Zeichnens die aktuelle Hilfslinie gegen bestehende prüfen
             if (
@@ -10106,7 +10434,7 @@ class CanvasWidget(QWidget):
                             angle_deg = 180 - angle_deg
                         self._helper_line_intersections.append((intersection_pt, angle_deg, "__preview__", hid, fid))
 
-    def _draw_helper_line_angles(self, painter: QPainter):
+    def _draw_helper_line_angles(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         """Zeichne Winkel-Markierungen an Hilfslinienschnittpunkten."""
         if not self._helper_line_intersections:
             return
@@ -10121,6 +10449,8 @@ class CanvasWidget(QWidget):
         pen.setDashPattern([4.0, 4.0])
         
         for intersection_pt, angle_deg, hid1, hid2, fid in self._helper_line_intersections:
+            if visible_rect is not None and not visible_rect.contains(intersection_pt):
+                continue
             painter.setPen(pen)
             painter.setBrush(QBrush(color))
             
@@ -10177,7 +10507,7 @@ class CanvasWidget(QWidget):
         painter.setPen(QPen(QColor("#00e676")))
         painter.drawText(QPointF(frame.x(), frame.y() - 6.0 / self._scale), text)
 
-    def _draw_selection_highlight(self, painter: QPainter):
+    def _draw_selection_highlight(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         """Draw a highlight around the currently selected item from treeview."""
         if not self._selected_item_id or not self._selected_item_type:
             return
@@ -10196,12 +10526,16 @@ class CanvasWidget(QWidget):
         if item_type == "polygon" and item_id in self._polygons:
             pts = self._polygons[item_id]
             if len(pts) >= 3:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    return
                 poly = QPolygonF(pts)
                 painter.drawPolygon(poly)
 
         elif item_type == "elec_room" and item_id in self._elec_room_polygons:
             pts = self._elec_room_polygons[item_id]
             if len(pts) >= 3:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    return
                 poly = QPolygonF(pts)
                 painter.drawPolygon(poly)
 
@@ -10216,6 +10550,8 @@ class CanvasWidget(QWidget):
             padding = 5.0 / self._scale
             rect = QRectF(pos.x() - w/2 - padding, pos.y() - h/2 - padding,
                          w + 2*padding, h + 2*padding)
+            if visible_rect is not None and not visible_rect.intersects(rect):
+                return
             painter.drawRect(rect)
 
         elif item_type == "hkv" and item_id in self._hkv_points:
@@ -10224,31 +10560,43 @@ class CanvasWidget(QWidget):
             padding = 5.0 / self._scale
             rect = QRectF(pos.x() - w/2 - padding, pos.y() - h/2 - padding,
                          w + 2*padding, h + 2*padding)
+            if visible_rect is not None and not visible_rect.intersects(rect):
+                return
             painter.drawRect(rect)
 
         elif item_type == "route" and item_id in self._manual_routes:
             pts = self._manual_routes[item_id]
             if len(pts) >= 2:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    return
                 painter.drawPolyline(QPolygonF(pts))
 
         elif item_type == "supply_line" and item_id in self._supply_lines:
             pts = self._supply_lines[item_id]
             if len(pts) >= 2:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    return
                 painter.drawPolyline(QPolygonF(pts))
 
         elif item_type == "elec_cable" and item_id in self._elec_cables:
             pts = self._elec_cables[item_id]
             if len(pts) >= 2:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    return
                 painter.drawPolyline(QPolygonF(pts))
 
         elif item_type == "hkv_line" and item_id in self._hkv_lines:
             pts = self._hkv_lines[item_id]
             if len(pts) >= 2:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    return
                 painter.drawPolyline(QPolygonF(pts))
 
         elif item_type == "helper_line" and self._helper_selected_floor_id:
             pts = self._floor_helper_lines.get(self._helper_selected_floor_id, {}).get(item_id, [])
             if len(pts) >= 2:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                    return
                 painter.drawPolyline(QPolygonF(pts))
                 r = 6.0 / self._scale
                 painter.drawEllipse(pts[0], r, r)
@@ -10259,44 +10607,60 @@ class CanvasWidget(QWidget):
             if pos is not None:
                 self._text_annotations[item_id] = pos
                 r = 8.0 / self._scale
+                if visible_rect is not None and not visible_rect.contains(pos):
+                    return
                 painter.drawEllipse(pos, r, r)
 
         elif item_type == "annotation_line" and item_id in self._annotation_lines:
             points = self._annotation_points_from_shape(self._annotation_lines[item_id])
             if len(points) >= 2:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(points), visible_rect):
+                    return
                 painter.drawLine(points[0], points[1])
 
         elif item_type == "annotation_rectangle" and item_id in self._annotation_rectangles:
             rect = self._annotation_rect(self._annotation_rectangles[item_id])
             if rect is not None:
+                if visible_rect is not None and not visible_rect.intersects(rect):
+                    return
                 painter.drawRect(rect)
 
         elif item_type == "annotation_polyline" and item_id in self._annotation_polylines:
             points = self._annotation_points_from_shape(self._annotation_polylines[item_id])
             if len(points) >= 2:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(points), visible_rect):
+                    return
                 painter.drawPolyline(QPolygonF(points))
 
         elif item_type == "annotation_polygon" and item_id in self._annotation_polygons:
             points = self._annotation_points_from_shape(self._annotation_polygons[item_id])
             if len(points) >= 3:
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(points), visible_rect):
+                    return
                 painter.drawPolygon(QPolygonF(points))
 
         elif item_type == "annotation_circle" and item_id in self._annotation_circles:
             geometry = self._annotation_circle_geometry(self._annotation_circles[item_id])
             if geometry is not None:
                 center, radius = geometry
+                if visible_rect is not None and not visible_rect.intersects(QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2)):
+                    return
                 painter.drawEllipse(center, radius, radius)
 
         elif item_type == "annotation_ellipse" and item_id in self._annotation_ellipses:
             geometry = self._annotation_ellipse_geometry(self._annotation_ellipses[item_id])
             if geometry is not None:
                 center, rx, ry = geometry
+                if visible_rect is not None and not visible_rect.intersects(QRectF(center.x() - rx, center.y() - ry, rx * 2, ry * 2)):
+                    return
                 painter.drawEllipse(center, rx, ry)
 
         elif item_type == "distance_measure":
             idx = self._measurement_obj_to_index(item_id, "MSRD")
             if idx is not None and 0 <= idx < len(self._measure_lines):
                 p1, p2, _mm_len = self._measure_lines[idx]
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds([p1, p2]), visible_rect):
+                    return
                 painter.drawLine(p1, p2)
                 r = 7.0 / self._scale
                 painter.drawEllipse(p1, r, r)
@@ -10306,6 +10670,8 @@ class CanvasWidget(QWidget):
             idx = self._measurement_obj_to_index(item_id, "MSRA")
             if idx is not None and 0 <= idx < len(self._angle_measurements):
                 p1, p2, p3, _angle = self._angle_measurements[idx]
+                if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds([p1, p2, p3]), visible_rect):
+                    return
                 painter.drawLine(p2, p1)
                 painter.drawLine(p2, p3)
                 r = 7.0 / self._scale
@@ -10315,7 +10681,7 @@ class CanvasWidget(QWidget):
 
     # ── Text Annotations drawing ─────────────────────────────────── #
 
-    def _draw_text_annotations(self, painter: QPainter):
+    def _draw_text_annotations(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         """Render all visible text annotations on the canvas."""
         self._text_rects.clear()
         for tid, pos in self._text_annotations.items():
@@ -10345,6 +10711,8 @@ class CanvasWidget(QWidget):
                              pos_pt.y() - fm.ascent() - pad,
                              max_width + 2 * pad,
                              total_height + 2 * pad)
+            if visible_rect is not None and not self._bounds_visible_in_rect(bg_rect, visible_rect):
+                continue
             bg = QColor("#2b2b2b")
             bg.setAlpha(180)
             painter.setPen(Qt.NoPen)
@@ -10535,7 +10903,7 @@ class CanvasWidget(QWidget):
 
         painter.restore()
 
-    def _draw_annotation_shapes(self, painter: QPainter):
+    def _draw_annotation_shapes(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         def draw_shape(kind: str, aid: str, shape: dict) -> None:
             style_shape = dict(shape)
             if self._document is not None:
@@ -10558,6 +10926,15 @@ class CanvasWidget(QWidget):
                     except (TypeError, ValueError):
                         style_shape["corner_radius"] = float(style_shape.get("corner_radius", 0.0) or 0.0)
             elif not bool(style_shape.get("visible", True)):
+                return
+            if (
+                visible_rect is not None
+                and aid != self._placing_annotation_id
+                and not self._bounds_visible_in_rect(
+                    self._annotation_bounds(kind, shape, 12.0 / max(self._scale, 1e-9)),
+                    visible_rect,
+                )
+            ):
                 return
             painter.save()
             painter.setPen(self._annotation_pen(style_shape))
@@ -10632,6 +11009,31 @@ class CanvasWidget(QWidget):
             draw_shape("annotation_circle", aid, shape)
         for aid, shape in self._annotation_ellipses.items():
             draw_shape("annotation_ellipse", aid, shape)
+
+    def _draw_perf_overlay(self, painter: QPainter) -> None:
+        painter.save()
+        painter.resetTransform()
+        font = painter.font()
+        font.setPointSizeF(9.0)
+        painter.setFont(font)
+        lines = [
+            f"paint {self._perf_last_paint_ms:.1f} ms",
+            f"fps {self._perf_last_fps:.1f}",
+            f"scale {self._scale:.2f}",
+        ]
+        metrics = painter.fontMetrics()
+        width = max(metrics.horizontalAdvance(line) for line in lines) + 12
+        height = metrics.height() * len(lines) + 10
+        rect = QRectF(8.0, 8.0, width, height)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 190))
+        painter.drawRoundedRect(rect, 4.0, 4.0)
+        painter.setPen(QPen(QColor("#7df9ff")))
+        y = rect.top() + metrics.ascent() + 5.0
+        for line in lines:
+            painter.drawText(QPointF(rect.left() + 6.0, y), line)
+            y += metrics.height()
+        painter.restore()
 
     def _draw_edit_annotation_overlay(self, painter: QPainter, kind: str, element_id: str):
         shape = self._annotation_shape_store(kind, element_id)
@@ -10753,38 +11155,19 @@ class CanvasWidget(QWidget):
         if self._mm_per_px <= 0:
             return
         spacing_px = self._grid_spacing_mm / self._mm_per_px
-        # Check visibility using scaled size (how big it appears on screen)
         spacing_px_scaled = spacing_px * self._scale
-        if spacing_px_scaled < 2:
-            return  # too dense to draw
-
-        # Compute the visible canvas rectangle from the viewport
-        vw, vh = self.width(), self.height()
-        x0 = -self._offset.x() / self._scale
-        y0 = -self._offset.y() / self._scale
-        x1 = x0 + vw / self._scale
-        y1 = y0 + vh / self._scale
-
-        # Snap start to grid
-        gx0 = (x0 // spacing_px) * spacing_px
-        gy0 = (y0 // spacing_px) * spacing_px
-
-        pen = QPen(self._grid_color)
-        pen.setWidth(1)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-
-        # vertical lines
-        x = gx0
-        while x <= x1:
-            painter.drawLine(QPointF(x, y0), QPointF(x, y1))
-            x += spacing_px
-
-        # horizontal lines
-        y = gy0
-        while y <= y1:
-            painter.drawLine(QPointF(x0, y), QPointF(x1, y))
-            y += spacing_px
+        if not math.isfinite(spacing_px_scaled) or spacing_px_scaled < 2:
+            return
+        interacting = self._interactive_quality and not self._full_quality_render_depth
+        if interacting:
+            # Draw a subset of the real grid. Never change snapping or saved
+            # spacing; all displayed lines remain on actual grid coordinates.
+            spacing_px *= max(1, math.ceil(8.0 / spacing_px_scaled))
+        self._grid_layer_cache.draw(
+            painter, self.width(), self.height(), self._scale, self._offset,
+            spacing_px, self._grid_color,
+            use_cache=not interacting and not self._full_quality_render_depth,
+        )
 
     def _draw_polygon(self, painter, pts, color, label):
         if not pts:
@@ -10916,29 +11299,24 @@ class CanvasWidget(QWidget):
         line_dist = self._route_line_dist_px.get(cid, 0.0)
         offset = line_dist / 2.0
 
-        line1 = self._offset_route_points(points, offset)
-        line2 = self._offset_route_points(points, -offset)
-
-        # Build one continuous loop: line1 forward → line2 reversed
-        combined = list(line1) + list(reversed(line2))
-
         pen = QPen(color, 2.0 / self._scale)
         pen.setJoinStyle(Qt.RoundJoin)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
-        if len(combined) > 1:
-            path_key = (
-                tuple((p.x(), p.y()) for p in points),
-                line_dist,
-            )
-            cached = self._manual_route_path_cache.get(cid)
-            if cached and cached[0] == path_key:
-                path = cached[1]
-            else:
+        path_key = (tuple((p.x(), p.y()) for p in points), line_dist)
+        cached = self._manual_route_path_cache.get(cid)
+        if cached and cached[0] == path_key:
+            path = cached[1]
+        else:
+            line1 = self._offset_route_points(points, offset)
+            line2 = self._offset_route_points(points, -offset)
+            combined = list(line1) + list(reversed(line2))
+            path = QPainterPath()
+            if len(combined) > 1:
                 path = self._smooth_polyline_path(combined, offset)
-                self._manual_route_path_cache[cid] = (path_key, path)
-            painter.drawPath(path)
+            self._manual_route_path_cache[cid] = (path_key, path)
+        painter.drawPath(path)
 
         # Draw control points
         painter.setBrush(QBrush(color))
@@ -11057,7 +11435,9 @@ class CanvasWidget(QWidget):
         if is_highlighted:
             outer_radius = 5.0 / self._scale
             inner_radius = 3.0 / self._scale
-            for pt in render_pts:
+            # Handles must match the actual draggable model points, not the
+            # display-only lane offsets or generated AP approach corners.
+            for pt in points:
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QBrush(QColor("#ffffff")))
                 painter.drawEllipse(pt, outer_radius, outer_radius)
@@ -11570,7 +11950,7 @@ class CanvasWidget(QWidget):
             painter.setPen(QPen(QColor("#ffffff"), 1.0 / self._scale))
             painter.drawEllipse(p, r, r)
 
-    def _draw_multiselect_overlay(self, painter: QPainter):
+    def _draw_multiselect_overlay(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         if self._mode not in (
             ToolMode.EDIT_POLYGON,
             ToolMode.EDIT_ROUTE,
@@ -11619,10 +11999,12 @@ class CanvasWidget(QWidget):
         for p in pts:
             painter.drawEllipse(p, r, r)
 
-    def _draw_multi_selection_highlights(self, painter):
+    def _draw_multi_selection_highlights(self, painter: QPainter, visible_rect: Optional[QRectF] = None):
         """Draw highlights for multi-selected objects and active box-selection rect."""
         # Draw box-selection rectangle
         if self._selection_rect:
+            if visible_rect is not None and not visible_rect.intersects(self._selection_rect):
+                return
             pen = QPen(QColor("#ffdd00"), 2.0 / self._scale, Qt.DashLine)
             painter.setPen(pen)
             brush = QBrush(QColor(255, 221, 0, 40))  # semi-transparent yellow
@@ -11643,6 +12025,8 @@ class CanvasWidget(QWidget):
                 if pt:
                     w, h = self._elec_point_size_px.get(obj_id, (30.0, 30.0))
                     rect = QRectF(pt.x() - w / 2 - 3, pt.y() - h / 2 - 3, w + 6, h + 6)
+                    if visible_rect is not None and not visible_rect.intersects(rect):
+                        continue
                     painter.drawRect(rect)
 
             elif obj_type == "hkv":
@@ -11650,16 +12034,22 @@ class CanvasWidget(QWidget):
                 if pt:
                     w, h = self._hkv_size_px.get(obj_id, (40.0, 40.0))
                     rect = QRectF(pt.x() - w / 2 - 3, pt.y() - h / 2 - 3, w + 6, h + 6)
+                    if visible_rect is not None and not visible_rect.intersects(rect):
+                        continue
                     painter.drawRect(rect)
 
             elif obj_type == "text":
                 rect = self._text_rects.get(obj_id)
                 if rect:
+                    if visible_rect is not None and not visible_rect.intersects(rect):
+                        continue
                     painter.drawRect(rect.adjusted(-3, -3, 3, 3))
 
             elif obj_type == "elec_cable":
                 pts = self._elec_cables.get(obj_id, [])
                 if len(pts) >= 2:
+                    if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(pts), visible_rect):
+                        continue
                     dashed_pen = QPen(QColor("#ff9900"), 2.5 / self._scale, Qt.DashLine)
                     painter.setPen(dashed_pen)
                     for i in range(len(pts) - 1):
@@ -11673,7 +12063,7 @@ class CanvasWidget(QWidget):
 
     # ── Collision zone overlay ────────────────────────────────────────── #
 
-    def _draw_collision_zones(self, painter, cid: str, dragged_idx: int):
+    def _draw_collision_zones(self, painter, cid: str, dragged_idx: int, visible_rect: Optional[QRectF] = None):
         """Draw semi-transparent red collision zones while a route point is dragged.
 
         Two zone types are visualised:
@@ -11683,6 +12073,8 @@ class CanvasWidget(QWidget):
         """
         polygon = self._polygons.get(cid, [])
         if len(polygon) < 3:
+            return
+        if visible_rect is not None and not self._bounds_visible_in_rect(self._points_bounds(polygon), visible_rect):
             return
 
         wall_dist = self._route_wall_dist_px.get(cid, 0.0)

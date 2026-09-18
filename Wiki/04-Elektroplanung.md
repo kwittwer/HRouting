@@ -146,7 +146,9 @@ Die Zuordnung wird als strukturierte Daten im Projekt gespeichert und kann über
 
 ### Kabel bearbeiten
 
-- **Doppelklick** auf ein Kabel oder **✏️ Kabel bearbeiten** aktiviert den Bearbeitungsmodus.
+- Kabel auswählen, dann mit der **linken Maustaste auf die Linie doppelklicken**: Ein neuer Knoten entsteht direkt an der Klickposition. Diesen anschließend mit gedrückter linker Maustaste verschieben.
+- Das funktioniert auch auf versetzt dargestellten Kabelspuren. Bestehende Anschlussbindungen bleiben beim Einfügen erhalten; **Strg+Z** macht das Einfügen rückgängig.
+- **✏️ Kabel bearbeiten** aktiviert den Bearbeitungsmodus. Auch dort fügt ein Doppelklick auf die Linie einen Knoten an der Klickposition ein.
 - Knoten verschieben, löschen oder einfügen wie bei anderen Polylinien.
 
 ### Kabel-Parameter

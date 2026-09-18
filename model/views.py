@@ -658,6 +658,12 @@ class NestedViewMapView(MutableMapping):
 
     @property
     def _root(self) -> dict:
+        """Vorhandene Daten lesen, ohne einen fehlenden Root anzulegen."""
+        root = self._document.view.get(self._view_key)
+        return root if isinstance(root, dict) else {}
+
+    def _ensure_root(self) -> dict:
+        """Persistierten Root ausschließlich für Schreibzugriffe anlegen."""
         root = self._document.view.get(self._view_key)
         if not isinstance(root, dict):
             root = {}
@@ -670,7 +676,7 @@ class NestedViewMapView(MutableMapping):
         return _InnerViewMap(self, key, self._converters, self._on_change)
 
     def __setitem__(self, key: str, value: Any) -> None:
-        inner = self._root.setdefault(key, {})
+        inner = self._ensure_root().setdefault(key, {})
         inner.clear()
         write = self._converters[1]
         if hasattr(value, "items"):
@@ -698,8 +704,9 @@ class NestedViewMapView(MutableMapping):
             return default
 
     def setdefault(self, key: str, default: Any = None) -> Any:
-        if key not in self._root:
-            self._root[key] = {}
+        root = self._ensure_root()
+        if key not in root:
+            root[key] = {}
             if default:
                 self[key] = default
         return _InnerViewMap(self, key, self._converters, self._on_change)
@@ -744,13 +751,15 @@ class _InnerViewMap(MutableMapping):
 
     @property
     def _data(self) -> dict:
-        return self._owner._root.setdefault(self._floor_id, {})
+        return self._owner._root.get(self._floor_id, {})
 
     def __getitem__(self, key: str) -> Any:
         return _wrap_list(self._read(self._data[key]), self, key)
 
     def __setitem__(self, key: str, value: Any) -> None:
-        self._data[key] = self._write(value)
+        # Veraltete Proxys dürfen gelöschte Einträge nur beim Schreiben anlegen.
+        data = self._owner._ensure_root().setdefault(self._floor_id, {})
+        data[key] = self._write(value)
         if self._on_change is not None:
             self._on_change(self._floor_id)
 

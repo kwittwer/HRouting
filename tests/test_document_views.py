@@ -27,6 +27,7 @@ from model.views import (  # noqa: E402
     SIZE,
     DocumentMapView,
     NestedEntryView,
+    NestedViewMapView,
     ParamsMapView,
 )
 
@@ -227,3 +228,126 @@ def test_params_view_get_returns_default_for_unknown():
     doc = _document()
     view = ParamsMapView(doc, "visible", (Circuit,), RAW, True)
     assert view.get("HK-99", True) is True
+
+
+# ---------------------------------------------------------------------------
+# NestedViewMapView / _InnerViewMap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "canvas",
+    [{}, {"floor_helper_lines": None}, {"floor_helper_lines": []}],
+    ids=["missing-root", "null-root", "non-dict-root"],
+)
+def test_nested_map_root_reads_do_not_mutate_before_write(canvas):
+    doc = Document.from_dict({"canvas": canvas})
+    snapshot = doc.to_dict()
+    seen = []
+    view = NestedViewMapView(doc, "floor_helper_lines", POINT_LIST, seen.append)
+
+    assert "grundriss-1" not in view
+    assert view.get("grundriss-1", "fallback") == "fallback"
+    assert len(view) == 0
+    assert list(view) == []
+    assert list(view.keys()) == []
+    assert list(view.items()) == []
+    assert list(view.values()) == []
+    assert view.copy() == {}
+    assert dict(view) == {}
+    with pytest.raises(KeyError):
+        view["grundriss-1"]
+    assert doc.to_dict() == snapshot
+    assert seen == []
+
+    inner = view.setdefault("grundriss-1", {})
+    assert doc.view["floor_helper_lines"] == {"grundriss-1": {}}
+    inner["HL-1"] = [QPointF(1, 2), QPointF(3, 4)]
+    assert doc.to_dict()["canvas"]["floor_helper_lines"] == {
+        "grundriss-1": {"HL-1": [[1.0, 2.0], [3.0, 4.0]]}
+    }
+    assert seen == ["grundriss-1"]
+
+
+@pytest.mark.parametrize(
+    "default_args",
+    [(), (None,), ({},), ({"HL-1": [QPointF(1, 2)]},)],
+    ids=["omitted", "none", "empty", "populated"],
+)
+def test_nested_map_setdefault_persists_missing_root_and_returns_writeback(default_args):
+    doc = _document()
+    view = NestedViewMapView(doc, "floor_helper_lines", POINT_LIST)
+    assert "floor_helper_lines" not in doc.view
+
+    inner = view.setdefault("grundriss-1", *default_args)
+    expected = {"HL-1": [[1.0, 2.0]]} if default_args and default_args[0] else {}
+    assert doc.to_dict()["canvas"]["floor_helper_lines"] == {"grundriss-1": expected}
+
+    # An existing floor must not be overwritten by a later default.
+    view.setdefault("grundriss-1", {"HL-ignored": [QPointF(9, 9)]})
+    assert inner.copy() == ({"HL-1": [QPointF(1, 2)]} if expected else {})
+    inner["HL-2"] = [QPointF(3, 4)]
+    inner["HL-2"].append(QPointF(5, 6))
+    inner["HL-2"][0] = QPointF(7, 8)
+    assert doc.to_dict()["canvas"]["floor_helper_lines"] == {
+        "grundriss-1": {**expected, "HL-2": [[7.0, 8.0], [5.0, 6.0]]}
+    }
+
+
+@pytest.mark.parametrize("value", [{}, {"HL-1": [QPointF(1, 2)]}])
+def test_nested_map_assignment_persists_missing_root(value):
+    doc = _document()
+    seen = []
+    view = NestedViewMapView(doc, "floor_helper_lines", POINT_LIST, seen.append)
+    assert "floor_helper_lines" not in doc.view
+
+    view["grundriss-1"] = value
+    expected = {"HL-1": [[1.0, 2.0]]} if value else {}
+    assert doc.to_dict()["canvas"]["floor_helper_lines"] == {"grundriss-1": expected}
+    assert view["grundriss-1"].copy() == value
+    assert seen == ["grundriss-1"]
+
+
+@pytest.mark.parametrize("delete_root", [False, True], ids=["floor", "root"])
+@pytest.mark.parametrize("write_method", ["assign", "setdefault", "list-writeback"])
+def test_nested_map_stale_inner_reads_stay_deleted_until_explicit_write(delete_root, write_method):
+    doc = _document()
+    seen = []
+    view = NestedViewMapView(doc, "floor_helper_lines", POINT_LIST, seen.append)
+    view["grundriss-1"] = {"HL-1": [QPointF(1, 2)]}
+    inner = view["grundriss-1"]
+    points = inner["HL-1"]
+    if delete_root:
+        del doc.view["floor_helper_lines"]
+    else:
+        del view["grundriss-1"]
+    snapshot = doc.to_dict()
+    seen.clear()
+
+    assert "HL-1" not in inner
+    assert inner.get("HL-1", "fallback") == "fallback"
+    assert len(inner) == 0
+    assert list(inner) == []
+    assert list(inner.keys()) == []
+    assert list(inner.items()) == []
+    assert list(inner.values()) == []
+    assert inner.copy() == {}
+    assert dict(inner) == {}
+    with pytest.raises(KeyError):
+        inner["HL-1"]
+    assert doc.to_dict() == snapshot
+    assert "grundriss-1" not in view
+    assert seen == []
+
+    # Explicit writes retain the old proxy's ability to recreate its owner.
+    if write_method == "assign":
+        inner["HL-2"] = [QPointF(3, 4)]
+        expected = {"HL-2": [[3.0, 4.0]]}
+    elif write_method == "setdefault":
+        inner.setdefault("HL-2", [])
+        expected = {"HL-2": []}
+    else:
+        points.append(QPointF(3, 4))
+        expected = {"HL-1": [[1.0, 2.0], [3.0, 4.0]]}
+    assert doc.to_dict()["canvas"]["floor_helper_lines"] == {"grundriss-1": expected}
+    assert seen == ["grundriss-1"]

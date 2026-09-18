@@ -9,6 +9,7 @@
 | **Linksklick** (leere Fläche) | Zeichenfläche verschieben |
 | **Linksklick** (auf Objekt) | Objekt auswählen / Startpunkt ziehen |
 | **Doppelklick** (auf Objekt) | Bearbeitungsmodus aktivieren |
+| **Linker Doppelklick** (Linie eines ausgewählten Kabels) | Neuen verschiebbaren Knoten an der Klickposition einfügen |
 | **Rechtsklick** (beim Zeichnen) | Linie/Polygon abschließen |
 | **Rechtsklick** (auf Objekt) | Kontextmenü öffnen |
 | **Mittlere Maustaste** (Bearbeitung) | Bearbeitungsmodus beenden |

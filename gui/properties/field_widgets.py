@@ -214,7 +214,17 @@ class ChoiceFieldWidget(FieldWidget):
 
     def set_options(self, options: tuple[ChoiceOption, ...]) -> None:
         """Tauscht die Auswahlliste aus und hält den aktuellen Wert."""
+        # Compare actual entries: set_value() may have inserted legacy values
+        # that must still be removed even when the source options are unchanged.
+        if self._combo.count() == len(options) and all(
+            (self._combo.itemData(index), self._combo.itemText(index))
+            == _option_parts(option)
+            for index, option in enumerate(options)
+        ):
+            return
+
         current = self.value()
+        was_updating = self._updating
         self._updating = True
         try:
             self._set_combo_options(options)
@@ -229,7 +239,7 @@ class ChoiceFieldWidget(FieldWidget):
                 elif self._combo.count() > 0:
                     self._combo.setCurrentIndex(0)
         finally:
-            self._updating = False
+            self._updating = was_updating
 
     def value(self) -> Any:
         if self._combo.isEditable():

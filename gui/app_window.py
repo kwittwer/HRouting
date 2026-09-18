@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import subprocess
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -639,6 +641,7 @@ class AppWindow(QMainWindow):
         self.canvas.annotation_shape_changed.connect(self._on_annotation_shape_changed)
         self.canvas.multi_objects_moved.connect(self._on_canvas_mutation_signal)
         self.canvas.will_move_multi_objects.connect(self._push_undo)
+        self.canvas.will_insert_elec_cable_point.connect(self._push_undo)
         self.canvas.ref_line_set.connect(self._on_ref_line_set)
         self.canvas.route_changed.connect(self._on_route_changed)
         self.canvas.supply_line_changed.connect(self._on_supply_line_changed)
@@ -1299,6 +1302,8 @@ class AppWindow(QMainWindow):
 
     def _on_document_data_changed(self, element_id: str) -> None:
         """Der Canvas hat Projektdaten geändert – Projekt gilt als bearbeitet."""
+        if self._restoring_snapshot:
+            return
         self._record_canvas_change()
         self.properties.refresh_element(element_id)
         self._refresh_schema_windows()
@@ -1475,7 +1480,7 @@ class AppWindow(QMainWindow):
             return
         if self._last_document_snapshot is None:
             self._last_document_snapshot = self._document.snapshot()
-        self._append_undo_snapshot(copy.deepcopy(self._last_document_snapshot))
+        self._append_undo_snapshot(self._last_document_snapshot)
         self._undo_group_open = True
         self._undo_group_timer.start(_UNDO_GROUP_IDLE_MS)
 
@@ -1597,6 +1602,8 @@ class AppWindow(QMainWindow):
         """
         current_scale = float(self.canvas._scale)
         current_offset = QPointF(self.canvas._offset)
+        perf_mode = os.getenv("HROUTING_PERF", "0") in {"1", "true", "True", "yes", "on"}
+        perf_started = time.perf_counter() if perf_mode else 0.0
         # Anzeigeeinstellungen sichern: diese sind kein Teil der Projekthistorie
         # und sollen beim Rückgängigmachen / Wiederherstellen nicht zurückspringen.
         current_view = {
@@ -1613,11 +1620,14 @@ class AppWindow(QMainWindow):
         }
         self._restoring_snapshot = True
         try:
+            restore_started = time.perf_counter() if perf_mode else 0.0
             self._document.restore(snapshot)
+            restore_done = time.perf_counter() if perf_mode else 0.0
             # Canvas: erst rohe Ansichtsdaten übertragen, dann Views neu binden.
             raw_canvas = snapshot.get("canvas", {})
             self.canvas.from_dict(raw_canvas)
             self.canvas.set_document(self._document)
+            canvas_done = time.perf_counter() if perf_mode else 0.0
             self.canvas._scale = current_scale
             self.canvas._offset = QPointF(current_offset)
             self._document.view["view_scale"] = current_scale
@@ -1645,16 +1655,30 @@ class AppWindow(QMainWindow):
             self._sync_grid_toolbar_from_canvas()
             self.canvas.update()
             self._load_floor_plan_images(self._document)
-            # Eigenschaften-Dock: alle Editor-Caches invalidieren.
+            load_done = time.perf_counter() if perf_mode else 0.0
+            # Eigenschaften-Dock: aktuelle Ansicht nach Restore nur neu binden,
+            # aber nicht die gesamte Editor-Caches-Sammlung wegwerfen.
             current_id = self.properties._current_id
-            self.properties.set_document(self._document)
-            if current_id and self._document.get(current_id):
-                self.properties.show_element(current_id)
+            if current_id:
+                if self._document.get(current_id):
+                    self.properties.show_element(current_id)
+                else:
+                    self.properties.show_global_settings()
+            else:
+                self.properties.refresh_current()
         finally:
             self._restoring_snapshot = False
             self._undo_group_open = False
+            self._refresh_schema_windows()
             self._sync_measurements_to_elements()
             self._last_document_snapshot = self._document.snapshot()
+            if perf_mode:
+                total_ms = (time.perf_counter() - perf_started) * 1000.0
+                self.log.info(
+                    f"Restore timing: document={(restore_done - restore_started) * 1000.0:.1f} ms, "
+                    f"canvas={(canvas_done - restore_done) * 1000.0:.1f} ms, "
+                    f"dock={(load_done - canvas_done) * 1000.0:.1f} ms, total={total_ms:.1f} ms"
+                )
 
     def _update_undo_redo_state(self) -> None:
         """Passt den aktivierten Zustand und die Menü-Beschriftung an."""
