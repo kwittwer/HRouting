@@ -212,6 +212,27 @@ def _elec_point_choice_options(document: Any) -> tuple[ChoiceOption, ...]:
     return tuple(options)
 
 
+def _cable_type_options(document: Any = None) -> tuple[str, ...]:
+    """Alle im Projekt bereits verwendeten Kabeltypen plus die Standardliste."""
+    seen: set[str] = set()
+    values: list[str] = []
+
+    if document is not None:
+        for cable in document.elements.get("elec_cables", {}).values():
+            text = str((getattr(cable, "data", {}) or {}).get("type", "") or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                values.append(text)
+
+    for option in CABLE_TYPES:
+        text = str(option).strip()
+        if text and text not in seen:
+            seen.add(text)
+            values.append(text)
+
+    return tuple(values)
+
+
 AP_POSITIONS = ("Wand", "Decke", "Boden")
 AP_TYPES = ("standard", "uv", "up_distribution", "hak", "zaehler")
 SMARTHOME_DEVICES = ("", "Shelly", "Sonoff ZBMINIR2")
@@ -464,7 +485,7 @@ ELEC_CABLE_SCHEMA = ElementSchema(
             tooltip="'+ AP Höhe' oder eigener Wert wie 2 m / 140 cm",
         ),
         FieldSpec("type", "Kabeltyp", FieldKind.EDITABLE_CHOICE,
-                  options=CABLE_TYPES, default="5x1,5", group="Kabel"),
+                  document_options=_cable_type_options, default="5x1,5", group="Kabel"),
         FieldSpec("type_label_visible", "Kabeltyp im Plan anzeigen",
                   FieldKind.BOOL, default=False, group="Kabel"),
         FieldSpec("stroke_width", "Strichstärke", FieldKind.NUMBER,

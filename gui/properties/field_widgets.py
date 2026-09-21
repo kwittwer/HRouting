@@ -22,10 +22,25 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QWidget,
 )
 
 from model.schema import ChoiceOption, FieldKind, FieldSpec
+
+
+class SafeDoubleSpinBox(QDoubleSpinBox):
+    """SpinBox that ignores mouse-wheel adjustments."""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
+class SafeComboBox(QComboBox):
+    """ComboBox that ignores mouse-wheel adjustments."""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
 
 
 def _option_parts(option: ChoiceOption) -> tuple[str, str]:
@@ -71,13 +86,15 @@ class FieldWidget(QWidget):
 class TextFieldWidget(FieldWidget):
     def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._edit = QLineEdit(self)
+        self._edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._edit.editingFinished.connect(
             lambda: self._emit(self._edit.text())
         )
-        layout.addWidget(self._edit)
+        layout.addWidget(self._edit, 1)
 
     def value(self) -> Any:
         return self._edit.text()
@@ -89,12 +106,14 @@ class TextFieldWidget(FieldWidget):
 class MultilineFieldWidget(FieldWidget):
     def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._edit = QPlainTextEdit(self)
+        self._edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._edit.setMaximumHeight(64)
         self._edit.focusOutEvent = self._wrap_focus_out(self._edit.focusOutEvent)
-        layout.addWidget(self._edit)
+        layout.addWidget(self._edit, 1)
 
     def _wrap_focus_out(self, original):
         def handler(event):
@@ -113,9 +132,11 @@ class MultilineFieldWidget(FieldWidget):
 class NumberFieldWidget(FieldWidget):
     def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._spin = QDoubleSpinBox(self)
+        self._spin = SafeDoubleSpinBox(self)
+        self._spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._spin.setRange(spec.minimum, spec.maximum)
         self._spin.setSingleStep(spec.step)
         self._spin.setDecimals(spec.decimals)
@@ -123,7 +144,7 @@ class NumberFieldWidget(FieldWidget):
         if spec.unit:
             self._spin.setSuffix(f" {spec.unit}")
         self._spin.valueChanged.connect(self._emit)
-        layout.addWidget(self._spin)
+        layout.addWidget(self._spin, 1)
 
     def value(self) -> Any:
         return self._spin.value()
@@ -138,9 +159,11 @@ class NumberFieldWidget(FieldWidget):
 class BoolFieldWidget(FieldWidget):
     def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._box = QCheckBox(self)
+        self._box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._box.toggled.connect(self._emit)
         layout.addWidget(self._box)
         layout.addStretch(1)
@@ -155,13 +178,15 @@ class BoolFieldWidget(FieldWidget):
 class ColorFieldWidget(FieldWidget):
     def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._color = str(spec.default or "#ffffff")
         self._button = QPushButton(self)
+        self._button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._button.setFixedHeight(22)
         self._button.clicked.connect(self._pick_color)
-        layout.addWidget(self._button)
+        layout.addWidget(self._button, 1)
         self._apply_style()
 
     def _apply_style(self) -> None:
@@ -195,16 +220,19 @@ class ChoiceFieldWidget(FieldWidget):
         options: tuple[ChoiceOption, ...] | None = None,
     ) -> None:
         super().__init__(spec, parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._combo = QComboBox(self)
+        self._combo = SafeComboBox(self)
+        self._combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._combo.setMinimumWidth(100)
         self._combo.setEditable(editable)
         self._set_combo_options(options if options is not None else spec.resolve_options())
         if editable:
             self._combo.editTextChanged.connect(self._emit)
         else:
             self._combo.currentIndexChanged.connect(lambda _index: self._emit(self.value()))
-        layout.addWidget(self._combo)
+        layout.addWidget(self._combo, 1)
 
     def _set_combo_options(self, options: tuple[ChoiceOption, ...]) -> None:
         self._combo.clear()
@@ -264,10 +292,12 @@ class ChoiceFieldWidget(FieldWidget):
 class FileFieldWidget(FieldWidget):
     def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         self._edit = QLineEdit(self)
+        self._edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._edit.editingFinished.connect(lambda: self._emit(self._edit.text()))
         self._button = QPushButton("…", self)
         self._button.setFixedWidth(28)
@@ -293,11 +323,13 @@ class FileFieldWidget(FieldWidget):
 class ReadOnlyFieldWidget(FieldWidget):
     def __init__(self, spec: FieldSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._label = QLabel("–", self)
+        self._label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._label)
+        layout.addWidget(self._label, 1)
 
     def value(self) -> Any:
         return self._label.text()

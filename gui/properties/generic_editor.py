@@ -32,6 +32,8 @@ from .field_widgets import (
     MultilineFieldWidget,
     NumberFieldWidget,
     ReadOnlyFieldWidget,
+    SafeComboBox,
+    SafeDoubleSpinBox,
     TextFieldWidget,
     create_field_widget,
 )
@@ -55,14 +57,14 @@ class _RefLengthFieldWidget(FieldWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        self._spin = QDoubleSpinBox(self)
+        self._spin = SafeDoubleSpinBox(self)
         self._spin.setRange(0.001, max(spec.maximum, 999_999_999.0))
         self._spin.setDecimals(3)
         self._spin.setSingleStep(1.0)
         self._spin.setKeyboardTracking(False)
         self._spin.valueChanged.connect(self._on_value_changed)
 
-        self._unit = QComboBox(self)
+        self._unit = SafeComboBox(self)
         self._unit.addItems(["mm", "cm", "m"])
         self._unit.currentTextChanged.connect(self._on_unit_changed)
 
@@ -149,6 +151,7 @@ class GenericElementEditor(QWidget):
         form = QFormLayout(box)
         form.setContentsMargins(8, 8, 8, 8)
         form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         for spec in specs:
             if isinstance(self._element, FloorPlan) and spec.key == "ref_length_mm":
                 widget = _RefLengthFieldWidget(spec, box)
@@ -209,6 +212,7 @@ class GenericElementEditor(QWidget):
         form = QFormLayout(box)
         form.setContentsMargins(8, 8, 8, 8)
         form.setSpacing(4)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         for key, label in self._schema.computed:
             value_label = QLabel("–", box)
             self._computed_labels[key] = value_label
@@ -379,6 +383,7 @@ class GenericMultiElementEditor(QWidget):
         form = QFormLayout(box)
         form.setContentsMargins(8, 8, 8, 8)
         form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         for spec in self._specs:
             options = (
                 spec.resolve_options(self._document)
@@ -495,6 +500,7 @@ class GlobalSettingsEditor(QWidget):
         form = QFormLayout(box)
         form.setContentsMargins(8, 8, 8, 8)
         form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         for spec in GLOBAL_FIELDS:
             widget = create_field_widget(spec, box)
             widget.value_changed.connect(self._on_changed)

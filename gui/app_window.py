@@ -18,8 +18,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QDateTime, QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap
+from PySide6.QtCore import QPointF, QRectF, QDateTime, QSettings, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialogButtonBox,
@@ -467,6 +467,7 @@ class AppWindow(QMainWindow):
         file_menu = bar.addMenu("&Datei")
         self._add_action(file_menu, "Neues Projekt", self._new_project, QKeySequence.New)
         self._add_action(file_menu, "Projekt öffnen…", self._open_project, QKeySequence.Open)
+        self._add_action(file_menu, "Projektordner im Explorer öffnen", self._open_project_directory_in_explorer)
         self._recent_menu = file_menu.addMenu("🕑 Letzte Projekte")
         self._rebuild_recent_menu()
         file_menu.addSeparator()
@@ -4088,6 +4089,30 @@ class AppWindow(QMainWindow):
         project_path = Path(path)
         if self.open_project_file(project_path):
             self._maybe_offer_pull_for_loaded_project(project_path)
+
+    def _open_project_directory_in_explorer(self) -> None:
+        if self._project_path is None:
+            QMessageBox.information(self, "Projektordner", "Es ist noch kein Projekt geladen.")
+            return
+
+        project_dir = self._project_path.parent.resolve()
+        if not project_dir.exists():
+            QMessageBox.warning(self, "Projektordner", f"Ordner nicht gefunden:\n{project_dir}")
+            return
+
+        try:
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(project_dir)))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Fehler", f"Projektordner konnte nicht geöffnet werden:\n{exc}")
+            self.log.error(f"Projektordner im Explorer öffnen fehlgeschlagen: {exc}")
+            return
+
+        if not opened:
+            QMessageBox.warning(
+                self,
+                "Explorer",
+                f"Der Ordner konnte nicht im Explorer geöffnet werden:\n{project_dir}",
+            )
 
     def open_project_file(self, path: Path) -> bool:
         """Öffnet ein Projekt ohne Dialog (z. B. per Kommandozeile)."""

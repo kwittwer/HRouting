@@ -202,6 +202,33 @@ def test_topology_dock_exports_svg(app, monkeypatch, tmp_path):
     finally:
         window.deleteLater()
 
+def test_open_project_directory_in_explorer_uses_current_project_path(app, monkeypatch, tmp_path):
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+
+    window = AppWindow()
+    try:
+        project_path = tmp_path / "demo.hrp"
+        project_path.write_text("{}", encoding="utf-8")
+        window._project_path = project_path
+
+        calls = []
+
+        def fake_open_url(url):
+            calls.append(str(url.toLocalFile()))
+            return True
+
+        monkeypatch.setattr("PySide6.QtGui.QDesktopServices.openUrl", fake_open_url)
+
+        window._open_project_directory_in_explorer()
+
+        expected = str(project_path.parent.resolve().as_posix())
+        assert calls == [expected]
+    finally:
+        window.deleteLater()
+
+
 def test_open_project_file_auto_migrates_cable_names_and_persists_backup(app, monkeypatch, tmp_path):
     from gui.app_window import AppWindow  # noqa: PLC0415
     from storage.hrp_io import load_raw, save_raw  # noqa: PLC0415

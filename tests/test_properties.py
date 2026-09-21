@@ -241,6 +241,66 @@ def test_choice_widget_keeps_storage_value_for_label_value_options(app):
         widget.deleteLater()
 
 
+def test_cable_type_options_include_project_types(app, document):
+    from model.schema import ELEC_CABLE_SCHEMA  # noqa: PLC0415
+
+    spec = next(f for f in ELEC_CABLE_SCHEMA.fields if f.key == "type")
+    project_types = {
+        str((cable.data or {}).get("type", "")).strip()
+        for cable in document.elements["elec_cables"].values()
+        if str((cable.data or {}).get("type", "")).strip()
+    }
+
+    options = spec.resolve_options(document)
+    assert project_types.issubset(set(options))
+
+
+def test_widget_wheel_does_not_change_value(app):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtWidgets import QApplication
+
+    from gui.properties.field_widgets import create_field_widget  # noqa: PLC0415
+
+    number_widget = create_field_widget(FieldSpec("value", "Wert", FieldKind.NUMBER, minimum=0, maximum=100, default=10))
+    choice_widget = create_field_widget(FieldSpec("mode", "Modus", FieldKind.CHOICE, options=("a", "b")), options=("a", "b"))
+    try:
+        number_widget.set_value(10.0)
+        choice_widget.set_value("a")
+
+        evt = QWheelEvent(
+            QPointF(10, 10), QPointF(10, 10),
+            QPoint(), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+        QApplication.sendEvent(number_widget._spin, evt)
+        QApplication.sendEvent(choice_widget._combo, evt)
+
+        assert number_widget.value() == 10.0
+        assert choice_widget.value() == "a"
+    finally:
+        number_widget.deleteLater()
+        choice_widget.deleteLater()
+
+
+def test_field_widgets_expand_with_parent_width(app):
+    from PySide6.QtWidgets import QSizePolicy
+
+    from gui.properties.field_widgets import create_field_widget  # noqa: PLC0415
+
+    text_widget = create_field_widget(FieldSpec("name", "Name", FieldKind.TEXT))
+    choice_widget = create_field_widget(FieldSpec("kind", "Art", FieldKind.CHOICE))
+    try:
+        assert text_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+        assert text_widget._edit.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+        assert choice_widget.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+        assert choice_widget._combo.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+    finally:
+        text_widget.deleteLater()
+        choice_widget.deleteLater()
+
+
 def test_editor_builds_all_fields(app, document):
     from gui.properties import GenericElementEditor  # noqa: PLC0415
 
