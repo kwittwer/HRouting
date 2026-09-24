@@ -1017,6 +1017,12 @@ class UvRailWidget(QWidget):
 # ------------------------------------------------------------------ #
 
 class UvConfigDialog(QDialog):
+    # Emitted whenever any slot/busbar/dimension value changes, so embedded
+    # (buttonless) hosts such as UvPlanningDock can persist the change live
+    # instead of relying on the QDialog accepted/rejected signals, which are
+    # never emitted when show_buttons=False (no OK/Cancel buttons exist).
+    config_changed = Signal()
+
     MAX_UV_ROWS = 12
     MAX_UV_MODULES = 36
     UV_PRESETS: list[tuple[str, tuple[int, int]]] = [
@@ -1307,6 +1313,7 @@ class UvConfigDialog(QDialog):
             self._cable_choices,
             busbars=self._capture_current_busbars(),
         )
+        self.config_changed.emit()
 
     def _write_slot_to_table(self, row_no: int, slot_no: int, data: dict):
         """Write slot data dict into the table at (row_no, slot_no)."""

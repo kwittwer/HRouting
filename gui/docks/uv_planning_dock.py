@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QComboBox, QDockWidget, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from model.document import Document
@@ -12,12 +12,17 @@ from model.elements import ElecPoint
 class UvPlanningDock(QDockWidget):
     """Dock mit Auswahl der aktiven UV und eingebettetem UV-Editor."""
 
+    # Emitted after a live edit has been persisted into point.data["uv_config"],
+    # so hosts (AppWindow) can mark the project as dirty.
+    config_saved = Signal(str)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Unterverteilungen", parent)
         self.setObjectName("dock_uv_planning")
 
         self._document: Document | None = None
         self._point_id = ""
+        self._saving = False
         self._selector = QComboBox(self)
         self._selector.currentIndexChanged.connect(self._on_selector_changed)
 
@@ -182,12 +187,22 @@ class UvPlanningDock(QDockWidget):
             self._editor.accepted.connect(self._save_editor)
         if hasattr(self._editor, "rejected"):
             self._editor.rejected.connect(self._refresh_editor)
+        # The embedded editor is shown with show_buttons=False (no OK/Cancel),
+        # so "accepted" never fires. Persist live on every edit instead, so
+        # slot/busbar changes made in this dock are not silently lost (they
+        # would otherwise only exist inside the QDialog widget's own state).
+        if hasattr(self._editor, "config_changed"):
+            self._editor.config_changed.connect(self._save_editor)
 
         self._placeholder.hide()
         if isinstance(self._editor, QWidget):
             self._content_layout.addWidget(self._editor)
 
     def _save_editor(self) -> None:
+        # Re-entrancy guard: get_config() internally normalizes busbars, which
+        # calls _refresh_visual() -> config_changed -> _save_editor() again.
+        if self._saving:
+            return
         if self._document is None or not self._point_id:
             return
         point = self._document.get(self._point_id)
@@ -195,5 +210,10 @@ class UvPlanningDock(QDockWidget):
             return
         if self._editor is None:
             return
-        point.data["uv_config"] = self._editor.get_config()
+        self._saving = True
+        try:
+            point.data["uv_config"] = self._editor.get_config()
+        finally:
+            self._saving = False
         self._document.element_changed.emit(self._point_id)
+        self.config_saved.emit(self._point_id)

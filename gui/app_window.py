@@ -19,7 +19,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QDateTime, QSettings, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialogButtonBox,
@@ -403,6 +403,7 @@ class AppWindow(QMainWindow):
             lambda: self._build_schema_data()[:2]
         )
         self.uv_planning = UvPlanningDock(self)
+        self.uv_planning.config_saved.connect(lambda _point_id: self._mark_dirty())
         # Backward compatibility for tests/extensions that still use `window.overview`.
         self.overview = self.overview_heating
 
@@ -4164,6 +4165,7 @@ class AppWindow(QMainWindow):
         if self._project_path is None:
             return self._save_project_as()
         self._sync_canvas_to_document()
+        self._flush_live_editor_state()
         try:
             save_document(self._document, self._project_path)
         except Exception as exc:  # noqa: BLE001
@@ -4176,6 +4178,16 @@ class AppWindow(QMainWindow):
         self._update_git_action_state()
         self.log.success(f"Gespeichert: {self._project_path}")
         return True
+
+    def _flush_live_editor_state(self) -> None:
+        """Persist open non-modal editors before save/export reads the document."""
+        uv_planning = getattr(self, "uv_planning", None)
+        if uv_planning is None:
+            return
+        editor = getattr(uv_planning, "_editor", None)
+        save_editor = getattr(uv_planning, "_save_editor", None)
+        if editor is not None and callable(save_editor):
+            save_editor()
 
     def _save_and_git_commit_push(self) -> None:
         if not self._save_project():
@@ -5561,6 +5573,130 @@ class AppWindow(QMainWindow):
             normalized.append(page)
         return normalized or self._default_pdf_export_pages()
 
+    # Colours/abbreviations mirrored from UvRailWidget in parameter_panel.py
+    # (duplicated from gui/main_window.py's _PdfContext._UV_COLORS/_UV_SHORT —
+    # kept as a separate copy on purpose, see AppWindow vs MainWindow note below)
+    _UV_COLORS: dict[str, str] = {
+        "": "#aaaaaa",
+        "Reserve": "#888888",
+        "Hauptschalter": "#c0392b",
+        "LS": "#1553b5",
+        "LS 3-polig": "#0d3d8a",
+        "FI": "#b85d10",
+        "FI 4-polig": "#8a3a00",
+        "FI/LS": "#6b22bf",
+        "Überspannungsschutz": "#9b0000",
+        "Motorschutz": "#1a7a3a",
+        "Schütz": "#007070",
+        "Zeitschalter": "#5a5a00",
+        "Klemme": "#9a7000",
+        "Steckdose UV": "#2c6e49",
+        "Freitext": "#444444",
+    }
+    _UV_SHORT: dict[str, str] = {
+        "": "",
+        "Reserve": "Res",
+        "Hauptschalter": "HS",
+        "LS": "LS",
+        "LS 3-polig": "LS3",
+        "FI": "FI",
+        "FI 4-polig": "FI4",
+        "FI/LS": "FI/L",
+        "Überspannungsschutz": "ÜSS",
+        "Motorschutz": "MOT",
+        "Schütz": "SCH",
+        "Zeitschalter": "Zeit",
+        "Klemme": "KL",
+        "Steckdose UV": "SD",
+        "Freitext": "...",
+    }
+
+    @staticmethod
+    def _build_uv_table_model(uv: dict) -> dict:
+        """Normalize UV config into a compact export table model.
+
+        NOTE: functionally identical to gui/main_window.py's
+        _PdfContext._build_uv_table_model. Kept as a separate copy here
+        because AppWindow (this file) is the actual PDF export path used by
+        the desktop app, while MainWindow/_PdfContext is only used by
+        mcp_server.py and tests. See project memory for details.
+        """
+        slots_raw = uv.get("slots", []) or []
+        rows = int(uv.get("rows", 0) or 0)
+        modules_per_row = int(uv.get("modules_per_row", 0) or 0)
+
+        if rows < 1 or modules_per_row < 1:
+            if slots_raw:
+                row_values = [int(s.get("row", 1) or 1) for s in slots_raw if isinstance(s, dict)]
+                slot_values = [int(s.get("slot", 1) or 1) for s in slots_raw if isinstance(s, dict)]
+                rows = max(1, max(row_values) if row_values else 1)
+                modules_per_row = max(1, max(slot_values) if slot_values else 12)
+            else:
+                rows = 1
+                modules_per_row = 12
+
+        row_blocks: list[list[dict]] = [[] for _ in range(rows)]
+        for s in slots_raw:
+            if not isinstance(s, dict):
+                continue
+            try:
+                row = int(s.get("row", 0) or 0)
+                slot = int(s.get("slot", 0) or 0)
+                te_size = max(1, int(s.get("te_size", 1) or 1))
+            except (TypeError, ValueError):
+                continue
+            if row < 1 or slot < 1:
+                continue
+            device_type = str(s.get("device_type", "") or "").strip()
+            label = str(s.get("label", "") or "").strip()
+            spec = str(s.get("spec", "") or "").strip()
+            te_start = slot
+            te_end = slot + te_size - 1
+            if row > rows:
+                row = rows
+            bucket = row_blocks[row - 1]
+            if bucket and bucket[-1]["device_type"] == device_type and bucket[-1]["te_end"] + 1 >= te_start:
+                bucket[-1]["te_end"] = max(bucket[-1]["te_end"], te_end)
+                if not bucket[-1].get("label") and label:
+                    bucket[-1]["label"] = label
+                if not bucket[-1].get("spec") and spec:
+                    bucket[-1]["spec"] = spec
+                continue
+            bucket.append({
+                "row": row,
+                "device_type": device_type,
+                "te_start": te_start,
+                "te_end": te_end,
+                "label": label,
+                "spec": spec,
+            })
+
+        phase_rows: list[dict] = []
+        for b in uv.get("busbars", []) or []:
+            if not isinstance(b, dict):
+                continue
+            phase = str(b.get("phase", "") or "").strip()
+            if not phase:
+                continue
+            try:
+                te_start = int(b.get("te_start", 1) or 1)
+                te_end = int(b.get("te_end", 1) or 1)
+            except (TypeError, ValueError):
+                continue
+            phase_rows.append({
+                "phase": phase,
+                "te_start": max(1, te_start),
+                "te_end": max(max(1, te_start), te_end),
+                "color": str(b.get("color", "#888888") or "#888888"),
+            })
+
+        return {
+            "rows": rows,
+            "modules_per_row": modules_per_row,
+            "row_blocks": row_blocks,
+            "phase_rows": phase_rows,
+        }
+
     def _pdf_uv_page(self, painter, writer, page: dict, export_data: dict | None = None) -> None:
         from PySide6.QtGui import QFont  # noqa: PLC0415
 
@@ -5575,102 +5711,272 @@ class AppWindow(QMainWindow):
                     break
         if selected_uv is None and uv_data:
             selected_uv = uv_data[0]
+
+        title = str(page.get("title") or "UV – Schranklayout")
+        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        _, content_rect = self._draw_pdf_title(painter, page_rect, title)
+
         if selected_uv is None:
-            page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
-            _, content_rect = self._draw_pdf_title(painter, page_rect, str(page.get("title") or "UV – Schranklayout"))
             painter.drawText(content_rect, Qt.AlignCenter | Qt.TextWordWrap, "Keine Unterverteilung verfügbar.")
             return
 
-        uv_colors = {
-            "": "#aaaaaa",
-            "Reserve": "#888888",
-            "Hauptschalter": "#c0392b",
-            "LS": "#1553b5",
-            "LS 3-polig": "#0d3d8a",
-            "FI": "#b85d10",
-            "FI 4-polig": "#8a3a00",
-            "FI/LS": "#6b22bf",
-            "Überspannungsschutz": "#9b0000",
-            "Motorschutz": "#1a7a3a",
-            "Schütz": "#007070",
-            "Zeitschalter": "#5a5a00",
-            "Klemme": "#9a7000",
-            "Steckdose UV": "#2c6e49",
-            "Freitext": "#444444",
-        }
-        uv_short = {
-            "": "",
-            "Reserve": "Res",
-            "Hauptschalter": "HS",
-            "LS": "LS",
-            "LS 3-polig": "LS3",
-            "FI": "FI",
-            "FI 4-polig": "FI4",
-            "FI/LS": "FI/L",
-            "Überspannungsschutz": "ÜSS",
-            "Motorschutz": "MOT",
-            "Schütz": "SCH",
-            "Zeitschalter": "Zeit",
-            "Klemme": "KL",
-            "Steckdose UV": "SD",
-            "Freitext": "...",
-        }
+        # Page-relative mm() helper (mirrors _PdfContext.mm() in gui/main_window.py)
+        # so slot/row sizes scale with the writer's actual export resolution
+        # instead of using fixed tiny pixel constants.
+        dpi = float(writer.resolution() or 150)
 
-        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
-        _, content_rect = self._draw_pdf_title(painter, page_rect, str(page.get("title") or "UV – Schranklayout"))
+        def mm(value: float) -> float:
+            return value * dpi / 25.4
 
-        rows = max(1, int(selected_uv.get("rows", 0) or 1))
-        modules_per_row = max(1, int(selected_uv.get("modules_per_row", 0) or 1))
-        slot_map = {
-            (int(s.get("row", 0) or 0), int(s.get("slot", 0) or 0)): s
-            for s in (selected_uv.get("slots") or [])
-            if isinstance(s, dict)
-        }
-        x0 = content_rect.x() + 16
-        y = content_rect.y() + 16
-        rail_w = max(80.0, content_rect.width() - 32.0)
-        slot_w = rail_w / max(modules_per_row, 1)
-        slot_h = 18.0
-        row_gap = 18.0
-        left_label_w = 26.0
+        table_model = self._build_uv_table_model(selected_uv)
+        rows = int(table_model["rows"])
+        mpr = max(1, int(table_model["modules_per_row"]))
+        slots_list = [s for s in (selected_uv.get("slots") or []) if isinstance(s, dict)]
+        busbars_list = [b for b in (selected_uv.get("busbars") or []) if isinstance(b, dict)]
+        ap_name = str(selected_uv.get("ap_name", "") or "")
+        room = str(selected_uv.get("room", "") or "")
+        preset = str(selected_uv.get("preset", "") or "")
 
+        slot_map: dict[tuple[int, int], dict] = {}
+        for s in slots_list:
+            try:
+                slot_map[(int(s.get("row", 0) or 0), int(s.get("slot", 0) or 0))] = s
+            except (TypeError, ValueError):
+                continue
+
+        x0 = content_rect.x()
+        avail_w = content_rect.width()
+        y = content_rect.y()
+        page_bottom = content_rect.bottom()
+
+        def new_page(continuation_title: str) -> None:
+            nonlocal x0, avail_w, y, page_bottom
+            self._pdf_new_page(painter, writer)
+            page_rect2 = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+            _, content_rect2 = self._draw_pdf_title(painter, page_rect2, continuation_title)
+            x0 = content_rect2.x()
+            avail_w = content_rect2.width()
+            y = content_rect2.y()
+            page_bottom = content_rect2.bottom()
+
+        # ── DIN-rail sizing constants (computed early so the header banner
+        # can match the rail's actual right edge instead of the full page width) ──
+        slot_w = min(mm(15), avail_w / mpr)
+        slot_h = mm(13)
+        rail_h = mm(2.5)
+        te_num_h = mm(3.5)
+        row_band_h = te_num_h + slot_h + rail_h + mm(1.5)
+        left_margin = mm(8)
+        gap_between_rails = mm(4)
+        bb_strip_h = mm(2.2)
+        colors_3p = {"L1": "#e53935", "L2": "#43a047", "L3": "#1e88e5"}
+        colors_3pn = {"L1": "#e53935", "L2": "#43a047", "L3": "#1e88e5", "N": "#1565c0"}
+        rail_total_w = min(avail_w, left_margin + mpr * slot_w)
+
+        # ── header (ap name, room, preset, dimensions) ──────────────────
+        header_h = mm(7)
+        subtitle_parts = []
+        if room:
+            subtitle_parts.append(f"Raum: {room}")
+        subtitle_parts.append(f"{rows}×{mpr} TE")
+        if preset:
+            subtitle_parts.append(preset)
+        subtitle = "  |  ".join(subtitle_parts)
+
+        painter.fillRect(QRectF(x0, y, rail_total_w, header_h), QBrush(QColor("#d0d8e8")))
+        painter.setPen(QPen(QColor("#555555"), 1))
+        painter.drawRect(QRectF(x0, y, rail_total_w, header_h))
+        painter.setPen(Qt.black)
+        painter.setFont(QFont("Arial", 11, QFont.Bold))
+        painter.drawText(
+            QRectF(x0 + mm(2), y, rail_total_w * 0.5, header_h),
+            Qt.AlignVCenter | Qt.AlignLeft,
+            ap_name or "Unterverteilung",
+        )
+        painter.setFont(QFont("Arial", 9))
+        painter.drawText(
+            QRectF(x0 + mm(2), y, rail_total_w - mm(4), header_h),
+            Qt.AlignVCenter | Qt.AlignRight,
+            subtitle,
+        )
+        y += header_h + mm(2)
+
+        has_any_content = bool(slots_list) or bool(busbars_list)
+
+        # ── DIN-rail visual per row (primary view, shown first) ──────────
+        te_global_offset = 0
         for row_idx in range(rows):
             row_no = row_idx + 1
-            row_y = y + row_idx * (slot_h + row_gap)
-            painter.setPen(QPen(QColor("#666666"), 1))
-            painter.setFont(QFont("Arial", 8, QFont.Bold))
-            painter.drawText(QRectF(x0, row_y, left_label_w, slot_h), Qt.AlignVCenter | Qt.AlignRight, f"R{row_no}")
 
-            rail_x = x0 + left_label_w + 8
-            for te in range(1, modules_per_row + 1):
-                sx = rail_x + (te - 1) * slot_w
-                slot_data = slot_map.get((row_no, te), {})
-                device_type = str(slot_data.get("device_type", "") or "").strip()
-                if device_type:
-                    color = QColor(uv_colors.get(device_type, uv_colors[""]))
-                    painter.setBrush(QBrush(color))
+            if y + row_band_h > page_bottom:
+                new_page(f"{title} (Fortsetzung)")
+
+            painter.setFont(QFont("Arial", 9, QFont.Bold))
+            painter.setPen(QColor("#555555"))
+            painter.drawText(
+                QRectF(x0, y + te_num_h, left_margin - mm(1), slot_h + rail_h),
+                Qt.AlignVCenter | Qt.AlignRight,
+                f"R{row_no}",
+            )
+
+            rail_x0 = x0 + left_margin
+
+            painter.setFont(QFont("Arial", 7))
+            painter.setPen(QColor("#888888"))
+            for te in range(1, mpr + 1):
+                tx = rail_x0 + (te - 1) * slot_w
+                painter.drawText(
+                    QRectF(tx, y, slot_w, te_num_h),
+                    Qt.AlignHCenter | Qt.AlignVCenter,
+                    str(te_global_offset + te),
+                )
+
+            te = 1
+            while te <= mpr:
+                sx = rail_x0 + (te - 1) * slot_w
+                slot_data = slot_map.get((row_no, te))
+                ts = max(1, int((slot_data or {}).get("te_size", 1) or 1))
+                ts = min(ts, mpr - te + 1)
+                sw = ts * slot_w
+                sy = y + te_num_h
+                device_type = str((slot_data or {}).get("device_type", "") or "").strip()
+
+                if slot_data and device_type:
+                    color_hex = self._UV_COLORS.get(device_type, self._UV_COLORS[""])
+                    painter.setBrush(QBrush(QColor(color_hex)))
                     painter.setPen(QPen(QColor("#222222"), 1))
-                    painter.drawRoundedRect(QRectF(sx + 1, row_y, max(6.0, slot_w - 2), slot_h), 2.0, 2.0)
-                    painter.setPen(QColor("#ffffff"))
-                    painter.setFont(QFont("Arial", 7, QFont.Bold))
-                    painter.drawText(
-                        QRectF(sx + 2, row_y + 2, max(6.0, slot_w - 4), slot_h - 4),
-                        Qt.AlignCenter,
-                        uv_short.get(device_type, device_type[:3]),
+                    painter.drawRoundedRect(
+                        QRectF(sx + mm(0.3), sy, sw - mm(0.6), slot_h), mm(0.8), mm(0.8)
                     )
+                    short = self._UV_SHORT.get(device_type, device_type[:4])
+                    painter.setFont(QFont("Arial", 8, QFont.Bold))
+                    painter.setPen(QColor("#ffffff"))
+                    painter.drawText(
+                        QRectF(sx + mm(0.3), sy + mm(0.5), sw - mm(0.6), slot_h * 0.38),
+                        Qt.AlignHCenter | Qt.AlignVCenter,
+                        short,
+                    )
+                    spec = str(slot_data.get("spec", "") or "").strip()
+                    if spec:
+                        painter.setFont(QFont("Arial", 7))
+                        painter.setPen(QColor("#ffe08a"))
+                        painter.drawText(
+                            QRectF(sx + mm(0.3), sy + slot_h * 0.4, sw - mm(0.6), slot_h * 0.28),
+                            Qt.AlignHCenter | Qt.AlignVCenter,
+                            spec,
+                        )
+                    label = str(slot_data.get("label", "") or "").strip()
+                    if label:
+                        painter.setFont(QFont("Arial", 7))
+                        painter.setPen(QColor("#eeeeee"))
+                        painter.drawText(
+                            QRectF(
+                                sx + mm(0.4),
+                                sy + slot_h * (0.68 if spec else 0.5),
+                                sw - mm(0.8),
+                                slot_h * 0.30,
+                            ),
+                            Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap,
+                            label,
+                        )
                 else:
-                    painter.setBrush(QBrush(QColor("#efefef")))
-                    painter.setPen(QPen(QColor("#cfcfcf"), 1))
-                    painter.drawRect(QRectF(sx + 1, row_y, max(6.0, slot_w - 2), slot_h))
+                    painter.setBrush(QBrush(QColor("#e8e8e8")))
+                    painter.setPen(QPen(QColor("#999999"), 1))
+                    painter.drawRect(QRectF(sx + mm(0.3), sy, sw - mm(0.6), slot_h))
 
-            painter.setBrush(QBrush(QColor("#8c8c8c")))
-            painter.setPen(QPen(QColor("#666666"), 1))
-            painter.drawRect(QRectF(rail_x, row_y + slot_h + 2, rail_w, 4))
+                te += ts
 
+            rail_y = y + te_num_h + slot_h
+            painter.setBrush(QBrush(QColor("#999999")))
+            painter.setPen(QPen(QColor("#777777"), 1))
+            painter.drawRect(QRectF(rail_x0, rail_y, mpr * slot_w, rail_h))
+
+            if busbars_list:
+                bb_y = rail_y - bb_strip_h
+                row_te_start_g = te_global_offset + 1
+                row_te_end_g = te_global_offset + mpr
+                for bb in busbars_list:
+                    try:
+                        bb_te_s = int(bb.get("te_start", 1) or 1)
+                        bb_te_e = int(bb.get("te_end", 1) or 1)
+                    except (TypeError, ValueError):
+                        continue
+                    vis_s = max(bb_te_s, row_te_start_g)
+                    vis_e = min(bb_te_e, row_te_end_g)
+                    if vis_s > vis_e:
+                        continue
+                    bb_col = str(bb.get("color", "#888888") or "#888888")
+                    bb_phase = str(bb.get("phase", "") or "")
+
+                    if bb_phase == "L1/L2/L3":
+                        for te_g in range(vis_s, vis_e + 1):
+                            local_te = te_g - row_te_start_g
+                            te_bx = rail_x0 + local_te * slot_w
+                            ph = ("L1", "L2", "L3")[(te_g - bb_te_s) % 3]
+                            painter.fillRect(QRectF(te_bx, bb_y, slot_w, bb_strip_h), QBrush(QColor(colors_3p[ph])))
+                            painter.setFont(QFont("Arial", 7, QFont.Bold))
+                            painter.setPen(QColor("#ffffff"))
+                            painter.drawText(
+                                QRectF(te_bx + mm(0.2), bb_y, slot_w - mm(0.4), bb_strip_h),
+                                Qt.AlignHCenter | Qt.AlignVCenter,
+                                ph,
+                            )
+                    elif bb_phase in ("3~N", "3~N4"):
+                        for te_g in range(vis_s, vis_e + 1):
+                            local_te = te_g - row_te_start_g
+                            te_bx = rail_x0 + local_te * slot_w
+                            idx = te_g - bb_te_s
+                            if bb_phase == "3~N":
+                                ph = ("L1", "L2", "L3", "N")[idx % 4]
+                            elif idx < 3:
+                                ph = ("L1", "L2", "L3")[idx]
+                            elif idx == 3:
+                                ph = "N"
+                            else:
+                                ph = ("L1", "L2", "L3")[(idx - 4) % 3]
+                            painter.fillRect(QRectF(te_bx, bb_y, slot_w, bb_strip_h), QBrush(QColor(colors_3pn[ph])))
+                            painter.setFont(QFont("Arial", 7, QFont.Bold))
+                            painter.setPen(QColor("#ffffff"))
+                            painter.drawText(
+                                QRectF(te_bx + mm(0.2), bb_y, slot_w - mm(0.4), bb_strip_h),
+                                Qt.AlignHCenter | Qt.AlignVCenter,
+                                ph,
+                            )
+                    else:
+                        local_s = vis_s - row_te_start_g
+                        local_e = vis_e - row_te_start_g
+                        bx = rail_x0 + local_s * slot_w
+                        bw_b = (local_e - local_s + 1) * slot_w
+                        painter.fillRect(QRectF(bx, bb_y, bw_b, bb_strip_h), QBrush(QColor(bb_col)))
+                        if bb_phase:
+                            painter.setFont(QFont("Arial", 7, QFont.Bold))
+                            painter.setPen(QColor("#ffffff"))
+                            painter.drawText(
+                                QRectF(bx + mm(0.5), bb_y, bw_b - mm(1), bb_strip_h),
+                                Qt.AlignVCenter | Qt.AlignLeft,
+                                bb_phase,
+                            )
+
+            te_global_offset += mpr
+            y += row_band_h + gap_between_rails
+
+        if not has_any_content:
+            empty_rect = QRectF(x0, y, avail_w, mm(12))
+            painter.fillRect(empty_rect, QBrush(QColor("#f8fafc")))
+            painter.setPen(QPen(QColor("#c7d2e3"), 1))
+            painter.drawRect(empty_rect)
+            painter.setPen(Qt.black)
+            painter.setFont(QFont("Arial", 10, QFont.Bold))
+            painter.drawText(
+                empty_rect.adjusted(mm(2), 0, -mm(2), 0),
+                Qt.AlignVCenter | Qt.AlignLeft,
+                "Keine Belegung konfiguriert",
+            )
+            y += mm(14)
+
+        # ── detailed assignment table (occupied slots only) ─────────────
         path_rows = []
-        for slot in sorted((selected_uv.get("slots") or []), key=lambda s: (int(s.get("row", 0) or 0), int(s.get("slot", 0) or 0))):
-            if not isinstance(slot, dict):
-                continue
+        for slot in sorted(slots_list, key=lambda s: (int(s.get("row", 0) or 0), int(s.get("slot", 0) or 0))):
             if not str(slot.get("device_type", "") or "").strip():
                 continue
             path_rows.append([
@@ -5683,10 +5989,11 @@ class AppWindow(QMainWindow):
                 str(slot.get("note", "")),
             ])
         if path_rows:
+            self._pdf_new_page(painter, writer)
             self._draw_pdf_table(
                 painter,
                 writer,
-                f"{str(page.get('title') or 'UV – Schranklayout')} – Belegung",
+                f"{title} – Belegung",
                 ["Reihe", "TE", "Typ", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"],
                 path_rows,
                 col_widths=[0.6, 0.5, 1.1, 1.0, 1.7, 1.8, 1.4],
@@ -6638,6 +6945,8 @@ class AppWindow(QMainWindow):
 
     def _collect_export_data(self) -> dict:
         from model.computed import cable_length_details  # noqa: PLC0415
+
+        self._flush_live_editor_state()
 
         hk_rows, t_supply, t_return = self._collect_length_overview_rows()
 

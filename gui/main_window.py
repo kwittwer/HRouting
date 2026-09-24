@@ -9053,6 +9053,17 @@ class _PdfContext:
                     x += col_w[i]
                 row_y += self.mm(4.2)
             y = row_y + self.mm(2)
+        elif not slots_list and not busbars_list:
+            empty_rect = QRectF(x0 + self.mm(1), y, avail_w - self.mm(2), self.mm(10))
+            self.painter.fillRect(empty_rect, QBrush(QColor("#f8fafc")))
+            self.painter.drawRect(empty_rect)
+            self.painter.setFont(QFont("Arial", 9, QFont.Bold))
+            self.painter.drawText(
+                empty_rect.adjusted(self.mm(1.2), 0, -self.mm(1.2), 0),
+                Qt.AlignVCenter | Qt.AlignLeft,
+                "Keine Belegung hinterlegt",
+            )
+            y += self.mm(12)
 
         # ── DIN-rail rows ───────────────────────────────────────── #
         font_te = QFont("Arial", 9)

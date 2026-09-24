@@ -173,6 +173,142 @@ def test_uv_planning_dock_filters_cables_to_active_uv_ap(app, monkeypatch):
         window.deleteLater()
 
 
+def test_uv_planning_dock_persists_busbar_edits_live(app, monkeypatch):
+    """Regression: the embedded dock editor is shown with show_buttons=False
+    (no OK/Cancel), so QDialog.accepted never fires. Without a live-persist
+    hook, edits (e.g. adding a Phasenschiene/busbar) were never written to
+    point.data["uv_config"], so they were silently lost and never appeared
+    in the PDF export, even though the live preview showed them correctly."""
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0]},
+                    "elec_cables": {},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "UV 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                            "ap_type": "uv",
+                            "uv_config": {"rows": 2, "modules_per_row": 12, "busbars": []},
+                        },
+                    },
+                },
+            }
+        )
+
+        window._set_document(document)
+        window._apply_workspace("electrical")
+        app.processEvents()
+
+        dock = window.uv_planning
+        assert dock.active_point_id() == "AP-1"
+        editor = dock._editor
+        assert editor is not None
+
+        was_dirty = window._dirty
+        window._dirty = False
+
+        # Simulate the user adding a busbar row via the embedded dock editor
+        # (mirrors clicking "+ Phasenschiene" in the "Phasenschienen" tab).
+        editor._add_busbar_row()
+        app.processEvents()
+
+        point = document.get("AP-1")
+        persisted = point.data.get("uv_config", {}).get("busbars")
+        assert persisted, "busbar edit was not persisted into point.data[\"uv_config\"]"
+        assert persisted[0]["phase"] == "L1"
+        assert window._dirty, "editing the UV via the dock should mark the project dirty"
+
+        window._dirty = was_dirty
+    finally:
+        window.deleteLater()
+
+
+def test_collect_export_data_flushes_live_uv_editor_state(app, monkeypatch):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0]},
+                    "elec_cables": {},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "UV_HWR",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                            "ap_type": "uv",
+                            "uv_config": {
+                                "rows": 5,
+                                "modules_per_row": 12,
+                                "slots": [
+                                    {"row": 2, "slot": 1, "device_type": "LS", "te_size": 1, "label": "KBL_UV_Zählerschrank:?"}
+                                ],
+                                "busbars": [],
+                            },
+                        },
+                    },
+                },
+            }
+        )
+
+        window._set_document(document)
+        window._apply_workspace("electrical")
+        app.processEvents()
+
+        dock = window.uv_planning
+        editor = dock._editor
+        assert dock.active_point_id() == "AP-1"
+        assert editor is not None
+
+        editor.config_changed.disconnect(dock._save_editor)
+        editor._add_busbar_row(
+            {"phase": "L1/L2/L3", "color": "#888888", "te_start": 1, "te_end": 12}
+        )
+        app.processEvents()
+
+        point = document.get("AP-1")
+        assert point.data.get("uv_config", {}).get("busbars") == []
+
+        export_data = window._collect_export_data()
+        uv_data = next(uv for uv in export_data["uv_data"] if uv["ap_id"] == "AP-1")
+        assert uv_data["busbars"] == [
+            {"phase": "L1/L2/L3", "color": "#888888", "te_start": 1, "te_end": 12}
+        ]
+        assert point.data.get("uv_config", {}).get("busbars") == uv_data["busbars"]
+    finally:
+        window.deleteLater()
+
+
 def test_action_configure_uv_opens_dock_not_dialog(app, monkeypatch):
     _settings_noop(monkeypatch)
 
@@ -277,7 +413,7 @@ def test_main_window_uv_schematic_never_renders_blank_for_unconfigured_uv(app, m
             {"ap_name": "UV 1", "room": "Küche", "rows": 0, "modules_per_row": 0, "slots": []},
         )
         assert y_after > y_start
-        assert pic.boundingRect().height() > 0
+        assert pic.boundingRect().height() > 100
     finally:
         painter.end()
 
@@ -287,6 +423,127 @@ def test_main_window_uv_table_model_groups_te_blocks_and_busbars(app, monkeypatc
     from gui.main_window import MainWindow  # noqa: PLC0415
 
     window = MainWindow()
+    try:
+        model = window._build_uv_table_model({
+            "ap_name": "UV 1",
+            "room": "Küche",
+            "rows": 2,
+            "modules_per_row": 12,
+            "slots": [
+                {"row": 1, "slot": 1, "device_type": "LS", "te_size": 2},
+                {"row": 1, "slot": 3, "device_type": "LS", "te_size": 2},
+                {"row": 2, "slot": 5, "device_type": "FI", "te_size": 3},
+            ],
+            "busbars": [
+                {"phase": "L1", "te_start": 1, "te_end": 6},
+                {"phase": "L2", "te_start": 7, "te_end": 12},
+            ],
+        })
+
+        assert model["rows"] == 2
+        assert model["modules_per_row"] == 12
+        assert model["row_blocks"][0][0]["device_type"] == "LS"
+        assert model["row_blocks"][0][0]["te_start"] == 1
+        assert model["row_blocks"][0][0]["te_end"] == 4
+        assert model["phase_rows"][0]["phase"] == "L1"
+        assert model["phase_rows"][0]["te_start"] == 1
+        assert model["phase_rows"][0]["te_end"] == 6
+    finally:
+        window.deleteLater()
+
+
+def test_app_window_pdf_uv_page_renders_without_crashing(app, monkeypatch, tmp_path):
+    """Regression test for the real production UV PDF renderer.
+
+    AppWindow._pdf_uv_page previously crashed with NameError (QBrush was
+    used but never imported), which silently truncated the export mid-page
+    (title + first row label only, matching the user-reported blank PDF).
+    """
+    _settings_noop(monkeypatch)
+    from PySide6.QtGui import QPainter, QPdfWriter, QPageLayout, QPageSize  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        pdf_path = tmp_path / "uv_export.pdf"
+        writer = QPdfWriter(str(pdf_path))
+        writer.setResolution(150)
+        writer.setPageSize(QPageSize(QPageSize.A4))
+        writer.setPageOrientation(QPageLayout.Landscape)
+        painter = QPainter()
+        assert painter.begin(writer)
+        try:
+            page = {"type": "uv", "title": "UV – Schranklayout", "uv_ap_id": "AP-1"}
+            export_data = {
+                "uv_data": [
+                    {
+                        "ap_id": "AP-1",
+                        "ap_name": "UV Keller",
+                        "room": "Technikraum",
+                        "preset": "Standard",
+                        "rows": 2,
+                        "modules_per_row": 12,
+                        "slots": [
+                            {"row": 1, "slot": 1, "device_type": "LS", "te_size": 2, "label": "Licht Flur"},
+                            {"row": 2, "slot": 5, "device_type": "FI", "te_size": 3, "spec": "40A/30mA"},
+                        ],
+                        "busbars": [
+                            {"phase": "L1/L2/L3", "te_start": 1, "te_end": 12},
+                        ],
+                    }
+                ]
+            }
+            # Must not raise (previously: NameError: name 'QBrush' is not defined).
+            window._pdf_uv_page(painter, writer, page, export_data)
+        finally:
+            painter.end()
+        assert pdf_path.stat().st_size > 0
+    finally:
+        window.deleteLater()
+
+
+def test_app_window_pdf_uv_page_shows_fallback_for_empty_uv(app, monkeypatch, tmp_path):
+    _settings_noop(monkeypatch)
+    from PySide6.QtGui import QPainter, QPdfWriter, QPageLayout, QPageSize  # noqa: PLC0415
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        pdf_path = tmp_path / "uv_export_empty.pdf"
+        writer = QPdfWriter(str(pdf_path))
+        writer.setResolution(150)
+        writer.setPageSize(QPageSize(QPageSize.A4))
+        writer.setPageOrientation(QPageLayout.Landscape)
+        painter = QPainter()
+        assert painter.begin(writer)
+        try:
+            page = {"type": "uv", "title": "UV – Schranklayout", "uv_ap_id": "AP-1"}
+            export_data = {
+                "uv_data": [
+                    {
+                        "ap_id": "AP-1",
+                        "ap_name": "UV Leer",
+                        "room": "",
+                        "rows": 0,
+                        "modules_per_row": 0,
+                        "slots": [],
+                        "busbars": [],
+                    }
+                ]
+            }
+            window._pdf_uv_page(painter, writer, page, export_data)
+        finally:
+            painter.end()
+        assert pdf_path.stat().st_size > 0
+    finally:
+        window.deleteLater()
+
+
+def test_app_window_build_uv_table_model_groups_te_blocks_and_busbars(app, monkeypatch):
+    _settings_noop(monkeypatch)
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
     try:
         model = window._build_uv_table_model({
             "ap_name": "UV 1",
