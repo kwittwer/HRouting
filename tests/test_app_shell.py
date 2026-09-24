@@ -74,6 +74,248 @@ def test_app_window_builds_and_switches_workspaces(app, tmp_path, monkeypatch):
         window.deleteLater()
 
 
+def test_uv_planning_dock_builds_and_selects_uv_ap(app, monkeypatch):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [120.0, 10.0]},
+                    "elec_cables": {},
+                },
+                "params": {
+                    "floorplans": {
+                        "grundriss-1": {"name": "EG", "visible": True, "file_path": ""}
+                    },
+                    "elec_points": {
+                        "AP-1": {
+                            "point_id": "AP-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "UV 1",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                            "ap_type": "uv",
+                            "uv_config": {"rows": 2, "modules_per_row": 12},
+                        },
+                        "AP-2": {
+                            "point_id": "AP-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Dose 2",
+                            "builtin_symbol": "Steckdose",
+                            "visible": True,
+                            "ap_type": "standard",
+                        },
+                    },
+                },
+            }
+        )
+
+        window._set_document(document)
+        window._apply_workspace("electrical")
+        app.processEvents()
+
+        assert DockId.UV_PLANNING in window._docks
+        assert window._docks[DockId.UV_PLANNING] is window.uv_planning
+        assert window.uv_planning.active_point_id() == "AP-1"
+        assert window.uv_planning._selector.count() >= 1
+        assert window.uv_planning.get_config()["rows"] == 2
+    finally:
+        window.deleteLater()
+
+
+def test_uv_planning_dock_filters_cables_to_active_uv_ap(app, monkeypatch):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [120.0, 10.0], "AP-3": [220.0, 10.0]},
+                    "elec_cables": {"EK-1": [[10.0, 10.0], [120.0, 10.0]], "EK-2": [[220.0, 10.0], [320.0, 10.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1", "EK-2": "AP-3"},
+                    "cable_end_ap": {"EK-1": "AP-2", "EK-2": "AP-4"},
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "UV 1", "builtin_symbol": "Steckdose", "visible": True, "ap_type": "uv"},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "Dose 2", "builtin_symbol": "Steckdose", "visible": True},
+                        "AP-3": {"point_id": "AP-3", "floor_plan_id": "grundriss-1", "name": "Dose 3", "builtin_symbol": "Steckdose", "visible": True},
+                    },
+                    "elec_cables": {
+                        "EK-1": {"cable_id": "EK-1", "floor_plan_id": "grundriss-1", "name": "UV-Kabel", "type": "3x1.5", "visible": True, "start_ap": "AP-1", "end_ap": "AP-2"},
+                        "EK-2": {"cable_id": "EK-2", "floor_plan_id": "grundriss-1", "name": "Fernkabel", "type": "3x1.5", "visible": True, "start_ap": "AP-3", "end_ap": "AP-4"},
+                    },
+                },
+            }
+        )
+
+        window._set_document(document)
+        window._apply_workspace("electrical")
+        app.processEvents()
+
+        dock = window.uv_planning
+        assert dock.active_point_id() == "AP-1"
+        assert dock._editor is not None
+        assert dock._editor._cable_choices == ["UV-Kabel"]
+    finally:
+        window.deleteLater()
+
+
+def test_action_configure_uv_opens_dock_not_dialog(app, monkeypatch):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {"floor_plans": [{"fp_id": "grundriss-1", "visible": True}], "elec_points": {"AP-1": [10.0, 10.0]}, "elec_cables": {}},
+                "params": {"floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}}, "elec_points": {"AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "UV 1", "builtin_symbol": "Steckdose", "visible": True, "ap_type": "uv"}}},
+            }
+        )
+        window._set_document(document)
+        window._apply_workspace("electrical")
+        app.processEvents()
+
+        window._action_configure_uv("AP-1")
+        app.processEvents()
+
+        assert window.uv_planning.isVisible()
+        assert window.uv_planning.active_point_id() == "AP-1"
+        assert window.uv_planning._editor is not None
+    finally:
+        window.deleteLater()
+
+
+def test_default_pdf_export_pages_include_uv_page(app, monkeypatch):
+    _settings_noop(monkeypatch)
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    window = AppWindow()
+    try:
+        pages = window._default_pdf_export_pages()
+        assert any(page.get("type") == "uv" for page in pages)
+    finally:
+        window.deleteLater()
+
+
+def test_app_window_uv_export_page_uses_uv_renderer(app, monkeypatch):
+    _settings_noop(monkeypatch)
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        calls = []
+
+        def fake_uv_page(*args, **kwargs):
+            calls.append((args, kwargs))
+
+        monkeypatch.setattr(window, "_pdf_uv_page", fake_uv_page, raising=False)
+        page = {"type": "uv", "title": "UV – Schranklayout", "uv_ap_id": "AP-1"}
+
+        window._render_pdf_export_page(
+            painter=object(),
+            writer=object(),
+            page=page,
+            hk_rows=[],
+            t_supply=35.0,
+            t_return=30.0,
+            ap_rows=[],
+            cable_rows=[],
+            export_data={"uv_data": [{"ap_id": "AP-1", "ap_name": "UV 1", "rows": 2, "modules_per_row": 12, "slots": []}]},
+        )
+
+        assert calls
+        assert calls[0][0][2]["uv_ap_id"] == "AP-1"
+    finally:
+        window.deleteLater()
+
+
+def test_main_window_default_pdf_export_pages_include_uv_page(app, monkeypatch):
+    _settings_noop(monkeypatch)
+    from gui.main_window import MainWindow  # noqa: PLC0415
+
+    window = MainWindow()
+    try:
+        pages = window._default_pdf_export_pages()
+        assert any(page.get("type") == "uv" for page in pages)
+        assert any(page.get("type") == "uv" for page in window._normalize_pdf_export_pages(pages))
+    finally:
+        window.deleteLater()
+
+
+def test_main_window_uv_schematic_never_renders_blank_for_unconfigured_uv(app, monkeypatch):
+    _settings_noop(monkeypatch)
+    from PySide6.QtGui import QPainter, QPicture  # noqa: PLC0415
+    from PySide6.QtPrintSupport import QPrinter  # noqa: PLC0415
+    from gui.main_window import _PdfContext  # noqa: PLC0415
+
+    pic = QPicture()
+    painter = QPainter()
+    assert painter.begin(pic)
+    try:
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        ctx = _PdfContext(printer, painter, 96)
+        page = ctx.page_rect()
+        y_start = ctx.title(page, "UV – Schranklayout")
+        y_after = ctx.draw_uv_schematic(
+            page,
+            y_start,
+            {"ap_name": "UV 1", "room": "Küche", "rows": 0, "modules_per_row": 0, "slots": []},
+        )
+        assert y_after > y_start
+        assert pic.boundingRect().height() > 0
+    finally:
+        painter.end()
+
+
+def test_main_window_uv_table_model_groups_te_blocks_and_busbars(app, monkeypatch):
+    _settings_noop(monkeypatch)
+    from gui.main_window import MainWindow  # noqa: PLC0415
+
+    window = MainWindow()
+    try:
+        model = window._build_uv_table_model({
+            "ap_name": "UV 1",
+            "room": "Küche",
+            "rows": 2,
+            "modules_per_row": 12,
+            "slots": [
+                {"row": 1, "slot": 1, "device_type": "LS", "te_size": 2},
+                {"row": 1, "slot": 3, "device_type": "LS", "te_size": 2},
+                {"row": 2, "slot": 5, "device_type": "FI", "te_size": 3},
+            ],
+            "busbars": [
+                {"phase": "L1", "te_start": 1, "te_end": 6},
+                {"phase": "L2", "te_start": 7, "te_end": 12},
+            ],
+        })
+
+        assert model["rows"] == 2
+        assert model["modules_per_row"] == 12
+        assert model["row_blocks"][0][0]["device_type"] == "LS"
+        assert model["row_blocks"][0][0]["te_start"] == 1
+        assert model["row_blocks"][0][0]["te_end"] == 4
+        assert model["phase_rows"][0]["phase"] == "L1"
+        assert model["phase_rows"][0]["te_start"] == 1
+        assert model["phase_rows"][0]["te_end"] == 6
+    finally:
+        window.deleteLater()
+
+
 def test_app_window_wires_topology_dock_and_populates_graph(app, monkeypatch):
     _settings_noop(monkeypatch)
 

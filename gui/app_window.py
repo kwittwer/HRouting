@@ -101,7 +101,7 @@ from logic.schaltplan_generator import build_uv_hierarchy, get_uv_circuits
 from . import layout_store
 from .canvas_widget import CanvasWidget, ToolMode
 from .docks import LogDock, NavigatorDock, PropertiesDock, ToolsDock
-from .docks import ProjectOverviewDock, TopologyDock
+from .docks import ProjectOverviewDock, TopologyDock, UvPlanningDock
 from .workspaces import (
     DEFAULT_WORKSPACE_ID,
     DockId,
@@ -402,6 +402,7 @@ class AppWindow(QMainWindow):
         self.topology.set_data_provider(
             lambda: self._build_schema_data()[:2]
         )
+        self.uv_planning = UvPlanningDock(self)
         # Backward compatibility for tests/extensions that still use `window.overview`.
         self.overview = self.overview_heating
 
@@ -416,6 +417,7 @@ class AppWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro_rooms)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro_cables)
         self.addDockWidget(Qt.RightDockWidgetArea, self.topology)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.uv_planning)
         self.log.hide()
         self.overview_general.hide()
         self.overview_heating.hide()
@@ -424,6 +426,7 @@ class AppWindow(QMainWindow):
         self.overview_electro_rooms.hide()
         self.overview_electro_cables.hide()
         self.topology.hide()
+        self.uv_planning.hide()
 
         self._docks = {
             DockId.NAVIGATOR: self.navigator,
@@ -437,6 +440,7 @@ class AppWindow(QMainWindow):
             DockId.OVERVIEW_ELECTRO_ROOMS: self.overview_electro_rooms,
             DockId.OVERVIEW_ELECTRO_CABLES: self.overview_electro_cables,
             DockId.TOPOLOGY: self.topology,
+            DockId.UV_PLANNING: self.uv_planning,
         }
 
         for dock in self._docks.values():
@@ -1970,6 +1974,7 @@ class AppWindow(QMainWindow):
         self.overview_electro_rooms.set_document(document)
         self.overview_electro_cables.set_document(document)
         self.topology.set_document(document)
+        self.uv_planning.set_document(document)
         self._normalize_loaded_cable_bindings(document)
 
         # Globale Ansichtsdaten (Zoom, Raster, Grundriss-Transformationen,
@@ -2115,19 +2120,24 @@ class AppWindow(QMainWindow):
         self._mark_dirty()
 
     def _action_configure_uv(self, element_id: str) -> None:
-        from gui.parameter_panel import UvConfigDialog  # noqa: PLC0415
-
         element = self._document.get(element_id)
         if element is None:
             return
-        dialog = UvConfigDialog(
-            config=element.data.get("uv_config") or {},
-            cable_choices=self._cable_names(),
-            parent=self,
-        )
-        if dialog.exec() == QDialog.Accepted:
-            self._store_config(element_id, "uv_config", dialog.get_config())
-            self.log.info(f"Unterverteilung aktualisiert: {element_id}")
+        self.uv_planning.select_point(element_id)
+        self.uv_planning.show()
+        self.uv_planning.raise_()
+
+        editor = getattr(self.uv_planning, "_editor", None)
+        if editor is not None and not isinstance(editor, QWidget):
+            if hasattr(editor, "exec"):
+                try:
+                    accepted = editor.exec()
+                except TypeError:
+                    accepted = None
+                if accepted == QDialog.Accepted and hasattr(editor, "get_config"):
+                    self.uv_planning._save_editor()
+
+        self.log.info(f"Unterverteilung geöffnet: {element_id}")
 
     def _action_configure_up(self, element_id: str) -> None:
         from gui.parameter_panel import UpDistributionDialog  # noqa: PLC0415
@@ -5327,6 +5337,21 @@ class AppWindow(QMainWindow):
         return []
 
     def _default_pdf_export_pages(self) -> list[dict]:
+        uv_point_ids = []
+        if self._document is not None:
+            uv_point_ids = [
+                point.id
+                for point in self._document.all_elements()
+                if isinstance(point, ElecPoint) and str(point.ap_type or "").strip().lower() == "uv"
+            ]
+        uv_page = {
+            "id": "page-uv",
+            "type": "uv",
+            "title": "UV – Schranklayout",
+            "enabled": bool(uv_point_ids),
+            "uv_ap_id": uv_point_ids[0] if uv_point_ids else "",
+            "table_sections": ["el_uv"],
+        }
         return [
             {
                 "id": "overview-all",
@@ -5388,6 +5413,7 @@ class AppWindow(QMainWindow):
                 "floor_plan_id": None,
                 "source_rect": None,
             },
+            uv_page,
         ]
 
     def _hrouting_program_version(self) -> str:
@@ -5447,6 +5473,7 @@ class AppWindow(QMainWindow):
                 "elektro",
                 "elektro_room",
                 "elektro_topology",
+                "uv",
             ):
                 continue
             page = {
@@ -5457,6 +5484,19 @@ class AppWindow(QMainWindow):
             }
             if ptype == "elektro_topology":
                 page["root_ap_id"] = str(src.get("root_ap_id") or "").strip()
+            if ptype == "uv":
+                page["uv_ap_id"] = str(src.get("uv_ap_id") or "").strip()
+                page["table_sections"] = list(src.get("table_sections") or ["el_uv"])
+                page["floor_plan_id"] = src.get("floor_plan_id") or None
+                rect = src.get("source_rect")
+                if isinstance(rect, (list, tuple)) and len(rect) == 4:
+                    try:
+                        x, y, w, h = [float(v) for v in rect]
+                        page["source_rect"] = [x, y, w, h] if w > 0 and h > 0 else None
+                    except (TypeError, ValueError):
+                        page["source_rect"] = None
+                else:
+                    page["source_rect"] = None
             if ptype in ("plan", "heating", "heating_circuit", "elektro", "elektro_room"):
                 page["show_background"] = bool(src.get("show_background", True))
                 page["show_heating"] = bool(src.get("show_heating", True))
@@ -5521,6 +5561,137 @@ class AppWindow(QMainWindow):
             normalized.append(page)
         return normalized or self._default_pdf_export_pages()
 
+    def _pdf_uv_page(self, painter, writer, page: dict, export_data: dict | None = None) -> None:
+        from PySide6.QtGui import QFont  # noqa: PLC0415
+
+        data = export_data or {}
+        uv_data = list(data.get("uv_data") or [])
+        uv_ap_id = str(page.get("uv_ap_id") or "").strip()
+        selected_uv = None
+        if uv_ap_id:
+            for uv in uv_data:
+                if str(uv.get("ap_id", "") or "").strip() == uv_ap_id:
+                    selected_uv = uv
+                    break
+        if selected_uv is None and uv_data:
+            selected_uv = uv_data[0]
+        if selected_uv is None:
+            page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+            _, content_rect = self._draw_pdf_title(painter, page_rect, str(page.get("title") or "UV – Schranklayout"))
+            painter.drawText(content_rect, Qt.AlignCenter | Qt.TextWordWrap, "Keine Unterverteilung verfügbar.")
+            return
+
+        uv_colors = {
+            "": "#aaaaaa",
+            "Reserve": "#888888",
+            "Hauptschalter": "#c0392b",
+            "LS": "#1553b5",
+            "LS 3-polig": "#0d3d8a",
+            "FI": "#b85d10",
+            "FI 4-polig": "#8a3a00",
+            "FI/LS": "#6b22bf",
+            "Überspannungsschutz": "#9b0000",
+            "Motorschutz": "#1a7a3a",
+            "Schütz": "#007070",
+            "Zeitschalter": "#5a5a00",
+            "Klemme": "#9a7000",
+            "Steckdose UV": "#2c6e49",
+            "Freitext": "#444444",
+        }
+        uv_short = {
+            "": "",
+            "Reserve": "Res",
+            "Hauptschalter": "HS",
+            "LS": "LS",
+            "LS 3-polig": "LS3",
+            "FI": "FI",
+            "FI 4-polig": "FI4",
+            "FI/LS": "FI/L",
+            "Überspannungsschutz": "ÜSS",
+            "Motorschutz": "MOT",
+            "Schütz": "SCH",
+            "Zeitschalter": "Zeit",
+            "Klemme": "KL",
+            "Steckdose UV": "SD",
+            "Freitext": "...",
+        }
+
+        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        _, content_rect = self._draw_pdf_title(painter, page_rect, str(page.get("title") or "UV – Schranklayout"))
+
+        rows = max(1, int(selected_uv.get("rows", 0) or 1))
+        modules_per_row = max(1, int(selected_uv.get("modules_per_row", 0) or 1))
+        slot_map = {
+            (int(s.get("row", 0) or 0), int(s.get("slot", 0) or 0)): s
+            for s in (selected_uv.get("slots") or [])
+            if isinstance(s, dict)
+        }
+        x0 = content_rect.x() + 16
+        y = content_rect.y() + 16
+        rail_w = max(80.0, content_rect.width() - 32.0)
+        slot_w = rail_w / max(modules_per_row, 1)
+        slot_h = 18.0
+        row_gap = 18.0
+        left_label_w = 26.0
+
+        for row_idx in range(rows):
+            row_no = row_idx + 1
+            row_y = y + row_idx * (slot_h + row_gap)
+            painter.setPen(QPen(QColor("#666666"), 1))
+            painter.setFont(QFont("Arial", 8, QFont.Bold))
+            painter.drawText(QRectF(x0, row_y, left_label_w, slot_h), Qt.AlignVCenter | Qt.AlignRight, f"R{row_no}")
+
+            rail_x = x0 + left_label_w + 8
+            for te in range(1, modules_per_row + 1):
+                sx = rail_x + (te - 1) * slot_w
+                slot_data = slot_map.get((row_no, te), {})
+                device_type = str(slot_data.get("device_type", "") or "").strip()
+                if device_type:
+                    color = QColor(uv_colors.get(device_type, uv_colors[""]))
+                    painter.setBrush(QBrush(color))
+                    painter.setPen(QPen(QColor("#222222"), 1))
+                    painter.drawRoundedRect(QRectF(sx + 1, row_y, max(6.0, slot_w - 2), slot_h), 2.0, 2.0)
+                    painter.setPen(QColor("#ffffff"))
+                    painter.setFont(QFont("Arial", 7, QFont.Bold))
+                    painter.drawText(
+                        QRectF(sx + 2, row_y + 2, max(6.0, slot_w - 4), slot_h - 4),
+                        Qt.AlignCenter,
+                        uv_short.get(device_type, device_type[:3]),
+                    )
+                else:
+                    painter.setBrush(QBrush(QColor("#efefef")))
+                    painter.setPen(QPen(QColor("#cfcfcf"), 1))
+                    painter.drawRect(QRectF(sx + 1, row_y, max(6.0, slot_w - 2), slot_h))
+
+            painter.setBrush(QBrush(QColor("#8c8c8c")))
+            painter.setPen(QPen(QColor("#666666"), 1))
+            painter.drawRect(QRectF(rail_x, row_y + slot_h + 2, rail_w, 4))
+
+        path_rows = []
+        for slot in sorted((selected_uv.get("slots") or []), key=lambda s: (int(s.get("row", 0) or 0), int(s.get("slot", 0) or 0))):
+            if not isinstance(slot, dict):
+                continue
+            if not str(slot.get("device_type", "") or "").strip():
+                continue
+            path_rows.append([
+                f"R{int(slot.get('row', 0) or 0)}",
+                str(slot.get("slot", "")),
+                str(slot.get("device_type", "")),
+                str(slot.get("spec", "")),
+                str(slot.get("label", "")),
+                str(slot.get("assignment", "")),
+                str(slot.get("note", "")),
+            ])
+        if path_rows:
+            self._draw_pdf_table(
+                painter,
+                writer,
+                f"{str(page.get('title') or 'UV – Schranklayout')} – Belegung",
+                ["Reihe", "TE", "Typ", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"],
+                path_rows,
+                col_widths=[0.6, 0.5, 1.1, 1.0, 1.7, 1.8, 1.4],
+            )
+
     def _current_floor_plans_for_export_dialog(self) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         for fid in self.canvas._floor_plan_order:
@@ -5571,6 +5742,7 @@ class AppWindow(QMainWindow):
             elec_rooms=self._current_elec_rooms_for_export_dialog(),
             heating_circuits=self._current_heating_circuits_for_export_dialog(),
             topology_roots=self._current_topology_roots_for_export_dialog(),
+            uv_points=self._current_uv_points_for_export_dialog(),
             svg_size=self.canvas._svg_size,
             export_meta=self._normalize_pdf_export_meta(self._pdf_export_meta, pages),
             hrouting_version=self._hrouting_program_version(),
@@ -5582,6 +5754,19 @@ class AppWindow(QMainWindow):
         out_pages = self._normalize_pdf_export_pages(dialog.get_pages())
         out_meta = self._normalize_pdf_export_meta(dialog.get_export_meta(), out_pages)
         return out_pages, out_meta
+
+    def _current_uv_points_for_export_dialog(self) -> list[tuple[str, str]]:
+        if self._document is None:
+            return []
+        choices: list[tuple[str, str]] = []
+        for point in self._document.all_elements():
+            if not isinstance(point, ElecPoint):
+                continue
+            if str(point.ap_type or "").strip().lower() != "uv":
+                continue
+            label = str(point.name or point.id or "UV").strip()
+            choices.append((str(point.id or ""), f"{label} ({point.id})" if point.id else label))
+        return sorted(choices, key=lambda entry: entry[1].lower())
 
     def _current_topology_roots_for_export_dialog(self) -> list[tuple[str, str]]:
         ap_nodes, cable_edges, _room_map = self._build_schema_data()
@@ -7049,6 +7234,10 @@ class AppWindow(QMainWindow):
                 metric_rows,
                 col_widths=[0.8, 1.3, 0.9, 0.9, 0.9, 0.9, 0.9, 0.8],
             )
+            return
+
+        if ptype == "uv":
+            self._pdf_uv_page(painter, writer, page, export_data)
             return
 
         if ptype == "elektro_topology":

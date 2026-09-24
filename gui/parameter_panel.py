@@ -1048,12 +1048,14 @@ class UvConfigDialog(QDialog):
 
     def __init__(self, config: dict | None = None,
                  cable_choices: list[str] | None = None,
-                 parent=None):
+                 parent=None,
+                 show_buttons: bool = True):
         super().__init__(parent)
         self.setWindowTitle("UV planen")
         self.resize(1100, 740)
         self.setSizeGripEnabled(True)
         self._cable_choices = list(cable_choices or [])
+        self._show_buttons = bool(show_buttons)
         self._building = False
         self._build_ui()
         self._load_config(config or {})
@@ -1155,10 +1157,11 @@ class UvConfigDialog(QDialog):
         busbar_layout.addWidget(lbl_hint)
         self.tabs.addTab(busbar_tab, "Phasenschienen")
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        if self._show_buttons:
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            root.addWidget(buttons)
 
     def _capture_current_slots(self) -> list[dict]:
         """Read all rows from the table widget into a list of slot dicts.
@@ -2418,6 +2421,14 @@ class ElektroPointPanel(QWidget):
         self._up_cable_choices = merged
 
     def _open_uv_dialog(self):
+        window = self.window()
+        uv_dock = getattr(window, "uv_planning", None)
+        if uv_dock is not None:
+            uv_dock.select_point(self.point_id)
+            uv_dock.show()
+            uv_dock.raise_()
+            return
+
         dlg = UvConfigDialog(
             config=self._uv_config,
             cable_choices=self._uv_cable_choices,

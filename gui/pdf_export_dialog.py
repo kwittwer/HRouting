@@ -63,6 +63,7 @@ class PdfExportConfigDialog(QDialog):
         elec_rooms: list[tuple[str, str]] | None = None,
         heating_circuits: list[tuple[str, str]] | None = None,
         topology_roots: list[tuple[str, str]] | None = None,
+        uv_points: list[tuple[str, str]] | None = None,
         export_meta: dict | None = None,
         hrouting_version: str = "",
         canvas=None,
@@ -78,6 +79,7 @@ class PdfExportConfigDialog(QDialog):
         self._elec_rooms = list(elec_rooms or [])
         self._heating_circuits = list(heating_circuits or [])
         self._topology_roots = list(topology_roots or [])
+        self._uv_points = list(uv_points or [])
         self._svg_w = float(svg_size[0] if svg_size else 0.0)
         self._svg_h = float(svg_size[1] if svg_size else 0.0)
         self._hrouting_version = str(hrouting_version or "")
@@ -203,12 +205,15 @@ class PdfExportConfigDialog(QDialog):
         self.btn_add_elektro_room.clicked.connect(self._on_add_elektro_room_page)
         self.btn_add_topology = QPushButton("Topologie-Seite einfügen")
         self.btn_add_topology.clicked.connect(self._on_add_topology_page)
+        self.btn_add_uv = QPushButton("UV-Seite einfügen")
+        self.btn_add_uv.clicked.connect(self._on_add_uv_page)
         self.btn_remove = QPushButton("Seite entfernen")
         self.btn_remove.clicked.connect(self._on_remove_selected)
         left_btns.addWidget(self.btn_add_plan)
         left_btns.addWidget(self.btn_add_heating_circuit)
         left_btns.addWidget(self.btn_add_elektro_room)
         left_btns.addWidget(self.btn_add_topology)
+        left_btns.addWidget(self.btn_add_uv)
         left_btns.addWidget(self.btn_remove)
         left.addLayout(left_btns)
 
@@ -229,6 +234,13 @@ class PdfExportConfigDialog(QDialog):
             self.cb_topology_root.addItem(label, point_id)
         self.cb_topology_root.currentIndexChanged.connect(self._on_topology_root_changed)
         self.form.addRow("Topologie-Wurzel", self.cb_topology_root)
+
+        self.cb_uv_ap = QComboBox()
+        self.cb_uv_ap.addItem("Automatisch", "")
+        for point_id, label in self._uv_points:
+            self.cb_uv_ap.addItem(label, point_id)
+        self.cb_uv_ap.currentIndexChanged.connect(self._on_uv_ap_changed)
+        self.form.addRow("UV-Anschluss", self.cb_uv_ap)
 
         self.plan_group = QGroupBox("Plan-Einstellungen")
         right.addWidget(self.plan_group)
@@ -356,6 +368,7 @@ class PdfExportConfigDialog(QDialog):
             "elektro": "Elektro",
             "elektro_room": "Elektro-Raum",
             "elektro_topology": "Elektro-Topologie",
+            "uv": "UV",
         }.get(ptype, ptype)
 
     @staticmethod
@@ -406,6 +419,8 @@ class PdfExportConfigDialog(QDialog):
             return ["el_ap_infos", "el_kabel"]
         if ptype == "heating_circuit":
             return ["hk_lengths", "hk_hydraulics"]
+        if ptype == "uv":
+            return ["el_uv"]
         return []
 
     @staticmethod
@@ -422,6 +437,8 @@ class PdfExportConfigDialog(QDialog):
             return {"el_ap_infos", "el_kabel"}
         if ptype == "heating_circuit":
             return {"hk_lengths", "hk_hydraulics"}
+        if ptype == "uv":
+            return {"el_uv"}
         return set()
 
     def _load_pages_into_tree(self):
@@ -520,21 +537,26 @@ class PdfExportConfigDialog(QDialog):
                 "elektro_room",
                 "heating_circuit",
             )
-            supports_tables = ptype in ("heating", "elektro")
+            supports_tables = ptype in ("heating", "elektro", "uv")
             supports_room_selection = ptype == "elektro_room"
             supports_circuit_selection = ptype == "heating_circuit"
             supports_topology_root = ptype == "elektro_topology"
+            supports_uv_selection = ptype == "uv"
             self.plan_group.setVisible(is_plan_like)
             self.table_group.setVisible(supports_tables)
             self.room_group.setVisible(supports_room_selection)
             self.circuit_group.setVisible(supports_circuit_selection)
             self.cb_topology_root.setVisible(supports_topology_root)
+            self.cb_uv_ap.setVisible(supports_uv_selection)
             label = self.form.labelForField(self.cb_topology_root)
             if label is not None:
                 label.setVisible(supports_topology_root)
+            uv_label = self.form.labelForField(self.cb_uv_ap)
+            if uv_label is not None:
+                uv_label.setVisible(supports_uv_selection)
             self.lbl_no_rooms.setVisible(not bool(self._room_checks))
             self.lbl_no_circuits.setVisible(not bool(self._circuit_checks))
-            self.lbl_non_plan.setVisible((not is_plan_like) and (not supports_topology_root))
+            self.lbl_non_plan.setVisible((not is_plan_like) and (not supports_topology_root) and (not supports_uv_selection))
 
             if is_plan_like:
                 floor_plan_id = page.get("floor_plan_id")
@@ -572,6 +594,11 @@ class PdfExportConfigDialog(QDialog):
                 root_ap_id = str(page.get("root_ap_id") or "")
                 idx = self.cb_topology_root.findData(root_ap_id)
                 self.cb_topology_root.setCurrentIndex(max(0, idx))
+
+            if supports_uv_selection:
+                uv_ap_id = str(page.get("uv_ap_id") or "")
+                idx = self.cb_uv_ap.findData(uv_ap_id)
+                self.cb_uv_ap.setCurrentIndex(max(0, idx))
 
             if supports_tables:
                 allowed = self._allowed_table_sections(ptype)
@@ -658,9 +685,10 @@ class PdfExportConfigDialog(QDialog):
             lambda p: p.__setitem__("root_ap_id", self.cb_topology_root.currentData())
         )
 
-
-
-
+    def _on_uv_ap_changed(self, _index: int):
+        self._update_current_page(
+            lambda p: p.__setitem__("uv_ap_id", self.cb_uv_ap.currentData())
+        )
 
     def _on_add_plan_page(self):
         page = {
@@ -775,6 +803,33 @@ class PdfExportConfigDialog(QDialog):
             "title": "Elektro – Topologie",
             "enabled": True,
             "root_ap_id": "",
+        }
+        item = QTreeWidgetItem(self.tree)
+        item.setText(0, page["title"])
+        item.setText(1, self._page_type_label(page))
+        item.setFlags(
+            item.flags()
+            | Qt.ItemIsUserCheckable
+            | Qt.ItemIsEditable
+            | Qt.ItemIsDragEnabled
+            | Qt.ItemIsDropEnabled
+            | Qt.ItemIsSelectable
+            | Qt.ItemIsEnabled
+        )
+        item.setCheckState(0, Qt.Checked)
+        item.setData(0, Qt.UserRole, page)
+        self.tree.setCurrentItem(item)
+        self._update_page_count_field()
+
+    def _on_add_uv_page(self):
+        uv_ap_id = str(self.cb_uv_ap.currentData() or "").strip()
+        page = {
+            "id": f"uv-{uuid.uuid4().hex[:8]}",
+            "type": "uv",
+            "title": "UV – Schranklayout",
+            "enabled": True,
+            "uv_ap_id": uv_ap_id,
+            "table_sections": ["el_uv"],
         }
         item = QTreeWidgetItem(self.tree)
         item.setText(0, page["title"])

@@ -4678,9 +4678,21 @@ class MainWindow(QMainWindow):
             ]
         if ptype == "elektro_room":
             return ["el_ap_infos", "el_kabel"]
+        if ptype == "uv":
+            return ["el_uv"]
         return []
 
     def _default_pdf_export_pages(self) -> list[dict]:
+        document = getattr(self, "_document", None)
+        uv_point_ids = []
+        if document is not None:
+            uv_point_ids = [
+                point.id
+                for point in document.all_elements()
+                if isinstance(point, ElecPoint)
+                and str(point.ap_type or "").strip().lower() == "uv"
+            ]
+
         pages: list[dict] = [
             {
                 "id": "overview-all",
@@ -4741,6 +4753,16 @@ class MainWindow(QMainWindow):
                 "floor_plan_id": None,
                 "source_rect": None,
             },
+            {
+                "id": "page-uv",
+                "type": "uv",
+                "title": "UV – Schranklayout",
+                "enabled": bool(uv_point_ids),
+                "uv_ap_id": uv_point_ids[0] if uv_point_ids else "",
+                "table_sections": ["el_uv"],
+                "floor_plan_id": None,
+                "source_rect": None,
+            },
         ]
 
         for fid in self.canvas._floor_plan_order:
@@ -4780,6 +4802,7 @@ class MainWindow(QMainWindow):
                 "hydraulics",
                 "elektro",
                 "elektro_room",
+                "uv",
             ):
                 continue
 
@@ -4865,6 +4888,22 @@ class MainWindow(QMainWindow):
 
                 rect = src.get("source_rect")
                 if (isinstance(rect, (list, tuple)) and len(rect) == 4):
+                    try:
+                        rx, ry, rw, rh = [float(v) for v in rect]
+                        if rw > 0 and rh > 0:
+                            page["source_rect"] = [rx, ry, rw, rh]
+                        else:
+                            page["source_rect"] = None
+                    except (TypeError, ValueError):
+                        page["source_rect"] = None
+                else:
+                    page["source_rect"] = None
+            elif ptype == "uv":
+                page["uv_ap_id"] = str(src.get("uv_ap_id") or "").strip()
+                page["table_sections"] = list(src.get("table_sections") or ["el_uv"])
+                page["floor_plan_id"] = src.get("floor_plan_id") or None
+                rect = src.get("source_rect")
+                if isinstance(rect, (list, tuple)) and len(rect) == 4:
                     try:
                         rx, ry, rw, rh = [float(v) for v in rect]
                         if rw > 0 and rh > 0:
@@ -5735,6 +5774,84 @@ class MainWindow(QMainWindow):
                         break
             point_id_to_room_name[pid] = room_name
         return point_id_to_room_name
+
+    def _build_uv_table_model(self, uv: dict) -> dict:
+        """Normalize UV config into a compact table model for export rendering."""
+        slots_raw = uv.get("slots", []) or []
+        rows = int(uv.get("rows", 0) or 0)
+        modules_per_row = int(uv.get("modules_per_row", 0) or 0)
+
+        if rows < 1 or modules_per_row < 1:
+            if slots_raw:
+                row_values = [int(s.get("row", 1) or 1) for s in slots_raw if isinstance(s, dict)]
+                slot_values = [int(s.get("slot", 1) or 1) for s in slots_raw if isinstance(s, dict)]
+                rows = max(1, max(row_values) if row_values else 1)
+                modules_per_row = max(1, max(slot_values) if slot_values else 12)
+            else:
+                rows = 1
+                modules_per_row = 12
+
+        row_blocks: list[list[dict]] = [[] for _ in range(rows)]
+        for s in slots_raw:
+            if not isinstance(s, dict):
+                continue
+            try:
+                row = int(s.get("row", 0) or 0)
+                slot = int(s.get("slot", 0) or 0)
+                te_size = max(1, int(s.get("te_size", 1) or 1))
+            except (TypeError, ValueError):
+                continue
+            if row < 1 or slot < 1:
+                continue
+            device_type = str(s.get("device_type", "") or "").strip()
+            label = str(s.get("label", "") or "").strip()
+            spec = str(s.get("spec", "") or "").strip()
+            te_start = slot
+            te_end = slot + te_size - 1
+            if row > rows:
+                row = rows
+            bucket = row_blocks[row - 1]
+            if bucket and bucket[-1]["device_type"] == device_type and bucket[-1]["te_end"] + 1 >= te_start:
+                bucket[-1]["te_end"] = max(bucket[-1]["te_end"], te_end)
+                if not bucket[-1].get("label") and label:
+                    bucket[-1]["label"] = label
+                if not bucket[-1].get("spec") and spec:
+                    bucket[-1]["spec"] = spec
+                continue
+            bucket.append({
+                "row": row,
+                "device_type": device_type,
+                "te_start": te_start,
+                "te_end": te_end,
+                "label": label,
+                "spec": spec,
+            })
+
+        phase_rows: list[dict] = []
+        for b in uv.get("busbars", []) or []:
+            if not isinstance(b, dict):
+                continue
+            phase = str(b.get("phase", "") or "").strip()
+            if not phase:
+                continue
+            try:
+                te_start = int(b.get("te_start", 1) or 1)
+                te_end = int(b.get("te_end", 1) or 1)
+            except (TypeError, ValueError):
+                continue
+            phase_rows.append({
+                "phase": phase,
+                "te_start": max(1, te_start),
+                "te_end": max(max(1, te_start), te_end),
+                "color": str(b.get("color", "#888888") or "#888888"),
+            })
+
+        return {
+            "rows": rows,
+            "modules_per_row": modules_per_row,
+            "row_blocks": row_blocks,
+            "phase_rows": phase_rows,
+        }
 
     def _collect_uv_rows(self, point_id_to_room_name: dict[str, str] | None = None) -> list[dict]:
         point_id_to_room_name = point_id_to_room_name or self._collect_point_id_to_room_name()
@@ -7742,6 +7859,14 @@ class MainWindow(QMainWindow):
                 table_sections=page.get("table_sections"),
             )
             return
+        if ptype == "uv":
+            self._pdf_uv_page(
+                ctx,
+                data,
+                title=title,
+                uv_ap_id=str(page.get("uv_ap_id") or "").strip(),
+            )
+            return
 
         self._pdf_plan_page(
             ctx,
@@ -7995,6 +8120,52 @@ class MainWindow(QMainWindow):
                 for r in data["hl_rows"]
             ]
             ctx.draw_table(page, y_after, headers, rows)
+
+    def _pdf_uv_page(self, ctx: '_PdfContext', data: dict,
+                     title: str = "UV – Schranklayout",
+                     uv_ap_id: str | None = None):
+        page = ctx.page_rect()
+        ctx.stamp(page)
+
+        uv_data = data.get("uv_data", [])
+        selected_uv = None
+        if uv_ap_id:
+            for uv in uv_data:
+                if str(uv.get("ap_id", "") or "").strip() == uv_ap_id:
+                    selected_uv = uv
+                    break
+        if selected_uv is None and uv_data:
+            selected_uv = uv_data[0]
+        if selected_uv is None:
+            return
+
+        y_after = ctx.title(page, title)
+        y_after = ctx.draw_uv_schematic(page, y_after, selected_uv)
+
+        slot_rows = []
+        for slot in selected_uv.get("slots", []) or []:
+            if not isinstance(slot, dict):
+                continue
+            if not any(str(slot.get(key, "") or "").strip() for key in ("device_type", "spec", "label", "assignment", "manufacturer", "article_number", "note")):
+                continue
+            slot_rows.append([
+                str(slot.get("row", "")),
+                str(slot.get("slot", "")),
+                str(slot.get("device_type", "")),
+                str(slot.get("te_size", "")),
+                str(slot.get("spec", "")),
+                str(slot.get("label", "")),
+                str(slot.get("assignment", "")),
+                str(slot.get("manufacturer", "")),
+                str(slot.get("article_number", "")),
+                str(slot.get("note", "")),
+            ])
+        if slot_rows:
+            page = ctx.new_page(toc_title=f"{title} – Tabelle")
+            y_after = ctx.title(page, title)
+            y_after = ctx.section_heading(page, y_after, "Belegte TE")
+            headers = ["Reihe", "TE", "Belegung", "TE-Br.", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Hersteller", "Artikelnummer", "Notiz"]
+            ctx.draw_table(page, y_after, headers, slot_rows)
 
     # ── Seite: Elektro (Plan + Tabelle) ──
 
@@ -8353,6 +8524,85 @@ class _PdfContext:
     def mm(self, millimeters: float) -> float:
         return millimeters * self.dpi / 25.4
 
+    @staticmethod
+    def _build_uv_table_model(uv: dict) -> dict:
+        """Normalize UV config into a compact export table model."""
+        slots_raw = uv.get("slots", []) or []
+        rows = int(uv.get("rows", 0) or 0)
+        modules_per_row = int(uv.get("modules_per_row", 0) or 0)
+
+        if rows < 1 or modules_per_row < 1:
+            if slots_raw:
+                row_values = [int(s.get("row", 1) or 1) for s in slots_raw if isinstance(s, dict)]
+                slot_values = [int(s.get("slot", 1) or 1) for s in slots_raw if isinstance(s, dict)]
+                rows = max(1, max(row_values) if row_values else 1)
+                modules_per_row = max(1, max(slot_values) if slot_values else 12)
+            else:
+                rows = 1
+                modules_per_row = 12
+
+        row_blocks: list[list[dict]] = [[] for _ in range(rows)]
+        for s in slots_raw:
+            if not isinstance(s, dict):
+                continue
+            try:
+                row = int(s.get("row", 0) or 0)
+                slot = int(s.get("slot", 0) or 0)
+                te_size = max(1, int(s.get("te_size", 1) or 1))
+            except (TypeError, ValueError):
+                continue
+            if row < 1 or slot < 1:
+                continue
+            device_type = str(s.get("device_type", "") or "").strip()
+            label = str(s.get("label", "") or "").strip()
+            spec = str(s.get("spec", "") or "").strip()
+            te_start = slot
+            te_end = slot + te_size - 1
+            if row > rows:
+                row = rows
+            bucket = row_blocks[row - 1]
+            if bucket and bucket[-1]["device_type"] == device_type and bucket[-1]["te_end"] + 1 >= te_start:
+                bucket[-1]["te_end"] = max(bucket[-1]["te_end"], te_end)
+                if not bucket[-1].get("label") and label:
+                    bucket[-1]["label"] = label
+                if not bucket[-1].get("spec") and spec:
+                    bucket[-1]["spec"] = spec
+                continue
+            bucket.append({
+                "row": row,
+                "device_type": device_type,
+                "te_start": te_start,
+                "te_end": te_end,
+                "label": label,
+                "spec": spec,
+            })
+
+        phase_rows: list[dict] = []
+        for b in uv.get("busbars", []) or []:
+            if not isinstance(b, dict):
+                continue
+            phase = str(b.get("phase", "") or "").strip()
+            if not phase:
+                continue
+            try:
+                te_start = int(b.get("te_start", 1) or 1)
+                te_end = int(b.get("te_end", 1) or 1)
+            except (TypeError, ValueError):
+                continue
+            phase_rows.append({
+                "phase": phase,
+                "te_start": max(1, te_start),
+                "te_end": max(max(1, te_start), te_end),
+                "color": str(b.get("color", "#888888") or "#888888"),
+            })
+
+        return {
+            "rows": rows,
+            "modules_per_row": modules_per_row,
+            "row_blocks": row_blocks,
+            "phase_rows": phase_rows,
+        }
+
     def page_rect(self) -> QRectF:
         return QRectF(self._pr)
 
@@ -8671,16 +8921,15 @@ class _PdfContext:
         from PySide6.QtGui import QPen, QBrush, QFont
         from PySide6.QtCore import Qt
 
-        rows = int(uv.get("rows", 0) or 0)
-        mpr = int(uv.get("modules_per_row", 0) or 0)
         slots_list: list[dict] = uv.get("slots", [])
         busbars_list: list[dict] = list(uv.get("busbars", []) or [])
         ap_name = str(uv.get("ap_name", "") or "")
         room = str(uv.get("room", "") or "")
         preset = str(uv.get("preset", "") or "")
 
-        if rows < 1 or mpr < 1:
-            return y_start
+        table_model = self._build_uv_table_model(uv)
+        rows = int(table_model["rows"])
+        mpr = int(table_model["modules_per_row"])
 
         bottom_margin = self.mm(6)
 
@@ -8758,6 +9007,52 @@ class _PdfContext:
             Qt.AlignVCenter | Qt.AlignRight, subtitle,
         )
         y += header_h + gap_after_header
+
+        # ── compact configuration table ─────────────────────────── #
+        table_y = y
+        table_rows: list[list[str]] = []
+        for row_idx, blocks in enumerate(table_model["row_blocks"], start=1):
+            if not blocks:
+                table_rows.append([f"R{row_idx}", "-", "-", "-", "-"])
+                continue
+            for block in blocks:
+                table_rows.append([
+                    f"R{row_idx}",
+                    f"{block['te_start']}–{block['te_end']}",
+                    str(block.get("device_type", "") or "-"),
+                    str(block.get("label", "") or "").split(" ")[0] if block.get("label") else "-",
+                    str(block.get("spec", "") or ""),
+                ])
+        for phase in table_model["phase_rows"]:
+            table_rows.append(["Phase", phase["phase"], f"{phase['te_start']}–{phase['te_end']}", "", ""])
+
+        if table_rows:
+            header_labels = ["Reihe", "TE", "Gerät", "Kurz", "Kennz."]
+            table_h = self.mm(8) + max(1, len(table_rows)) * self.mm(4)
+            table_rect = QRectF(x0 + self.mm(1), table_y, avail_w - self.mm(2), table_h)
+            self.painter.setPen(QPen(QColor("#c7d2e3"), max(1, self.mm(0.2))))
+            self.painter.fillRect(table_rect, QBrush(QColor("#f8fafc")))
+            self.painter.drawRect(table_rect)
+            self.painter.setPen(Qt.black)
+            self.painter.setFont(QFont("Arial", 8, QFont.Bold))
+            col_w = [table_rect.width() * 0.16, table_rect.width() * 0.18, table_rect.width() * 0.26, table_rect.width() * 0.16, table_rect.width() * 0.24]
+            x = table_rect.x()
+            for i, text in enumerate(header_labels):
+                cell = QRectF(x, table_rect.y(), col_w[i], self.mm(5.5))
+                self.painter.drawRect(cell)
+                self.painter.drawText(cell.adjusted(self.mm(0.7), 0, -self.mm(0.7), 0), Qt.AlignCenter, text)
+                x += col_w[i]
+            self.painter.setFont(QFont("Arial", 7))
+            row_y = table_rect.y() + self.mm(5.5)
+            for row in table_rows[:8]:
+                x = table_rect.x()
+                for i, cell_text in enumerate(row):
+                    cell = QRectF(x, row_y, col_w[i], self.mm(4.2))
+                    self.painter.drawRect(cell)
+                    self.painter.drawText(cell.adjusted(self.mm(0.5), 0, -self.mm(0.5), 0), Qt.AlignLeft | Qt.AlignVCenter, str(cell_text))
+                    x += col_w[i]
+                row_y += self.mm(4.2)
+            y = row_y + self.mm(2)
 
         # ── DIN-rail rows ───────────────────────────────────────── #
         font_te = QFont("Arial", 9)

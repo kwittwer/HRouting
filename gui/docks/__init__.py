@@ -7,6 +7,7 @@ from .log_dock import LogDock
 
 from .overview_dock import ProjectOverviewDock
 from .topology_dock import TopologyDock
+from .uv_planning_dock import UvPlanningDock
 
 __all__ = [
 	"NavigatorDock",
@@ -15,4 +16,5 @@ __all__ = [
 	"LogDock",
 	"ProjectOverviewDock",
 	"TopologyDock",
+	"UvPlanningDock",
 ]
