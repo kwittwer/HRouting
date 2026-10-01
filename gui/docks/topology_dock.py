@@ -631,10 +631,11 @@ class TopologyDock(QDockWidget):
         self._cable_edges: list[CableEdge] = []
         self._selected_root_ap_id = ""
         self._data_provider: Callable[[], tuple[list[ApNode], list[CableEdge]]] | None = None
+        self._render_pending = False
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(150)
-        self._refresh_timer.timeout.connect(self._apply_render_data)
+        self._refresh_timer.timeout.connect(self._on_refresh_timeout)
 
         self._widget = ElecTopologyWidget(self)
         self.setWidget(self._widget)
@@ -725,8 +726,21 @@ class TopologyDock(QDockWidget):
             ap_nodes, cable_edges = self._data_provider()
             self._ap_nodes = list(ap_nodes)
             self._cable_edges = list(cable_edges)
+        self._render_pending = False
         self._sync_root_combo()
         self._widget.set_data(self._ap_nodes, self._cable_edges, self._selected_root_ap_id)
+
+    def _on_refresh_timeout(self) -> None:
+        if self.isHidden():
+            # Unsichtbar: weder Daten neu aufbauen noch Szene rendern.
+            self._render_pending = True
+            return
+        self._apply_render_data()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt-API
+        super().showEvent(event)
+        if self._render_pending:
+            self.refresh_now()
 
     def _connected_root_choices(self) -> list[tuple[str, str]]:
         nodes = {node.point_id: node for node in self._ap_nodes if node.visible}

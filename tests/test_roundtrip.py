@@ -408,6 +408,43 @@ def test_migration_initializes_cable_type_styles_and_line_style_map():
     }
 
 
+def test_document_load_applies_saved_cable_type_profile_to_cables():
+    raw = {
+        "canvas": {
+            "elec_cables": {"EK-1": [[10.0, 10.0], [20.0, 20.0]]},
+            "elec_cable_stroke_width": {"EK-1": 1.0},
+            "elec_cable_line_style": {"EK-1": "dot"},
+        },
+        "params": {
+            "elec_cables": {
+                "EK-1": {
+                    "cable_id": "EK-1",
+                    "type": "3x1,5",
+                    "color": "#112233",
+                    "stroke_width": 1.0,
+                    "line_style": "dot",
+                }
+            },
+            "elec_cable_type_styles": {
+                "3x1,5": {
+                    "color": "#ff0000",
+                    "stroke_width": 4.5,
+                    "line_style": "dash",
+                }
+            },
+        },
+    }
+
+    doc = Document.from_dict(raw)
+    cable = doc.elements["elec_cables"]["EK-1"]
+
+    assert cable.data["color"] == "#ff0000"
+    assert cable.data["stroke_width"] == 4.5
+    assert cable.data["line_style"] == "dash"
+    assert cable.geom["elec_cable_stroke_width"] == 4.5
+    assert cable.geom["elec_cable_line_style"] == "dash"
+
+
 def test_save_document_embeds_asset_paths_as_data_uri(tmp_path: Path):
     images_dir = tmp_path / "images"
     icons_dir = tmp_path / "icons"

@@ -867,6 +867,14 @@ class MainWindow(QMainWindow):
                 self._on_elec_cable_type_label_visibility_changed
             )
             values = panel.get_parameters()
+            cable_type = str((self._document.elements["elec_cables"].get(kid).data.get("type") or values.get("type") or "")).strip() if self._document and kid in self._document.elements.get("elec_cables", {}) else str(values.get("type") or "").strip()
+            profiles = self._document.settings.get("elec_cable_type_styles") if self._document and isinstance(self._document.settings, dict) else {}
+            project_style = profiles.get(cable_type) if isinstance(profiles, dict) and cable_type else None
+            effective = values.copy()
+            if isinstance(project_style, dict):
+                effective["color"] = str(project_style.get("color") or effective.get("color") or "#ff9800")
+                effective["stroke_width"] = float(project_style.get("stroke_width", effective.get("stroke_width", 2.0)))
+                effective["line_style"] = str(project_style.get("line_style") or effective.get("line_style") or "solid")
             self.canvas._label_map[kid] = values.get("name", kid)
             self.canvas._elec_visible[kid] = values.get("visible", True)
             self.canvas._elec_cable_notes[kid] = values.get("comment", "")
@@ -877,7 +885,12 @@ class MainWindow(QMainWindow):
             )
             self.canvas.set_label_font_size(kid, values.get("label_size", 12.0))
             self.canvas.set_label_visible(kid, values.get("label_visible", True))
-            self.canvas.set_color(kid, QColor(values.get("color", "#ff9800")))
+            self.canvas.set_color(kid, QColor(effective.get("color", "#ff9800")))
+            self.canvas.set_elec_cable_stroke_width(kid, float(effective.get("stroke_width", 2.0)))
+            self.canvas.set_elec_cable_line_style(kid, str(effective.get("line_style", "solid")))
+            panel._color = QColor(effective.get("color", "#ff9800"))
+            panel._update_color_button()
+            panel.sb_stroke_width.setValue(float(effective.get("stroke_width", 2.0)))
             length_px = self.canvas.get_elec_cable_length_px(kid)
             length_mm = length_px * self.canvas.get_mm_per_px()
             self.param_panel.set_cable_length(kid, length_mm)

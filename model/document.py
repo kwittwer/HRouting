@@ -75,6 +75,19 @@ def _all_geom_keys() -> set[str]:
     return keys
 
 
+def _normalize_cable_line_style(value: object) -> str:
+    style = str(value or "solid").strip().lower()
+    return style if style in {"solid", "dash", "dot", "dashdot"} else "solid"
+
+
+def _normalize_cable_stroke_width(value: object) -> float:
+    try:
+        width = float(value)
+    except (TypeError, ValueError):
+        width = 2.0
+    return max(0.5, min(10.0, width))
+
+
 class Document:
     """Projektdokument mit typisiertem Zugriff auf alle Elemente."""
 
@@ -341,6 +354,27 @@ class Document:
             rest = {k: v for k, v in values.items() if k not in taken}
             if rest:
                 doc.canvas_orphans[key] = rest
+
+        # --- kabeltypbezogene Projekt-Styles wiederherstellen -------------
+        profiles = params.get("elec_cable_type_styles")
+        if isinstance(profiles, dict):
+            for cable in doc.elements.get("elec_cables", {}).values():
+                cable_type = str(cable.data.get("type") or cable.data.get("cable_type") or "").strip()
+                profile = profiles.get(cable_type)
+                if not isinstance(profile, dict):
+                    continue
+                color = str(profile.get("color") or cable.data.get("color") or "#ff9800").strip()
+                stroke_width = _normalize_cable_stroke_width(
+                    profile.get("stroke_width", cable.data.get("stroke_width", cable.geom.get("elec_cable_stroke_width", 2.0)))
+                )
+                line_style = _normalize_cable_line_style(
+                    profile.get("line_style", cable.data.get("line_style", cable.geom.get("elec_cable_line_style", "solid")))
+                )
+                cable.data["color"] = color
+                cable.data["stroke_width"] = stroke_width
+                cable.data["line_style"] = line_style
+                cable.geom["elec_cable_stroke_width"] = stroke_width
+                cable.geom["elec_cable_line_style"] = line_style
 
         # --- globale Einstellungen --------------------------------------
         element_param_keys = {c.PARAMS_KEY for c in ELEMENT_TYPES} | {

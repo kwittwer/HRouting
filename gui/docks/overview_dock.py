@@ -8,6 +8,7 @@ from PySide6.QtCore import QByteArray, Qt, QTimer, QSettings, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDockWidget,
@@ -155,6 +156,7 @@ class ProjectOverviewDock(QDockWidget):
         self._updating_electro_tables = False
         self._elec_room_row_ap_ids: dict[int, str] = {}
         self._elec_cable_row_ids: dict[int, str] = {}
+        self._elec_cable_committed_types: dict[str, str] = {}
         if visible_electro_sections is None:
             self._visible_electro_sections = {"materials", "rooms", "cables"}
         else:
@@ -511,6 +513,19 @@ class ProjectOverviewDock(QDockWidget):
     def _schedule_refresh(self, *_args) -> None:
         self._refresh_timer.start()
 
+    def _electro_edit_in_progress(self) -> bool:
+        """True, wenn der Nutzer gerade in einer Elektro-Tabelle editiert."""
+        focus = QApplication.focusWidget()
+        if focus is None:
+            return False
+        for table in (
+            getattr(self, "_elec_room_table", None),
+            getattr(self, "_elec_cable_table", None),
+        ):
+            if table is not None and (table is focus or table.isAncestorOf(focus)):
+                return True
+        return False
+
     def refresh_now(self) -> None:
         self._refresh_timer.stop()
         self._do_refresh()
@@ -523,6 +538,10 @@ class ProjectOverviewDock(QDockWidget):
             return
         current_revision = int(getattr(self._document, "revision", 0) or 0)
         if current_revision == self._last_document_revision:
+            return
+        if self._electro_edit_in_progress():
+            # Ein Tabellenneuaufbau würde den aktiven Zell-Editor zerstören.
+            self._refresh_timer.start()
             return
         try:
             from model.computed import project_overview_data  # noqa: PLC0415
@@ -866,9 +885,15 @@ class ProjectOverviewDock(QDockWidget):
                 if current_type and combo.findText(current_type) < 0:
                     combo.addItem(current_type)
                 combo.setCurrentText(current_type)
-                combo.currentTextChanged.connect(
-                    lambda value, cid=cable_id: self._on_elec_cable_type_changed(cid, value)
+                self._elec_cable_committed_types[cable_id] = current_type
+                combo.activated.connect(
+                    lambda _index, cid=cable_id, cb=combo: self._commit_elec_cable_type(cid, cb)
                 )
+                line_edit = combo.lineEdit()
+                if line_edit is not None:
+                    line_edit.editingFinished.connect(
+                        lambda cid=cable_id, cb=combo: self._commit_elec_cable_type(cid, cb)
+                    )
                 tbl.setCellWidget(r, 1, combo)
             else:
                 tbl.setCellWidget(r, 1, None)
@@ -929,6 +954,19 @@ class ProjectOverviewDock(QDockWidget):
         cable_id = str(self._elec_cable_row_ids.get(row, "") or "").strip()
         if not cable_id:
             return
+
+    def _commit_elec_cable_type(self, cable_id: str, combo: QComboBox) -> None:
+        """Übernimmt den Kabeltyp erst beim Abschluss der Eingabe."""
+        if self._updating_electro_tables:
+            return
+        cable_id = str(cable_id or "").strip()
+        if not cable_id:
+            return
+        value = str(combo.currentText() or "").strip()
+        if value == self._elec_cable_committed_types.get(cable_id):
+            return
+        self._elec_cable_committed_types[cable_id] = value
+        self._on_elec_cable_type_changed(cable_id, value)
 
     def _on_elec_cable_type_changed(self, cable_id: str, value: str) -> None:
         if self._updating_electro_tables:

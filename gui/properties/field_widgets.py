@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -48,6 +48,12 @@ def _option_parts(option: ChoiceOption) -> tuple[str, str]:
         return str(option[0]), str(option[1])
     text = str(option)
     return text, text
+
+
+# Freitext in editierbaren Auswahlfeldern wird erst nach einer Tippause
+# übernommen. Jedes Zeichen sofort zu melden löst die komplette
+# Dokument-Aktualisierung aus (Undo-Snapshot, Schema-Neuaufbau, Canvas).
+EDITABLE_CHOICE_COMMIT_IDLE_MS = 400
 
 
 class FieldWidget(QWidget):
@@ -227,12 +233,53 @@ class ChoiceFieldWidget(FieldWidget):
         self._combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._combo.setMinimumWidth(100)
         self._combo.setEditable(editable)
+        self._commit_timer: QTimer | None = None
+        self._pending_edit = False
+        self._committed_text: str = ""
         self._set_combo_options(options if options is not None else spec.resolve_options())
         if editable:
-            self._combo.editTextChanged.connect(self._emit)
+            self._commit_timer = QTimer(self)
+            self._commit_timer.setSingleShot(True)
+            self._commit_timer.setInterval(EDITABLE_CHOICE_COMMIT_IDLE_MS)
+            self._commit_timer.timeout.connect(self.commit_pending_edit)
+            self._committed_text = self._combo.currentText()
+            self._combo.editTextChanged.connect(self._on_edit_text_changed)
+            self._combo.activated.connect(lambda _index: self._commit_text(force=True))
+            line_edit = self._combo.lineEdit()
+            if line_edit is not None:
+                line_edit.editingFinished.connect(self.commit_pending_edit)
         else:
             self._combo.currentIndexChanged.connect(lambda _index: self._emit(self.value()))
         layout.addWidget(self._combo, 1)
+
+    # -- Commit-Steuerung für editierbare Felder -------------------------
+    def _on_edit_text_changed(self, _text: str) -> None:
+        if self._updating or self._commit_timer is None:
+            return
+        self._pending_edit = True
+        self._commit_timer.start()
+
+    def has_pending_edit(self) -> bool:
+        """True, solange eine Freitexteingabe noch nicht übernommen wurde."""
+        return self._pending_edit
+
+    def commit_pending_edit(self) -> None:
+        """Übernimmt eine offene Freitexteingabe (Tippause, Enter, Fokusverlust)."""
+        self._commit_text(force=False)
+
+    def _commit_text(self, *, force: bool) -> None:
+        if self._commit_timer is None:
+            return
+        self._commit_timer.stop()
+        pending = self._pending_edit
+        self._pending_edit = False
+        if self._updating or (not pending and not force):
+            return
+        text = self._combo.currentText()
+        if text == self._committed_text:
+            return
+        self._committed_text = text
+        self._emit(text)
 
     def _set_combo_options(self, options: tuple[ChoiceOption, ...]) -> None:
         self._combo.clear()
@@ -259,7 +306,9 @@ class ChoiceFieldWidget(FieldWidget):
             # For non-editable combos we must not re-insert stale values that
             # were removed from the source options (e.g. deleted distributors).
             if self._combo.isEditable():
-                self.set_value(current)
+                # Direkt anwenden: eine laufende Eingabe bleibt sichtbar und
+                # ihr ausstehender Commit behält den richtigen Vergleichswert.
+                self._apply_text("" if current is None else str(current))
             else:
                 index = self._combo.findData("" if current is None else str(current))
                 if index >= 0:
@@ -276,7 +325,19 @@ class ChoiceFieldWidget(FieldWidget):
         return self._combo.currentText() if data is None else data
 
     def set_value(self, value: Any) -> None:
+        if self._pending_edit:
+            if self._combo.hasFocus():
+                # Laufende Eingabe nicht überschreiben; sie meldet sich selbst.
+                return
+            # Ohne Fokus gewinnt der programmatische Wert.
+            self._pending_edit = False
+            if self._commit_timer is not None:
+                self._commit_timer.stop()
         text = "" if value is None else str(value)
+        self._committed_text = text
+        self._apply_text(text)
+
+    def _apply_text(self, text: str) -> None:
         index = self._combo.findData(text)
         if index < 0:
             index = self._combo.findText(text)

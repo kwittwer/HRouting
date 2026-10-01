@@ -2214,6 +2214,8 @@ class CanvasWidget(QWidget):
         return False
 
     def set_color(self, circuit_id: str, color: QColor):
+        if self._color_map.get(circuit_id) == color:
+            return
         self._color_map[circuit_id] = color
         self.update()
 
@@ -2452,7 +2454,10 @@ class CanvasWidget(QWidget):
         self.update()
 
     def set_elec_cable_stroke_width(self, cable_id: str, width: float):
-        self._elec_cable_stroke_width[cable_id] = max(0.5, min(10.0, width))
+        value = max(0.5, min(10.0, width))
+        if self._elec_cable_stroke_width.get(cable_id) == value:
+            return
+        self._elec_cable_stroke_width[cable_id] = value
         self._elec_cable_path_cache.pop(cable_id, None)
         self._elec_cable_overlap_cache_key = None
         self._elec_cable_segment_offset_cache.clear()
@@ -2462,15 +2467,23 @@ class CanvasWidget(QWidget):
         style = str(style_key or "solid").strip().lower()
         if style not in {"solid", "dash", "dot", "dashdot"}:
             style = "solid"
+        if self._elec_cable_line_style.get(cable_id) == style:
+            return
         self._elec_cable_line_style[cable_id] = style
         self.update()
 
     def set_elec_cable_type_text(self, cable_id: str, cable_type: str):
-        self._elec_cable_type_text[cable_id] = str(cable_type or "").strip()
+        text = str(cable_type or "").strip()
+        if self._elec_cable_type_text.get(cable_id) == text:
+            return
+        self._elec_cable_type_text[cable_id] = text
         self.update()
 
     def set_elec_cable_type_label_visible(self, cable_id: str, visible: bool):
-        self._elec_cable_type_label_visible[cable_id] = bool(visible)
+        value = bool(visible)
+        if self._elec_cable_type_label_visible.get(cable_id) == value:
+            return
+        self._elec_cable_type_label_visible[cable_id] = value
         self.update()
 
     def _elec_cable_type_label_id(self, cable_id: str) -> str:

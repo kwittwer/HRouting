@@ -1206,6 +1206,91 @@ def test_batch_color_uses_per_type_source_for_mixed_types(app, monkeypatch):
         window.deleteLater()
 
 
+def test_reload_uses_project_type_profile_for_canvas_render(app, monkeypatch):
+    _settings_noop(monkeypatch)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        old_doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [80.0, 10.0]},
+                    "elec_cables": {"EK-1": [[10.0, 10.0], [80.0, 10.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "A", "visible": True},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "B", "visible": True},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "K1",
+                            "type": "5x1,5",
+                            "color": "#ff0000",
+                            "stroke_width": 7.0,
+                            "line_style": "dash",
+                            "visible": True,
+                        }
+                    },
+                    "elec_cable_type_styles": {
+                        "5x1,5": {"color": "#ff0000", "stroke_width": 7.0, "line_style": "dash"},
+                    },
+                },
+            }
+        )
+        new_doc = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "elec_points": {"AP-1": [10.0, 10.0], "AP-2": [80.0, 10.0]},
+                    "elec_cables": {"EK-1": [[10.0, 10.0], [80.0, 10.0]]},
+                    "cable_start_ap": {"EK-1": "AP-1"},
+                    "cable_end_ap": {"EK-1": "AP-2"},
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "elec_points": {
+                        "AP-1": {"point_id": "AP-1", "floor_plan_id": "grundriss-1", "name": "A", "visible": True},
+                        "AP-2": {"point_id": "AP-2", "floor_plan_id": "grundriss-1", "name": "B", "visible": True},
+                    },
+                    "elec_cables": {
+                        "EK-1": {
+                            "cable_id": "EK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "K1",
+                            "type": "5x1,5",
+                            "color": "#ff0000",
+                            "stroke_width": 7.0,
+                            "line_style": "dash",
+                            "visible": True,
+                        }
+                    },
+                    "elec_cable_type_styles": {
+                        "5x1,5": {"color": "#00aa00", "stroke_width": 2.0, "line_style": "solid"},
+                    },
+                },
+            }
+        )
+
+        window._set_document(old_doc)
+        window._set_document(new_doc)
+
+        assert window.canvas._color_map["EK-1"].name() == "#00aa00"
+        assert window.canvas._elec_cable_stroke_width["EK-1"] == 2.0
+        assert window.canvas._elec_cable_line_style["EK-1"] == "solid"
+    finally:
+        window.deleteLater()
+
+
 def test_app_window_floating_docks_have_min_max_hints(app, monkeypatch):
     from PySide6.QtCore import QSettings, Qt  # noqa: PLC0415
 
@@ -4434,6 +4519,8 @@ def test_pdf_export_restores_topology_dock_after_export(app, monkeypatch, tmp_pa
             }
         )
         window._set_document(document)
+        # Der Topologie-Dock rendert nur sichtbar; fuer den Vergleich einblenden.
+        window._show_topology_dock()
         assert window.topology._widget._summary_label.text() == "Topologie: 2 APs, 1 Kabel"
 
         pdf_path = tmp_path / "restore_topology_after_export.pdf"
@@ -5951,6 +6038,10 @@ def test_project_overview_electro_inline_editing(app, monkeypatch):
         cable_type_combo = cable_table.cellWidget(0, 1)
         assert isinstance(cable_type_combo, QComboBox)
         cable_type_combo.setEditText("Sonderleitung 5x2,5")
+        app.processEvents()
+        # Freitext wird erst beim Abschluss der Eingabe übernommen.
+        assert doc.elements["elec_cables"]["EK-1"].data.get("type") != "Sonderleitung 5x2,5"
+        cable_type_combo.lineEdit().editingFinished.emit()
         app.processEvents()
         assert doc.elements["elec_cables"]["EK-1"].data.get("type") == "Sonderleitung 5x2,5"
     finally:

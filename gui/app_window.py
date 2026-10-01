@@ -128,6 +128,13 @@ _HELPER_NAV_ID_PREFIX = "NAV-HLP::"
 _VALID_CABLE_LINE_STYLES = {"solid", "dash", "dot", "dashdot"}
 
 
+def _copy_ap_config(raw: object) -> dict:
+    """Kopiert eine AP-Konfiguration nur, wenn sie überhaupt Daten enthält."""
+    if not raw:
+        return {}
+    return copy.deepcopy(raw)
+
+
 def _parse_helper_nav_id(nav_id: str) -> tuple[str, str] | None:
     if not nav_id.startswith(_HELPER_NAV_ID_PREFIX):
         return None
@@ -294,6 +301,8 @@ class AppWindow(QMainWindow):
         self._canvas_refresh_timer = QTimer(self)
         self._canvas_refresh_timer.setSingleShot(True)
         self._canvas_refresh_timer.timeout.connect(self._flush_pending_canvas_refresh)
+        self._schema_refresh_pending = False
+        self._schema_room_map_cache: tuple[int, dict[str, str]] | None = None
         self._undo_action: QAction | None = None
         self._redo_action: QAction | None = None
         self._save_git_action: QAction | None = None
@@ -402,6 +411,7 @@ class AppWindow(QMainWindow):
         self.topology.set_data_provider(
             lambda: self._build_schema_data()[:2]
         )
+        self.topology.visibilityChanged.connect(self._on_topology_visibility_changed)
         self.uv_planning = UvPlanningDock(self)
         self.uv_planning.config_saved.connect(lambda _point_id: self._mark_dirty())
         # Backward compatibility for tests/extensions that still use `window.overview`.
@@ -954,6 +964,40 @@ class AppWindow(QMainWindow):
                 matches.append(cable_id)
         return sorted(matches)
 
+    def _resolve_elec_cable_render_style(
+        self,
+        cable_id: str,
+        fallback: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        cable_id = str(cable_id or "").strip()
+        fallback = fallback if isinstance(fallback, dict) else {}
+        cable = self._document.elements.get("elec_cables", {}).get(cable_id) if self._document is not None else None
+        cable_type = ""
+        if cable is not None:
+            cable_type = str(cable.data.get("type") or cable.data.get("cable_type") or "").strip()
+        profile = self._read_cable_type_style_profile(cable_type) if cable_type else None
+        if profile is not None:
+            return {
+                "color": str(profile.get("color") or fallback.get("color") or "#ff9800"),
+                "stroke_width": self._normalize_cable_stroke_width(
+                    profile.get("stroke_width", fallback.get("stroke_width", 2.0))
+                ),
+                "line_style": self._normalize_cable_line_style(
+                    profile.get("line_style", fallback.get("line_style", "solid"))
+                ),
+            }
+
+        color = str(fallback.get("color") or cable.data.get("color") if cable is not None else fallback.get("color") or "#ff9800")
+        return {
+            "color": color or "#ff9800",
+            "stroke_width": self._normalize_cable_stroke_width(
+                fallback.get("stroke_width", cable.data.get("stroke_width", 2.0) if cable is not None else 2.0)
+            ),
+            "line_style": self._normalize_cable_line_style(
+                fallback.get("line_style", cable.data.get("line_style", "solid") if cable is not None else "solid")
+            ),
+        }
+
     def _read_cable_type_style_profile(self, cable_type: str) -> dict[str, object] | None:
         cable_type = str(cable_type or "").strip()
         if not cable_type:
@@ -1059,20 +1103,34 @@ class AppWindow(QMainWindow):
             return []
 
         changed: list[str] = []
+        target_color = str(profile["color"])
+        target_width = float(profile["stroke_width"])
+        target_style = str(profile["line_style"])
         for cable_id in self._cable_ids_by_type(cable_type):
             cable = self._document.elements.get("elec_cables", {}).get(cable_id)
             if cable is None:
                 continue
-            cable.data["color"] = str(profile["color"])
-            cable.data["stroke_width"] = float(profile["stroke_width"])
-            cable.data["line_style"] = str(profile["line_style"])
+            unchanged = (
+                cable.data.get("color") == target_color
+                and cable.data.get("stroke_width") == target_width
+                and cable.data.get("line_style") == target_style
+                and cable.geom.get("elec_cable_stroke_width") == target_width
+                and cable.geom.get("elec_cable_line_style") == target_style
+            )
+            cable.data["color"] = target_color
+            cable.data["stroke_width"] = target_width
+            cable.data["line_style"] = target_style
 
-            cable.geom["elec_cable_stroke_width"] = float(profile["stroke_width"])
-            cable.geom["elec_cable_line_style"] = str(profile["line_style"])
+            cable.geom["elec_cable_stroke_width"] = target_width
+            cable.geom["elec_cable_line_style"] = target_style
 
-            self.canvas.set_color(cable_id, QColor(str(profile["color"])))
-            self.canvas.set_elec_cable_stroke_width(cable_id, float(profile["stroke_width"]))
-            self.canvas.set_elec_cable_line_style(cable_id, str(profile["line_style"]))
+            self.canvas.set_color(cable_id, QColor(target_color))
+            self.canvas.set_elec_cable_stroke_width(cable_id, target_width)
+            self.canvas.set_elec_cable_line_style(cable_id, target_style)
+            if unchanged:
+                # Gleicher Stil: kein Signal, sonst aktualisiert sich das halbe
+                # Projekt, obwohl sich nichts geändert hat.
+                continue
             self._document.element_changed.emit(cable_id)
             changed.append(cable_id)
 
@@ -1595,7 +1653,8 @@ class AppWindow(QMainWindow):
     def _push_undo(self) -> None:
         """Nimmt einen Snapshot des aktuellen Zustands auf den Undo-Stack."""
         self._undo_group_timer.stop()
-        self._finish_undo_group()
+        # Ein Snapshot genügt: er schließt die laufende Gruppe ab und ist
+        # zugleich der neue Undo-Eintrag.
         snapshot = self._document.snapshot()
         self._append_undo_snapshot(snapshot)
         # Der explizite Aufrufer mutiert unmittelbar nach diesem Aufruf. Die
@@ -1955,6 +2014,7 @@ class AppWindow(QMainWindow):
     def _set_document(self, document: Document) -> None:
         self._canvas_refresh_timer.stop()
         self._pending_canvas_refresh_ids.clear()
+        self._schema_room_map_cache = None
         self._document = document
         self._annotation_live_value_cache.clear()
         self._pending_annotation_refresh_id = ""
@@ -1980,6 +2040,11 @@ class AppWindow(QMainWindow):
 
         # Globale Ansichtsdaten (Zoom, Raster, Grundriss-Transformationen,
         # Hilfslinien, Messungen) in den Canvas übertragen …
+        # Vor dem Reload müssen veraltete Farbcaches geleert werden, damit die
+        # Farben des neuen Projekts nicht aus einem zuvor geöffneten Dokument
+        # in den Plan übernommen werden.
+        self.canvas._document = document
+        self.canvas._color_map.clear()
         raw = document.to_dict()
         self.canvas.from_dict(raw.get("canvas", {}))
         # … und danach die Elementdaten an das Dokument binden. Ab hier ist
@@ -5020,8 +5085,23 @@ class AppWindow(QMainWindow):
             out[pid] = room_name
         return out
 
-    def _build_schema_data(self) -> tuple[list[ApNode], list[CableEdge], dict[str, str]]:
+    def _cached_point_id_to_room_name(self) -> dict[str, str]:
+        """Raumzuordnung pro Dokument-Revision zwischenspeichern.
+
+        ``_build_schema_data`` wird pro Aktualisierung mehrfach aufgerufen
+        (Schema-Fenster und Topologie-Provider); die Punkt-in-Polygon-Suche
+        über alle APs und Räume muss dabei nicht doppelt laufen.
+        """
+        revision = int(getattr(self._document, "revision", 0) or 0)
+        cached = self._schema_room_map_cache
+        if cached is not None and cached[0] == revision:
+            return cached[1]
         room_map = self._collect_point_id_to_room_name()
+        self._schema_room_map_cache = (revision, room_map)
+        return room_map
+
+    def _build_schema_data(self) -> tuple[list[ApNode], list[CableEdge], dict[str, str]]:
+        room_map = self._cached_point_id_to_room_name()
         cables = self._document.elements["elec_cables"]
         points = self._document.elements["elec_points"]
 
@@ -5063,10 +5143,10 @@ class AppWindow(QMainWindow):
                 smarthome_device=str(point.data.get("smarthome_device", "") or ""),
                 smarthome_device_color=str(point.data.get("smarthome_device_color", "") or ""),
                 note=str(point.data.get("note", "") or ""),
-                uv_config=copy.deepcopy(point.data.get("uv_config") or {}),
-                up_distribution_config=copy.deepcopy(point.data.get("up_distribution_config") or {}),
-                hak_config=copy.deepcopy(point.data.get("hak_config") or {}),
-                zaehler_config=copy.deepcopy(point.data.get("zaehler_config") or {}),
+                uv_config=_copy_ap_config(point.data.get("uv_config")),
+                up_distribution_config=_copy_ap_config(point.data.get("up_distribution_config")),
+                hak_config=_copy_ap_config(point.data.get("hak_config")),
+                zaehler_config=_copy_ap_config(point.data.get("zaehler_config")),
             )
             ap_nodes.append(node)
 
@@ -5237,21 +5317,35 @@ class AppWindow(QMainWindow):
         return [max(xs) + 60.0, max(ys) + 30.0]
 
     def _show_topology_dock(self) -> None:
-        self._refresh_schema_windows()
         self.topology.show()
         self.topology.raise_()
+        self._refresh_schema_windows()
 
     def _open_schaltplan_window(self) -> None:
         if self._schaltplan_window is None:
             self._schaltplan_window = SchaltplanWindow(self)
-        self._refresh_schema_windows()
         self._schaltplan_window.show()
+        self._refresh_schema_windows()
         self._schaltplan_window.raise_()
         self._schaltplan_window.activateWindow()
 
+    def _schema_consumers_visible(self) -> bool:
+        """True, wenn Topologie-Dock oder Schaltplan die Schema-Daten anzeigen."""
+        window = self._schaltplan_window
+        if window is not None and not window.isHidden():
+            return True
+        return self.topology is not None and not self.topology.isHidden()
+
+    def _on_topology_visibility_changed(self, visible: bool) -> None:
+        if visible and self._schema_refresh_pending:
+            self._refresh_schema_windows()
+
     def _refresh_schema_windows(self) -> None:
-        if self._schaltplan_window is None and self.topology is None:
+        if not self._schema_consumers_visible():
+            # Niemand zeigt die Daten an - Neuaufbau bis zum Einblenden aufschieben.
+            self._schema_refresh_pending = True
             return
+        self._schema_refresh_pending = False
         ap_nodes, cable_edges, room_map = self._build_schema_data()
         self.topology.set_topology_data(ap_nodes, cable_edges)
         if self._schaltplan_window is not None:
