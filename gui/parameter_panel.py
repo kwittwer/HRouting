@@ -24,11 +24,11 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSplitter, QAbstractItemView,
     QDialog, QDialogButtonBox, QSpinBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QTabWidget, QSizePolicy,
-    QMenu,
+    QMenu, QMessageBox,
 )
 from pathlib import Path
 from PySide6.QtGui import QColor, QPixmap, QPainter, QFont, QPen, QBrush, QFontMetrics
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QPoint
 
 from logic.elec_schematic import default_elec_schematic, sanitize_elec_schematic
 
@@ -458,11 +458,25 @@ class UvSlotEditPopup(QDialog):
         self._max_rows = max_rows
         self._max_modules = max_modules
         self._phase_info = phase_info
+        self._duplicate_requested = False
+        self._custom_device_types = self._normalize_custom_device_types(
+            slot.get("custom_device_types", [])
+        )
         row_no = slot.get("row", "?")
         slot_no = slot.get("slot", "?")
         self.setWindowTitle(f"Slot R{row_no} / TE {slot_no} bearbeiten")
         self.setMinimumWidth(380)
         self._build_ui(slot, cable_choices)
+
+    @classmethod
+    def _normalize_custom_device_types(cls, values) -> list[str]:
+        merged: list[str] = []
+        for value in values or []:
+            text = str(value or "").strip()
+            if not text or text == "Freitext" or text in merged or text in cls.UV_DEVICE_TYPES:
+                continue
+            merged.append(text)
+        return merged
 
     def _build_ui(self, slot: dict, cable_choices: list[str]):
         layout = QVBoxLayout(self)
@@ -495,8 +509,16 @@ class UvSlotEditPopup(QDialog):
         form.addRow("Position:", pos_row)
 
         self.cmb_device = SafeComboBox()
+        self.cmb_device.setEditable(True)
         self.cmb_device.addItems(self.UV_DEVICE_TYPES)
-        self.cmb_device.setCurrentText(str(slot.get("device_type", "") or ""))
+        for device_type in self._custom_device_types:
+            self.cmb_device.addItem(device_type)
+        current_device_type = str(slot.get("device_type", "") or "").strip()
+        if current_device_type and self.cmb_device.findText(current_device_type) < 0:
+            self.cmb_device.addItem(current_device_type)
+        self.cmb_device.setCurrentText(current_device_type)
+        self.cmb_device.currentTextChanged.connect(self._on_device_type_changed)
+        self.cmb_device.lineEdit().setPlaceholderText("Gerätetyp auswählen oder neu eingeben")
         form.addRow("Belegung:", self.cmb_device)
 
         self.sb_te_size = QSpinBox()
@@ -536,9 +558,32 @@ class UvSlotEditPopup(QDialog):
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        duplicate_btn = buttons.addButton("Duplizieren", QDialogButtonBox.ActionRole)
+        duplicate_btn.clicked.connect(self._accept_duplicate)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _on_device_type_changed(self, text: str) -> None:
+        current = str(text or "").strip()
+        if not current:
+            return
+        if current == "Freitext":
+            self.cmb_device.lineEdit().selectAll()
+            return
+        if current not in self._custom_device_types and current not in self.UV_DEVICE_TYPES:
+            self._custom_device_types.append(current)
+            if self.cmb_device.findText(current) < 0:
+                self.cmb_device.addItem(current)
+
+    def _accept_duplicate(self) -> None:
+        self._duplicate_requested = True
+        self.accept()
+
+    def consume_duplicate_request(self) -> bool:
+        duplicate_requested = self._duplicate_requested
+        self._duplicate_requested = False
+        return duplicate_requested
 
     def get_slot_data(self) -> dict:
         return {
@@ -552,6 +597,7 @@ class UvSlotEditPopup(QDialog):
             "article_number": self.le_article_number.text().strip(),
             "assignment": self.cmb_assignment.currentText().strip(),
             "note": self.le_note.text().strip(),
+            "custom_device_types": list(self._custom_device_types),
         }
 
 
@@ -561,6 +607,9 @@ class UvRailWidget(QWidget):
     """Widget that paints a visual DIN-rail (Hutschiene) layout of a UV."""
 
     slot_clicked = Signal(int, int)  # row_no, slot_no
+    slot_copy_requested = Signal(int, int)
+    slot_paste_requested = Signal(int, int)
+    slot_context_menu_requested = Signal(int, int, object)
 
     SLOT_W = 28        # px per TE unit
     ROW_H = 82         # full height of one row band
@@ -619,6 +668,7 @@ class UvRailWidget(QWidget):
         self.setMinimumHeight(120)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
         # drag state
         self._drag_source: tuple[int, int] | None = None   # (row_no, slot_no)
         self._drag_slot_data: dict | None = None
@@ -628,6 +678,7 @@ class UvRailWidget(QWidget):
         self._drag_y = 0
         self._is_dragging = False
         self._drop_target: tuple[int, int] | None = None   # (row_no, slot_no)
+        self._selected_slot: tuple[int, int] | None = None
 
     # ── public ──────────────────────────────────────────────── #
 
@@ -819,6 +870,11 @@ class UvRailWidget(QWidget):
                     painter.setPen(QPen(QColor("#4a4a4a"), 1))
                     painter.drawRect(int(x + 1), int(slot_top), int(w), int(slot_h))
 
+                if self._selected_slot == (row_no, start_te):
+                    painter.setBrush(Qt.NoBrush)
+                    painter.setPen(QPen(QColor("#00e5ff"), 2))
+                    painter.drawRoundedRect(int(x + 1), int(slot_top), int(w), int(slot_h), 3, 3)
+
             # ─ Busbar phase bands (drawn on top of slot area, just above DIN rail) ─
             if self._busbars:
                 busbar_strip_h = max(5, int(row_h * 0.09))
@@ -950,12 +1006,14 @@ class UvRailWidget(QWidget):
     # ── mouse ────────────────────────────────────────────────── #
 
     def mousePressEvent(self, event):
+        self.setFocus(Qt.MouseFocusReason)
         if event.button() != Qt.LeftButton:
             return
         x, y = event.x(), event.y()
         hit = self._hit_slot(x, y)
         if hit is not None:
             row_no, slot_no = hit
+            self._selected_slot = hit
             # Only draggable if slot has content
             slot_data = next(
                 (s for s in self._slots if s.get("row") == row_no and s.get("slot") == slot_no),
@@ -969,6 +1027,7 @@ class UvRailWidget(QWidget):
             self._drag_y = y
             self._is_dragging = False
             self._drop_target = None
+            self.update()
 
     def mouseMoveEvent(self, event):
         if self._drag_source is None:
@@ -1007,11 +1066,34 @@ class UvRailWidget(QWidget):
         if was_dragging:
             if (source is not None and drop is not None
                     and source != drop):
+                self._selected_slot = drop
                 self.slot_moved.emit(source[0], source[1], drop[0], drop[1])
         else:
             # Plain click
             if source is not None:
+                self._selected_slot = source
                 self.slot_clicked.emit(source[0], source[1])
+
+    def contextMenuEvent(self, event):
+        self.setFocus(Qt.MouseFocusReason)
+        hit = self._hit_slot(event.pos().x(), event.pos().y())
+        if hit is None:
+            return
+        self._selected_slot = hit
+        self.update()
+        self.slot_context_menu_requested.emit(hit[0], hit[1], event.globalPos())
+
+    def keyPressEvent(self, event):
+        if self._selected_slot is not None and event.modifiers() & Qt.ControlModifier:
+            if event.key() == Qt.Key_C:
+                self.slot_copy_requested.emit(self._selected_slot[0], self._selected_slot[1])
+                event.accept()
+                return
+            if event.key() == Qt.Key_V:
+                self.slot_paste_requested.emit(self._selected_slot[0], self._selected_slot[1])
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
 
 # ------------------------------------------------------------------ #
@@ -1063,8 +1145,174 @@ class UvConfigDialog(QDialog):
         self._cable_choices = list(cable_choices or [])
         self._show_buttons = bool(show_buttons)
         self._building = False
+        self._custom_device_types: list[str] = []
+        self._slot_clipboard: dict | None = None
         self._build_ui()
         self._load_config(config or {})
+
+    @classmethod
+    def _normalize_custom_device_types(cls, values) -> list[str]:
+        merged: list[str] = []
+        for value in values or []:
+            text = str(value or "").strip()
+            if not text or text == "Freitext" or text in merged or text in cls.UV_DEVICE_TYPES:
+                continue
+            merged.append(text)
+        return merged
+
+    def _ensure_custom_device_type(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text or text == "Freitext" or text in self.UV_DEVICE_TYPES:
+            return text
+        if text not in self._custom_device_types:
+            self._custom_device_types.append(text)
+        return text
+
+    def _populate_device_combo(self, combo: QComboBox, current_text: str = "") -> None:
+        combo.clear()
+        combo.setEditable(True)
+        combo.addItems(self.UV_DEVICE_TYPES)
+        for device_type in self._custom_device_types:
+            combo.addItem(device_type)
+        current = self._ensure_custom_device_type(current_text)
+        if current and combo.findText(current) < 0:
+            combo.addItem(current)
+        combo.setCurrentText(current)
+        if combo.lineEdit() is not None:
+            combo.lineEdit().setPlaceholderText("Gerätetyp auswählen oder neu eingeben")
+
+    def _on_device_combo_changed(self, _text: str) -> None:
+        self._sync_custom_device_types_from_table()
+        self._refresh_visual()
+
+    def _sync_custom_device_types_from_table(self) -> None:
+        for row_idx in range(self.tbl_slots.rowCount()):
+            device_combo = self.tbl_slots.cellWidget(row_idx, 2)
+            if isinstance(device_combo, QComboBox):
+                self._ensure_custom_device_type(device_combo.currentText())
+
+    def _collect_slot_data(self, row_no: int, slot_no: int) -> dict:
+        for slot in self._capture_current_slots():
+            if slot["row"] == row_no and slot["slot"] == slot_no:
+                slot_data = dict(slot)
+                slot_data["custom_device_types"] = list(self._custom_device_types)
+                return slot_data
+        return {"row": row_no, "slot": slot_no, "custom_device_types": list(self._custom_device_types)}
+
+    def _find_next_free_slot(self, source_row: int, source_slot: int, te_size: int) -> tuple[int, int] | None:
+        rows = self.sb_rows.value()
+        modules_per_row = self.sb_modules.value()
+        if rows <= 0 or modules_per_row <= 0:
+            return None
+
+        occupied: set[tuple[int, int]] = set()
+        for slot in self._capture_current_slots():
+            if not self._slot_has_content(slot):
+                continue
+            row_no = int(slot.get("row", 0) or 0)
+            slot_no = int(slot.get("slot", 0) or 0)
+            width = max(1, int(slot.get("te_size", 1) or 1))
+            if row_no == source_row and slot_no == source_slot:
+                continue
+            for offset in range(width):
+                occupied.add((row_no, slot_no + offset))
+
+        start_index = (source_row - 1) * modules_per_row + source_slot
+        for global_te in range(start_index + 1, rows * modules_per_row + 1):
+            row_no = ((global_te - 1) // modules_per_row) + 1
+            slot_no = ((global_te - 1) % modules_per_row) + 1
+            if slot_no + te_size - 1 > modules_per_row:
+                continue
+            if all((row_no, slot_no + offset) not in occupied for offset in range(te_size)):
+                return row_no, slot_no
+        return None
+
+    def _duplicate_slot_to_next_free(self, source_row: int, source_slot: int, slot_data: dict) -> bool:
+        target = self._find_next_free_slot(source_row, source_slot, max(1, int(slot_data.get("te_size", 1) or 1)))
+        if target is None:
+            QMessageBox.information(
+                self,
+                "Kein freier Platz",
+                "Für dieses UV-Element wurde keine freie nächste Position gefunden.",
+            )
+            return False
+        duplicated = dict(slot_data)
+        duplicated["row"], duplicated["slot"] = target
+        self._write_slot_to_table(target[0], target[1], duplicated)
+        return True
+
+    def _clear_overlapping_slots(self, row_no: int, slot_no: int, te_size: int) -> None:
+        end_slot = slot_no + te_size - 1
+        for slot in self._capture_current_slots():
+            if not self._slot_has_content(slot):
+                continue
+            if int(slot.get("row", 0) or 0) != row_no:
+                continue
+            other_start = int(slot.get("slot", 0) or 0)
+            other_width = max(1, int(slot.get("te_size", 1) or 1))
+            other_end = other_start + other_width - 1
+            if other_end < slot_no or other_start > end_slot:
+                continue
+            self._clear_slot_in_table(row_no, other_start)
+
+    def _copy_slot(self, row_no: int, slot_no: int) -> bool:
+        slot_data = self._collect_slot_data(row_no, slot_no)
+        if not self._slot_has_content(slot_data):
+            return False
+        self._slot_clipboard = dict(slot_data)
+        self._slot_clipboard["custom_device_types"] = list(self._custom_device_types)
+        return True
+
+    def _paste_slot(self, row_no: int, slot_no: int) -> bool:
+        if not isinstance(self._slot_clipboard, dict):
+            return False
+        pasted = dict(self._slot_clipboard)
+        te_size = max(1, int(pasted.get("te_size", 1) or 1))
+        if slot_no + te_size - 1 > self.sb_modules.value():
+            QMessageBox.information(
+                self,
+                "Nicht genügend Platz",
+                "Das kopierte UV-Element passt an dieser Position nicht mehr in die Reihe.",
+            )
+            return False
+        self._custom_device_types = self._normalize_custom_device_types(
+            list(self._custom_device_types) + list(pasted.get("custom_device_types", []))
+        )
+        pasted["row"] = row_no
+        pasted["slot"] = slot_no
+        self._clear_overlapping_slots(row_no, slot_no, te_size)
+        self._write_slot_to_table(row_no, slot_no, pasted)
+        self.tabs.setCurrentIndex(0)
+        self._refresh_visual()
+        return True
+
+    def _delete_slot(self, row_no: int, slot_no: int) -> bool:
+        slot_data = self._collect_slot_data(row_no, slot_no)
+        if not self._slot_has_content(slot_data):
+            return False
+        self._clear_slot_in_table(row_no, slot_no)
+        self.tabs.setCurrentIndex(0)
+        self._refresh_visual()
+        return True
+
+    def _show_slot_context_menu(self, row_no: int, slot_no: int, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+        slot_data = self._collect_slot_data(row_no, slot_no)
+
+        copy_action = menu.addAction("Kopieren")
+        copy_action.setEnabled(self._slot_has_content(slot_data))
+        paste_action = menu.addAction("Einfügen")
+        paste_action.setEnabled(isinstance(self._slot_clipboard, dict))
+        delete_action = menu.addAction("Löschen")
+        delete_action.setEnabled(self._slot_has_content(slot_data))
+
+        action = menu.exec(global_pos)
+        if action is copy_action:
+            self._copy_slot(row_no, slot_no)
+        elif action is paste_action:
+            self._paste_slot(row_no, slot_no)
+        elif action is delete_action:
+            self._delete_slot(row_no, slot_no)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -1106,6 +1354,9 @@ class UvConfigDialog(QDialog):
         self.tabs.addTab(rail_scroll, "Visuell")
         self.rail_widget.slot_clicked.connect(self._on_rail_slot_clicked)
         self.rail_widget.slot_moved.connect(self._on_slot_moved)
+        self.rail_widget.slot_copy_requested.connect(self._copy_slot)
+        self.rail_widget.slot_paste_requested.connect(self._paste_slot)
+        self.rail_widget.slot_context_menu_requested.connect(self._show_slot_context_menu)
 
         # Tab 1 – editable table
         # Columns: Reihe | TE | Belegung | TE-Br. | Typ/Kennz. | Bezeichnung |
@@ -1253,9 +1504,8 @@ class UvConfigDialog(QDialog):
 
                 # col 2 – device type
                 cmb_device = SafeComboBox()
-                cmb_device.addItems(self.UV_DEVICE_TYPES)
-                cmb_device.setCurrentText(str(slot.get("device_type", "") or "").strip())
-                cmb_device.currentTextChanged.connect(self._refresh_visual)
+                self._populate_device_combo(cmb_device, str(slot.get("device_type", "") or "").strip())
+                cmb_device.currentTextChanged.connect(self._on_device_combo_changed)
                 self.tbl_slots.setCellWidget(idx, 2, cmb_device)
 
                 # col 3 – TE-Breite
@@ -1357,12 +1607,7 @@ class UvConfigDialog(QDialog):
 
     def _on_rail_slot_clicked(self, row_no: int, slot_no: int):
         """Slot in rail was clicked: open edit popup, write result back."""
-        current_slots = self._capture_current_slots()
-        slot_data: dict = {"row": row_no, "slot": slot_no}
-        for s in current_slots:
-            if s["row"] == row_no and s["slot"] == slot_no:
-                slot_data = dict(s)
-                break
+        slot_data = self._collect_slot_data(row_no, slot_no)
 
         # Compute phase info for this slot (global TE number)
         mpr = self.sb_modules.value()
@@ -1392,6 +1637,9 @@ class UvConfigDialog(QDialog):
             return
 
         updated = dlg.get_slot_data()
+        self._custom_device_types = self._normalize_custom_device_types(
+            list(self._custom_device_types) + list(updated.get("custom_device_types", []))
+        )
         new_row = updated["row"]
         new_slot = updated["slot"]
 
@@ -1403,8 +1651,18 @@ class UvConfigDialog(QDialog):
         else:
             self._write_slot_to_table(row_no, slot_no, updated)
 
+        duplicated = False
+        if hasattr(dlg, "consume_duplicate_request") and dlg.consume_duplicate_request():
+            duplicated = self._duplicate_slot_to_next_free(new_row, new_slot, updated)
+
         self.tabs.setCurrentIndex(0)
         self._refresh_visual()
+        if duplicated:
+            QMessageBox.information(
+                self,
+                "Element dupliziert",
+                "Das UV-Element wurde an der nächsten freien Stelle eingefügt.",
+            )
 
     def _on_slot_moved(self, from_row: int, from_slot: int,
                        to_row: int, to_slot: int):
@@ -1442,6 +1700,12 @@ class UvConfigDialog(QDialog):
         modules_per_row = int(config.get("modules_per_row", 12) or 12)
         slots = config.get("slots", [])
         busbars = config.get("busbars", [])
+        self._custom_device_types = self._normalize_custom_device_types(
+            config.get("custom_device_types", [])
+        )
+        for slot in (slots if isinstance(slots, list) else []):
+            if isinstance(slot, dict):
+                self._ensure_custom_device_type(str(slot.get("device_type", "") or ""))
         self._building = True
         self.sb_rows.setValue(rows)
         self.sb_modules.setValue(modules_per_row)
@@ -1485,12 +1749,14 @@ class UvConfigDialog(QDialog):
         for slot in self._capture_current_slots():
             if self._slot_has_content(slot):
                 slots.append(slot)
+        self._sync_custom_device_types_from_table()
         return {
             "rows": rows,
             "modules_per_row": modules_per_row,
             "preset": self.cmb_preset.currentText(),
             "slots": slots,
             "busbars": self._capture_current_busbars(),
+            "custom_device_types": list(self._custom_device_types),
         }
 
     @staticmethod

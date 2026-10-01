@@ -125,6 +125,7 @@ def test_uv_planning_dock_builds_and_selects_uv_ap(app, monkeypatch):
         assert window.uv_planning.active_point_id() == "AP-1"
         assert window.uv_planning._selector.count() >= 1
         assert window.uv_planning.get_config()["rows"] == 2
+        assert window.uv_planning.titleBarWidget() is None
     finally:
         window.deleteLater()
 
@@ -307,6 +308,148 @@ def test_collect_export_data_flushes_live_uv_editor_state(app, monkeypatch):
         assert point.data.get("uv_config", {}).get("busbars") == uv_data["busbars"]
     finally:
         window.deleteLater()
+
+
+def test_uv_config_dialog_persists_custom_device_types(app):
+    from gui.parameter_panel import UvConfigDialog  # noqa: PLC0415
+
+    dialog = UvConfigDialog(config={"rows": 1, "modules_per_row": 12}, show_buttons=False)
+    try:
+        device_combo = dialog.tbl_slots.cellWidget(0, 2)
+        assert device_combo is not None
+        device_combo.setCurrentText("Energymeter")
+
+        config = dialog.get_config()
+        assert config["custom_device_types"] == ["Energymeter"]
+
+        reopened = UvConfigDialog(config=config, show_buttons=False)
+        try:
+            reopened_combo = reopened.tbl_slots.cellWidget(0, 2)
+            assert reopened_combo.findText("Energymeter") >= 0
+        finally:
+            reopened.deleteLater()
+    finally:
+        dialog.deleteLater()
+
+
+def test_uv_config_dialog_duplicates_slot_to_next_free_position(app):
+    from gui.parameter_panel import UvConfigDialog  # noqa: PLC0415
+
+    dialog = UvConfigDialog(
+        config={
+            "rows": 1,
+            "modules_per_row": 4,
+            "slots": [
+                {
+                    "row": 1,
+                    "slot": 1,
+                    "device_type": "LS",
+                    "te_size": 1,
+                    "spec": "B16A",
+                    "label": "Licht",
+                }
+            ],
+        },
+        show_buttons=False,
+    )
+    try:
+        source = dialog._collect_slot_data(1, 1)
+        assert dialog._duplicate_slot_to_next_free(1, 1, source) is True
+
+        slots = dialog._capture_current_slots()
+        duplicated = next(slot for slot in slots if slot["row"] == 1 and slot["slot"] == 2)
+        assert duplicated["device_type"] == "LS"
+        assert duplicated["label"] == "Licht"
+    finally:
+        dialog.deleteLater()
+
+
+def test_uv_config_dialog_copies_and_pastes_slot_to_target_position(app):
+    from gui.parameter_panel import UvConfigDialog  # noqa: PLC0415
+
+    dialog = UvConfigDialog(
+        config={
+            "rows": 1,
+            "modules_per_row": 4,
+            "slots": [
+                {
+                    "row": 1,
+                    "slot": 1,
+                    "device_type": "LS",
+                    "te_size": 1,
+                    "spec": "B16A",
+                    "label": "Licht",
+                    "note": "A",
+                }
+            ],
+        },
+        show_buttons=False,
+    )
+    try:
+        assert dialog._copy_slot(1, 1) is True
+        assert dialog._paste_slot(1, 3) is True
+
+        slots = dialog._capture_current_slots()
+        pasted = next(slot for slot in slots if slot["row"] == 1 and slot["slot"] == 3)
+        assert pasted["device_type"] == "LS"
+        assert pasted["spec"] == "B16A"
+        assert pasted["label"] == "Licht"
+        assert pasted["note"] == "A"
+    finally:
+        dialog.deleteLater()
+
+
+def test_uv_config_dialog_deletes_slot_content(app):
+    from gui.parameter_panel import UvConfigDialog  # noqa: PLC0415
+
+    dialog = UvConfigDialog(
+        config={
+            "rows": 1,
+            "modules_per_row": 4,
+            "slots": [
+                {
+                    "row": 1,
+                    "slot": 2,
+                    "device_type": "LS",
+                    "te_size": 1,
+                    "label": "Licht",
+                }
+            ],
+        },
+        show_buttons=False,
+    )
+    try:
+        assert dialog._delete_slot(1, 2) is True
+
+        slots = dialog._capture_current_slots()
+        deleted = next(slot for slot in slots if slot["row"] == 1 and slot["slot"] == 2)
+        assert deleted["device_type"] == ""
+        assert deleted["label"] == ""
+        assert dialog._delete_slot(1, 2) is False
+    finally:
+        dialog.deleteLater()
+
+
+def test_uv_rail_widget_emits_copy_and_paste_shortcuts(app):
+    from PySide6.QtCore import QEvent, Qt  # noqa: PLC0415
+    from PySide6.QtGui import QKeyEvent  # noqa: PLC0415
+    from gui.parameter_panel import UvRailWidget  # noqa: PLC0415
+
+    widget = UvRailWidget()
+    try:
+        widget.set_data(1, 4, [{"row": 1, "slot": 1, "device_type": "LS", "te_size": 1}], [])
+        widget._selected_slot = (1, 1)
+
+        calls: list[tuple[str, int, int]] = []
+        widget.slot_copy_requested.connect(lambda row, slot: calls.append(("copy", row, slot)))
+        widget.slot_paste_requested.connect(lambda row, slot: calls.append(("paste", row, slot)))
+
+        widget.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_C, Qt.ControlModifier))
+        widget.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_V, Qt.ControlModifier))
+
+        assert calls == [("copy", 1, 1), ("paste", 1, 1)]
+    finally:
+        widget.deleteLater()
 
 
 def test_action_configure_uv_opens_dock_not_dialog(app, monkeypatch):
