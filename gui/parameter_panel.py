@@ -31,6 +31,9 @@ from PySide6.QtGui import QColor, QPixmap, QPainter, QFont, QPen, QBrush, QFontM
 from PySide6.QtCore import Signal, Qt, QPoint
 
 from logic.elec_schematic import default_elec_schematic, sanitize_elec_schematic
+from model.cable_laying_location import normalize_cable_laying_location
+from model.schema import ELEC_CABLE_SCHEMA
+from gui.properties.field_widgets import create_field_widget
 
 # ── Custom Spinbox: Completely disable mouse wheel ────────────── #
 class SafeDoubleSpinBox(QDoubleSpinBox):
@@ -155,7 +158,7 @@ class HeatingCircuitPanel(QWidget):
         form.addRow(self.chk_visible)
 
         self.chk_label_visible = QCheckBox("Beschriftung")
-        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.setChecked(False)
         self.chk_label_visible.toggled.connect(
             lambda checked: self.label_visibility_changed.emit(self.circuit_id, checked)
         )
@@ -2413,7 +2416,7 @@ class ElektroPointPanel(QWidget):
         form.addRow(self.chk_visible)
 
         self.chk_label_visible = QCheckBox("Beschriftung")
-        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.setChecked(False)
         self.chk_label_visible.toggled.connect(
             lambda c: self.label_visibility_changed.emit(self.point_id, c)
         )
@@ -2936,7 +2939,7 @@ class ElektroRoomPanel(QWidget):
         form.addRow(self.chk_visible)
 
         self.chk_label_visible = QCheckBox("Beschriftung")
-        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.setChecked(False)
         self.chk_label_visible.toggled.connect(
             lambda c: self.label_visibility_changed.emit(self.room_id, c)
         )
@@ -3023,6 +3026,7 @@ class ElektroCablePanel(QWidget):
     color_changed        = Signal(str, str)
     type_changed         = Signal(str, str)
     comment_changed      = Signal(str, str)
+    laying_location_changed = Signal(str, object)
     draw_cable_requested = Signal(str)
     edit_cable_requested = Signal(str)
     visibility_changed   = Signal(str, bool)
@@ -3061,7 +3065,7 @@ class ElektroCablePanel(QWidget):
         form.addRow(self.chk_visible)
 
         self.chk_label_visible = QCheckBox("Beschriftung")
-        self.chk_label_visible.setChecked(bool(self._defaults.get("label_visible", True)))
+        self.chk_label_visible.setChecked(bool(self._defaults.get("label_visible", False)))
         self.chk_label_visible.toggled.connect(
             lambda c: self.label_visibility_changed.emit(self.cable_id, c)
         )
@@ -3098,6 +3102,15 @@ class ElektroCablePanel(QWidget):
             lambda value: self.type_changed.emit(self.cable_id, value)
         )
         form.addRow("Typ:", self.cmb_type)
+
+        spec = next(field for field in ELEC_CABLE_SCHEMA.fields if field.key == "laying_location")
+        self.laying_location_widget = create_field_widget(spec, self)
+        # New cables never inherit physical locations from last-used defaults.
+        self.laying_location_widget.update_silently(normalize_cable_laying_location(None))
+        self.laying_location_widget.value_changed.connect(
+            lambda _key, value: self.laying_location_changed.emit(self.cable_id, value)
+        )
+        form.addRow("Verlegeort:", self.laying_location_widget)
 
         self.te_comment = QTextEdit()
         self.te_comment.setMaximumHeight(50)
@@ -3190,6 +3203,7 @@ class ElektroCablePanel(QWidget):
         self.lbl_end_ap.setText(f"End-AP: {ap_name or '\u2013'}")
 
     def get_parameters(self) -> dict:
+        self.commit_pending_edit()
         return {
             "name":    self.le_name.text().strip() or self.cable_id,
             "color":   self._color.name(),
@@ -3200,12 +3214,22 @@ class ElektroCablePanel(QWidget):
             "type_label_visible": self.chk_type_label_visible.isChecked(),
             "label_size": self.sb_label_size.value(),
             "stroke_width": self.sb_stroke_width.value(),
+            "laying_location": self.laying_location_widget.value(),
             "start_ap": self._start_ap,
             "end_ap":   self._end_ap,
         }
 
     def get_type_text(self) -> str:
         return self.cmb_type.currentText()
+
+    def commit_pending_edit(self):
+        self.laying_location_widget.commit_pending_edit()
+
+    def has_pending_edit(self) -> bool:
+        return self.laying_location_widget.has_pending_edit()
+
+    def set_laying_location(self, value):
+        self.laying_location_widget.update_silently(normalize_cable_laying_location(value))
 
     def set_type_text(self, cable_type: str):
         value = (cable_type or "").strip() or self.DEFAULT_CABLE_TYPE
@@ -3237,6 +3261,7 @@ class ElektroCablePanel(QWidget):
         return d
 
     def from_dict(self, d: dict):
+        self.set_laying_location(d.get("laying_location"))
         self.le_name.setText(d.get("name", self.cable_id))
         c = d.get("color", self._color.name())
         self._color = QColor(c)
@@ -3292,7 +3317,7 @@ class HkvPanel(QWidget):
         form.addRow(self.chk_visible)
 
         self.chk_label_visible = QCheckBox("Beschriftung")
-        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.setChecked(False)
         self.chk_label_visible.toggled.connect(
             lambda c: self.label_visibility_changed.emit(self.hkv_id, c))
         form.addRow(self.chk_label_visible)
@@ -3442,7 +3467,7 @@ class HkvLinePanel(QWidget):
         form.addRow(self.chk_visible)
 
         self.chk_label_visible = QCheckBox("Beschriftung")
-        self.chk_label_visible.setChecked(True)
+        self.chk_label_visible.setChecked(False)
         self.chk_label_visible.toggled.connect(
             lambda c: self.label_visibility_changed.emit(self.line_id, c))
         form.addRow(self.chk_label_visible)
@@ -5611,7 +5636,7 @@ class ParameterPanel(QWidget):
             "type": ElektroCablePanel.DEFAULT_CABLE_TYPE,
             "comment": "",
             "visible": True,
-            "label_visible": True,
+            "label_visible": False,
             "type_label_visible": False,
             "label_size": 12.0,
         }
@@ -5631,7 +5656,7 @@ class ParameterPanel(QWidget):
         if "visible" in defaults:
             sanitized["visible"] = bool(defaults.get("visible", True))
         if "label_visible" in defaults:
-            sanitized["label_visible"] = bool(defaults.get("label_visible", True))
+            sanitized["label_visible"] = bool(defaults.get("label_visible", False))
         if "type_label_visible" in defaults:
             sanitized["type_label_visible"] = bool(
                 defaults.get("type_label_visible", False)

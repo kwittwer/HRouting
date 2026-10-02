@@ -148,6 +148,9 @@ def get_field(element: Element, spec: FieldSpec) -> Any:
     """Liest den gespeicherten Wert eines Feldes."""
     key = spec.key
 
+    if isinstance(element, ElecCable) and key == "laying_location":
+        return element.laying_location
+
     if key in _ANNOTATION_DIMENSION_FIELDS and isinstance(
         element, (AnnotationRectangle, AnnotationCircle, AnnotationEllipse)
     ):
@@ -213,6 +216,10 @@ def get_field(element: Element, spec: FieldSpec) -> Any:
 def set_field(element: Element, spec: FieldSpec, value: Any) -> None:
     """Schreibt einen Feldwert an die im Format vorgesehene(n) Stelle(n)."""
     key = spec.key
+
+    if isinstance(element, ElecCable) and key == "laying_location":
+        element.laying_location = value
+        return
 
     if key in _ANNOTATION_DIMENSION_FIELDS and isinstance(
         element, (AnnotationRectangle, AnnotationCircle, AnnotationEllipse)

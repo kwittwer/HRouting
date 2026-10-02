@@ -55,6 +55,11 @@ from logic.svg_parser import parse_svg_dimensions
 from logic.heating_calc import calc_circuit, calc_balancing, FLOOR_COVERINGS
 from logic.kicad_export import export_project_to_kicad
 from model.schema import format_auto_cable_name
+from model.cable_laying_location import (
+    aggregate_cable_laying_locations,
+    format_cable_laying_location,
+    normalize_cable_laying_location,
+)
 
 _SETTINGS = QSettings("HRouting", "HRouting")
 _LAST_PROJECT_KEY = "last_project_path"
@@ -482,6 +487,8 @@ class MainWindow(QMainWindow):
         self._record_mutation(debounced=False)
 
     def _flush_pending_dirty(self):
+        for panel in self.param_panel.elec_cable_panels.values():
+            panel.commit_pending_edit()
         if self._dirty_debounce_timer.isActive():
             self._dirty_debounce_timer.stop()
             self._apply_debounced_dirty()
@@ -489,6 +496,7 @@ class MainWindow(QMainWindow):
     def _maybe_save(self) -> bool:
         """Ask the user to save if there are unsaved changes.
         Returns True if the caller may proceed, False to cancel."""
+        self._flush_pending_dirty()
         if not self._dirty:
             return True
         reply = QMessageBox.question(
@@ -860,6 +868,11 @@ class MainWindow(QMainWindow):
             panel.color_changed.connect(self._on_elec_cable_color_changed)
             panel.type_changed.connect(self._on_elec_cable_type_changed)
             panel.comment_changed.connect(self._on_elec_cable_comment_changed)
+            try:
+                panel.laying_location_changed.disconnect(self._on_elec_cable_laying_location_changed)
+            except RuntimeError:
+                pass
+            panel.laying_location_changed.connect(self._on_elec_cable_laying_location_changed)
             panel.visibility_changed.connect(self._on_elec_visibility_changed)
             panel.label_size_changed.connect(self._on_label_size_changed)
             panel.label_visibility_changed.connect(self._on_label_visibility_changed)
@@ -867,8 +880,10 @@ class MainWindow(QMainWindow):
                 self._on_elec_cable_type_label_visibility_changed
             )
             values = panel.get_parameters()
-            cable_type = str((self._document.elements["elec_cables"].get(kid).data.get("type") or values.get("type") or "")).strip() if self._document and kid in self._document.elements.get("elec_cables", {}) else str(values.get("type") or "").strip()
-            profiles = self._document.settings.get("elec_cable_type_styles") if self._document and isinstance(self._document.settings, dict) else {}
+            document = getattr(self, "_document", None)
+            cable_model = document.elements.get("elec_cables", {}).get(kid) if document is not None else None
+            cable_type = str((cable_model.data.get("type") if cable_model is not None else "") or values.get("type") or "").strip()
+            profiles = document.settings.get("elec_cable_type_styles") if document is not None else {}
             project_style = profiles.get(cable_type) if isinstance(profiles, dict) and cable_type else None
             effective = values.copy()
             if isinstance(project_style, dict):
@@ -2714,6 +2729,7 @@ class MainWindow(QMainWindow):
         panel.color_changed.connect(self._on_elec_cable_color_changed)
         panel.type_changed.connect(self._on_elec_cable_type_changed)
         panel.comment_changed.connect(self._on_elec_cable_comment_changed)
+        panel.laying_location_changed.connect(self._on_elec_cable_laying_location_changed)
         panel.visibility_changed.connect(self._on_elec_visibility_changed)
         panel.label_size_changed.connect(self._on_label_size_changed)
         panel.label_visibility_changed.connect(self._on_label_visibility_changed)
@@ -2800,6 +2816,19 @@ class MainWindow(QMainWindow):
         self.canvas._elec_cable_notes[cable_id] = comment
         self._mark_dirty_debounced()
         self._refresh_electrical_aux_windows()
+
+    def _on_elec_cable_laying_location_changed(self, cable_id: str, value: dict):
+        panel = self.param_panel.elec_cable_panels.get(cable_id)
+        if panel is not None:
+            panel.set_laying_location(value)
+        # Legacy panels are the persistence source; also update a live model
+        # when this callback is used by an adapter. No geometry/label changes.
+        document = getattr(self, "_document", None)
+        if document is not None:
+            cable = document.elements.get("elec_cables", {}).get(cable_id)
+            if cable is not None:
+                cable.laying_location = value
+        self._mark_dirty_debounced()
 
     def _on_elec_cable_stroke_width_changed(self, cable_id: str, width: float):
         self.canvas.set_elec_cable_stroke_width(cable_id, width)
@@ -3715,7 +3744,9 @@ class MainWindow(QMainWindow):
         new_id = f"KV-{self._elec_cable_counter}"
         panel = self._create_elec_cable_panel(new_id, fp_id=src_fp_id, name=src.get('name', source_id))
         panel.set_type_text(src.get("type", "5x1,5"))
+        panel.set_laying_location(src.get("laying_location"))
         panel.te_comment.setPlainText(src.get("comment", ""))
+        panel.chk_label_visible.setChecked(src.get("label_visible", False))
         self.canvas._elec_cable_notes[new_id] = src.get("comment", "")
         panel.chk_type_label_visible.setChecked(src.get("type_label_visible", False))
         panel.sb_label_size.setValue(src.get("label_size", 12.0))
@@ -5897,6 +5928,7 @@ class MainWindow(QMainWindow):
                         "spec": str(slot.get("spec", "") or "").strip(),
                         "label": str(slot.get("label", "") or "").strip(),
                         "assignment": str(slot.get("assignment", "") or "").strip(),
+                        **self._uv_slot_cable_fields(pid, slot),
                         "manufacturer": str(slot.get("manufacturer", "") or "").strip(),
                         "article_number": str(slot.get("article_number", "") or "").strip(),
                         "note": str(slot.get("note", "") or "").strip(),
@@ -5907,6 +5939,7 @@ class MainWindow(QMainWindow):
             )
             if not normalized_slots:
                 rows.append({
+                    "ap_id": pid,
                     "ap": ap_name,
                     "room": room_name,
                     "rows": uv_rows,
@@ -5919,10 +5952,12 @@ class MainWindow(QMainWindow):
                     "label": "",
                     "assignment": "",
                     "note": "",
+                    **self._cable_laying_location_fields(""),
                 })
                 continue
             for slot in normalized_slots:
                 rows.append({
+                    "ap_id": pid,
                     "ap": ap_name,
                     "room": room_name,
                     "rows": uv_rows,
@@ -5937,6 +5972,9 @@ class MainWindow(QMainWindow):
                     "manufacturer": slot["manufacturer"],
                     "article_number": slot["article_number"],
                     "note": slot["note"],
+                    "cable_id": slot["cable_id"],
+                    "laying_location": slot["laying_location"],
+                    "laying_location_text": slot["laying_location_text"],
                 })
         return rows
 
@@ -5972,6 +6010,7 @@ class MainWindow(QMainWindow):
                         "spec": str(s.get("spec", "") or "").strip(),
                         "label": str(s.get("label", "") or "").strip(),
                         "assignment": str(s.get("assignment", "") or "").strip(),
+                        **self._uv_slot_cable_fields(pid, s),
                         "manufacturer": str(s.get("manufacturer", "") or "").strip(),
                         "article_number": str(s.get("article_number", "") or "").strip(),
                         "note": str(s.get("note", "") or "").strip(),
@@ -6000,6 +6039,43 @@ class MainWindow(QMainWindow):
                 ],
             })
         return result
+
+    def _cable_laying_location_fields(self, cable_id: str) -> dict:
+        panel = self.param_panel.elec_cable_panels.get(cable_id)
+        location = normalize_cable_laying_location(
+            panel.get_parameters().get("laying_location") if panel is not None else None
+        )
+        return {"laying_location": location, "laying_location_text": format_cable_laying_location(location)}
+
+    def _related_cable_laying_location_fields(self, cable_ids: list[str]) -> dict:
+        values = [self._cable_laying_location_fields(cid)["laying_location"] for cid in dict.fromkeys(cable_ids)]
+        return self._laying_location_union_fields(values)
+
+    @staticmethod
+    def _laying_location_union_fields(values) -> dict:
+        values = [normalize_cable_laying_location(value) for value in values]
+        custom = list(dict.fromkeys(
+            value["custom_text"].strip() or "Sonstiges" for value in values if value["custom_enabled"]
+        ))
+        return {
+            "laying_location": normalize_cable_laying_location({
+                "locations": [code for value in values for code in value["locations"]],
+                "custom_enabled": bool(custom), "custom_text": "; ".join(custom),
+            }),
+            "laying_location_text": aggregate_cable_laying_locations(values),
+        }
+
+    def _uv_slot_cable_fields(self, point_id: str, slot: dict) -> dict:
+        cables = self.param_panel.elec_cable_panels
+        assignment = str(slot.get("cable_id") or slot.get("assignment") or "").strip()
+        cable_id = assignment if assignment in cables else ""
+        if assignment and not cable_id:
+            matches = [cid for cid, panel in cables.items()
+                       if point_id in self.canvas.get_cable_ap(cid)
+                       and panel.get_parameters().get("name", cid) == assignment]
+            if len(matches) == 1:
+                cable_id = matches[0]
+        return {"cable_id": cable_id, **self._cable_laying_location_fields(cable_id)}
 
     def _collect_up_distribution_rows(self, point_id_to_room_name: dict[str, str] | None = None) -> list[dict]:
         point_id_to_room_name = point_id_to_room_name or self._collect_point_id_to_room_name()
@@ -6031,6 +6107,14 @@ class MainWindow(QMainWindow):
                 if text and text not in outgoing_ids:
                     outgoing_ids.append(text)
             outgoing_names = [cable_id_to_name.get(cable_id, cable_id) for cable_id in outgoing_ids]
+            incoming = self._cable_laying_location_fields(incoming_id)
+            outgoing = self._related_cable_laying_location_fields(outgoing_ids)
+            location_fields = {
+                "incoming_laying_location": incoming["laying_location"],
+                "incoming_laying_location_text": incoming["laying_location_text"],
+                "outgoing_laying_location": outgoing["laying_location"],
+                "outgoing_laying_location_text": outgoing["laying_location_text"],
+            }
 
             mappings_raw = config.get("mappings", [])
             if not isinstance(mappings_raw, list):
@@ -6062,6 +6146,10 @@ class MainWindow(QMainWindow):
                     "to_conductor": "",
                     "mapping_note": "",
                     "distribution_note": distribution_note,
+                    **location_fields,
+                    "to_cable_laying_location": normalize_cable_laying_location(None),
+                    "to_cable_laying_location_text": "–",
+                    **self._related_cable_laying_location_fields([incoming_id, *outgoing_ids]),
                 })
                 continue
 
@@ -6078,6 +6166,10 @@ class MainWindow(QMainWindow):
                     "to_conductor": mapping["to_conductor"],
                     "mapping_note": mapping["note"],
                     "distribution_note": distribution_note,
+                    **location_fields,
+                    "to_cable_laying_location": self._cable_laying_location_fields(mapping["to_cable_id"])["laying_location"],
+                    "to_cable_laying_location_text": self._cable_laying_location_fields(mapping["to_cable_id"])["laying_location_text"],
+                    **self._related_cable_laying_location_fields([incoming_id, mapping["to_cable_id"]]),
                 })
         return rows
 
@@ -6182,9 +6274,11 @@ class MainWindow(QMainWindow):
         ]
 
         cable_by_type: dict[str, float] = defaultdict(float)
+        locations_by_type: dict[str, list[dict]] = defaultdict(list)
         for row in kv_rows:
             cable_type = str(row.get("type", "") or "").strip() or "(unbekannt)"
             cable_by_type[cable_type] += float(row.get("length_m", 0.0) or 0.0)
+            locations_by_type[cable_type].append(row.get("laying_location"))
         cable_bom_rows = [
             {
                 "category": "Elektro-Kabel",
@@ -6194,6 +6288,7 @@ class MainWindow(QMainWindow):
                 "unit": "m",
                 "quantity": length_m,
                 "meta": {"cable_type": cable_type},
+                **self._laying_location_union_fields(locations_by_type[cable_type]),
             }
             for cable_type, length_m in sorted(cable_by_type.items(), key=lambda kv: kv[0].lower())
         ]
@@ -6468,6 +6563,8 @@ class MainWindow(QMainWindow):
             length_m += total_height_cm / 100.0
             
             kv_rows.append({
+                "cable_id": kid,
+                **self._cable_laying_location_fields(kid),
                 "name": params["name"],
                 "type": params["type"],
                 "comment": params.get("comment", ""),
@@ -6726,13 +6823,13 @@ class MainWindow(QMainWindow):
         kv_layout = QVBoxLayout(kv_widget)
 
         kv_layout.addWidget(QLabel("<b>Kabelliste – alle Kabel</b>"))
-        tbl_kv = QTableWidget(len(kv_rows), 14)
+        tbl_kv = QTableWidget(len(kv_rows), 15)
         tbl_kv.setHorizontalHeaderLabels(
             [
                 "Name", "Typ", "Kabel-Notiz", "Länge (m)",
                 "Start-AP", "Start-Gerät", "Start-Farbe", "Start-Notiz",
                 "End-AP", "End-Gerät", "End-Farbe", "End-Notiz",
-                "Start-Raum", "End-Raum",
+                "Start-Raum", "End-Raum", "Verlegeort",
             ]
         )
         tbl_kv.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -6754,13 +6851,14 @@ class MainWindow(QMainWindow):
             tbl_kv.setItem(i, 11, QTableWidgetItem(r.get("end_note", "")))
             tbl_kv.setItem(i, 12, QTableWidgetItem(r.get("start_room", "")))
             tbl_kv.setItem(i, 13, QTableWidgetItem(r.get("end_room", "")))
+            tbl_kv.setItem(i, 14, QTableWidgetItem(r["laying_location_text"]))
         kv_layout.addWidget(tbl_kv)
 
         kv_layout.addWidget(QLabel("<b>Summe pro Leitungstyp</b>"))
         sorted_types = sorted(kv_sum.keys())
-        tbl_kv_sum = QTableWidget(len(sorted_types), 2)
+        tbl_kv_sum = QTableWidget(len(sorted_types), 3)
         tbl_kv_sum.setHorizontalHeaderLabels(
-            ["Leitungstyp", "Gesamtlänge (m)"])
+            ["Leitungstyp", "Gesamtlänge (m)", "Verlegeort"])
         tbl_kv_sum.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         tbl_kv_sum.setEditTriggers(QTableWidget.NoEditTriggers)
         for i, t in enumerate(sorted_types):
@@ -6768,6 +6866,9 @@ class MainWindow(QMainWindow):
             item = QTableWidgetItem(f"{kv_sum[t]:.2f}")
             item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             tbl_kv_sum.setItem(i, 1, item)
+            tbl_kv_sum.setItem(i, 2, QTableWidgetItem(aggregate_cable_laying_locations(
+                r["laying_location"] for r in kv_rows if r["type"] == t
+            )))
         kv_layout.addWidget(tbl_kv_sum)
 
         if ap_type_counts:
@@ -6820,9 +6921,9 @@ class MainWindow(QMainWindow):
             uv_widget = QWidget()
             uv_layout = QVBoxLayout(uv_widget)
             uv_layout.addWidget(QLabel("<b>Unterverteilungen – Belegung</b>"))
-            tbl_uv = QTableWidget(len(uv_rows), 10)
+            tbl_uv = QTableWidget(len(uv_rows), 11)
             tbl_uv.setHorizontalHeaderLabels(
-                ["UV", "Raum", "Raster", "Reihe", "TE", "Belegung", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
+                ["UV", "Raum", "Raster", "Reihe", "TE", "Belegung", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz", "Verlegeort"]
             )
             tbl_uv.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
             tbl_uv.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -6837,6 +6938,7 @@ class MainWindow(QMainWindow):
                 tbl_uv.setItem(i, 7, QTableWidgetItem(r.get("label", "")))
                 tbl_uv.setItem(i, 8, QTableWidgetItem(r.get("assignment", "")))
                 tbl_uv.setItem(i, 9, QTableWidgetItem(r.get("note", "")))
+                tbl_uv.setItem(i, 10, QTableWidgetItem(r.get("laying_location_text", "–")))
             uv_layout.addWidget(tbl_uv)
             tabs.addTab(uv_widget, "🧰 UV")
 
@@ -6844,12 +6946,13 @@ class MainWindow(QMainWindow):
             up_widget = QWidget()
             up_layout = QVBoxLayout(up_widget)
             up_layout.addWidget(QLabel("<b>Verteilung in Unterputzdose – Aderzuordnung</b>"))
-            tbl_up = QTableWidget(len(up_distribution_rows), 10)
+            tbl_up = QTableWidget(len(up_distribution_rows), 13)
             tbl_up.setHorizontalHeaderLabels(
                 [
                     "AP", "Raum", "Zuleitung", "Abgänge",
                     "Ader (Zuleitung)", "Abgehendes Kabel", "Ader (Abgang)",
                     "Zuordnung-Notiz", "Verteilungs-Notiz", "Abgangs-ID",
+                    "Verlegeort Zuleitung", "Verlegeort Abgänge", "Verlegeort Abgang",
                 ]
             )
             tbl_up.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -6865,6 +6968,8 @@ class MainWindow(QMainWindow):
                 tbl_up.setItem(i, 7, QTableWidgetItem(r.get("mapping_note", "")))
                 tbl_up.setItem(i, 8, QTableWidgetItem(r.get("distribution_note", "")))
                 tbl_up.setItem(i, 9, QTableWidgetItem(r.get("to_cable_id", "")))
+                for col, key in enumerate(("incoming_laying_location_text", "outgoing_laying_location_text", "to_cable_laying_location_text"), 10):
+                    tbl_up.setItem(i, col, QTableWidgetItem(r.get(key, "–")))
             up_layout.addWidget(tbl_up)
             tabs.addTab(up_widget, "🔀 Unterputzdose")
 
@@ -6898,6 +7003,7 @@ class MainWindow(QMainWindow):
                     "article_number": row.get("article_number", ""),
                     "unit": row.get("unit", ""),
                     "quantity": row.get("quantity", 0),
+                    "laying_location_text": row.get("laying_location_text", "") if section_key == "cable_bom_rows" else "",
                     "note": (
                         f"TE: {row.get('te_total', 0)}" if section_key == "uv_device_bom_rows"
                         else f"TE {row.get('te_start', '')}-{row.get('te_end', '')}; UV: {row.get('uv_names', '')}" if section_key == "uv_busbar_bom_rows"
@@ -6905,8 +7011,8 @@ class MainWindow(QMainWindow):
                     ),
                 })
 
-        tbl_bom = QTableWidget(len(bom_rows), 7)
-        tbl_bom.setHorizontalHeaderLabels(["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz"])
+        tbl_bom = QTableWidget(len(bom_rows), 8)
+        tbl_bom.setHorizontalHeaderLabels(["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz", "Verlegeort"])
         tbl_bom.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         tbl_bom.setEditTriggers(QTableWidget.NoEditTriggers)
         for i, row in enumerate(bom_rows):
@@ -6919,6 +7025,7 @@ class MainWindow(QMainWindow):
             item_qty.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             tbl_bom.setItem(i, 5, item_qty)
             tbl_bom.setItem(i, 6, QTableWidgetItem(str(row.get("note", ""))))
+            tbl_bom.setItem(i, 7, QTableWidgetItem(row.get("laying_location_text", "")))
         bom_layout.addWidget(tbl_bom)
         tabs.addTab(bom_widget, "📦 Stückliste")
 
@@ -6930,9 +7037,9 @@ class MainWindow(QMainWindow):
             for ap_name in sorted(ap_cables.keys()):
                 cables = ap_cables[ap_name]
                 ap_layout.addWidget(QLabel(f"<i>{ap_name}</i>"))
-                tbl_ap = QTableWidget(len(cables), 8)
+                tbl_ap = QTableWidget(len(cables), 9)
                 tbl_ap.setHorizontalHeaderLabels(
-                    ["Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "Länge (m)"])
+                    ["Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "Länge (m)", "Verlegeort"])
                 tbl_ap.horizontalHeader().setSectionResizeMode(
                     QHeaderView.Stretch)
                 tbl_ap.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -6948,6 +7055,7 @@ class MainWindow(QMainWindow):
                     item = QTableWidgetItem(f"{c['length_m']:.2f}")
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     tbl_ap.setItem(i, 7, item)
+                    tbl_ap.setItem(i, 8, QTableWidgetItem(c.get("laying_location_text", "–")))
                 ap_layout.addWidget(tbl_ap)
         else:
             ap_layout.addWidget(QLabel("Keine AP-Kabelverbindungen vorhanden."))
@@ -6980,11 +7088,11 @@ class MainWindow(QMainWindow):
             ))
 
             if room_rows:
-                tbl_room = QTableWidget(len(room_rows), 9)
+                tbl_room = QTableWidget(len(room_rows), 10)
                 tbl_room.setHorizontalHeaderLabels(
                     [
                         "AP", "Gerät", "Farbe", "AP-Notiz",
-                        "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)",
+                        "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)", "Verlegeort",
                     ]
                 )
                 tbl_room.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -7002,6 +7110,7 @@ class MainWindow(QMainWindow):
                     item = QTableWidgetItem(f"{row.get('length_m', 0.0):.2f}")
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     tbl_room.setItem(i, 8, item)
+                    tbl_room.setItem(i, 9, QTableWidgetItem(row.get("laying_location_text", "–")))
 
                 room_layout.addWidget(tbl_room)
             else:
@@ -7035,16 +7144,27 @@ class MainWindow(QMainWindow):
             "CSV (*.csv)")
         if not path:
             return
-        sep = ";"
+        import csv
+        import io
+
+        def csv_row(cells):
+            buffer = io.StringIO(newline="")
+            csv.writer(buffer, delimiter=";", lineterminator="\r\n").writerow(cells)
+            return buffer.getvalue()[:-2]
+
+        def location(row):
+            text = row.get("laying_location_text", format_cable_laying_location(row.get("laying_location"), empty=""))
+            return "" if text == "–" else text
+
         lines: list[str] = []
 
         # Heizkreise Einzellängen
         lines.append("Heizkreise - Einzellängen")
-        lines.append(sep.join(["Name", "Rohrdurchmesser (mm)",
+        lines.append(csv_row(["Name", "Rohrdurchmesser (mm)",
                                "Verlegeabstand (mm)",
                                "Rohr (m)", "Zuleitung (m)", "Gesamt (m)", "Umfang (m)", "Fläche (m²)"]))
         for r in hk_rows:
-            lines.append(sep.join([
+            lines.append(csv_row([
                 r["name"],
                 f"{r['diameter_mm']:.1f}",
                 f"{r['spacing_mm']:.1f}",
@@ -7058,14 +7178,14 @@ class MainWindow(QMainWindow):
 
         # Heizkreise Summe pro Durchmesser
         lines.append("Heizkreise - Summe pro Rohrdurchmesser")
-        lines.append(sep.join(["Rohrdurchmesser (mm)", "Gesamtlänge (m)"]))
+        lines.append(csv_row(["Rohrdurchmesser (mm)", "Gesamtlänge (m)"]))
         for d in sorted(hk_sum.keys()):
-            lines.append(sep.join([f"{d:.1f}", f"{hk_sum[d]:.2f}"]))
+            lines.append(csv_row([f"{d:.1f}", f"{hk_sum[d]:.2f}"]))
         lines.append("")
 
         # Hydraulische Übersicht & Abgleich
         lines.append("Heizkreise - Hydraulische Übersicht & Abgleich")
-        lines.append(sep.join([
+        lines.append(csv_row([
             "Name", "HKV", "Raumtemp. (°C)", "Fußbodenbelag",
             "Fläche (m²)", "q (W/m²)",
             "Leistung (W)", "Volumenstrom (l/min)", "Δp Rohr (mbar)",
@@ -7073,7 +7193,7 @@ class MainWindow(QMainWindow):
             "Soll-Durchfluss (l/min)",
         ]))
         for r in hk_rows:
-            lines.append(sep.join([
+            lines.append(csv_row([
                 r["name"],
                 r.get("distributor", ""),
                 f"{r['room_temp']:.1f}",
@@ -7093,11 +7213,11 @@ class MainWindow(QMainWindow):
         # Summe pro Heizkreisverteiler
         if hkv_sum:
             lines.append("Summe pro Heizkreisverteiler")
-            lines.append(sep.join([
+            lines.append(csv_row([
                 "Heizkreisverteiler", "Volumenstrom (l/min)", "Leistung (W)",
             ]))
             for name in sorted(hkv_sum.keys()):
-                lines.append(sep.join([
+                lines.append(csv_row([
                     name,
                     f"{hkv_sum[name]['volume_flow']:.2f}",
                     f"{hkv_sum[name]['power']:.0f}",
@@ -7106,12 +7226,12 @@ class MainWindow(QMainWindow):
 
         # Elektro Einzellängen
         lines.append("Elektro - Kabelverbindungen")
-        lines.append(sep.join(["Name", "Typ", "Start-AP", "Start-Position",
+        lines.append(csv_row(["Name", "Typ", "Start-AP", "Start-Position",
                                "Start-Höhe (cm)", "Start-Gerät", "Start-Farbe", "Start-Notiz",
                                "End-AP", "End-Position", "End-Höhe (cm)", "End-Gerät", "End-Farbe",
-                               "End-Notiz", "Kabel-Notiz", "Länge (m)"]))
+                               "End-Notiz", "Kabel-Notiz", "Länge (m)", "Verlegeort"]))
         for r in kv_rows:
-            lines.append(sep.join([
+            lines.append(csv_row([
                 r["name"], r["type"],
                 r.get("start_ap", ""), r.get("start_position", ""),
                 f"{r.get('start_height_cm', 0.0):.1f}",
@@ -7121,38 +7241,42 @@ class MainWindow(QMainWindow):
                 r.get("end_device", ""), r.get("end_device_color", ""), r.get("end_note", ""),
                 r.get("comment", ""),
                 f"{r['length_m']:.2f}",
+                location(r),
             ]))
         lines.append("")
 
         # Elektro Summe pro Typ
         lines.append("Elektro - Summe pro Leitungstyp")
-        lines.append(sep.join(["Leitungstyp", "Gesamtlänge (m)"]))
+        lines.append(csv_row(["Leitungstyp", "Gesamtlänge (m)", "Verlegeort"]))
         for t in sorted(kv_sum.keys()):
-            lines.append(sep.join([t, f"{kv_sum[t]:.2f}"]))
+            lines.append(csv_row([t, f"{kv_sum[t]:.2f}", aggregate_cable_laying_locations(
+                (row.get("laying_location") for row in kv_rows if row["type"] == t), empty=""
+            )]))
         lines.append("")
 
         # AP-Anschlüsse
         if ap_cables:
             lines.append("Elektro - Anschlusspunkte")
-            lines.append(sep.join(["AP", "Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz",
-                                   "Länge (m)"]))
+            lines.append(csv_row(["AP", "Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz",
+                                   "Länge (m)", "Verlegeort"]))
             for ap_name in sorted(ap_cables.keys()):
                 for c in ap_cables[ap_name]:
-                    lines.append(sep.join([
+                    lines.append(csv_row([
                         ap_name, c["cable"], c["type"], c["role"],
                         c.get("ap_device", ""), c.get("ap_device_color", ""), c.get("ap_note", ""), c.get("cable_note", ""),
                         f"{c['length_m']:.2f}",
+                        location(c),
                     ]))
             lines.append("")
 
         # Raumzuordnung AP → Kabelziele
         if room_ap_connections:
             lines.append("Elektro - Räume mit AP und Kabelzielen")
-            lines.append(sep.join([
-                "Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)",
+            lines.append(csv_row([
+                "Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)", "Verlegeort",
             ]))
             for row in room_ap_connections:
-                lines.append(sep.join([
+                lines.append(csv_row([
                     row.get("room", ""),
                     row.get("ap", ""),
                     row.get("ap_device", ""),
@@ -7163,25 +7287,26 @@ class MainWindow(QMainWindow):
                     row.get("cable_note", ""),
                     row.get("target_ap", ""),
                     f"{row.get('length_m', 0.0):.2f}",
+                    location(row),
                 ]))
             lines.append("")
 
         # AP-Typen
         if ap_type_counts:
             lines.append("Elektro - Anschlusspunkte je Typ")
-            lines.append(sep.join(["Typ", "Anzahl"]))
+            lines.append(csv_row(["Typ", "Anzahl"]))
             for type_name in sorted(ap_type_counts.keys()):
-                lines.append(sep.join([type_name, str(ap_type_counts[type_name])]))
+                lines.append(csv_row([type_name, str(ap_type_counts[type_name])]))
             lines.append("")
 
         if uv_rows:
             lines.append("Elektro - Unterverteilungen")
-            lines.append(sep.join([
+            lines.append(csv_row([
                 "UV", "Raum", "Raster", "Reihe", "TE", "Belegung",
-                "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz",
+                "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz", "Verlegeort",
             ]))
             for row in uv_rows:
-                lines.append(sep.join([
+                lines.append(csv_row([
                     row.get("ap", ""),
                     row.get("room", ""),
                     f"{row.get('rows', 0)}x{row.get('modules_per_row', 0)}",
@@ -7192,18 +7317,20 @@ class MainWindow(QMainWindow):
                     row.get("label", ""),
                     row.get("assignment", ""),
                     row.get("note", ""),
+                    location(row),
                 ]))
             lines.append("")
 
         if up_distribution_rows:
             lines.append("Elektro - Verteilung in Unterputzdose")
-            lines.append(sep.join([
+            lines.append(csv_row([
                 "AP", "Raum", "Zuleitung", "Abgänge",
                 "Ader (Zuleitung)", "Abgehendes Kabel", "Abgehendes Kabel (ID)", "Ader (Abgang)",
                 "Zuordnung-Notiz", "Verteilungs-Notiz",
+                "Verlegeort Zuleitung", "Verlegeort Abgänge", "Verlegeort Abgang",
             ]))
             for row in up_distribution_rows:
-                lines.append(sep.join([
+                lines.append(csv_row([
                     row.get("ap", ""),
                     row.get("room", ""),
                     row.get("incoming_cable", ""),
@@ -7214,12 +7341,15 @@ class MainWindow(QMainWindow):
                     row.get("to_conductor", ""),
                     row.get("mapping_note", ""),
                     row.get("distribution_note", ""),
+                    *["" if row.get(key, "–") == "–" else row.get(key, "") for key in (
+                        "incoming_laying_location_text", "outgoing_laying_location_text", "to_cable_laying_location_text"
+                    )],
                 ]))
             lines.append("")
 
         if bom_data:
             lines.append("Stückliste - Zusammenfassung")
-            lines.append(sep.join(["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz"]))
+            lines.append(csv_row(["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz", "Verlegeort"]))
             for section_key, section_name in [
                 ("hk_bom_rows", "Heizrohr"),
                 ("cable_bom_rows", "Elektro-Kabel"),
@@ -7238,7 +7368,7 @@ class MainWindow(QMainWindow):
                     else:
                         note = str(row.get("note", "") or "")
 
-                    lines.append(sep.join([
+                    lines.append(csv_row([
                         section_name,
                         str(row.get("description", "")),
                         str(row.get("manufacturer", "")),
@@ -7246,16 +7376,17 @@ class MainWindow(QMainWindow):
                         str(row.get("unit", "")),
                         f"{float(row.get('quantity', 0.0) or 0.0):.2f}",
                         note,
+                        location(row) if section_key == "cable_bom_rows" else "",
                     ]))
             lines.append("")
 
         # HKV-Leitungen
         if hl_rows:
             lines.append("HKV-Leitungen - Einzellängen")
-            lines.append(sep.join(["Name", "Typ", "Start-HKV", "End-HKV",
+            lines.append(csv_row(["Name", "Typ", "Start-HKV", "End-HKV",
                                    "Länge (m)"]))
             for r in hl_rows:
-                lines.append(sep.join([
+                lines.append(csv_row([
                     r["name"], r["type"],
                     r.get("start_hkv", ""), r.get("end_hkv", ""),
                     f"{r['length_m']:.2f}",
@@ -7264,12 +7395,12 @@ class MainWindow(QMainWindow):
 
             if hl_sum:
                 lines.append("HKV-Leitungen - Summe pro Leitungstyp")
-                lines.append(sep.join(["Leitungstyp", "Gesamtlänge (m)"]))
+                lines.append(csv_row(["Leitungstyp", "Gesamtlänge (m)"]))
                 for t in sorted(hl_sum.keys()):
-                    lines.append(sep.join([t, f"{hl_sum[t]:.2f}"]))
+                    lines.append(csv_row([t, f"{hl_sum[t]:.2f}"]))
                 lines.append("")
 
-        with open(path, "w", encoding="utf-8-sig") as f:
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
             f.write("\n".join(lines))
         self.status.showMessage(f"\u2705 L\u00e4ngen exportiert: {path}")
 
@@ -7295,6 +7426,9 @@ class MainWindow(QMainWindow):
                         "ap_device_color": r.get(color_key, ""),
                         "ap_note": r.get(note_key, ""),
                         "cable_note": r.get("comment", ""),
+                        "cable_id": r.get("cable_id", ""),
+                        "laying_location": normalize_cable_laying_location(r.get("laying_location")),
+                        "laying_location_text": format_cable_laying_location(r.get("laying_location")),
                     })
         return dict(ap_map)
 
@@ -7338,9 +7472,9 @@ class MainWindow(QMainWindow):
                         break
             point_id_to_room_name[pid] = room_name
 
-        # cable name -> length/type (from kv rows) for robust display order
+        # IDs are authoritative: auto-generated cable names need not be unique.
         cable_meta: dict[str, dict] = {
-            r.get("name", ""): {
+            r.get("cable_id", ""): {
                 "type": r.get("type", ""),
                 "length_m": float(r.get("length_m", 0.0)),
                 "comment": str(r.get("comment", "") or "").strip(),
@@ -7352,9 +7486,9 @@ class MainWindow(QMainWindow):
         for cable_id, panel in self.param_panel.elec_cable_panels.items():
             cable_params = panel.get_parameters()
             cable_name = cable_params.get("name", cable_id)
-            cable_type = cable_meta.get(cable_name, {}).get("type", cable_params.get("type", ""))
-            cable_len = cable_meta.get(cable_name, {}).get("length_m", 0.0)
-            cable_note = cable_meta.get(cable_name, {}).get("comment", str(cable_params.get("comment", "") or "").strip())
+            cable_type = cable_meta.get(cable_id, {}).get("type", cable_params.get("type", ""))
+            cable_len = cable_meta.get(cable_id, {}).get("length_m", 0.0)
+            cable_note = cable_meta.get(cable_id, {}).get("comment", str(cable_params.get("comment", "") or "").strip())
 
             start_id, end_id = self.canvas.get_cable_ap(cable_id)
 
@@ -7371,6 +7505,8 @@ class MainWindow(QMainWindow):
                     "ap_device_color": point_id_to_device_color.get(start_id, ""),
                     "ap_note": point_id_to_note.get(start_id, ""),
                     "cable_note": cable_note,
+                    "cable_id": cable_id,
+                    **self._cable_laying_location_fields(cable_id),
                 })
             if end_id:
                 rows.append({
@@ -7385,6 +7521,8 @@ class MainWindow(QMainWindow):
                     "ap_device_color": point_id_to_device_color.get(end_id, ""),
                     "ap_note": point_id_to_note.get(end_id, ""),
                     "cable_note": cable_note,
+                    "cable_id": cable_id,
+                    **self._cable_laying_location_fields(cable_id),
                 })
 
         return sorted(
@@ -7491,6 +7629,8 @@ class MainWindow(QMainWindow):
             length_m += total_height_cm / 100.0
             
             kv_rows.append({"name": params["name"], "type": params["type"],
+                            "cable_id": kid,
+                            **self._cable_laying_location_fields(kid),
                             "comment": params.get("comment", ""),
                             "length_m": length_m,
                             "start_ap": start_name, "end_ap": end_name,
@@ -7572,6 +7712,11 @@ class MainWindow(QMainWindow):
             "t_supply": t_supply, "t_return": t_return,
             "hk_rows": hk_rows, "hkv_sum": hkv_sum,
             "kv_rows": kv_rows, "kv_sum": kv_sum,
+            "kv_laying_location_by_type": {
+                cable_type: aggregate_cable_laying_locations(
+                    row.get("laying_location") for row in kv_rows if row["type"] == cable_type
+                ) for cable_type in kv_sum
+            },
             "ap_cables": ap_cables,
             "room_ap_connections": room_ap_connections,
             "ap_type_counts": ap_type_counts,
@@ -8172,12 +8317,13 @@ class MainWindow(QMainWindow):
                 str(slot.get("manufacturer", "")),
                 str(slot.get("article_number", "")),
                 str(slot.get("note", "")),
+                str(slot.get("laying_location_text", "–")),
             ])
         if slot_rows:
             page = ctx.new_page(toc_title=f"{title} – Tabelle")
             y_after = ctx.title(page, title)
             y_after = ctx.section_heading(page, y_after, "Belegte TE")
-            headers = ["Reihe", "TE", "Belegung", "TE-Br.", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Hersteller", "Artikelnummer", "Notiz"]
+            headers = ["Reihe", "TE", "Belegung", "TE-Br.", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Hersteller", "Artikelnummer", "Notiz", "Verlegeort"]
             ctx.draw_table(page, y_after, headers, slot_rows)
 
     # ── Seite: Elektro (Plan + Tabelle) ──
@@ -8253,21 +8399,23 @@ class MainWindow(QMainWindow):
                 "Name", "Typ", "Kabel-Notiz",
                 "Start-AP", "Start-Gerät", "Start-Farbe", "Start-Notiz", "Start-H. (cm)",
                 "End-AP", "End-Gerät", "End-Farbe", "End-Notiz", "End-H. (cm)",
-                "Länge (m)",
+                "Länge (m)", "Verlegeort",
             ]
             rows = [[r["name"], r["type"],
                      r.get("comment", ""),
                      r.get("start_ap", ""), r.get("start_device", ""), r.get("start_device_color", ""), r.get("start_note", ""), f"{r.get('start_height_cm', 0.0):.1f}",
                      r.get("end_ap", ""), r.get("end_device", ""), r.get("end_device_color", ""), r.get("end_note", ""), f"{r.get('end_height_cm', 0.0):.1f}",
-                     f"{r['length_m']:.2f}"]
+                     f"{r['length_m']:.2f}", r.get("laying_location_text", "–")]
                     for r in data["kv_rows"]]
-            col_w = [1.0, 0.9, 1.5, 0.9, 0.9, 0.8, 1.2, 0.7, 0.9, 0.9, 0.8, 1.2, 0.7, 0.8]
+            col_w = [1.0, 0.9, 1.5, 0.9, 0.9, 0.8, 1.2, 0.7, 0.9, 0.9, 0.8, 1.2, 0.7, 0.8, 2.0]
             y_after = ctx.draw_table(page, y_after, headers, rows, col_widths=col_w)
             kv_sum = data.get("kv_sum", {})
             if kv_sum:
                 y_after += ctx.mm(4)
-                h2 = ["Leitungstyp", "Gesamtlänge (m)"]
-                r2 = [[t, f"{kv_sum[t]:.2f}"] for t in sorted(kv_sum.keys())]
+                h2 = ["Leitungstyp", "Gesamtlänge (m)", "Verlegeort"]
+                r2 = [[t, f"{kv_sum[t]:.2f}", aggregate_cable_laying_locations(
+                    r.get("laying_location") for r in data["kv_rows"] if r["type"] == t
+                )] for t in sorted(kv_sum.keys())]
                 ctx.draw_table(page, y_after, h2, r2)
 
         ap_type_counts = data.get("ap_type_counts", {})
@@ -8284,7 +8432,7 @@ class MainWindow(QMainWindow):
             page = ctx.new_page(toc_title=f"{title} – AP-Anschlüsse")
             y_after = ctx.title(page, title)
             y_after = ctx.section_heading(page, y_after, "Anschlusspunkte – Kabelzuordnung")
-            ap_headers = ["AP", "Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "Länge (m)"]
+            ap_headers = ["AP", "Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "Länge (m)", "Verlegeort"]
             ap_rows = []
             for ap_name in sorted(ap_cables.keys()):
                 for c in ap_cables[ap_name]:
@@ -8292,6 +8440,7 @@ class MainWindow(QMainWindow):
                         ap_name, c["cable"], c["type"], c["role"],
                         c.get("ap_device", ""), c.get("ap_device_color", ""),
                         c.get("ap_note", ""), c.get("cable_note", ""), f"{c['length_m']:.2f}",
+                        c.get("laying_location_text", "–"),
                     ])
             ctx.draw_table(page, y_after, ap_headers, ap_rows)
 
@@ -8300,7 +8449,7 @@ class MainWindow(QMainWindow):
             page = ctx.new_page(toc_title=f"{title} – Räume")
             y_after = ctx.title(page, title)
             y_after = ctx.section_heading(page, y_after, "AP-Zuordnung nach Räumen")
-            room_headers = ["Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)"]
+            room_headers = ["Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Führt zu AP", "Länge (m)", "Verlegeort"]
             room_rows = [
                 [
                     r.get("room", ""), r.get("ap", ""),
@@ -8308,6 +8457,7 @@ class MainWindow(QMainWindow):
                     r.get("cable", ""), r.get("type", ""),
                     r.get("cable_note", ""), r.get("target_ap", ""),
                     f"{r.get('length_m', 0.0):.2f}",
+                    r.get("laying_location_text", "–"),
                 ]
                 for r in room_ap_connections
             ]
@@ -8336,10 +8486,19 @@ class MainWindow(QMainWindow):
                 page = ctx.new_page(toc_title=f"{title} – UV: {uv.get('ap_name', '')}")
                 y_after = ctx.title(page, f"{title} – UV: {uv.get('ap_name', '')}")
                 y_after = ctx.draw_uv_schematic(page, y_after, uv)
+                assigned_rows = [row for row in uv_rows if row.get("ap_id") == uv.get("ap_id")]
+                if assigned_rows:
+                    page = ctx.new_page(toc_title=f"{title} – UV-Kabelzuordnung")
+                    y_after = ctx.title(page, title)
+                    ctx.draw_table(page, y_after, ["UV", "Reihe", "TE", "Kabel/Stromkreis", "Verlegeort"], [
+                        [row.get("ap", ""), str(row.get("row", "")), str(row.get("slot", "")),
+                         row.get("assignment", ""), row.get("laying_location_text", "–")]
+                        for row in assigned_rows
+                    ])
         elif "el_uv" in sections and uv_rows:
             # Fallback: flat table for projects without uv_data
             y_after += ctx.mm(4)
-            headers = ["UV", "Raum", "Raster", "Reihe", "TE", "Belegung", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
+            headers = ["UV", "Raum", "Raster", "Reihe", "TE", "Belegung", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz", "Verlegeort"]
             rows = [
                 [
                     r.get("ap", ""),
@@ -8352,6 +8511,7 @@ class MainWindow(QMainWindow):
                     r.get("label", ""),
                     r.get("assignment", ""),
                     r.get("note", ""),
+                    r.get("laying_location_text", "–"),
                 ]
                 for r in uv_rows
             ]
@@ -8385,7 +8545,7 @@ class MainWindow(QMainWindow):
                     page = ctx.new_page(toc_title=f"Stromkreise: {uv_name}")
                     y_after = ctx.title(page, f"Schaltplan – Stromkreise: {uv_name}")
                     y_after = ctx.section_heading(page, y_after, "Stromkreiszuordnung")
-                    headers = ["Reihe", "TE", "Gerät", "Kennz.", "Bezeichnung", "Kabel", "Verbraucher", "Raum", "Notiz"]
+                    headers = ["Reihe", "TE", "Gerät", "Kennz.", "Bezeichnung", "Kabel", "Verbraucher", "Raum", "Notiz", "Verlegeort"]
                     rows = [
                         [
                             str(c.get("row", "")),
@@ -8397,6 +8557,7 @@ class MainWindow(QMainWindow):
                             str(c.get("end_ap_name", "")),
                             str(c.get("end_ap_room", "")),
                             str(c.get("note", "")),
+                            self._uv_slot_cable_fields(uv_id, c)["laying_location_text"],
                         ]
                         for c in circuits
                     ]
@@ -8444,6 +8605,7 @@ class MainWindow(QMainWindow):
                 "AP", "Raum", "Zuleitung", "Abgänge",
                 "Ader (Zul.)", "Abgehendes Kabel", "Ader (Abg.)",
                 "Zuordn.-Notiz", "Verteilungs-Notiz",
+                "Verlegeort Zuleitung", "Verlegeort Abgänge", "Verlegeort Abgang",
             ]
             rows = [
                 [
@@ -8456,6 +8618,9 @@ class MainWindow(QMainWindow):
                     r.get("to_conductor", ""),
                     r.get("mapping_note", ""),
                     r.get("distribution_note", ""),
+                    r.get("incoming_laying_location_text", "–"),
+                    r.get("outgoing_laying_location_text", "–"),
+                    r.get("to_cable_laying_location_text", "–"),
                 ]
                 for r in up_distribution_rows
             ]
@@ -8487,12 +8652,13 @@ class MainWindow(QMainWindow):
                         str(row.get("unit", "")),
                         f"{float(row.get('quantity', 0.0) or 0.0):.2f}",
                         note,
+                        str(row.get("laying_location_text", "–")) if key == "cable_bom_rows" else "",
                     ])
             if bom_rows:
                 page = ctx.new_page(toc_title=f"{title} – Stückliste")
                 y_after = ctx.title(page, title)
                 y_after = ctx.section_heading(page, y_after, "Stückliste")
-                headers = ["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz"]
+                headers = ["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz", "Verlegeort"]
                 ctx.draw_table(page, y_after, headers, bom_rows)
 
         if "el_uv_busbars" in sections and data.get("uv_busbar_bom_rows"):
@@ -8755,8 +8921,9 @@ class _PdfContext:
 
     def draw_table(self, page: QRectF, y_start: float,
                    headers: list[str], rows: list[list[str]],
-                   col_widths: list[float] | None = None) -> float:
-        from PySide6.QtGui import QPen, QBrush
+                   col_widths: list[float] | None = None,
+                   *, wrap_columns: set[int] | None = None) -> float:
+        from PySide6.QtGui import QPen, QBrush, QTextLayout, QTextOption
         n_cols = len(headers)
         side_margin = self.mm(4)
         table_w = max(self.mm(40), page.width() - 2 * side_margin)
@@ -8769,6 +8936,9 @@ class _PdfContext:
 
         base_font_size = 9 if n_cols <= 6 else (8 if n_cols <= 8 else 7)
         wide_table = n_cols >= 8
+        wrap_columns = set(wrap_columns or ()) | {
+            idx for idx, header in enumerate(headers) if "Verlegeort" in header
+        }
         cell_pad = self.mm(0.8)
         top_margin = self.mm(6)
         bottom_margin = self.mm(6)
@@ -8779,21 +8949,27 @@ class _PdfContext:
         header_h = max(self.mm(6), line_h + 2 * cell_pad)
         min_row_h = max(self.mm(4.2), line_h + 2 * cell_pad)
 
-        def _cell_height(text: str, col_w: float) -> float:
-            if wide_table:
-                return min_row_h
-            inner_w = max(1, int(col_w - 2 * cell_pad))
-            br = fm.boundingRect(0, 0, inner_w, 100000,
-                                  Qt.TextWordWrap | Qt.AlignLeft, str(text))
-            return br.height() + 2 * cell_pad
+        def _text_lines(text: str, idx: int):
+            layout = QTextLayout(text.replace("\r\n", "\n").replace("\n", "\u2028"), self.painter.font(), self.painter.device())
+            option = QTextOption()
+            option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            option.setAlignment(Qt.AlignLeft if idx in wrap_columns or idx < 2 else Qt.AlignRight)
+            layout.setTextOption(option)
+            lines = []
+            layout.beginLayout()
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(max(1, widths[idx] - 2 * cell_pad))
+                lines.append(line)
+            layout.endLayout()
+            return layout, lines
 
-        def _row_height(row_cells: list) -> float:
-            h = min_row_h
-            for j, cell in enumerate(row_cells):
-                if cell:
-                    h = max(h, _cell_height(str(cell),
-                                            widths[j] if j < len(widths) else self.mm(20)))
-            return h
+        self.painter.setFont(QFont("Arial", base_font_size, QFont.Bold))
+        header_layouts = {idx: _text_lines(str(headers[idx]), idx) for idx in wrap_columns}
+        header_h = max(header_h, max((len(item[1]) for item in header_layouts.values()), default=1) * line_h + 2 * cell_pad)
+        self.painter.setFont(QFont("Arial", base_font_size))
 
         def _page_bottom() -> float:
             return page.bottom() - bottom_margin
@@ -8814,6 +8990,11 @@ class _PdfContext:
                 r = QRectF(cx, y_pos, widths[j], header_h)
                 self.painter.fillRect(r, QBrush(QColor("#e0e0e0")))
                 self.painter.drawRect(r)
+                if j in header_layouts:
+                    for local_idx, line in enumerate(header_layouts[j][1]):
+                        line.draw(self.painter, QPointF(cx + cell_pad, y_pos + cell_pad + local_idx * line_h))
+                    cx += widths[j]
+                    continue
                 if wide_table:
                     inner_w = max(1, int(widths[j] - 2 * cell_pad))
                     header_text = fm.elidedText(str(h), Qt.ElideRight, inner_w)
@@ -8844,8 +9025,12 @@ class _PdfContext:
         # Data rows
         self.painter.setFont(QFont("Arial", base_font_size))
         for ri, row in enumerate(rows):
-            rh = _row_height(row)
-            if y + rh > _page_bottom():
+            row = [str(row[idx]) if idx < len(row) else "" for idx in range(n_cols)]
+            layouts = {idx: _text_lines(cell, idx) for idx, cell in enumerate(row)
+                       if not wide_table or idx in wrap_columns}
+            line_count = max(1, max((len(item[1]) for item in layouts.values()), default=1))
+            rh = max(min_row_h, line_count * line_h + 2 * cell_pad)
+            if y + rh > _page_bottom() and rh <= page.height() - top_margin - bottom_margin - header_h:
                 page = _new_page()
                 x0 = page.x() + side_margin
                 y = page.y() + top_margin
@@ -8853,36 +9038,36 @@ class _PdfContext:
                 y += header_h
             self.painter.setFont(QFont("Arial", base_font_size))
 
-            if ri % 2 == 1:
+            offset = 0
+            while offset < line_count:
+                capacity = int((_page_bottom() - y - 2 * cell_pad) // line_h)
+                if capacity < 1:
+                    page = _new_page()
+                    x0 = page.x() + side_margin
+                    y = page.y() + top_margin
+                    _draw_header(y)
+                    y += header_h
+                    self.painter.setFont(QFont("Arial", base_font_size))
+                    continue
+                count = min(capacity, line_count - offset)
+                fragment_h = max(min_row_h, count * line_h + 2 * cell_pad)
+                if ri % 2 == 1:
+                    self.painter.fillRect(QRectF(x0, y, table_w, fragment_h), QBrush(QColor("#f5f5f5")))
                 cx = x0
-                for j in range(n_cols):
-                    self.painter.fillRect(
-                        QRectF(cx, y, widths[j], rh),
-                        QBrush(QColor("#f5f5f5")))
+                for j, cell in enumerate(row):
+                    r = QRectF(cx, y, widths[j], fragment_h)
+                    self.painter.drawRect(r)
+                    if j in layouts:
+                        for local_idx, line in enumerate(layouts[j][1][offset:offset + count]):
+                            line.draw(self.painter, QPointF(cx + cell_pad, y + cell_pad + local_idx * line_h))
+                    elif offset == 0:
+                        txt = fm.elidedText(cell, Qt.ElideRight, max(1, int(widths[j] - 2 * cell_pad)))
+                        align = Qt.AlignRight if j >= 2 else Qt.AlignLeft
+                        self.painter.drawText(r.adjusted(cell_pad, cell_pad, -cell_pad, -cell_pad),
+                                              align | Qt.AlignVCenter | Qt.TextSingleLine, txt)
                     cx += widths[j]
-            cx = x0
-            for j, cell in enumerate(row):
-                r = QRectF(cx, y, widths[j], rh)
-                self.painter.drawRect(r)
-                align = ((Qt.AlignRight | Qt.AlignTop)
-                         if j >= 2
-                         else (Qt.AlignLeft | Qt.AlignTop))
-                if wide_table:
-                    inner_w = max(1, int(widths[j] - 2 * cell_pad))
-                    txt = fm.elidedText(str(cell), Qt.ElideRight, inner_w)
-                    flags = ((Qt.AlignRight | Qt.AlignVCenter)
-                             if j >= 2
-                             else (Qt.AlignLeft | Qt.AlignVCenter)) | Qt.TextSingleLine
-                else:
-                    txt = str(cell)
-                    flags = align | Qt.TextWordWrap
-                self.painter.drawText(
-                    r.adjusted(cell_pad, cell_pad, -cell_pad, -cell_pad),
-                    flags,
-                    txt,
-                )
-                cx += widths[j]
-            y += rh
+                y += fragment_h
+                offset += count
 
         self.painter.restore()
         return y

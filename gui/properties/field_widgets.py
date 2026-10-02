@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QSignalBlocker, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,9 +23,11 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QVBoxLayout,
     QWidget,
 )
 
+from model.cable_laying_location import normalize_cable_laying_location
 from model.schema import ChoiceOption, FieldKind, FieldSpec
 
 
@@ -179,6 +181,100 @@ class BoolFieldWidget(FieldWidget):
 
     def set_value(self, value: Any) -> None:
         self._box.setChecked(bool(value))
+
+
+class MultiSelectWithTextFieldWidget(FieldWidget):
+    """Independent presets plus an optional, retained custom text value.
+
+    Checkboxes commit immediately. Typing commits only on editingFinished or
+    an explicit save/export flush, never on a timer or each keystroke.
+    """
+
+    def __init__(
+        self,
+        spec: FieldSpec,
+        parent: QWidget | None = None,
+        options: tuple[ChoiceOption, ...] | None = None,
+    ) -> None:
+        super().__init__(spec, parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self._checks: dict[str, QCheckBox] = {}
+        for option in options if options is not None else spec.resolve_options():
+            code, label = _option_parts(option)
+            check = QCheckBox(label, self)
+            self._checks[code] = check
+            check.toggled.connect(self._on_check_toggled)
+            layout.addWidget(check)
+
+        custom_row = QHBoxLayout()
+        self._custom_check = QCheckBox("Sonstiges", self)
+        self._custom_edit = QLineEdit(self)
+        self._custom_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._custom_edit.setPlaceholderText("Eigener Verlegeort")
+        self._custom_edit.setEnabled(False)
+        self._pending_edit = False
+        self._committed_text = ""
+        self._custom_check.toggled.connect(self._on_check_toggled)
+        self._custom_edit.textEdited.connect(self._on_text_edited)
+        self._custom_edit.editingFinished.connect(self.commit_pending_edit)
+        custom_row.addWidget(self._custom_check)
+        custom_row.addWidget(self._custom_edit, 1)
+        layout.addLayout(custom_row)
+
+    def value(self) -> dict:
+        return normalize_cable_laying_location({
+            "locations": [code for code, check in self._checks.items() if check.isChecked()],
+            "custom_enabled": self._custom_check.isChecked(),
+            "custom_text": self._custom_edit.text(),
+        })
+
+    def set_value(self, value: Any) -> None:
+        # A document refresh must not replace a focused, unfinished input or
+        # move its cursor. The user commits that atomic value when ready.
+        if self._pending_edit and self._custom_edit.hasFocus():
+            return
+        normalized = normalize_cable_laying_location(value)
+        controls = [*self._checks.values(), self._custom_check, self._custom_edit]
+        blockers = [QSignalBlocker(control) for control in controls]
+        try:
+            self._pending_edit = False
+            self._committed_text = normalized["custom_text"]
+            for code, check in self._checks.items():
+                check.setChecked(code in normalized["locations"])
+            self._custom_check.setChecked(normalized["custom_enabled"])
+            if self._custom_edit.text() != normalized["custom_text"]:
+                self._custom_edit.setText(normalized["custom_text"])
+            self._custom_edit.setEnabled(normalized["custom_enabled"])
+        finally:
+            for blocker in blockers:
+                blocker.unblock()
+
+    def _on_text_edited(self, text: str) -> None:
+        if not self._updating:
+            self._pending_edit = text != self._committed_text
+
+    def _on_check_toggled(self, _checked: bool) -> None:
+        if self._updating:
+            return
+        # Include any typed text in the full checkbox commit before disabling
+        # the edit can generate editingFinished. Never clear inactive text.
+        self._pending_edit = False
+        self._committed_text = self._custom_edit.text()
+        self._custom_edit.setEnabled(self._custom_check.isChecked())
+        self._emit(self.value())
+
+    def has_pending_edit(self) -> bool:
+        return self._pending_edit
+
+    def commit_pending_edit(self) -> None:
+        if self._updating or not self._pending_edit:
+            return
+        self._pending_edit = False
+        self._committed_text = self._custom_edit.text()
+        self._emit(self.value())
 
 
 class ColorFieldWidget(FieldWidget):
@@ -410,6 +506,9 @@ _FACTORY = {
     ),
     FieldKind.EDITABLE_CHOICE: lambda spec, parent, options: ChoiceFieldWidget(
         spec, True, parent, options
+    ),
+    FieldKind.MULTISELECT_WITH_TEXT: lambda spec, parent, options: MultiSelectWithTextFieldWidget(
+        spec, parent, options
     ),
     FieldKind.FILE: lambda spec, parent, options: FileFieldWidget(spec, parent),
     FieldKind.READONLY: lambda spec, parent, options: ReadOnlyFieldWidget(spec, parent),

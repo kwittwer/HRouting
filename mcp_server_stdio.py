@@ -31,10 +31,27 @@ import sys
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
+from model.cable_laying_location import (
+    aggregate_cable_laying_locations,
+    format_cable_laying_location,
+    normalize_cable_laying_location,
+)
 
 logger = logging.getLogger("hrouting.mcp-stdio")
 
 BASE_DIR = Path(__file__).parent
+
+def _laying_location_union(values) -> dict:
+    values = [normalize_cable_laying_location(value) for value in values]
+    custom = list(dict.fromkeys(value["custom_text"].strip() or "Sonstiges"
+                               for value in values if value["custom_enabled"]))
+    return {
+        "laying_location": normalize_cable_laying_location({
+            "locations": [code for value in values for code in value["locations"]],
+            "custom_enabled": bool(custom), "custom_text": "; ".join(custom),
+        }),
+        "laying_location_text": aggregate_cable_laying_locations(values),
+    }
 
 # ── Projekt-State ──────────────────────────────────────────────────
 
@@ -791,10 +808,12 @@ def _create_stdio_mcp():
         ]
 
         cable_by_type: dict[str, float] = {}
+        locations_by_type: dict[str, list[dict]] = {}
         for cable_id, cdata in params.get("elec_cables", {}).items():
-            cable_type = str(cdata.get("cable_type", cdata.get("name", cable_id)) or "").strip() or "(unbekannt)"
+            cable_type = str(cdata.get("type") or cdata.get("cable_type") or cdata.get("name", cable_id) or "").strip() or "(unbekannt)"
             length_m = _polyline_length_m(canvas.get("elec_cables", {}).get(cable_id, []), mm_per_px)
             cable_by_type[cable_type] = cable_by_type.get(cable_type, 0.0) + length_m
+            locations_by_type.setdefault(cable_type, []).append(cdata.get("laying_location"))
 
         cable_bom_rows = [
             {
@@ -805,6 +824,7 @@ def _create_stdio_mcp():
                 "unit": "m",
                 "quantity": quantity,
                 "meta": {"cable_type": cable_type},
+                **_laying_location_union(locations_by_type[cable_type]),
             }
             for cable_type, quantity in sorted(cable_by_type.items(), key=lambda kv: kv[0].lower())
         ]
@@ -1038,6 +1058,10 @@ def _create_stdio_mcp():
         """Projektübersicht: Anzahl Elemente, Parameter, Maßstab."""
         p = _state.data.get("params", {})
         c = _state.data.get("canvas", {})
+        locations = {}
+        for cid, cable in p.get("elec_cables", {}).items():
+            cable_type = cable.get("type") or cable.get("cable_type") or cable.get("name", cid)
+            locations.setdefault(cable_type, []).append(cable.get("laying_location"))
         return {
             "project_file": str(_state.path) if _state.path else None,
             "dirty": _state.dirty,
@@ -1048,6 +1072,7 @@ def _create_stdio_mcp():
             "elec_point_ids": list(p.get("elec_points", {}).keys()),
             "elec_room_count": len(p.get("elec_rooms", {})),
             "elec_cable_count": len(p.get("elec_cables", {})),
+            "cable_laying_location_by_type": {key: _laying_location_union(values) for key, values in locations.items()},
             "hkv_count": len(p.get("hkv_points", {})),
             "t_supply": p.get("t_supply", 35.0),
             "t_return": p.get("t_return", 30.0),
@@ -1306,6 +1331,8 @@ def _create_stdio_mcp():
         result = []
         for eid, edata in p.get("elec_cables", {}).items():
             entry = dict(edata)
+            entry["laying_location"] = normalize_cable_laying_location(edata.get("laying_location"))
+            entry["laying_location_text"] = format_cable_laying_location(entry["laying_location"])
             entry["start_ap"] = c.get("cable_start_ap", {}).get(eid, "")
             entry["end_ap"] = c.get("cable_end_ap", {}).get(eid, "")
             result.append(entry)
@@ -1363,7 +1390,7 @@ def _create_stdio_mcp():
             "spacing": spacing,
             "wall_dist": wall_dist,
             "visible": True,
-            "label_visible": True,
+            "label_visible": False,
             "label_size": 12.0,
             "room_temp": room_temp,
             "floor_covering": floor_covering,
@@ -1474,7 +1501,7 @@ def _create_stdio_mcp():
             "icon_path": "",
             "builtin_symbol": builtin_symbol,
             "visible": True,
-            "label_visible": True,
+            "label_visible": False,
             "label_size": 12.0,
             "position": position,
             "height_from_floor": height_from_floor,
@@ -1947,6 +1974,8 @@ def _create_stdio_mcp():
                 "missing_start": is_missing_start,
                 "missing_end": is_missing_end,
                 "invalid_ref": is_invalid_ref,
+                "laying_location": normalize_cable_laying_location(cdata.get("laying_location")),
+                "laying_location_text": format_cable_laying_location(cdata.get("laying_location")),
             })
 
         return {

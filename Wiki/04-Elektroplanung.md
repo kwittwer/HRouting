@@ -158,11 +158,34 @@ Die Zuordnung wird als strukturierte Daten im Projekt gespeichert und kann über
 | **Name** | Bezeichnung |
 | **Farbe** | Darstellungsfarbe |
 | **Typ** | Kabeltyp (z.B. „5x1,5") |
+| **Verlegeort** | Mehrfachauswahl: Auf dem Boden, In der Wand, In der Decke sowie Sonstiges mit Freitext |
 | **Kommentar** | Freitext-Notiz |
 | **Kabeltyp im Plan** | Blendet den Kabeltyp direkt in der Plan-Beschriftung ein/aus |
 | **Schriftgröße** | Label-Schriftgröße |
 
 > **Hinweis:** Der Kabeltyp ist im Plan standardmäßig ausgeblendet. Wenn aktiviert, erscheint er als **eigene Beschriftung** (unabhängig vom Namen) und kann wie andere Labels per Drag & Drop separat verschoben werden.
+
+### Verlegeorte zuordnen
+
+Kabel auswählen und im Eigenschaftenbereich **Kabel → Verlegeort** die passenden
+Checkboxen aktivieren. Mehrere Orte sind gleichzeitig möglich. **Sonstiges**
+aktiviert ein zusätzliches Freitextfeld; die Eingabe wird mit Enter oder beim
+Verlassen des Felds übernommen. Beim Speichern oder Export werden noch offene
+Eingaben ebenfalls übernommen. Wird Sonstiges abgewählt, bleibt der Text
+gespeichert, erscheint aber nicht in Listen oder Exporten.
+
+Neue Kabel und ältere Projekte ohne Angabe starten ohne ausgewählten Ort.
+Die Angaben werden beim Duplizieren und beim Import von HRP-Elementen übernommen;
+ein erneuter KiCad-Import erhält bereits zugeordnete Verlegeorte.
+
+**Verlegeort** wird in Kabellisten, AP-/Raum-Kabelzuordnungen, kabelbezogenen
+Verteilertabellen sowie PDF- und vorhandenen CSV-Ausgaben aufgeführt. In Material-
+und Stücklisten bleiben die Gesamtlängen je Kabeltyp unverändert; die Spalte zeigt
+alle vorkommenden Verlegeorte, ohne Kabellängen mehrfach zu zählen.
+
+Die Angabe dokumentiert den physischen Verlauf, keine normierte elektrische
+Verlegeart. Sie verändert weder Kabellängen noch Dimensionierung, Darstellung
+oder die standardmäßig ausgeblendete Kabelbeschriftung.
 
 ### Berechnete Werte
 

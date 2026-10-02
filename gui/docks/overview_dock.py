@@ -413,8 +413,8 @@ class ProjectOverviewDock(QDockWidget):
         return tbl
 
     def _build_elec_cable_material_table(self) -> QTableWidget:
-        tbl = QTableWidget(0, 2)
-        tbl.setHorizontalHeaderLabels(["Typ", "Gesamtlänge [m]"])
+        tbl = QTableWidget(0, 3)
+        tbl.setHorizontalHeaderLabels(["Typ", "Gesamtlänge [m]", "Verlegeort"])
         tbl.setSortingEnabled(True)
         tbl.setEditTriggers(QTableWidget.NoEditTriggers)
         tbl.setSelectionBehavior(QTableWidget.SelectRows)
@@ -437,8 +437,8 @@ class ProjectOverviewDock(QDockWidget):
         return tbl
 
     def _build_elec_room_table(self) -> QTableWidget:
-        tbl = QTableWidget(0, 5)
-        tbl.setHorizontalHeaderLabels(["Raum", "AP", "AP-Typ", "Höhe über FB [cm]", "Kabel"])
+        tbl = QTableWidget(0, 6)
+        tbl.setHorizontalHeaderLabels(["Raum", "AP", "AP-Typ", "Höhe über FB [cm]", "Kabel", "Verlegeort"])
         # Grouped rows should keep a deterministic room -> AP order.
         tbl.setSortingEnabled(False)
         tbl.setEditTriggers(
@@ -453,8 +453,8 @@ class ProjectOverviewDock(QDockWidget):
         return tbl
 
     def _build_elec_cable_table(self) -> QTableWidget:
-        tbl = QTableWidget(0, 5)
-        tbl.setHorizontalHeaderLabels(["Name", "Typ", "Länge [m]", "Start AP", "End AP"])
+        tbl = QTableWidget(0, 6)
+        tbl.setHorizontalHeaderLabels(["Name", "Typ", "Länge [m]", "Start AP", "End AP", "Verlegeort"])
         tbl.setSortingEnabled(True)
         tbl.setEditTriggers(
             QAbstractItemView.DoubleClicked
@@ -689,6 +689,7 @@ class ProjectOverviewDock(QDockWidget):
 
     def _fill_elec_material_tables(self, materials: dict) -> None:
         cable_map = materials.get("cable_length_by_type_m", {}) if isinstance(materials, dict) else {}
+        location_map = materials.get("cable_laying_location_by_type", {}) if isinstance(materials, dict) else {}
         ap_map = materials.get("ap_count_by_type", {}) if isinstance(materials, dict) else {}
 
         cable_tbl = self._elec_cable_mat_table
@@ -700,10 +701,14 @@ class ProjectOverviewDock(QDockWidget):
             r = row_index
             cable_tbl.setItem(r, 0, _str_item(cable_type))
             cable_tbl.setItem(r, 1, _num_item(float(length_m or 0.0), ".2f", "m"))
+            location_item = _str_item(location_map.get(cable_type, "–"))
+            location_item.setToolTip(location_item.text())
+            cable_tbl.setItem(r, 2, location_item)
             row_index += 1
         if cable_map:
             cable_tbl.setItem(row_index, 0, _str_item("Summe"))
             cable_tbl.setItem(row_index, 1, _num_item(total_length_m, ".2f", "m"))
+            cable_tbl.setItem(row_index, 2, _str_item(""))
         cable_tbl.setSortingEnabled(True)
         cable_tbl.resizeColumnsToContents()
         self._elec_cable_total_label.setText(f"Gesamt: {total_length_m:.2f} m")
@@ -806,6 +811,10 @@ class ProjectOverviewDock(QDockWidget):
         tbl.setSortingEnabled(False)
         tbl.blockSignals(True)
         tbl.setRowCount(len(rows))
+        ap_locations = {
+            str(ap.get("point_id", "")): ap
+            for room in rooms or [] for ap in room.get("aps", [])
+        }
         symbol_options = self._elec_ap_symbol_options()
         for r, row in enumerate(rows):
             point_id = str(row.get("point_id") or "")
@@ -849,6 +858,16 @@ class ProjectOverviewDock(QDockWidget):
             self._set_item_editable(cable_item, False)
             cable_item.setToolTip(str(row.get("full_cables", "")))
             tbl.setItem(r, 4, cable_item)
+            ap_data = ap_locations.get(point_id, {})
+            location_item = _str_item(ap_data.get("laying_location_text", "–") if point_id else "")
+            self._set_item_editable(location_item, False)
+            detail_text = "\n".join(
+                f"{cable['name']} [{cable['id']}]: {cable['laying_location_text']}"
+                for cable in ap_data.get("cable_details", [])
+            )
+            location_item.setToolTip(detail_text or location_item.text())
+            cable_item.setToolTip(detail_text or cable_item.toolTip())
+            tbl.setItem(r, 5, location_item)
             if row.get("is_group"):
                 _style_group_row(r)
         tbl.blockSignals(False)
@@ -912,6 +931,10 @@ class ProjectOverviewDock(QDockWidget):
             end_item = _str_item(cable.get("end_ap_name", ""))
             self._set_item_editable(end_item, False)
             tbl.setItem(r, 4, end_item)
+            location_item = _str_item(cable.get("laying_location_text", "–"))
+            self._set_item_editable(location_item, False)
+            location_item.setToolTip(location_item.text())
+            tbl.setItem(r, 5, location_item)
         tbl.blockSignals(False)
         self._updating_electro_tables = False
         tbl.setSortingEnabled(True)

@@ -12,8 +12,10 @@ typisierte Zugriff erfolgt über Properties.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, ClassVar
 
+from .cable_laying_location import normalize_cable_laying_location
 from .layers import LayerId
 
 #: canvas-Maps, die für jedes Element existieren können
@@ -95,6 +97,9 @@ class Element:
         data: dict[str, Any] = dict(fields)
         if cls.ID_FIELD:
             data[cls.ID_FIELD] = element_id
+        data.setdefault("visible", True)
+        data.setdefault("label_visible", False)
+        data.setdefault("label_size", 12.0)
         return cls(element_id, data)
 
     @classmethod
@@ -231,6 +236,29 @@ class ElecCable(Element):
         "cable_end_ap",
         "elec_visible",
     )
+
+    def __init__(
+        self, element_id: str, data: dict | None = None, geom: dict | None = None,
+    ) -> None:
+        super().__init__(element_id, data, geom)
+        # Preserve raw/unknown fields on load, but don't alias nested metadata
+        # when a caller constructs a cable from another cable's params.
+        if "laying_location" in self.data:
+            self.data["laying_location"] = deepcopy(self.data["laying_location"])
+
+    @property
+    def laying_location(self) -> dict:
+        return normalize_cable_laying_location(self.data.get("laying_location"))
+
+    @laying_location.setter
+    def laying_location(self, value: Any) -> None:
+        self.data["laying_location"] = normalize_cable_laying_location(value)
+
+    def to_params(self) -> dict:
+        out = super().to_params()
+        if "laying_location" in out:
+            out["laying_location"] = deepcopy(out["laying_location"])
+        return out
 
     cable_type = _param("type", "")
     comment = _param("comment", "")

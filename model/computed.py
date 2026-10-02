@@ -12,6 +12,7 @@ import math
 import re
 from typing import Any
 
+from .cable_laying_location import aggregate_cable_laying_locations, format_cable_laying_location
 from .document import Document
 from .elements import (
     Circuit,
@@ -476,8 +477,10 @@ def _electro_overview_data(document: Document) -> dict[str, Any]:
 
     # Cable list + material sum by type.
     cable_length_by_type: dict[str, float] = defaultdict(float)
+    cable_locations_by_type: dict[str, list[dict]] = defaultdict(list)
     cable_rows: list[dict[str, Any]] = []
     ap_to_cables: dict[str, list[str]] = defaultdict(list)
+    ap_to_cable_rows: dict[str, list[dict]] = defaultdict(list)
 
     def _ap_name(ap_id: str) -> str:
         if not ap_id:
@@ -491,8 +494,8 @@ def _electro_overview_data(document: Document) -> dict[str, Any]:
         cable_type = str(cable.cable_type or "Unbekannt")
         length_info = cable_length_details(document, cable)
         length_m = float(length_info["length_m"])
-        start_ap_id = str(cable.start_ap or "")
-        end_ap_id = str(cable.end_ap or "")
+        start_ap_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "")
+        end_ap_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "")
         cable_name = str(cable.name or cable_id)
 
         cable_rows.append(
@@ -500,6 +503,8 @@ def _electro_overview_data(document: Document) -> dict[str, Any]:
                 "id": cable_id,
                 "name": cable_name,
                 "type": cable_type,
+                "laying_location": cable.laying_location,
+                "laying_location_text": format_cable_laying_location(cable.laying_location),
                 "length_m": length_m,
                 "valid_scale": bool(length_info["valid_scale"]),
                 "start_ap_id": start_ap_id,
@@ -509,11 +514,14 @@ def _electro_overview_data(document: Document) -> dict[str, Any]:
             }
         )
         cable_length_by_type[cable_type] += length_m
+        cable_locations_by_type[cable_type].append(cable.laying_location)
 
         if start_ap_id:
             ap_to_cables[start_ap_id].append(cable_name)
+            ap_to_cable_rows[start_ap_id].append(cable_rows[-1])
         if end_ap_id and end_ap_id != start_ap_id:
             ap_to_cables[end_ap_id].append(cable_name)
+            ap_to_cable_rows[end_ap_id].append(cable_rows[-1])
 
     # AP count by type.
     ap_count_by_type: dict[str, int] = defaultdict(int)
@@ -575,6 +583,10 @@ def _electro_overview_data(document: Document) -> dict[str, Any]:
             "ap_type": str(point.builtin_symbol or point.ap_type or "Unbekannt"),
             "height_from_floor_cm": float(point.height_from_floor or 0.0) / 10.0,
             "cables": sorted(set(ap_to_cables.get(point_id, []))),
+            "cable_details": list(ap_to_cable_rows.get(point_id, [])),
+            "laying_location_text": aggregate_cable_laying_locations(
+                row["laying_location"] for row in ap_to_cable_rows.get(point_id, [])
+            ),
         }
 
         key = assigned_room_id or unassigned_key
@@ -593,6 +605,10 @@ def _electro_overview_data(document: Document) -> dict[str, Any]:
 
     return {
         "materials": {
+            "cable_laying_location_by_type": {
+                key: aggregate_cable_laying_locations(values)
+                for key, values in sorted(cable_locations_by_type.items())
+            },
             "cable_length_by_type_m": {
                 key: round(value, 2) for key, value in sorted(cable_length_by_type.items())
             },

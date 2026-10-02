@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
+from .cable_laying_location import CABLE_LAYING_OPTIONS
 from .elements import (
     AngleMeasurement,
     AnnotationCircle,
@@ -51,6 +52,7 @@ class FieldKind(str, Enum):
     COLOR = "color"
     CHOICE = "choice"
     EDITABLE_CHOICE = "editable_choice"
+    MULTISELECT_WITH_TEXT = "multiselect_with_text"
     FILE = "file"
     READONLY = "readonly"
 
@@ -486,6 +488,9 @@ ELEC_CABLE_SCHEMA = ElementSchema(
         ),
         FieldSpec("type", "Kabeltyp", FieldKind.EDITABLE_CHOICE,
                   document_options=_cable_type_options, default="5x1,5", group="Kabel"),
+        FieldSpec("laying_location", "Verlegeort", FieldKind.MULTISELECT_WITH_TEXT,
+              options=CABLE_LAYING_OPTIONS, group="Kabel",
+              tooltip="Physischer Verlegeort; keine elektrische Verlegeart."),
         FieldSpec("type_label_visible", "Kabeltyp im Plan anzeigen",
                   FieldKind.BOOL, default=False, group="Kabel"),
         FieldSpec("stroke_width", "Strichstärke", FieldKind.NUMBER,

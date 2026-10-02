@@ -292,6 +292,20 @@ class GenericElementEditor(QWidget):
         self.refresh_computed()
         self._update_action_visibility()
 
+    def has_pending_edit(self) -> bool:
+        """Whether a compound/editable field still has an uncommitted input."""
+        return any(
+            callable(pending := getattr(widget, "has_pending_edit", None)) and pending()
+            for widget in self._widgets.values()
+        )
+
+    def commit_pending_edit(self) -> None:
+        """Flush live input through the normal pre_change/field_changed path."""
+        for widget in tuple(self._widgets.values()):
+            commit = getattr(widget, "commit_pending_edit", None)
+            if callable(commit):
+                commit()
+
     def refresh(self) -> None:
         """Alle Feldwerte aus dem Element übernehmen."""
         if self._header is not None:

@@ -988,6 +988,21 @@
       }
     },
 
+    "CableLayingLocation": {
+      "type": "object",
+      "description": "Physischer Verlegeort, keine normierte elektrische Verlegeart. Inaktiver Freitext bleibt gespeichert.",
+      "properties": {
+        "locations": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["floor", "wall", "ceiling"] },
+          "uniqueItems": true,
+          "default": []
+        },
+        "custom_enabled": { "type": "boolean", "default": false },
+        "custom_text": { "type": "string", "default": "" }
+      }
+    },
+
     "ParamElecCable": {
       "type": "object",
       "required": ["cable_id"],
@@ -997,6 +1012,7 @@
         "name": { "type": "string" },
         "color": { "$ref": "#/$defs/HexColor", "default": "#ff9800" },
         "type": { "type": "string", "default": "5x1,5", "description": "Kabeltyp, z.B. '5x1,5', '3x1,5'." },
+        "laying_location": { "$ref": "#/$defs/CableLayingLocation" },
         "comment": { "type": "string", "default": "" },
         "visible": { "type": "boolean", "default": true },
         "label_visible": { "type": "boolean", "default": true },

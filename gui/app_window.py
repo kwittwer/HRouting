@@ -45,6 +45,11 @@ from PySide6.QtWidgets import (
 )
 
 from model.document import Document
+from model.cable_laying_location import (
+    aggregate_cable_laying_locations,
+    format_cable_laying_location,
+    normalize_cable_laying_location,
+)
 from model.field_access import apply_display_value, get_field
 from model.elements import (
     AngleMeasurement,
@@ -3866,7 +3871,7 @@ class AppWindow(QMainWindow):
             spacing=150.0,
             wall_dist=200.0,
             visible=True,
-            label_visible=True,
+            label_visible=False,
             label_size=12.0,
             room_temp=20.0,
             floor_covering="Fliesen / Keramik",
@@ -3896,7 +3901,7 @@ class AppWindow(QMainWindow):
             icon_path="",
             builtin_symbol="Steckdose",
             visible=True,
-            label_visible=True,
+            label_visible=False,
             label_size=12.0,
             position="Wand",
             height_from_floor=30.0,
@@ -3922,7 +3927,7 @@ class AppWindow(QMainWindow):
             name=f"Raum {rid.rsplit('-', 1)[-1]}",
             color="#43aa8b",
             visible=True,
-            label_visible=True,
+            label_visible=False,
             label_size=12.0,
         )
         self._document.add(room)
@@ -4009,7 +4014,7 @@ class AppWindow(QMainWindow):
             name=format_auto_cable_name("", ""),
             color=str(profile.get("color", "#ff9800")),
             visible=True,
-            label_visible=True,
+            label_visible=False,
             label_size=12.0,
             type=cable_type,
             comment="",
@@ -4066,7 +4071,7 @@ class AppWindow(QMainWindow):
             name=format_auto_cable_name(str(point.name or ap_id), ""),
             color=str(profile.get("color", "#ff9800")),
             visible=True,
-            label_visible=True,
+            label_visible=False,
             label_size=12.0,
             type=cable_type,
             comment="",
@@ -4109,7 +4114,7 @@ class AppWindow(QMainWindow):
             name=f"HKV {hid.rsplit('-', 1)[-1]}",
             color="#e91e63",
             visible=True,
-            label_visible=True,
+            label_visible=False,
             label_size=12.0,
             width=50.0,
             height=50.0,
@@ -4134,7 +4139,7 @@ class AppWindow(QMainWindow):
             name=f"HKV-Leitung {lid.rsplit('-', 1)[-1]}",
             color="#9c27b0",
             visible=True,
-            label_visible=True,
+            label_visible=False,
             label_size=12.0,
             start_hkv="",
             end_hkv="",
@@ -4246,6 +4251,10 @@ class AppWindow(QMainWindow):
 
     def _flush_live_editor_state(self) -> None:
         """Persist open non-modal editors before save/export reads the document."""
+        properties = getattr(self, "properties", None)
+        for element_id, editor in tuple(getattr(properties, "_editors", {}).items()):
+            if self._document.get(element_id) is editor.element:
+                editor.commit_pending_edit()
         uv_planning = getattr(self, "uv_planning", None)
         if uv_planning is None:
             return
@@ -6081,6 +6090,7 @@ class AppWindow(QMainWindow):
                 str(slot.get("label", "")),
                 str(slot.get("assignment", "")),
                 str(slot.get("note", "")),
+                str(slot.get("laying_location_text", "–")),
             ])
         if path_rows:
             self._pdf_new_page(painter, writer)
@@ -6088,9 +6098,10 @@ class AppWindow(QMainWindow):
                 painter,
                 writer,
                 f"{title} – Belegung",
-                ["Reihe", "TE", "Typ", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"],
+                ["Reihe", "TE", "Typ", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz", "Verlegeort"],
                 path_rows,
-                col_widths=[0.6, 0.5, 1.1, 1.0, 1.7, 1.8, 1.4],
+                col_widths=[0.6, 0.5, 1.1, 1.0, 1.7, 1.8, 1.4, 1.8],
+                wrap_columns={7},
             )
 
     def _current_floor_plans_for_export_dialog(self) -> list[tuple[str, str]]:
@@ -6310,7 +6321,8 @@ class AppWindow(QMainWindow):
 
         cable_rows: list[list[str]] = []
         for cid, cable in self._document.elements["elec_cables"].items():
-            start_id, end_id = self.canvas.get_cable_ap(cid)
+            start_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "")
+            end_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "")
             start_name = self._document.elements["elec_points"].get(start_id).name if start_id in self._document.elements["elec_points"] else (start_id or "")
             end_name = self._document.elements["elec_points"].get(end_id).name if end_id in self._document.elements["elec_points"] else (end_id or "")
             length_m = float(cable_length_details(self._document, cable)["length_m"])
@@ -6320,6 +6332,7 @@ class AppWindow(QMainWindow):
                 str(start_name or ""),
                 str(end_name or ""),
                 f"{length_m:.2f} m",
+                format_cable_laying_location(cable.laying_location),
             ])
         cable_rows.sort(key=lambda row: row[0].lower())
         return ap_rows, cable_rows
@@ -6357,6 +6370,7 @@ class AppWindow(QMainWindow):
                 str(start_name or ""),
                 str(end_name or ""),
                 f"{length_m:.2f} m",
+                format_cable_laying_location(cable.laying_location),
             ])
 
         ap_rows: list[list[str]] = []
@@ -6547,6 +6561,45 @@ class AppWindow(QMainWindow):
             return label or "Eigenes Symbol"
         return "(kein Symbol)"
 
+    def _cable_laying_location_fields(self, cable_id: str) -> dict:
+        cable = self._document.elements["elec_cables"].get(cable_id)
+        location = normalize_cable_laying_location(cable.laying_location if cable is not None else None)
+        return {
+            "laying_location": location,
+            "laying_location_text": format_cable_laying_location(location),
+        }
+
+    def _related_cable_laying_location_fields(self, cable_ids: list[str]) -> dict:
+        """Union active metadata only; never split or multiply material quantities."""
+        values = [self._cable_laying_location_fields(cid)["laying_location"] for cid in dict.fromkeys(cable_ids)]
+        locations = [code for value in values for code in value["locations"]]
+        custom = list(dict.fromkeys(
+            value["custom_text"].strip() or "Sonstiges"
+            for value in values if value["custom_enabled"]
+        ))
+        return {
+            "laying_location": normalize_cable_laying_location({
+                "locations": locations,
+                "custom_enabled": bool(custom),
+                "custom_text": "; ".join(custom),
+            }),
+            "laying_location_text": aggregate_cable_laying_locations(values),
+        }
+
+    def _uv_slot_cable_fields(self, point_id: str, slot: dict) -> dict:
+        """Prefer IDs; legacy name assignments resolve only when unambiguous locally."""
+        cables = self._document.elements["elec_cables"]
+        assignment = str(slot.get("cable_id") or slot.get("assignment") or "").strip()
+        cable_id = assignment if assignment in cables else ""
+        if assignment and not cable_id:
+            matches = [
+                cid for cid in self._connected_cable_ids_for_ap(point_id)
+                if str(cables[cid].name or cid) == assignment
+            ]
+            if len(matches) == 1:
+                cable_id = matches[0]
+        return {"cable_id": cable_id, **self._cable_laying_location_fields(cable_id)}
+
     def _collect_uv_rows(self, point_id_to_room_name: dict[str, str] | None = None) -> list[dict]:
         point_id_to_room_name = point_id_to_room_name or self._collect_point_id_to_room_name()
         rows: list[dict] = []
@@ -6582,6 +6635,7 @@ class AppWindow(QMainWindow):
                         "manufacturer": str(slot.get("manufacturer", "") or "").strip(),
                         "article_number": str(slot.get("article_number", "") or "").strip(),
                         "note": str(slot.get("note", "") or "").strip(),
+                        **self._uv_slot_cable_fields(pid, slot),
                     }
                     for slot in slots
                     if isinstance(slot, dict)
@@ -6603,6 +6657,7 @@ class AppWindow(QMainWindow):
                         "label": "",
                         "assignment": "",
                         "note": "",
+                        **self._cable_laying_location_fields(""),
                     }
                 )
                 continue
@@ -6623,6 +6678,9 @@ class AppWindow(QMainWindow):
                         "manufacturer": slot["manufacturer"],
                         "article_number": slot["article_number"],
                         "note": slot["note"],
+                        "cable_id": slot["cable_id"],
+                        "laying_location": slot["laying_location"],
+                        "laying_location_text": slot["laying_location_text"],
                     }
                 )
         return rows
@@ -6660,6 +6718,7 @@ class AppWindow(QMainWindow):
                         "manufacturer": str(s.get("manufacturer", "") or "").strip(),
                         "article_number": str(s.get("article_number", "") or "").strip(),
                         "note": str(s.get("note", "") or "").strip(),
+                        **self._uv_slot_cable_fields(pid, s),
                     }
                     for s in slots_raw
                     if isinstance(s, dict)
@@ -6718,6 +6777,28 @@ class AppWindow(QMainWindow):
                 if text and text not in outgoing_ids:
                     outgoing_ids.append(text)
             outgoing_names = [cable_id_to_name.get(cable_id, cable_id) for cable_id in outgoing_ids]
+            incoming_location = self._cable_laying_location_fields(incoming_id)
+            outgoing_location = self._related_cable_laying_location_fields(outgoing_ids)
+            outgoing_cable_locations = [
+                {
+                    "cable_id": cable_id,
+                    "cable": cable_id_to_name.get(cable_id, cable_id),
+                    **self._cable_laying_location_fields(cable_id),
+                }
+                for cable_id in outgoing_ids
+            ]
+            location_fields = {
+                "incoming_laying_location": incoming_location["laying_location"],
+                "incoming_laying_location_text": incoming_location["laying_location_text"],
+                "outgoing_laying_location": outgoing_location["laying_location"],
+                "outgoing_laying_location_text": outgoing_location["laying_location_text"],
+                "outgoing_cable_ids": list(outgoing_ids),
+                "outgoing_cable_locations": outgoing_cable_locations,
+                "outgoing_cable_locations_text": "\n".join(
+                    f"{item['cable']} [{item['cable_id']}]: {item['laying_location_text']}"
+                    for item in outgoing_cable_locations
+                ) or "–",
+            }
             mappings_raw = config.get("mappings", [])
             if not isinstance(mappings_raw, list):
                 mappings_raw = []
@@ -6750,6 +6831,10 @@ class AppWindow(QMainWindow):
                         "to_conductor": "",
                         "mapping_note": "",
                         "distribution_note": distribution_note,
+                        **location_fields,
+                        "to_cable_laying_location": normalize_cable_laying_location(None),
+                        "to_cable_laying_location_text": "–",
+                        **self._related_cable_laying_location_fields([incoming_id, *outgoing_ids]),
                     }
                 )
                 continue
@@ -6767,6 +6852,10 @@ class AppWindow(QMainWindow):
                         "to_conductor": mapping["to_conductor"],
                         "mapping_note": mapping["note"],
                         "distribution_note": distribution_note,
+                        **location_fields,
+                        "to_cable_laying_location": self._cable_laying_location_fields(mapping["to_cable_id"])["laying_location"],
+                        "to_cable_laying_location_text": self._cable_laying_location_fields(mapping["to_cable_id"])["laying_location_text"],
+                        **self._related_cable_laying_location_fields([incoming_id, mapping["to_cable_id"]]),
                     }
                 )
         return rows
@@ -6789,6 +6878,8 @@ class AppWindow(QMainWindow):
                 if ap_name:
                     ap_map[ap_name].append(
                         {
+                            "cable_id": row.get("id", ""),
+                            "ap_id": row.get("start_ap_id" if role == "Start" else "end_ap_id", ""),
                             "cable": row.get("name", ""),
                             "type": row.get("type", ""),
                             "length_m": float(row.get("length_m", 0.0) or 0.0),
@@ -6797,6 +6888,8 @@ class AppWindow(QMainWindow):
                             "ap_device_color": row.get(color_key, ""),
                             "ap_note": row.get(note_key, ""),
                             "cable_note": row.get("comment", ""),
+                            "laying_location": normalize_cable_laying_location(row.get("laying_location")),
+                            "laying_location_text": format_cable_laying_location(row.get("laying_location")),
                         }
                     )
         return dict(ap_map)
@@ -6820,7 +6913,7 @@ class AppWindow(QMainWindow):
             for pid, point in self._document.elements["elec_points"].items()
         }
         cable_meta = {
-            row.get("name", ""): {
+            row.get("id", ""): {
                 "type": row.get("type", ""),
                 "length_m": float(row.get("length_m", 0.0) or 0.0),
                 "comment": str(row.get("comment", "") or ""),
@@ -6831,9 +6924,9 @@ class AppWindow(QMainWindow):
         rows: list[dict] = []
         for cable_id, cable in self._document.elements["elec_cables"].items():
             cable_name = str(cable.name or cable_id)
-            cable_type = cable_meta.get(cable_name, {}).get("type", str(cable.cable_type or ""))
-            cable_len = float(cable_meta.get(cable_name, {}).get("length_m", 0.0))
-            cable_note = cable_meta.get(cable_name, {}).get("comment", str(cable.comment or ""))
+            cable_type = cable_meta.get(cable_id, {}).get("type", str(cable.cable_type or ""))
+            cable_len = float(cable_meta.get(cable_id, {}).get("length_m", 0.0))
+            cable_note = cable_meta.get(cable_id, {}).get("comment", str(cable.comment or ""))
             start_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "")
             end_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "")
 
@@ -6851,6 +6944,9 @@ class AppWindow(QMainWindow):
                         "ap_device_color": point_id_to_device_color.get(start_id, ""),
                         "ap_note": point_id_to_note.get(start_id, ""),
                         "cable_note": cable_note,
+                        "cable_id": cable_id,
+                        "ap_id": start_id,
+                        **self._cable_laying_location_fields(cable_id),
                     }
                 )
             if end_id:
@@ -6867,6 +6963,9 @@ class AppWindow(QMainWindow):
                         "ap_device_color": point_id_to_device_color.get(end_id, ""),
                         "ap_note": point_id_to_note.get(end_id, ""),
                         "cable_note": cable_note,
+                        "cable_id": cable_id,
+                        "ap_id": end_id,
+                        **self._cable_laying_location_fields(cable_id),
                     }
                 )
 
@@ -6895,9 +6994,11 @@ class AppWindow(QMainWindow):
         hl_rows: list[dict],
     ) -> dict:
         cable_by_type: dict[str, float] = defaultdict(float)
+        locations_by_type: dict[str, list[dict]] = defaultdict(list)
         for row in kv_rows:
             cable_type = str(row.get("type", "") or "").strip() or "(unbekannt)"
             cable_by_type[cable_type] += float(row.get("length_m", 0.0) or 0.0)
+            locations_by_type[cable_type].append(row.get("laying_location"))
         cable_bom_rows = [
             {
                 "category": "Elektro-Kabel",
@@ -6906,6 +7007,7 @@ class AppWindow(QMainWindow):
                 "description": cable_type,
                 "unit": "m",
                 "quantity": length_m,
+                "laying_location_text": aggregate_cable_laying_locations(locations_by_type[cable_type]),
                 "manufacturer": "",
                 "article_number": "",
                 "note": "",
@@ -7053,6 +7155,7 @@ class AppWindow(QMainWindow):
 
         kv_rows: list[dict] = []
         kv_sum: dict[str, float] = defaultdict(float)
+        kv_locations: dict[str, list[dict]] = defaultdict(list)
         for cable_id, cable in self._document.elements["elec_cables"].items():
             length_m = float(cable_length_details(self._document, cable)["length_m"])
 
@@ -7065,12 +7168,15 @@ class AppWindow(QMainWindow):
             end_height = float(end_point.height_from_floor if end_point else 0.0) / 10.0
 
             row = {
+                "id": cable_id,
+                "start_ap_id": start_id,
+                "end_ap_id": end_id,
                 "name": str(cable.name or cable_id),
                 "type": str(cable.cable_type or ""),
                 "comment": str(cable.comment or ""),
                 "length_m": length_m,
-                "start_ap": str(start_point.name or start_id) if start_id else "",
-                "end_ap": str(end_point.name or end_id) if end_id else "",
+                "start_ap": str(start_point.name or start_id) if start_point else start_id,
+                "end_ap": str(end_point.name or end_id) if end_point else end_id,
                 "start_height_cm": start_height,
                 "end_height_cm": end_height,
                 "start_position": str(start_point.position or "") if start_point else "",
@@ -7081,9 +7187,11 @@ class AppWindow(QMainWindow):
                 "end_device": str(end_point.smarthome_device or "") if end_point else "",
                 "end_device_color": str(end_point.smarthome_device_color or "") if end_point else "",
                 "end_note": str(end_point.note or "") if end_point else "",
+                **self._cable_laying_location_fields(cable_id),
             }
             kv_rows.append(row)
             kv_sum[row["type"]] += length_m
+            kv_locations[row["type"]].append(row["laying_location"])
 
         ap_cables = self._build_ap_cable_map(kv_rows)
         room_ap_connections = self._build_room_ap_connection_map(kv_rows)
@@ -7147,6 +7255,10 @@ class AppWindow(QMainWindow):
             "hkv_sum": hkv_sum,
             "kv_rows": kv_rows,
             "kv_sum": kv_sum,
+            "kv_laying_location_by_type": {
+                cable_type: aggregate_cable_laying_locations(values)
+                for cable_type, values in kv_locations.items()
+            },
             "ap_cables": ap_cables,
             "room_ap_connections": room_ap_connections,
             "ap_type_counts": ap_type_counts,
@@ -7340,8 +7452,10 @@ class AppWindow(QMainWindow):
         headers: list[str],
         rows: list[list[str]],
         col_widths: list[float] | None = None,
+        *,
+        wrap_columns: set[int] | None = None,
     ) -> None:
-        from PySide6.QtGui import QBrush, QFont, QPen  # noqa: PLC0415
+        from PySide6.QtGui import QBrush, QFont, QFontMetricsF, QPen, QTextLayout, QTextOption  # noqa: PLC0415
 
         page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
         title_rect, content_rect = self._draw_pdf_title(painter, page_rect, title)
@@ -7366,26 +7480,57 @@ class AppWindow(QMainWindow):
             widths = [table_rect.width() / n_cols] * n_cols
 
         cell_pad = 4.0
-        fm = painter.fontMetrics()
-        header_h = max(16.0, fm.lineSpacing() + 2 * cell_pad)
-        min_row_h = max(14.0, fm.lineSpacing() + 2 * cell_pad)
-        cell_pad = 4.0
+        fm = QFontMetricsF(body_font, painter.device())
+        header_font = QFont("Arial", body_size, QFont.Bold)
+        header_fm = QFontMetricsF(header_font, painter.device())
+        line_h = max(fm.lineSpacing(), header_fm.lineSpacing())
+        min_row_h = max(14.0, line_h + 2 * cell_pad)
         y = table_rect.y() + 6.0
         bottom_margin = 6.0
         wide_table = n_cols >= 8
+        wrap_columns = set(wrap_columns or ())
+
+        def text_lines(value: str, idx: int, font: QFont, *, header: bool = False):
+            # QTextLayout wraps even unbroken free text; retain layouts while using their lines.
+            layout = QTextLayout(value.replace("\r\n", "\n").replace("\n", "\u2028"), font, painter.device())
+            option = QTextOption()
+            option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            option.setAlignment(Qt.AlignLeft if idx in wrap_columns or idx < 2 or header else Qt.AlignRight)
+            layout.setTextOption(option)
+            lines = []
+            layout.beginLayout()
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(max(1.0, widths[idx] - 2 * cell_pad))
+                lines.append(line)
+            layout.endLayout()
+            return layout, lines
+
+        header_layouts = {
+            idx: text_lines(str(header), idx, header_font, header=True)
+            for idx, header in enumerate(headers) if not wide_table or idx in wrap_columns
+        }
+        header_h = max(16.0, max((len(item[1]) for item in header_layouts.values()), default=1) * line_h + 2 * cell_pad)
 
         def draw_header(_y: float):
             x = table_rect.x()
             painter.save()
-            painter.setFont(QFont("Arial", body_size, QFont.Bold))
+            painter.setFont(header_font)
             painter.setPen(QPen(Qt.black, 1.0))
             for idx, header in enumerate(headers):
                 cell = QRectF(x, _y, widths[idx], header_h)
                 painter.fillRect(cell, QBrush(QColor("#e0e0e0")))
                 painter.drawRect(cell)
+                if idx in header_layouts:
+                    for line_index, line in enumerate(header_layouts[idx][1]):
+                        line.draw(painter, QPointF(x + cell_pad, _y + cell_pad + line_index * line_h))
+                    x += widths[idx]
+                    continue
                 if wide_table:
                     inner_w = max(1, int(widths[idx] - 2 * cell_pad))
-                    header_text = fm.elidedText(str(header), Qt.ElideRight, inner_w)
+                    header_text = header_fm.elidedText(str(header), Qt.ElideRight, inner_w)
                     flags = Qt.AlignVCenter | Qt.AlignLeft | Qt.TextSingleLine
                 else:
                     header_text = header
@@ -7398,63 +7543,59 @@ class AppWindow(QMainWindow):
                 x += widths[idx]
             painter.restore()
 
-        def row_height(values: list[str]) -> float:
-            if wide_table:
-                return min_row_h
-            height = min_row_h
-            for idx, value in enumerate(values):
-                inner_w = max(1, int(widths[idx] - 2 * cell_pad))
-                br = fm.boundingRect(0, 0, inner_w, 100000, Qt.TextWordWrap | Qt.AlignLeft, str(value))
-                height = max(height, br.height() + 2 * cell_pad)
-            return height
+        def continuation():
+            nonlocal table_rect, y
+            self._pdf_new_page(painter, writer)
+            page_rect2 = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+            _, content_rect2 = self._draw_pdf_title(painter, page_rect2, f"{title} (Fortsetzung)")
+            table_rect = QRectF(content_rect2.x() + side_margin, content_rect2.y(), table_rect.width(), content_rect2.height())
+            y = table_rect.y() + 6.0
+            painter.setFont(body_font)
+            draw_header(y)
+            y += header_h
 
         draw_header(y)
         y += header_h
         for row_index, row in enumerate(rows):
             data_row = [str(row[idx]) if idx < len(row) else "" for idx in range(n_cols)]
-            rh = row_height(data_row)
-            if y + rh > table_rect.bottom() - bottom_margin:
-                self._pdf_new_page(painter, writer)
-                page_rect2 = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
-                _, content_rect2 = self._draw_pdf_title(painter, page_rect2, f"{title} (Fortsetzung)")
-                table_rect = QRectF(
-                    content_rect2.x() + side_margin,
-                    content_rect2.y(),
-                    max(1.0, content_rect2.width() - 2 * side_margin),
-                    content_rect2.height(),
-                )
-                y = table_rect.y() + 6.0
-                if col_widths and len(col_widths) == n_cols and sum(col_widths) > 0:
-                    total_w = float(sum(col_widths))
-                    widths = [table_rect.width() * (w / total_w) for w in col_widths]
-                else:
-                    widths = [table_rect.width() / n_cols] * n_cols
-                painter.setFont(body_font)
-                draw_header(y)
-                y += header_h
+            layouts = {
+                idx: text_lines(value, idx, body_font)
+                for idx, value in enumerate(data_row) if not wide_table or idx in wrap_columns
+            }
+            line_count = max(1, max((len(item[1]) for item in layouts.values()), default=1))
+            rh = max(min_row_h, line_count * line_h + 2 * cell_pad)
+            full_page_h = table_rect.height() - 12.0 - header_h
+            if y + rh > table_rect.bottom() - bottom_margin and rh <= full_page_h:
+                continuation()
 
-            x = table_rect.x()
-            if row_index % 2 == 1:
-                painter.fillRect(QRectF(table_rect.x(), y, table_rect.width(), rh), QBrush(QColor("#f5f5f5")))
-            for idx, value in enumerate(data_row):
-                cell = QRectF(x, y, widths[idx], rh)
-                painter.drawRect(cell)
-                if wide_table:
-                    inner_w = max(1, int(widths[idx] - 2 * cell_pad))
-                    value_text = fm.elidedText(value, Qt.ElideRight, inner_w)
-                    align = (Qt.AlignRight | Qt.AlignVCenter) if idx >= 2 else (Qt.AlignLeft | Qt.AlignVCenter)
-                    flags = align | Qt.TextSingleLine
-                else:
-                    value_text = value
-                    align = (Qt.AlignRight | Qt.AlignTop) if idx >= 2 else (Qt.AlignLeft | Qt.AlignTop)
-                    flags = align | Qt.TextWordWrap
-                painter.drawText(
-                    cell.adjusted(cell_pad, cell_pad, -cell_pad, -cell_pad),
-                    flags,
-                    value_text,
-                )
-                x += widths[idx]
-            y += rh
+            # A single row can exceed a page. Render every line in consecutive fragments.
+            offset = 0
+            while offset < line_count:
+                available = table_rect.bottom() - bottom_margin - y
+                capacity = int((available - 2 * cell_pad) // line_h)
+                if capacity < 1:
+                    continuation()
+                    continue
+                count = min(capacity, line_count - offset)
+                fragment_h = max(min_row_h, count * line_h + 2 * cell_pad)
+                x = table_rect.x()
+                if row_index % 2 == 1:
+                    painter.fillRect(QRectF(x, y, table_rect.width(), fragment_h), QBrush(QColor("#f5f5f5")))
+                for idx, value in enumerate(data_row):
+                    cell = QRectF(x, y, widths[idx], fragment_h)
+                    painter.drawRect(cell)
+                    if idx in layouts:
+                        for local_index, line in enumerate(layouts[idx][1][offset:offset + count]):
+                            line.draw(painter, QPointF(x + cell_pad, y + cell_pad + local_index * line_h))
+                    elif offset == 0:
+                        value_text = fm.elidedText(value, Qt.ElideRight, max(1, int(widths[idx] - 2 * cell_pad)))
+                        align = Qt.AlignRight if idx >= 2 else Qt.AlignLeft
+                        painter.drawText(cell.adjusted(cell_pad, cell_pad, -cell_pad, -cell_pad), align | Qt.AlignVCenter | Qt.TextSingleLine, value_text)
+                    x += widths[idx]
+                y += fragment_h
+                offset += count
+                if offset < line_count:
+                    continuation()
 
     def _render_pdf_export_page(
         self,
@@ -7573,9 +7714,10 @@ class AppWindow(QMainWindow):
                 painter,
                 writer,
                 cable_title,
-                ["Name", "Typ", "Start", "Ende", "Länge"],
+                ["Name", "Typ", "Start", "Ende", "Länge", "Verlegeort"],
                 room_cable_rows,
-                col_widths=[1.6, 1.1, 1.2, 1.2, 0.8],
+                col_widths=[1.6, 1.1, 1.2, 1.2, 0.8, 1.8],
+                wrap_columns={5},
             )
             return
 
@@ -7752,9 +7894,10 @@ class AppWindow(QMainWindow):
                     painter,
                     writer,
                     "Elektro – Kabelverbindungen",
-                    ["Name", "Typ", "Start", "Ende", "Länge"],
+                    ["Name", "Typ", "Start", "Ende", "Länge", "Verlegeort"],
                     cable_rows,
-                    col_widths=[1.6, 1.2, 1.4, 1.4, 0.9],
+                    col_widths=[1.6, 1.2, 1.4, 1.4, 0.9, 1.8],
+                    wrap_columns={5},
                 )
             if export_data:
                 if "el_ap_types" in sections and export_data.get("ap_type_counts"):
@@ -7787,15 +7930,17 @@ class AppWindow(QMainWindow):
                                     str(conn.get("ap_note", "")),
                                     str(conn.get("cable_note", "")),
                                     f"{float(conn.get('length_m', 0.0)):.2f} m",
+                                    str(conn.get("laying_location_text", "–")),
                                 ]
                             )
                     self._draw_pdf_table(
                         painter,
                         writer,
                         "Anschlusspunkte – Kabelzuordnung",
-                        ["AP", "Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "Länge"],
+                        ["AP", "Kabel", "Typ", "Anschluss", "Gerät", "Farbe", "AP-Notiz", "Kabel-Notiz", "Länge", "Verlegeort"],
                         ap_rows_ext,
-                        col_widths=[1.0, 1.0, 0.8, 0.8, 1.0, 0.7, 1.4, 1.4, 0.8],
+                        col_widths=[1.0, 1.0, 0.8, 0.8, 1.0, 0.7, 1.4, 1.4, 0.8, 1.8],
+                        wrap_columns={9},
                     )
 
                 if "el_rooms" in sections and export_data.get("room_ap_connections"):
@@ -7812,6 +7957,7 @@ class AppWindow(QMainWindow):
                             str(r.get("cable_note", "")),
                             str(r.get("target_ap", "")),
                             f"{float(r.get('length_m', 0.0)):.2f} m",
+                            str(r.get("laying_location_text", "–")),
                         ]
                         for r in export_data.get("room_ap_connections", [])
                     ]
@@ -7819,9 +7965,10 @@ class AppWindow(QMainWindow):
                         painter,
                         writer,
                         "AP-Zuordnung nach Räumen",
-                        ["Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Ziel-AP", "Länge"],
+                        ["Raum", "AP", "Gerät", "Farbe", "AP-Notiz", "Kabel", "Typ", "Kabel-Notiz", "Ziel-AP", "Länge", "Verlegeort"],
                         rows,
-                        col_widths=[1.0, 0.9, 0.9, 0.7, 1.1, 0.9, 0.8, 1.1, 0.9, 0.7],
+                        col_widths=[1.0, 0.9, 0.9, 0.7, 1.1, 0.9, 0.8, 1.1, 0.9, 0.7, 1.8],
+                        wrap_columns={10},
                     )
 
                 if "el_uv" in sections and export_data.get("uv_rows"):
@@ -7838,6 +7985,7 @@ class AppWindow(QMainWindow):
                             str(r.get("label", "")),
                             str(r.get("assignment", "")),
                             str(r.get("note", "")),
+                            str(r.get("laying_location_text", "–")),
                         ]
                         for r in export_data.get("uv_rows", [])
                     ]
@@ -7845,9 +7993,10 @@ class AppWindow(QMainWindow):
                         painter,
                         writer,
                         "Unterverteilungen (UV)",
-                        ["UV", "Raum", "Raster", "Reihe", "TE", "Belegung", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"],
+                        ["UV", "Raum", "Raster", "Reihe", "TE", "Belegung", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz", "Verlegeort"],
                         rows,
-                        col_widths=[1.1, 1.0, 0.8, 0.6, 0.6, 1.0, 0.9, 1.2, 1.2, 1.2],
+                        col_widths=[1.1, 1.0, 0.8, 0.6, 0.6, 1.0, 0.9, 1.2, 1.2, 1.2, 1.8],
+                        wrap_columns={10},
                     )
 
                 if "el_up_distribution" in sections and export_data.get("up_distribution_rows"):
@@ -7863,6 +8012,9 @@ class AppWindow(QMainWindow):
                             str(r.get("to_conductor", "")),
                             str(r.get("mapping_note", "")),
                             str(r.get("distribution_note", "")),
+                            str(r.get("incoming_laying_location_text", "–")),
+                            str(r.get("outgoing_cable_locations_text", "–")),
+                            str(r.get("to_cable_laying_location_text", "–")),
                         ]
                         for r in export_data.get("up_distribution_rows", [])
                     ]
@@ -7870,9 +8022,10 @@ class AppWindow(QMainWindow):
                         painter,
                         writer,
                         "Unterputz-Verteilungen",
-                        ["AP", "Raum", "Zuleitung", "Abgänge", "Ader (Zul.)", "Abgehendes Kabel", "Ader (Abg.)", "Zuordn.-Notiz", "Verteilungs-Notiz"],
+                        ["AP", "Raum", "Zuleitung", "Abgänge", "Ader (Zul.)", "Abgehendes Kabel", "Ader (Abg.)", "Zuordn.-Notiz", "Verteilungs-Notiz", "Verlegeort Zuleitung", "Verlegeort Abgänge", "Verlegeort abgehendes Kabel"],
                         rows,
-                        col_widths=[0.9, 0.9, 1.1, 1.2, 0.8, 1.1, 0.8, 1.2, 1.2],
+                        col_widths=[0.9, 0.9, 1.1, 1.2, 0.8, 1.1, 0.8, 1.2, 1.2, 1.5, 1.5, 1.5],
+                        wrap_columns={9, 10, 11},
                     )
 
                 if "el_bom" in sections:
@@ -7902,6 +8055,7 @@ class AppWindow(QMainWindow):
                                     str(row.get("unit", "")),
                                     f"{float(row.get('quantity', 0.0) or 0.0):.2f}",
                                     note,
+                                    str(row.get("laying_location_text", "–")) if key == "cable_bom_rows" else "",
                                 ]
                             )
                     if bom_rows:
@@ -7910,9 +8064,10 @@ class AppWindow(QMainWindow):
                             painter,
                             writer,
                             "Stückliste",
-                            ["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz"],
+                            ["Bereich", "Artikel", "Hersteller", "Artikelnummer", "Einheit", "Menge", "Notiz", "Verlegeort"],
                             bom_rows,
-                            col_widths=[1.0, 1.6, 1.1, 1.2, 0.7, 0.7, 1.2],
+                            col_widths=[1.0, 1.6, 1.1, 1.2, 0.7, 0.7, 1.2, 1.8],
+                            wrap_columns={7},
                         )
 
                 if "el_uv_busbars" in sections and export_data.get("uv_busbar_bom_rows"):
@@ -7980,6 +8135,7 @@ class AppWindow(QMainWindow):
                                         str(circuit.get("end_ap_name", "")),
                                         str(circuit.get("end_ap_room", "")),
                                         str(circuit.get("note", "")),
+                                        self._uv_slot_cable_fields(uv_id, circuit)["laying_location_text"],
                                     ]
                                 )
                         if circuits_rows:
@@ -7988,8 +8144,9 @@ class AppWindow(QMainWindow):
                                 painter,
                                 writer,
                                 "Schaltplan – Stromkreise",
-                                ["UV", "Reihe", "TE", "Gerät", "Kennz.", "Bezeichnung", "Kabel", "Verbraucher", "Raum", "Notiz"],
+                                ["UV", "Reihe", "TE", "Gerät", "Kennz.", "Bezeichnung", "Kabel", "Verbraucher", "Raum", "Notiz", "Verlegeort"],
                                 circuits_rows,
+                                wrap_columns={10},
                             )
 
                     if "schaltplan_hierarchie" in sections:
@@ -8639,7 +8796,7 @@ class AppWindow(QMainWindow):
                     ),
                     color="#ffb300",
                     visible=True,
-                    label_visible=True,
+                    label_visible=False,
                     label_size=12.0,
                     type=cable_type,
                     comment="",
@@ -8709,7 +8866,7 @@ class AppWindow(QMainWindow):
                     ),
                     color="#ffb300",
                     visible=True,
-                    label_visible=True,
+                    label_visible=False,
                     label_size=12.0,
                     type=cable_type,
                     comment="",
@@ -8765,7 +8922,7 @@ class AppWindow(QMainWindow):
                     ),
                     color="#ffb300",
                     visible=True,
-                    label_visible=True,
+                    label_visible=False,
                     label_size=12.0,
                     type=cable_type,
                     comment="",
@@ -9184,7 +9341,7 @@ class AppWindow(QMainWindow):
             icon_path=str(BUILTIN_SYMBOLS.get("Steckdose", "") or ""),
             builtin_symbol="Steckdose",
             visible=True,
-            label_visible=True,
+            label_visible=False,
             label_size=12.0,
             position="Wand",
             height_from_floor=30.0,

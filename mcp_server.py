@@ -45,6 +45,11 @@ import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from model.cable_laying_location import (
+    aggregate_cable_laying_locations,
+    format_cable_laying_location,
+    normalize_cable_laying_location,
+)
 
 if TYPE_CHECKING:
     from gui.main_window import MainWindow
@@ -53,6 +58,18 @@ logger = logging.getLogger("hrouting.mcp")
 
 MCP_HOST = "127.0.0.1"
 MCP_PORT = 3274
+
+def _laying_location_union(values) -> dict:
+    values = [normalize_cable_laying_location(value) for value in values]
+    custom = list(dict.fromkeys(value["custom_text"].strip() or "Sonstiges"
+                               for value in values if value["custom_enabled"]))
+    return {
+        "laying_location": normalize_cable_laying_location({
+            "locations": [code for value in values for code in value["locations"]],
+            "custom_enabled": bool(custom), "custom_text": "; ".join(custom),
+        }),
+        "laying_location_text": aggregate_cable_laying_locations(values),
+    }
 
 
 # ── Verfügbarkeits-Check ───────────────────────────────────────────
@@ -608,6 +625,7 @@ def _create_mcp(window: MainWindow, bridge):
         ]
 
         cable_by_type: dict[str, float] = {}
+        locations_by_type: dict[str, list[dict]] = {}
         for cable_id, cdata in params.get("elec_cables", {}).items():
             cable_type = str(
                 cdata.get("cable_type")
@@ -629,6 +647,7 @@ def _create_mcp(window: MainWindow, bridge):
                     end_surcharge_m = 0.0
                 length_m = path_length_m + start_surcharge_m + end_surcharge_m
             cable_by_type[cable_type] = cable_by_type.get(cable_type, 0.0) + length_m
+            locations_by_type.setdefault(cable_type, []).append(cdata.get("laying_location"))
 
         cable_bom_rows = [
             {
@@ -639,6 +658,7 @@ def _create_mcp(window: MainWindow, bridge):
                 "unit": "m",
                 "quantity": quantity,
                 "meta": {"cable_type": cable_type},
+                **_laying_location_union(locations_by_type[cable_type]),
             }
             for cable_type, quantity in sorted(cable_by_type.items(), key=lambda kv: kv[0].lower())
         ]
@@ -1431,6 +1451,10 @@ def _create_mcp(window: MainWindow, bridge):
         Maßstab. Nutze dieses Tool als Einstieg."""
         def _read():
             p = window.param_panel.to_dict()
+            locations = {}
+            for cid, cable in p.get("elec_cables", {}).items():
+                cable_type = cable.get("type") or cable.get("cable_type") or cable.get("name", cid)
+                locations.setdefault(cable_type, []).append(cable.get("laying_location"))
             return {
                 "floor_plans": list(p.get("floorplans", {}).keys()),
                 "floor_plan_count": len(p.get("floorplans", {})),
@@ -1441,6 +1465,7 @@ def _create_mcp(window: MainWindow, bridge):
                 "elec_point_ids": list(p.get("elec_points", {}).keys()),
                 "elec_room_count": len(p.get("elec_rooms", {})),
                 "elec_cable_count": len(p.get("elec_cables", {})),
+                "cable_laying_location_by_type": {key: _laying_location_union(values) for key, values in locations.items()},
                 "hkv_count": len(p.get("hkv_points", {})),
                 "hkv_ids": list(p.get("hkv_points", {}).keys()),
                 "t_supply": p.get("t_supply", 35.0),
@@ -2624,6 +2649,8 @@ def _create_mcp(window: MainWindow, bridge):
             result = []
             for kid, kdata in p.get("elec_cables", {}).items():
                 entry = dict(kdata)
+                entry["laying_location"] = normalize_cable_laying_location(kdata.get("laying_location"))
+                entry["laying_location_text"] = format_cable_laying_location(entry["laying_location"])
                 pts = c.get("elec_cables", {}).get(kid, [])
                 entry["polyline_points"] = len(pts)
                 entry["has_route"] = len(pts) >= 2
@@ -2656,6 +2683,7 @@ def _create_mcp(window: MainWindow, bridge):
         start_length_surcharge_m: float = 0.0,
         end_length_surcharge_m: float = 0.0,
         stroke_width: float = 2.0,
+        laying_location: dict | None = None,
     ) -> dict:
         """Elektro-Kabel als Polylinie hinzufügen.
 
@@ -2677,6 +2705,8 @@ def _create_mcp(window: MainWindow, bridge):
                 (>= 0, leer = 0)
             stroke_width: Strichstärke der Kabellinie in px (0.5–10.0,
                 Standard: 2.0)
+            laying_location: Physische Orte {locations: [floor, wall, ceiling],
+                custom_enabled: bool, custom_text: str}; leer = keine Auswahl.
         """
         if len(polyline) < 2:
             return {"error": "Polylinie muss mindestens 2 Punkte haben."}
@@ -2734,6 +2764,7 @@ def _create_mcp(window: MainWindow, bridge):
             panel.le_name.setText(auto_name)
             panel.set_type_text(cable_type)
             panel.te_comment.setPlainText(comment)
+            panel.set_laying_location(laying_location)
             panel._color = QC(color)
             panel._update_color_button()
 
@@ -2745,6 +2776,7 @@ def _create_mcp(window: MainWindow, bridge):
                 if isinstance(cable_model, ElecCable):
                     cable_model.start_length_surcharge_m = surcharge_start
                     cable_model.end_length_surcharge_m = surcharge_end
+                    cable_model.laying_location = laying_location
 
             # Länge anzeigen
             doc = Document.from_dict({"params": w.param_panel.to_dict(), "canvas": w.canvas.to_dict()})
@@ -2767,6 +2799,8 @@ def _create_mcp(window: MainWindow, bridge):
                 "length_mm": round(length_mm, 1),
                 "valid_scale": bool(length_info["valid_scale"]),
                 "status": "created",
+                "laying_location": normalize_cable_laying_location(laying_location),
+                "laying_location_text": format_cable_laying_location(laying_location),
             }
 
         return invoke(_add)
@@ -2785,6 +2819,7 @@ def _create_mcp(window: MainWindow, bridge):
         end_length_surcharge_m: float | None = None,
         visible: bool | None = None,
         stroke_width: float | None = None,
+        laying_location: dict | None = None,
     ) -> dict:
         """Parameter eines Elektro-Kabels ändern.
         Nur angegebene Parameter werden geändert.
@@ -2804,6 +2839,7 @@ def _create_mcp(window: MainWindow, bridge):
                 (leer = unverändert)
             visible: Sichtbarkeit
             stroke_width: Neue Strichstärke in px (0.5–10.0)
+            laying_location: Physische Orte; None = unverändert, {} = löschen.
         """
         def _modify():
             from PySide6.QtCore import QPointF
@@ -2840,6 +2876,13 @@ def _create_mcp(window: MainWindow, bridge):
                 window.canvas.set_color(cable_id, QC(color))
             if cable_type is not None:
                 panel.set_type_text(cable_type)
+            if laying_location is not None:
+                panel.set_laying_location(laying_location)
+                model_doc = getattr(window, "_document", None)
+                if isinstance(model_doc, Document):
+                    cable_model = model_doc.elements.get("elec_cables", {}).get(cable_id)
+                    if isinstance(cable_model, ElecCable):
+                        cable_model.laying_location = laying_location
             if comment is not None:
                 panel.te_comment.setPlainText(comment)
                 window.canvas._elec_cable_notes[cable_id] = comment
@@ -4258,6 +4301,8 @@ def _create_mcp(window: MainWindow, bridge):
                 "missing_start": is_missing_start,
                 "missing_end": is_missing_end,
                 "invalid_ref": is_invalid_ref,
+                "laying_location": normalize_cable_laying_location(cdata.get("laying_location")),
+                "laying_location_text": format_cable_laying_location(cdata.get("laying_location")),
             })
 
         return {
@@ -5144,6 +5189,7 @@ def _create_mcp(window: MainWindow, bridge):
 
             total_m = 0.0
             by_type: dict[str, float] = {}
+            locations_by_type: dict[str, list[dict]] = {}
             details: list[dict] = []
 
             for cid, cdata in cables.items():
@@ -5154,9 +5200,11 @@ def _create_mcp(window: MainWindow, bridge):
                     dy = points[i][1] - points[i - 1][1]
                     length_m += hypot(dx, dy) * mpp / 1000.0
 
-                ctype = cdata.get("cable_type", cdata.get("name", cid))
+                ctype = cdata.get("type") or cdata.get("cable_type") or cdata.get("name", cid)
                 total_m += length_m
                 by_type[ctype] = by_type.get(ctype, 0.0) + length_m
+                location = normalize_cable_laying_location(cdata.get("laying_location"))
+                locations_by_type.setdefault(ctype, []).append(location)
                 details.append({
                     "cable_id": cid,
                     "name": cdata.get("name", cid),
@@ -5164,6 +5212,8 @@ def _create_mcp(window: MainWindow, bridge):
                     "length_m": round(length_m, 2),
                     "start_ap": cdata.get("start_ap_id", ""),
                     "end_ap": cdata.get("end_ap_id", ""),
+                    "laying_location": location,
+                    "laying_location_text": format_cable_laying_location(location),
                 })
 
             return {
@@ -5171,6 +5221,10 @@ def _create_mcp(window: MainWindow, bridge):
                 "cable_count": len(cables),
                 "by_type": {k: round(v, 2)
                             for k, v in sorted(by_type.items())},
+                "laying_location_by_type": {
+                    key: _laying_location_union(values)
+                    for key, values in sorted(locations_by_type.items())
+                },
                 "cables": sorted(details, key=lambda x: x["type"]),
             }
 

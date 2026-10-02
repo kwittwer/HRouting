@@ -19,7 +19,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QPointF  # noqa: E402
 
 from model.document import Document  # noqa: E402
-from model.elements import Circuit, ElecPoint, TextAnnotation  # noqa: E402
+from model.elements import Circuit, ElecCable, ElecPoint, TextAnnotation  # noqa: E402
 from model.views import (  # noqa: E402
     POINT,
     POINT_LIST,
@@ -207,6 +207,17 @@ def test_params_view_reads_visibility():
     view = ParamsMapView(doc, "visible", (Circuit,), RAW, True)
     assert view["HK-1"] is True
     assert view["HK-2"] is False
+
+
+def test_newly_created_elements_disable_label_visibility_by_default():
+    point = ElecPoint.create("AP-99", floor_plan_id="grundriss-1", name="Licht")
+    cable = ElecCable.create("EK-99", floor_plan_id="grundriss-1", name="Kabel")
+
+    assert point.data["visible"] is True
+    assert point.data["label_visible"] is False
+    assert point.label_visible is False
+    assert cable.data["label_visible"] is False
+    assert cable.label_visible is False
 
 
 def test_params_view_write_lands_in_params():
