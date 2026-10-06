@@ -18,8 +18,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QGraphicsPathItem, QGraphicsSimpleTextItem  # noqa: E402
+from PySide6.QtWidgets import QApplication, QColorDialog, QGraphicsPathItem, QGraphicsSimpleTextItem  # noqa: E402
 
 from gui.app_window import AppWindow  # noqa: E402
 from gui.docks.topology_dock import ElecTopologyWidget  # noqa: E402
@@ -136,6 +137,59 @@ def test_pdf_export_dialog_add_remove_and_edit_title(app):
         QTest.mouseClick(dialog.btn_remove, Qt.MouseButton.LeftButton)
         assert dialog.tree.topLevelItemCount() == 1
     finally:
+        dialog.deleteLater()
+
+
+@pytest.mark.gui
+def test_pdf_export_dialog_edits_room_label_colors_with_alpha(app, monkeypatch):
+    dialog = PdfExportConfigDialog(
+        pages=[_sample_page()],
+        floor_plans=[("grundriss-1", "EG")],
+        svg_size=(1000.0, 700.0),
+        room_label_colors={"background": "#80445566", "leader": "#99778899", "text": "#FF112233"},
+        room_label_style={"stroke_width": 2.4, "line_style": "dot"},
+    )
+    monkeypatch.setattr(
+        QColorDialog,
+        "getColor",
+        staticmethod(lambda *args, **kwargs: QColor("#406080A0")),
+    )
+    try:
+        assert dialog.get_room_label_colors() == {
+            "background": "#80445566",
+            "leader": "#99778899",
+            "text": "#ff112233",
+        }
+        assert dialog.get_room_label_style() == {"stroke_width": 2.4, "line_style": "dot"}
+        dialog._room_label_color_buttons["leader"].click()
+        assert dialog.get_room_label_colors()["leader"] == "#406080a0"
+        dialog.sb_room_label_stroke_width.setValue(3.0)
+        dialog.cb_room_label_line_style.setCurrentIndex(dialog.cb_room_label_line_style.findData("dashdot"))
+        assert dialog.get_room_label_style() == {"stroke_width": 3.0, "line_style": "dashdot"}
+    finally:
+        dialog.deleteLater()
+
+
+@pytest.mark.gui
+def test_pdf_export_dialog_small_window_keeps_buttons_available(app):
+    dialog = PdfExportConfigDialog(
+        pages=[_sample_page()],
+        floor_plans=[("grundriss-1", "EG")],
+        svg_size=(1000.0, 700.0),
+    )
+    try:
+        dialog.resize(660, 460)
+        dialog.show()
+        app.processEvents()
+        assert dialog.left_scroll.widgetResizable()
+        assert dialog.right_scroll.widgetResizable()
+        assert dialog.button_box.isVisible()
+        assert dialog.button_box.geometry().bottom() <= dialog.height()
+        assert dialog.right_scroll.verticalScrollBarPolicy() != Qt.ScrollBarAlwaysOff
+        assert dialog._content_splitter.orientation() == Qt.Vertical
+        assert dialog.right_scroll.verticalScrollBar().maximum() > 0
+    finally:
+        dialog.close()
         dialog.deleteLater()
 
 

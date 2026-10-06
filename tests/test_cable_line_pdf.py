@@ -7,7 +7,7 @@ import pytest
 from test_cable_laying_exports import app, window, _document, _write_pdf
 from gui.cable_line_preview import CableLineSample
 from gui.main_window import MainWindow, _PdfContext
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QPageLayout, QPageSize, QPainter, QPdfWriter
 
 
@@ -78,6 +78,64 @@ def test_room_filtered_pdf_samples(window, tmp_path):
         for color, _, _ in STYLES[2:]:
             rgb = tuple(int(color[index:index + 2], 16) / 255 for index in (1, 3, 5))
             assert not any(value == pytest.approx(rgb, abs=0.002) for value in colors if value)
+
+
+def test_room_plan_labels_hidden_cables_with_leaders(window, tmp_path):
+    window._set_document(_document())
+    for cable in window._document.elements["elec_cables"].values():
+        cable.name = "Duplicate"
+    original_labels = dict(window.canvas._label_visible)
+    with _write_pdf(window, tmp_path / "room-labels.pdf",
+                    page={"type": "elektro_room", "room_ids": ["ER-1"]}) as pdf:
+        assert len(pdf) == 3
+        plan_text = pdf[0].get_text()
+        assert "Duplicate (EK-1)" in plan_text
+        assert "Duplicate (EK-2)" in plan_text
+        assert "EK-3" not in plan_text
+        leaders = [drawing for drawing in pdf[0].get_drawings()
+               if drawing["fill_opacity"] == pytest.approx(130 / 255, abs=0.01)]
+        assert len(leaders) >= 2
+        assert all(len(drawing["items"]) > 1 for drawing in leaders)
+        assert "Duplicate (EK-1)" in pdf[2].get_text()
+        assert "Duplicate (EK-2)" in pdf[2].get_text()
+    assert window.canvas._label_visible == original_labels
+
+
+def test_room_plan_skips_outside_or_disabled_cable_labels(window, tmp_path):
+    window._set_document(_document())
+    for cable in window._document.elements["elec_cables"].values():
+        cable.name = "Duplicate"
+    window.canvas._elec_cables["EK-2"] = [QPointF(900, 900), QPointF(1000, 900)]
+    with _write_pdf(window, tmp_path / "room-clipped.pdf",
+                    page={"type": "elektro_room", "room_ids": ["ER-1"]}) as pdf:
+        assert "Duplicate (EK-1)" in pdf[0].get_text()
+        assert "Duplicate (EK-2)" not in pdf[0].get_text()
+        assert "Duplicate (EK-2)" in pdf[2].get_text()
+
+    with _write_pdf(window, tmp_path / "room-hidden.pdf",
+                    page={"type": "elektro_room", "room_ids": ["ER-1"],
+                          "element_visibility": {"kv": False}}) as pdf:
+        assert "Duplicate (EK-1)" not in pdf[0].get_text()
+        assert "Duplicate (EK-1)" in pdf[2].get_text()
+
+
+def test_room_label_colors_persist_alpha_values(window, monkeypatch):
+    store = {}
+
+    class SettingsStore:
+        def value(self, key, default=None):
+            return store.get(key, default)
+
+        def setValue(self, key, value):
+            store[key] = value
+
+    monkeypatch.setattr(window, "_settings", SettingsStore)
+    colors = {"background": "#70402010", "leader": "#60506070", "text": "#ff123456"}
+    window._save_pdf_room_label_colors(colors)
+    assert window._pdf_room_label_colors() == colors
+    style = {"stroke_width": 2.8, "line_style": "dashdot"}
+    window._save_pdf_room_label_style(style)
+    assert window._pdf_room_label_style() == style
 
 
 def _write_context_pdf(path, callback, resolution=150):

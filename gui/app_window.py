@@ -4902,6 +4902,64 @@ class AppWindow(QMainWindow):
     def _settings() -> QSettings:
         return layout_store.settings()
 
+    @staticmethod
+    def _default_pdf_room_label_colors() -> dict[str, str]:
+        return {
+            "background": "#E1FFFFFF",
+            "leader": "#82333333",
+            "text": "#FF202020",
+        }
+
+    def _pdf_room_label_colors(self) -> dict[str, str]:
+        colors = self._default_pdf_room_label_colors()
+        settings = self._settings()
+        for key, default in colors.items():
+            candidate = QColor(str(settings.value(f"pdf/elektro_room_label_colors/{key}", default)))
+            if candidate.isValid():
+                colors[key] = candidate.name(QColor.NameFormat.HexArgb)
+        return colors
+
+    def _save_pdf_room_label_colors(self, colors: dict[str, str]) -> None:
+        defaults = self._default_pdf_room_label_colors()
+        settings = self._settings()
+        for key, default in defaults.items():
+            candidate = QColor(str(colors.get(key, default)))
+            settings.setValue(
+                f"pdf/elektro_room_label_colors/{key}",
+                candidate.name(QColor.NameFormat.HexArgb) if candidate.isValid() else default,
+            )
+
+    @staticmethod
+    def _default_pdf_room_label_style() -> dict[str, str | float]:
+        return {"stroke_width": 1.2, "line_style": "dash"}
+
+    def _pdf_room_label_style(self) -> dict[str, str | float]:
+        settings = self._settings()
+        defaults = self._default_pdf_room_label_style()
+        try:
+            stroke_width = float(settings.value("pdf/elektro_room_label_style/stroke_width", defaults["stroke_width"]))
+        except (TypeError, ValueError):
+            stroke_width = float(defaults["stroke_width"])
+        line_style = str(settings.value("pdf/elektro_room_label_style/line_style", defaults["line_style"]))
+        return {
+            "stroke_width": max(0.2, min(5.0, stroke_width)),
+            "line_style": line_style if line_style in {"solid", "dash", "dot", "dashdot"} else "dash",
+        }
+
+    def _save_pdf_room_label_style(self, style: dict) -> None:
+        current = self._pdf_room_label_style()
+        try:
+            stroke_width = float(style.get("stroke_width", current["stroke_width"]))
+        except (TypeError, ValueError):
+            stroke_width = float(current["stroke_width"])
+        line_style = str(style.get("line_style", current["line_style"]))
+        settings = self._settings()
+        settings.setValue("pdf/elektro_room_label_style/stroke_width", max(0.2, min(5.0, stroke_width)))
+        settings.setValue(
+            "pdf/elektro_room_label_style/line_style",
+            line_style if line_style in {"solid", "dash", "dot", "dashdot"} else "dash",
+        )
+
     def _recent_projects(self) -> list[str]:
         recent = self._settings().value(_RECENT_KEY, [])
         if isinstance(recent, str):
@@ -6158,6 +6216,8 @@ class AppWindow(QMainWindow):
             svg_size=self.canvas._svg_size,
             export_meta=self._normalize_pdf_export_meta(self._pdf_export_meta, pages),
             hrouting_version=self._hrouting_program_version(),
+            room_label_colors=self._pdf_room_label_colors(),
+            room_label_style=self._pdf_room_label_style(),
             canvas=self.canvas,
             parent=self,
         )
@@ -6165,6 +6225,8 @@ class AppWindow(QMainWindow):
             return None
         out_pages = self._normalize_pdf_export_pages(dialog.get_pages())
         out_meta = self._normalize_pdf_export_meta(dialog.get_export_meta(), out_pages)
+        self._save_pdf_room_label_colors(dialog.get_room_label_colors())
+        self._save_pdf_room_label_style(dialog.get_room_label_style())
         return out_pages, out_meta
 
     def _current_uv_points_for_export_dialog(self) -> list[tuple[str, str]]:
@@ -6369,12 +6431,14 @@ class AppWindow(QMainWindow):
 
         selected_cable_ids: set[str] = set()
         cable_rows: list[list[str]] = []
+        cable_row_ids: list[str] = []
         for cable_id, cable in self._document.elements["elec_cables"].items():
             start_id = str(cable.start_ap or cable.geom.get("cable_start_ap") or "")
             end_id = str(cable.end_ap or cable.geom.get("cable_end_ap") or "")
             if start_id not in selected_ap_ids and end_id not in selected_ap_ids:
                 continue
             selected_cable_ids.add(cable_id)
+            cable_row_ids.append(cable_id)
             length_m = float(cable_length_details(self._document, cable)["length_m"])
             start_name = self._document.elements["elec_points"].get(start_id).name if start_id in self._document.elements["elec_points"] else (start_id or "")
             end_name = self._document.elements["elec_points"].get(end_id).name if end_id in self._document.elements["elec_points"] else (end_id or "")
@@ -6386,6 +6450,14 @@ class AppWindow(QMainWindow):
                 f"{length_m:.2f} m",
                 format_cable_laying_location(cable.laying_location),
             ])
+
+        name_counts: dict[str, int] = defaultdict(int)
+        for row in cable_rows:
+            name_counts[str(row[0])] += 1
+        for cable_id, row in zip(cable_row_ids, cable_rows):
+            name = str(row[0])
+            if name_counts[name] > 1:
+                row[0] = self._pdf_cable_sample(cable_id, f"{name} ({cable_id})")
 
         ap_rows: list[list[str]] = []
         for point_id, point in self._document.elements["elec_points"].items():
@@ -6449,6 +6521,122 @@ class AppWindow(QMainWindow):
         detail_rows.sort(key=lambda row: row[1].lower())
         metric_rows.sort(key=lambda row: row[1].lower())
         return {row[0] for row in detail_rows}, detail_rows, metric_rows
+
+    def _draw_pdf_room_cable_labels(
+        self, painter: QPainter, source_rect: QRectF, image_rect: QRectF,
+        cable_ids: set[str],
+    ) -> None:
+        scale = min(image_rect.width() / source_rect.width(), image_rect.height() / source_rect.height())
+        origin_x = image_rect.center().x() - source_rect.center().x() * scale
+        origin_y = image_rect.center().y() - source_rect.center().y() * scale
+        occupied: list[QRectF] = []
+        names = [self._document.elements["elec_cables"][cid].name or cid for cid in cable_ids
+                 if cid in self._document.elements["elec_cables"]]
+        colors = self._pdf_room_label_colors()
+        style = self._pdf_room_label_style()
+        line_styles = {
+            "solid": Qt.SolidLine,
+            "dash": Qt.DashLine,
+            "dot": Qt.DotLine,
+            "dashdot": Qt.DashDotLine,
+        }
+
+        painter.save()
+        try:
+            painter.setClipRect(image_rect)
+            font = painter.font()
+            font.setPointSizeF(9.0)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            for cable_id in sorted(cable_ids):
+                if not self.canvas._elec_visible.get(cable_id, True):
+                    continue
+                cable = self._document.elements["elec_cables"].get(cable_id)
+                points = self.canvas._elec_cables.get(cable_id, [])
+                if cable is None or len(points) < 2:
+                    continue
+
+                segments = []
+                for start, end in zip(points, points[1:]):
+                    dx, dy = end.x() - start.x(), end.y() - start.y()
+                    low, high = 0.0, 1.0
+                    for direction, distance in (
+                        (-dx, start.x() - source_rect.left()),
+                        (dx, source_rect.right() - start.x()),
+                        (-dy, start.y() - source_rect.top()),
+                        (dy, source_rect.bottom() - start.y()),
+                    ):
+                        if direction == 0:
+                            if distance < 0:
+                                high = -1.0
+                                break
+                        elif direction < 0:
+                            low = max(low, distance / direction)
+                        else:
+                            high = min(high, distance / direction)
+                    if high > low:
+                        midpoint = (low + high) / 2
+                        segments.append(((high - low) * math.hypot(dx, dy),
+                                         QPointF(start.x() + midpoint * dx, start.y() + midpoint * dy)))
+                if not segments:
+                    continue
+                anchor = max(segments, key=lambda segment: segment[0])[1]
+                target = QPointF(origin_x + anchor.x() * scale, origin_y + anchor.y() * scale)
+                name = str(cable.name or cable_id)
+                text = f"{name} ({cable_id})" if names.count(name) > 1 else name
+                width = metrics.horizontalAdvance(text) + 10
+                height = metrics.height() + 6
+                positions = (
+                    (18, -height - 12), (18, 12), (-width - 18, -height - 12),
+                    (-width - 18, 12), (18, -2 * height - 12), (18, height + 12),
+                )
+                candidates = [QRectF(target.x() + offset_x, target.y() + offset_y, width, height)
+                              for offset_x, offset_y in positions]
+                saved_pos = self.canvas._label_positions.get(cable_id)
+                if saved_pos is not None:
+                    candidates.insert(0, QRectF(origin_x + saved_pos.x() * scale,
+                                                 origin_y + saved_pos.y() * scale - metrics.ascent() - 3,
+                                                 width, height))
+                rect = next((candidate for candidate in candidates
+                             if image_rect.contains(candidate)
+                             and not any(candidate.adjusted(-4, -4, 4, 4).intersects(other)
+                                         for other in occupied)), None)
+                if rect is None:
+                    columns = (target.x() + 18, target.x() - width - 18,
+                               image_rect.left() + 4, image_rect.right() - width - 4)
+                    rows = sorted(range(max(0, int((image_rect.height() - height) // (height + 8)) + 1)),
+                                  key=lambda index: abs(image_rect.top() + index * (height + 8) - target.y()))
+                    for row_index in rows:
+                        for column in columns:
+                            candidate = QRectF(column, image_rect.top() + row_index * (height + 8),
+                                               width, height)
+                            if image_rect.contains(candidate) and not any(
+                                candidate.adjusted(-4, -4, 4, 4).intersects(other) for other in occupied
+                            ):
+                                rect = candidate
+                                break
+                        if rect is not None:
+                            break
+                if rect is None:
+                    continue
+                occupied.append(rect)
+                line_end = QPointF(max(rect.left(), min(rect.right(), target.x())),
+                                   max(rect.top(), min(rect.bottom(), target.y())))
+                leader = QColor(colors["leader"])
+                pen = QPen(
+                    leader,
+                    float(style["stroke_width"]),
+                    line_styles[str(style["line_style"])],
+                )
+                painter.setPen(pen)
+                painter.drawLine(target, line_end)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(colors["background"]))
+                painter.drawRect(rect)
+                painter.setPen(QColor(colors["text"]))
+                painter.drawText(QPointF(rect.left() + 5, rect.top() + 3 + metrics.ascent()), text)
+        finally:
+            painter.restore()
 
     def _room_focus_source_rect(self, room_ids: list[str], fallback: QRectF) -> QRectF:
         selected_room_ids = {str(room_id).strip() for room_id in room_ids if str(room_id).strip()}
@@ -7729,18 +7917,30 @@ class AppWindow(QMainWindow):
 
             # Limit visibility to selected rooms and their AP/cables for this page.
             for rid in self.canvas._elec_room_polygons:
-                self.canvas._elec_room_visible[rid] = rid in set(room_ids)
+                self.canvas._elec_room_visible[rid] = self.canvas._elec_room_visible.get(rid, True) and rid in room_ids
             for pid in self.canvas._elec_points:
-                self.canvas._elec_visible[pid] = pid in selected_ap_ids
+                self.canvas._elec_visible[pid] = self.canvas._elec_visible.get(pid, True) and pid in selected_ap_ids
             for cid in self.canvas._elec_cables:
-                self.canvas._elec_visible[cid] = cid in selected_cable_ids
+                self.canvas._elec_visible[cid] = self.canvas._elec_visible.get(cid, True) and cid in selected_cable_ids
 
-            img = self.canvas.render_for_export(
-                source_rect=source_rect,
-                output_w=max(1, int(image_rect.width())),
-                output_h=max(1, int(image_rect.height())),
-            )
+            old_labels = {cid: self.canvas._label_visible.get(cid) for cid in selected_cable_ids}
+            try:
+                for cid in selected_cable_ids:
+                    self.canvas._label_visible[cid] = False
+                img = self.canvas.render_for_export(
+                    source_rect=source_rect,
+                    output_w=max(1, int(image_rect.width())),
+                    output_h=max(1, int(image_rect.height())),
+                )
+            finally:
+                for cid, old_value in old_labels.items():
+                    if old_value is None:
+                        self.canvas._label_visible.pop(cid, None)
+                    else:
+                        self.canvas._label_visible[cid] = old_value
             painter.drawImage(image_rect, img)
+            if self.canvas._elec_cables:
+                self._draw_pdf_room_cable_labels(painter, source_rect, image_rect, selected_cable_ids)
 
             self._pdf_new_page(painter, writer)
             self._draw_pdf_table(

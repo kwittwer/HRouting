@@ -2,10 +2,13 @@ import copy
 import uuid
 
 from PySide6.QtCore import Qt, QRectF, QDate
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QColorDialog,
     QDateEdit,
+    QDoubleSpinBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -15,6 +18,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QPlainTextEdit,
+    QScrollArea,
+    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -66,13 +71,23 @@ class PdfExportConfigDialog(QDialog):
         uv_points: list[tuple[str, str]] | None = None,
         export_meta: dict | None = None,
         hrouting_version: str = "",
+        room_label_colors: dict[str, str] | None = None,
+        room_label_style: dict | None = None,
         canvas=None,
         parent=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("PDF-Export konfigurieren")
-        self.resize(1400, 900)
-        self.setWindowState(self.windowState() | Qt.WindowMaximized)
+        screen = self.screen()
+        available = screen.availableGeometry() if screen is not None else None
+        if available is not None:
+            self.resize(min(1400, int(available.width() * 0.96)),
+                        min(900, int(available.height() * 0.92)))
+            self.setMinimumSize(min(640, int(available.width() * 0.96)),
+                                min(420, int(available.height() * 0.92)))
+        else:
+            self.resize(1100, 760)
+            self.setMinimumSize(640, 420)
 
         self._pages = copy.deepcopy(pages)
         self._floor_plans = list(floor_plans)
@@ -83,12 +98,28 @@ class PdfExportConfigDialog(QDialog):
         self._svg_w = float(svg_size[0] if svg_size else 0.0)
         self._svg_h = float(svg_size[1] if svg_size else 0.0)
         self._hrouting_version = str(hrouting_version or "")
+        self._room_label_colors = {
+            "background": "#E1FFFFFF",
+            "leader": "#82333333",
+            "text": "#FF202020",
+        }
+        if isinstance(room_label_colors, dict):
+            for key in self._room_label_colors:
+                color = QColor(str(room_label_colors.get(key, "")))
+                if color.isValid():
+                    self._room_label_colors[key] = color.name(QColor.NameFormat.HexArgb)
+        room_label_style = room_label_style if isinstance(room_label_style, dict) else {}
+        self._room_label_stroke_width = max(0.2, min(5.0, float(room_label_style.get("stroke_width", 1.2))))
+        self._room_label_line_style = str(room_label_style.get("line_style", "dash"))
+        if self._room_label_line_style not in {"solid", "dash", "dot", "dashdot"}:
+            self._room_label_line_style = "dash"
         self._block_updates = False
         self._canvas = canvas
         self._element_checks: dict[str, QCheckBox] = {}
         self._table_checks: dict[str, QCheckBox] = {}
         self._room_checks: dict[str, QCheckBox] = {}
         self._circuit_checks: dict[str, QCheckBox] = {}
+        self._room_label_color_buttons: dict[str, QPushButton] = {}
         self._meta = self._normalize_meta(export_meta)
 
         self._build_ui()
@@ -141,13 +172,27 @@ class PdfExportConfigDialog(QDialog):
         content = QHBoxLayout()
         root.addLayout(content, stretch=1)
 
+        splitter = QSplitter(Qt.Horizontal)
+        self._content_splitter = splitter
+        content.addWidget(splitter)
+
         left_wrap = QWidget()
         left = QVBoxLayout(left_wrap)
-        content.addWidget(left_wrap, stretch=1)
+        self.left_scroll = QScrollArea()
+        self.left_scroll.setWidgetResizable(True)
+        self.left_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.left_scroll.setWidget(left_wrap)
+        splitter.addWidget(self.left_scroll)
 
         right_wrap = QWidget()
         right = QVBoxLayout(right_wrap)
-        content.addWidget(right_wrap, stretch=1)
+        self.right_scroll = QScrollArea()
+        self.right_scroll.setWidgetResizable(True)
+        self.right_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.right_scroll.setWidget(right_wrap)
+        splitter.addWidget(self.right_scroll)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
 
         meta_group = QGroupBox("Titelseite")
         meta_form = QFormLayout(meta_group)
@@ -302,6 +347,31 @@ class PdfExportConfigDialog(QDialog):
             room_layout.addWidget(cb)
         right.addWidget(self.room_group)
 
+        self.room_label_color_group = QGroupBox("Kabelbeschriftung im Elektro-Raum-PDF")
+        room_label_color_form = QFormLayout(self.room_label_color_group)
+        for key, label in (("background", "Hintergrund"), ("leader", "Verbindungslinie"), ("text", "Text")):
+            button = QPushButton()
+            button.setToolTip(f"{label}farbe wählen (inklusive Transparenz)")
+            button.clicked.connect(lambda _checked=False, color_key=key: self._pick_room_label_color(color_key))
+            self._room_label_color_buttons[key] = button
+            room_label_color_form.addRow(label, button)
+            self._update_room_label_color_button(key)
+        self.sb_room_label_stroke_width = QDoubleSpinBox()
+        self.sb_room_label_stroke_width.setRange(0.2, 5.0)
+        self.sb_room_label_stroke_width.setSingleStep(0.2)
+        self.sb_room_label_stroke_width.setSuffix(" pt")
+        self.sb_room_label_stroke_width.setValue(self._room_label_stroke_width)
+        self.cb_room_label_line_style = QComboBox()
+        for key, label in (("solid", "Durchgezogen"), ("dash", "Gestrichelt"),
+                           ("dot", "Gepunktet"), ("dashdot", "Strich-Punkt")):
+            self.cb_room_label_line_style.addItem(label, key)
+        self.cb_room_label_line_style.setCurrentIndex(
+            max(0, self.cb_room_label_line_style.findData(self._room_label_line_style))
+        )
+        room_label_color_form.addRow("Linienstärke", self.sb_room_label_stroke_width)
+        room_label_color_form.addRow("Linienart", self.cb_room_label_line_style)
+        right.addWidget(self.room_label_color_group)
+
         self.circuit_group = QGroupBox("Heizkreise")
         circuit_layout = QVBoxLayout(self.circuit_group)
         circuit_layout.setContentsMargins(6, 6, 6, 6)
@@ -316,12 +386,22 @@ class PdfExportConfigDialog(QDialog):
 
         right.addStretch(1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        root.addWidget(self.button_box)
+        self._update_content_orientation()
 
         self._update_page_count_field()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_content_orientation()
+
+    def _update_content_orientation(self) -> None:
+        orientation = Qt.Vertical if self.width() < 900 else Qt.Horizontal
+        if self._content_splitter.orientation() != orientation:
+            self._content_splitter.setOrientation(orientation)
 
     def _normalize_meta(self, meta: dict | None) -> dict[str, str]:
         src = meta if isinstance(meta, dict) else {}
@@ -341,6 +421,36 @@ class PdfExportConfigDialog(QDialog):
         if not out["hrouting_version"]:
             out["hrouting_version"] = str(self._hrouting_version or "")
         return out
+
+    def _update_room_label_color_button(self, key: str) -> None:
+        color = QColor(self._room_label_colors[key])
+        button = self._room_label_color_buttons[key]
+        button.setText(color.name(QColor.NameFormat.HexArgb).upper())
+        button.setStyleSheet(
+            f"background-color: rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()});"
+            "border: 1px solid palette(mid); padding: 5px;"
+        )
+
+    def _pick_room_label_color(self, key: str) -> None:
+        current = QColor(self._room_label_colors[key])
+        selected = QColorDialog.getColor(
+            current,
+            self,
+            "Farbe wählen",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel,
+        )
+        if selected.isValid():
+            self._room_label_colors[key] = selected.name(QColor.NameFormat.HexArgb)
+            self._update_room_label_color_button(key)
+
+    def get_room_label_colors(self) -> dict[str, str]:
+        return dict(self._room_label_colors)
+
+    def get_room_label_style(self) -> dict[str, str | float]:
+        return {
+            "stroke_width": self.sb_room_label_stroke_width.value(),
+            "line_style": str(self.cb_room_label_line_style.currentData() or "dash"),
+        }
 
     def _enabled_page_count(self) -> int:
         enabled = 0
