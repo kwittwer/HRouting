@@ -73,6 +73,8 @@ class PdfExportConfigDialog(QDialog):
         hrouting_version: str = "",
         room_label_colors: dict[str, str] | None = None,
         room_label_style: dict | None = None,
+        ap_label_colors: dict[str, str] | None = None,
+        ap_label_style: dict | None = None,
         canvas=None,
         parent=None,
     ):
@@ -113,6 +115,17 @@ class PdfExportConfigDialog(QDialog):
         self._room_label_line_style = str(room_label_style.get("line_style", "dash"))
         if self._room_label_line_style not in {"solid", "dash", "dot", "dashdot"}:
             self._room_label_line_style = "dash"
+        self._ap_label_colors = dict(self._room_label_colors)
+        if isinstance(ap_label_colors, dict):
+            for key in self._ap_label_colors:
+                color = QColor(str(ap_label_colors.get(key, "")))
+                if color.isValid():
+                    self._ap_label_colors[key] = color.name(QColor.NameFormat.HexArgb)
+        ap_label_style = ap_label_style if isinstance(ap_label_style, dict) else {}
+        self._ap_label_stroke_width = max(0.2, min(5.0, float(ap_label_style.get("stroke_width", 1.2))))
+        self._ap_label_line_style = str(ap_label_style.get("line_style", "dash"))
+        if self._ap_label_line_style not in {"solid", "dash", "dot", "dashdot"}:
+            self._ap_label_line_style = "dash"
         self._block_updates = False
         self._canvas = canvas
         self._element_checks: dict[str, QCheckBox] = {}
@@ -120,6 +133,7 @@ class PdfExportConfigDialog(QDialog):
         self._room_checks: dict[str, QCheckBox] = {}
         self._circuit_checks: dict[str, QCheckBox] = {}
         self._room_label_color_buttons: dict[str, QPushButton] = {}
+        self._ap_label_color_buttons: dict[str, QPushButton] = {}
         self._meta = self._normalize_meta(export_meta)
 
         self._build_ui()
@@ -372,6 +386,31 @@ class PdfExportConfigDialog(QDialog):
         room_label_color_form.addRow("Linienart", self.cb_room_label_line_style)
         right.addWidget(self.room_label_color_group)
 
+        self.ap_label_color_group = QGroupBox("AP-Beschriftung im Elektro-Raum-PDF")
+        ap_label_color_form = QFormLayout(self.ap_label_color_group)
+        for key, label in (("background", "Hintergrund"), ("leader", "Verbindungslinie"), ("text", "Text")):
+            button = QPushButton()
+            button.setToolTip(f"AP-{label.lower()}farbe wählen (inklusive Transparenz)")
+            button.clicked.connect(lambda _checked=False, color_key=key: self._pick_ap_label_color(color_key))
+            self._ap_label_color_buttons[key] = button
+            ap_label_color_form.addRow(label, button)
+            self._update_ap_label_color_button(key)
+        self.sb_ap_label_stroke_width = QDoubleSpinBox()
+        self.sb_ap_label_stroke_width.setRange(0.2, 5.0)
+        self.sb_ap_label_stroke_width.setSingleStep(0.2)
+        self.sb_ap_label_stroke_width.setSuffix(" pt")
+        self.sb_ap_label_stroke_width.setValue(self._ap_label_stroke_width)
+        self.cb_ap_label_line_style = QComboBox()
+        for key, label in (("solid", "Durchgezogen"), ("dash", "Gestrichelt"),
+                           ("dot", "Gepunktet"), ("dashdot", "Strich-Punkt")):
+            self.cb_ap_label_line_style.addItem(label, key)
+        self.cb_ap_label_line_style.setCurrentIndex(
+            max(0, self.cb_ap_label_line_style.findData(self._ap_label_line_style))
+        )
+        ap_label_color_form.addRow("Linienstärke", self.sb_ap_label_stroke_width)
+        ap_label_color_form.addRow("Linienart", self.cb_ap_label_line_style)
+        right.addWidget(self.ap_label_color_group)
+
         self.circuit_group = QGroupBox("Heizkreise")
         circuit_layout = QVBoxLayout(self.circuit_group)
         circuit_layout.setContentsMargins(6, 6, 6, 6)
@@ -450,6 +489,32 @@ class PdfExportConfigDialog(QDialog):
         return {
             "stroke_width": self.sb_room_label_stroke_width.value(),
             "line_style": str(self.cb_room_label_line_style.currentData() or "dash"),
+        }
+
+    def _update_ap_label_color_button(self, key: str) -> None:
+        color = QColor(self._ap_label_colors[key])
+        self._ap_label_color_buttons[key].setText(color.name(QColor.NameFormat.HexArgb).upper())
+        self._ap_label_color_buttons[key].setStyleSheet(
+            f"background-color: rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()});"
+            "border: 1px solid palette(mid); padding: 5px;"
+        )
+
+    def _pick_ap_label_color(self, key: str) -> None:
+        selected = QColorDialog.getColor(
+            QColor(self._ap_label_colors[key]), self, "AP-Farbe wählen",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel,
+        )
+        if selected.isValid():
+            self._ap_label_colors[key] = selected.name(QColor.NameFormat.HexArgb)
+            self._update_ap_label_color_button(key)
+
+    def get_ap_label_colors(self) -> dict[str, str]:
+        return dict(self._ap_label_colors)
+
+    def get_ap_label_style(self) -> dict[str, str | float]:
+        return {
+            "stroke_width": self.sb_ap_label_stroke_width.value(),
+            "line_style": str(self.cb_ap_label_line_style.currentData() or "dash"),
         }
 
     def _enabled_page_count(self) -> int:

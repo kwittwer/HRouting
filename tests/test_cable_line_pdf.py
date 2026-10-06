@@ -91,6 +91,9 @@ def test_room_plan_labels_hidden_cables_with_leaders(window, tmp_path):
         plan_text = pdf[0].get_text()
         assert "Duplicate (EK-1)" in plan_text
         assert "Duplicate (EK-2)" in plan_text
+        assert "Shared (AP-1)" in plan_text
+        assert "Shared (AP-2)" in plan_text
+        assert "AP-3" not in plan_text
         assert "EK-3" not in plan_text
         leaders = [drawing for drawing in pdf[0].get_drawings()
                if drawing["fill_opacity"] == pytest.approx(130 / 255, abs=0.01)]
@@ -138,6 +141,12 @@ def test_room_label_colors_persist_alpha_values(window, monkeypatch):
     style = {"stroke_width": 2.8, "line_style": "dashdot"}
     window._save_pdf_room_label_style(style)
     assert window._pdf_room_label_style() == style
+    ap_colors = {"background": "#7000ff00", "leader": "#60ff00ff", "text": "#ff001122"}
+    ap_style = {"stroke_width": 3.4, "line_style": "dot"}
+    window._save_pdf_ap_label_colors(ap_colors)
+    window._save_pdf_ap_label_style(ap_style)
+    assert window._pdf_ap_label_colors() == ap_colors
+    assert window._pdf_ap_label_style() == ap_style
 
 
 def _write_context_pdf(path, callback, resolution=150):

@@ -148,6 +148,8 @@ def test_pdf_export_dialog_edits_room_label_colors_with_alpha(app, monkeypatch):
         svg_size=(1000.0, 700.0),
         room_label_colors={"background": "#80445566", "leader": "#99778899", "text": "#FF112233"},
         room_label_style={"stroke_width": 2.4, "line_style": "dot"},
+        ap_label_colors={"background": "#80332211", "leader": "#99887766", "text": "#ffabcdef"},
+        ap_label_style={"stroke_width": 3.2, "line_style": "dashdot"},
     )
     monkeypatch.setattr(
         QColorDialog,
@@ -166,6 +168,15 @@ def test_pdf_export_dialog_edits_room_label_colors_with_alpha(app, monkeypatch):
         dialog.sb_room_label_stroke_width.setValue(3.0)
         dialog.cb_room_label_line_style.setCurrentIndex(dialog.cb_room_label_line_style.findData("dashdot"))
         assert dialog.get_room_label_style() == {"stroke_width": 3.0, "line_style": "dashdot"}
+        assert dialog.get_ap_label_colors() == {
+            "background": "#80332211",
+            "leader": "#99887766",
+            "text": "#ffabcdef",
+        }
+        assert dialog.get_ap_label_style() == {"stroke_width": 3.2, "line_style": "dashdot"}
+        dialog.sb_ap_label_stroke_width.setValue(0.8)
+        dialog.cb_ap_label_line_style.setCurrentIndex(dialog.cb_ap_label_line_style.findData("dot"))
+        assert dialog.get_ap_label_style() == {"stroke_width": 0.8, "line_style": "dot"}
     finally:
         dialog.deleteLater()
 
