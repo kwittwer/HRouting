@@ -6076,6 +6076,173 @@ def test_project_overview_electro_separate_docks_exist(app, monkeypatch):
         window.deleteLater()
 
 
+def test_project_overview_electro_cable_rows_copy_to_clipboard(app, monkeypatch):
+    from PySide6.QtCore import QItemSelectionModel, QLocale, QSettings, Qt  # noqa: PLC0415
+    from PySide6.QtWidgets import QApplication  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        dock = window.overview_electro_cables
+        dock._fill_elec_cable_table(
+            [
+                {
+                    "id": "EK-1",
+                    "name": "Alpha",
+                    "type": "NYM-J 3x1.5",
+                    "length_m": 12.345,
+                    "start_ap_name": "AP Alpha Start",
+                    "end_ap_name": "AP Alpha Ende",
+                    "laying_location_text": "Decke",
+                    "color": "#ff0000",
+                    "stroke_width": 2.0,
+                    "line_style": "solid",
+                },
+                {
+                    "id": "EK-2",
+                    "name": "Beta",
+                    "type": "J-Y(ST)Y 2x2x0.8",
+                    "length_m": 8.5,
+                    "start_ap_name": "AP Beta Start",
+                    "end_ap_name": "AP Beta Ende",
+                    "laying_location_text": "Wand",
+                    "color": "#00ff00",
+                    "stroke_width": 1.0,
+                    "line_style": "dashed",
+                },
+            ]
+        )
+        table = dock._elec_cable_table
+        for cable_id, cable_type, color, width, line_style in (
+            ("EK-1", "Sondertyp Alpha", "#123456", 3.5, "dotted"),
+            ("EK-2", "Sondertyp Beta", "#654321", 4.5, "dashed"),
+        ):
+            editors = dock._elec_cable_editors[cable_id]
+            editors[1].setCurrentText(cable_type)
+            editors[6].update_silently(color)
+            editors[7].update_silently(width)
+            editors[8].update_silently(line_style)
+
+        table.sortItems(0, Qt.DescendingOrder)
+        for row in (0, 1):
+            table.selectionModel().select(
+                table.model().index(row, 0),
+                QItemSelectionModel.Select | QItemSelectionModel.Rows,
+            )
+        app.processEvents()
+        monkeypatch.setattr(QApplication, "focusWidget", staticmethod(lambda: table))
+        original_locale = QLocale()
+        QLocale.setDefault(QLocale(QLocale.German, QLocale.Germany))
+        try:
+            window._copy_selected()
+        finally:
+            QLocale.setDefault(original_locale)
+
+        assert app.clipboard().text() == (
+            "Name\tTyp\tLänge [m]\tStart AP\tEnd AP\tVerlegeort\tFarbe\tStärke [px]\tLinienart\r\n"
+            "Beta\tSondertyp Beta\t8,50\tAP Beta Start\tAP Beta Ende\tWand"
+            "\t#654321\t4,5\tdashed\r\n"
+            "Alpha\tSondertyp Alpha\t12,35\tAP Alpha Start\tAP Alpha Ende\tDecke"
+            "\t#123456\t3,5\tdotted"
+        )
+
+        table.clearSelection()
+        clipboard_before = app.clipboard().text()
+        assert not dock.copy_selected_elec_cables()
+        assert app.clipboard().text() == clipboard_before
+    finally:
+        window.deleteLater()
+
+
+def test_project_overview_heating_rows_copy_to_clipboard(app, monkeypatch):
+    from PySide6.QtCore import QLocale, QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QApplication  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        dock = window.overview_heating
+        dock._fill_hk_table(
+            [{
+                "name": "Wohnzimmer",
+                "distributor": "HKV EG",
+                "total_m": 12.5,
+                "route_m": 10.0,
+                "supply_m": 2.5,
+                "room_temp": 20.0,
+                "volume_flow_lmin": 1.25,
+                "power_w": 350,
+                "pressure_drop_mbar": 25.0,
+                "kv_value": 0.1234,
+            }],
+            35.0,
+            30.0,
+        )
+        table = dock._hk_table
+        table.selectRow(0)
+        monkeypatch.setattr(QApplication, "focusWidget", staticmethod(lambda: table))
+        original_locale = QLocale()
+        QLocale.setDefault(QLocale(QLocale.German, QLocale.Germany))
+        try:
+            window._copy_selected()
+        finally:
+            QLocale.setDefault(original_locale)
+
+        assert app.clipboard().text() == (
+            "Name\tHKV\tGesamt [m]\tIm Raum [m]\tZuleitung [m]\tT-Soll [°C]"
+            "\tSpreizung [K]\tDurchfluss [l/min]\tLeistung [W]\tDruckverl. [mbar]"
+            "\tKv [m³/h]\r\n"
+            "Wohnzimmer\tHKV EG\t12,50\t10,00\t2,50\t20,0\t5,0"
+            "\t1,25\t350\t25,0\t0,1234"
+        )
+    finally:
+        window.deleteLater()
+
+
+def test_project_overview_electro_material_rows_copy_to_clipboard(app, monkeypatch):
+    from PySide6.QtCore import QLocale, QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        dock = window.overview_electro_materials
+        dock._fill_elec_material_tables(
+            {
+                "cable_length_by_type_m": {"3x2,5": 2.59},
+                "cable_laying_location_by_type": {"3x2,5": "–"},
+                "ap_count_by_type": {"Steckdose": 3},
+            }
+        )
+        table = dock._elec_cable_mat_table
+        row = next(
+            index for index in range(table.rowCount())
+            if table.item(index, 0).text() == "3x2,5"
+        )
+        table.selectRow(row)
+        original_locale = QLocale()
+        QLocale.setDefault(QLocale(QLocale.German, QLocale.Germany))
+        try:
+            assert dock.copy_selected_table_rows(table)
+        finally:
+            QLocale.setDefault(original_locale)
+
+        assert app.clipboard().text() == "Typ\tGesamtlänge [m]\tVerlegeort\r\n3x2,5\t2,59\t–"
+    finally:
+        window.deleteLater()
+
+
 def test_ref_line_and_ref_length_recompute_floorplan_scale(app, monkeypatch):
     from PySide6.QtCore import QPointF, QSettings  # noqa: PLC0415
 

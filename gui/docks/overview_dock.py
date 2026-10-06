@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from gui.cable_line_preview import CableLineSample, draw_cable_line_sample
 from gui.properties.field_widgets import ColorFieldWidget, NumberFieldWidget, ChoiceFieldWidget
+from gui.table_clipboard import copy_selected_table_rows, enable_table_row_copy
 from model.schema import ELEC_CABLE_SCHEMA
 
 if TYPE_CHECKING:
@@ -160,6 +161,7 @@ class ProjectOverviewDock(QDockWidget):
         self._updating_electro_tables = False
         self._elec_room_row_ap_ids: dict[int, str] = {}
         self._elec_cable_row_ids: dict[int, str] = {}
+        self._elec_cable_editors: dict[str, dict[int, QWidget]] = {}
         self._elec_cable_committed_types: dict[str, str] = {}
         if visible_electro_sections is None:
             self._visible_electro_sections = {"materials", "rooms", "cables"}
@@ -392,7 +394,7 @@ class ProjectOverviewDock(QDockWidget):
         tbl.setHorizontalHeaderLabels(columns)
         tbl.setSortingEnabled(True)
         tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        tbl.setSelectionBehavior(QTableWidget.SelectRows)
+        enable_table_row_copy(tbl, copy_handler=lambda: self.copy_selected_table_rows(tbl))
         tbl.setAlternatingRowColors(True)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -409,7 +411,7 @@ class ProjectOverviewDock(QDockWidget):
         tbl.setHorizontalHeaderLabels(columns)
         tbl.setSortingEnabled(True)
         tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        tbl.setSelectionBehavior(QTableWidget.SelectRows)
+        enable_table_row_copy(tbl, copy_handler=lambda: self.copy_selected_table_rows(tbl))
         tbl.setAlternatingRowColors(True)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -421,7 +423,7 @@ class ProjectOverviewDock(QDockWidget):
         tbl.setHorizontalHeaderLabels(["Typ", "Gesamtlänge [m]", "Verlegeort"])
         tbl.setSortingEnabled(True)
         tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        tbl.setSelectionBehavior(QTableWidget.SelectRows)
+        enable_table_row_copy(tbl, copy_handler=lambda: self.copy_selected_table_rows(tbl))
         tbl.setAlternatingRowColors(True)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -433,7 +435,7 @@ class ProjectOverviewDock(QDockWidget):
         tbl.setHorizontalHeaderLabels(["AP-Typ", "Anzahl"])
         tbl.setSortingEnabled(True)
         tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        tbl.setSelectionBehavior(QTableWidget.SelectRows)
+        enable_table_row_copy(tbl, copy_handler=lambda: self.copy_selected_table_rows(tbl))
         tbl.setAlternatingRowColors(True)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -449,7 +451,7 @@ class ProjectOverviewDock(QDockWidget):
             QAbstractItemView.DoubleClicked
             | QAbstractItemView.EditKeyPressed
         )
-        tbl.setSelectionBehavior(QTableWidget.SelectRows)
+        enable_table_row_copy(tbl, copy_handler=lambda: self.copy_selected_table_rows(tbl))
         tbl.setAlternatingRowColors(True)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -466,12 +468,42 @@ class ProjectOverviewDock(QDockWidget):
             QAbstractItemView.DoubleClicked
             | QAbstractItemView.EditKeyPressed
         )
-        tbl.setSelectionBehavior(QTableWidget.SelectRows)
+        enable_table_row_copy(tbl, copy_handler=lambda: self.copy_selected_table_rows(tbl))
         tbl.setAlternatingRowColors(True)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         tbl.verticalHeader().hide()
         return tbl
+
+    def copy_selected_table_rows(self, table: QTableWidget) -> bool:
+        if table is not self._elec_cable_table:
+            return copy_selected_table_rows(table)
+
+        def resolve_widget(row: int, column: int):
+            name_item = table.item(row, 0)
+            cable_id = str(name_item.data(Qt.UserRole) or "") if name_item is not None else ""
+            return self._elec_cable_editors.get(cable_id, {}).get(column) or table.cellWidget(row, column)
+
+        return copy_selected_table_rows(table, column_count=9, cell_widget_resolver=resolve_widget)
+
+    def copy_focused_table_rows(self, focus_widget: QWidget | None) -> bool | None:
+        if focus_widget is None:
+            return None
+        for table in (
+            self._hk_table,
+            self._hkv_table,
+            self._elec_cable_mat_table,
+            self._elec_ap_mat_table,
+            self._elec_room_table,
+            self._elec_cable_table,
+        ):
+            if focus_widget in (table, table.viewport()):
+                self.copy_selected_table_rows(table)
+                return True
+        return None
+
+    def copy_selected_elec_cables(self) -> bool:
+        return self.copy_selected_table_rows(self._elec_cable_table)
 
     @staticmethod
     def _set_item_editable(item: QTableWidgetItem, editable: bool) -> None:
@@ -887,6 +919,7 @@ class ProjectOverviewDock(QDockWidget):
         tbl.blockSignals(True)
         tbl.setRowCount(len(cables or []))
         self._elec_cable_row_ids = {}
+        self._elec_cable_editors = {}
         cable_type_options: list[str] = []
         try:
             from model.schema import CABLE_TYPES  # noqa: PLC0415
@@ -899,6 +932,7 @@ class ProjectOverviewDock(QDockWidget):
             self._elec_cable_row_ids[r] = cable_id
 
             name_item = _str_item(cable.get("name", ""))
+            name_item.setData(Qt.UserRole, cable_id)
             self._set_item_editable(name_item, False)
             tbl.setItem(r, 0, name_item)
 
@@ -920,6 +954,7 @@ class ProjectOverviewDock(QDockWidget):
                         lambda cid=cable_id, cb=combo: self._commit_elec_cable_type(cid, cb)
                     )
                 tbl.setCellWidget(r, 1, combo)
+                self._elec_cable_editors.setdefault(cable_id, {})[1] = combo
             else:
                 tbl.setCellWidget(r, 1, None)
                 type_item = _str_item(current_type)
@@ -953,6 +988,7 @@ class ProjectOverviewDock(QDockWidget):
                     lambda field, value, cid=cable_id: self._on_elec_cable_style_changed(cid, field, value)
                 )
                 tbl.setCellWidget(r, column, editor)
+                self._elec_cable_editors.setdefault(cable_id, {})[column] = editor
             sample = CableLineSample("", cable.get("color", "#ff9800"),
                                      cable.get("stroke_width", 2.0), cable.get("line_style", "solid"))
             pixmap = QPixmap(120, 16)

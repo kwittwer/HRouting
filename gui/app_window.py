@@ -2392,6 +2392,12 @@ class AppWindow(QMainWindow):
             self._delete_selected()
 
     def _copy_selected(self) -> None:
+        focus_widget = QApplication.focusWidget()
+        for dock in getattr(self, "_docks", {}).values():
+            copy_focused = getattr(dock, "copy_focused_table_rows", None)
+            if copy_focused is not None and copy_focused(focus_widget) is not None:
+                return
+
         element_id = self._current_selection_id()
         if not element_id:
             self.statusBar().showMessage("Kein Element ausgewählt", 2000)
