@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QByteArray, Qt, QTimer, QSettings, Signal
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import QByteArray, Qt, QTimer, QSettings, Signal, QRectF
+from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -26,6 +26,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from gui.cable_line_preview import CableLineSample, draw_cable_line_sample
+from gui.properties.field_widgets import ColorFieldWidget, NumberFieldWidget, ChoiceFieldWidget
+from model.schema import ELEC_CABLE_SCHEMA
 
 if TYPE_CHECKING:
     from model.document import Document
@@ -453,8 +457,10 @@ class ProjectOverviewDock(QDockWidget):
         return tbl
 
     def _build_elec_cable_table(self) -> QTableWidget:
-        tbl = QTableWidget(0, 6)
-        tbl.setHorizontalHeaderLabels(["Name", "Typ", "Länge [m]", "Start AP", "End AP", "Verlegeort"])
+        tbl = QTableWidget(0, 10)
+        tbl.setHorizontalHeaderLabels(["Name", "Typ", "Länge [m]", "Start AP", "End AP", "Verlegeort",
+                                       "Farbe", "Stärke [px]", "Linienart", "Linie"])
+        tbl.setIconSize(QPixmap(120, 16).size())
         tbl.setSortingEnabled(True)
         tbl.setEditTriggers(
             QAbstractItemView.DoubleClicked
@@ -935,6 +941,30 @@ class ProjectOverviewDock(QDockWidget):
             self._set_item_editable(location_item, False)
             location_item.setToolTip(location_item.text())
             tbl.setItem(r, 5, location_item)
+            for column, key, widget_class in (
+                (6, "color", ColorFieldWidget),
+                (7, "stroke_width", NumberFieldWidget),
+                (8, "line_style", ChoiceFieldWidget),
+            ):
+                spec = next(field for field in ELEC_CABLE_SCHEMA.fields if field.key == key)
+                editor = widget_class(spec, parent=tbl)
+                editor.update_silently(cable.get(key, spec.default))
+                editor.value_changed.connect(
+                    lambda field, value, cid=cable_id: self._on_elec_cable_style_changed(cid, field, value)
+                )
+                tbl.setCellWidget(r, column, editor)
+            sample = CableLineSample("", cable.get("color", "#ff9800"),
+                                     cable.get("stroke_width", 2.0), cable.get("line_style", "solid"))
+            pixmap = QPixmap(120, 16)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            draw_cable_line_sample(painter, QRectF(4, 0, 112, 16), sample)
+            painter.end()
+            preview_item = _ReadOnlyTableItem("")
+            preview_item.setIcon(QIcon(pixmap))
+            preview_item.setToolTip(f"{sample.color}, {sample.stroke_width:.1f} px, {sample.line_style}")
+            tbl.setItem(r, 9, preview_item)
+            tbl.setRowHeight(r, max(30, tbl.rowHeight(r)))
         tbl.blockSignals(False)
         self._updating_electro_tables = False
         tbl.setSortingEnabled(True)
@@ -990,6 +1020,12 @@ class ProjectOverviewDock(QDockWidget):
             return
         self._elec_cable_committed_types[cable_id] = value
         self._on_elec_cable_type_changed(cable_id, value)
+
+    def _on_elec_cable_style_changed(self, cable_id: str, key: str, value: object) -> None:
+        if self._updating_electro_tables or not cable_id:
+            return
+        self.pre_change.emit()
+        self.element_field_changed.emit(cable_id, key, value)
 
     def _on_elec_cable_type_changed(self, cable_id: str, value: str) -> None:
         if self._updating_electro_tables:

@@ -20,6 +20,15 @@ from model.computed import project_overview_data
 from model.document import Document
 
 
+@pytest.fixture(autouse=True)
+def isolated_overview_cache():
+    from model.computed import _PROJECT_OVERVIEW_CACHE
+
+    _PROJECT_OVERVIEW_CACHE.clear()
+    yield
+    _PROJECT_OVERVIEW_CACHE.clear()
+
+
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
@@ -110,3 +119,56 @@ def test_overview_old_cable_defaults_without_rewriting(app):
     finally:
         dock.deleteLater()
         app.processEvents()
+
+
+def test_cable_style_editors_keep_identity_after_sorting(app):
+    doc = _document()
+    doc.get("EK-1").data.update(name="Zulu", color="#cc2244", stroke_width=5.0, line_style="dash")
+    doc.get("EK-2").data.update(name="Alpha", color="#2266cc", stroke_width=1.0, line_style="dot")
+    dock = ProjectOverviewDock(visible_tabs=("Elektro",), visible_electro_sections=("cables",))
+    changes = []
+    undo_events = []
+    dock.element_field_changed.connect(lambda *args: changes.append(args))
+    dock.pre_change.connect(lambda: undo_events.append(True))
+    try:
+        dock.set_document(doc)
+        table = dock._elec_cable_table
+        assert changes == []
+        table.sortItems(0, Qt.AscendingOrder)
+        assert table.item(0, 0).text() == "Alpha"
+        assert table.cellWidget(0, 6).value() == "#2266cc"
+        assert table.cellWidget(0, 7).value() == 1.0
+        assert table.cellWidget(0, 8).value() == "dot"
+        assert not table.item(0, 9).icon().isNull()
+        assert "#2266cc" in table.item(0, 9).toolTip()
+        table.cellWidget(0, 6)._emit("#22aa44")
+        table.cellWidget(0, 7)._spin.setValue(3.5)
+        table.cellWidget(0, 8)._combo.setCurrentIndex(3)
+        assert changes == [
+            ("EK-2", "color", "#22aa44"),
+            ("EK-2", "stroke_width", 3.5),
+            ("EK-2", "line_style", "dashdot"),
+        ]
+        assert len(undo_events) == 3
+    finally:
+        dock.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("style", ["solid", "dash", "dot", "dashdot"])
+def test_cable_line_sample_draws_real_color_width_and_pattern(app, style):
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QImage, QPainter
+    from gui.cable_line_preview import CableLineSample, draw_cable_line_sample
+
+    image = QImage(200, 20, QImage.Format_ARGB32)
+    image.fill(Qt.white)
+    painter = QPainter(image)
+    draw_cable_line_sample(painter, QRectF(4, 0, 192, 20), CableLineSample("", "#cc2244", 4, style))
+    painter.end()
+    colors = [image.pixelColor(column, 10).name() for column in range(5, 195)]
+    assert "#cc2244" in colors
+    assert ("#ffffff" in colors) == (style != "solid")
+    column = next(column for column in range(5, 195) if image.pixelColor(column, 10).name() == "#cc2244")
+    assert image.pixelColor(column, 8).name() == "#cc2244"
+    assert image.pixelColor(column, 6).name() == "#ffffff"

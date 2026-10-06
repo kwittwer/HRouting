@@ -141,6 +141,52 @@ def test_unchanged_style_propagation_emits_no_element_signals(window):
     assert len(cables) == CABLE_COUNT
 
 
+@pytest.mark.parametrize("key,value,column", [
+    ("color", "#12ab34", 6),
+    ("stroke_width", 4.5, 7),
+    ("line_style", "dashdot", 8),
+])
+def test_overview_style_changes_match_properties_and_support_undo(window, key, value, column):
+    from model.field_access import apply_display_value
+    from model.schema import ELEC_CABLE_SCHEMA
+
+    document = window._document
+    spec = next(field for field in ELEC_CABLE_SCHEMA.fields if field.key == key)
+    cable = document.get("EK-1")
+    original = cable.data[key]
+    window._push_undo()
+    apply_display_value(cable, spec, value)
+    window._on_property_changed("EK-1", key, value)
+    expected = [dict(item.data) for item in document.elements["elec_cables"].values()]
+    window._undo()
+    dock = window.overview_electro_cables
+    dock.refresh_now()
+    table = dock._elec_cable_table
+    row = next(index for index in range(table.rowCount())
+               if table.item(index, 0).text() == document.get("EK-1").name)
+    undo_before = len(window._undo_stack)
+    editor = table.cellWidget(row, column)
+    if key == "stroke_width":
+        editor._spin.setValue(value)
+    elif key == "line_style":
+        editor._combo.setCurrentIndex(editor._combo.findData(value))
+    else:
+        editor._emit(value)
+    assert len(window._undo_stack) == undo_before + 1
+    assert [dict(item.data) for item in document.elements["elec_cables"].values()] == expected
+    if key == "color":
+        assert all(window.canvas._color_map[cid].name() == value for cid in document.elements["elec_cables"])
+    else:
+        canvas_values = getattr(window.canvas, f"_elec_cable_{key}")
+        assert all(canvas_values[cid] == value for cid in document.elements["elec_cables"])
+    dock.refresh_now()
+    assert str(value) in table.item(row, 9).toolTip()
+    window._undo()
+    assert document.get("EK-1").data[key] == original
+    window._redo()
+    assert document.get("EK-1").data[key] == value
+
+
 def test_editable_choice_commits_once_instead_of_per_keystroke(app):
     widget = ChoiceFieldWidget(
         FieldSpec("type", "Kabeltyp", FieldKind.EDITABLE_CHOICE),

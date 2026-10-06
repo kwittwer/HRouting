@@ -7730,6 +7730,55 @@ class MainWindow(QMainWindow):
 
     # ── PDF-Export ──
 
+    def _pdf_cable_sample(self, cable_id: str, text: str) -> str:
+        from gui.cable_line_preview import CableLineSample
+
+        panel = self.param_panel.elec_cable_panels.get(str(cable_id))
+        if panel is None:
+            return str(text)
+        values = panel.get_parameters()
+        return CableLineSample(str(text), values.get("color", "#ff9800"),
+                               values.get("stroke_width", 2.0),
+                               self.canvas._elec_cable_line_style.get(str(cable_id), values.get("line_style", "solid")))
+
+    def _pdf_up_rows(self, rows: list[dict]) -> list[list[str]]:
+        result = []
+        for row in rows:
+            outgoing = row.get("outgoing_cable_ids")
+            if outgoing is None:
+                outgoing = []
+                for panel in self.param_panel.elec_point_panels.values():
+                    values = panel.get_parameters()
+                    config = values.get("up_distribution_config") or {}
+                    if (values.get("name") == row.get("ap")
+                            and config.get("incoming_cable_id") == row.get("incoming_cable_id")):
+                        outgoing.extend(config.get("outgoing_cable_ids") or [])
+            for cable_id in list(dict.fromkeys(outgoing)) or [""]:
+                sample = self._pdf_cable_sample(cable_id, cable_id)
+                if cable_id:
+                    document = getattr(self, "_document", None)
+                    cable = document.elements["elec_cables"].get(cable_id) if document is not None else None
+                    panel = self.param_panel.elec_cable_panels.get(cable_id) if cable is None else None
+                    name = cable.name if cable is not None else (panel.get_parameters().get("name", cable_id) if panel else cable_id)
+                    sample = self._pdf_cable_sample(cable_id, name or cable_id)
+                result.append([
+                    row.get("ap", ""), row.get("room", ""),
+                    self._pdf_cable_sample(row.get("incoming_cable_id", ""), row.get("incoming_cable", "")),
+                    sample, row.get("from_conductor", ""),
+                    self._pdf_cable_sample(row.get("to_cable_id", ""), row.get("to_cable", "")),
+                    row.get("to_conductor", ""), row.get("mapping_note", ""), row.get("distribution_note", ""),
+                    row.get("incoming_laying_location_text", "–"),
+                    row.get("outgoing_cable_locations_text", row.get("outgoing_laying_location_text", "–")),
+                    row.get("to_cable_laying_location_text", "–"),
+                ])
+        return result
+
+    def _pdf_uv_samples(self, uv: dict) -> dict:
+        return {**uv, "slots": [
+            {**slot, "assignment": self._pdf_cable_sample(slot.get("cable_id", ""), slot.get("assignment", ""))}
+            for slot in uv.get("slots", [])
+        ]}
+
     def _export_pdf(self):
         """Export project as multi-page A4-landscape PDF.
 
@@ -8298,7 +8347,7 @@ class MainWindow(QMainWindow):
             return
 
         y_after = ctx.title(page, title)
-        y_after = ctx.draw_uv_schematic(page, y_after, selected_uv)
+        y_after = ctx.draw_uv_schematic(page, y_after, self._pdf_uv_samples(selected_uv))
 
         slot_rows = []
         for slot in selected_uv.get("slots", []) or []:
@@ -8313,7 +8362,7 @@ class MainWindow(QMainWindow):
                 str(slot.get("te_size", "")),
                 str(slot.get("spec", "")),
                 str(slot.get("label", "")),
-                str(slot.get("assignment", "")),
+                self._pdf_cable_sample(slot.get("cable_id", ""), str(slot.get("assignment", ""))),
                 str(slot.get("manufacturer", "")),
                 str(slot.get("article_number", "")),
                 str(slot.get("note", "")),
@@ -8401,7 +8450,7 @@ class MainWindow(QMainWindow):
                 "End-AP", "End-Gerät", "End-Farbe", "End-Notiz", "End-H. (cm)",
                 "Länge (m)", "Verlegeort",
             ]
-            rows = [[r["name"], r["type"],
+            rows = [[self._pdf_cable_sample(r.get("cable_id", r.get("id", "")), r["name"]), r["type"],
                      r.get("comment", ""),
                      r.get("start_ap", ""), r.get("start_device", ""), r.get("start_device_color", ""), r.get("start_note", ""), f"{r.get('start_height_cm', 0.0):.1f}",
                      r.get("end_ap", ""), r.get("end_device", ""), r.get("end_device_color", ""), r.get("end_note", ""), f"{r.get('end_height_cm', 0.0):.1f}",
@@ -8437,7 +8486,7 @@ class MainWindow(QMainWindow):
             for ap_name in sorted(ap_cables.keys()):
                 for c in ap_cables[ap_name]:
                     ap_rows.append([
-                        ap_name, c["cable"], c["type"], c["role"],
+                        ap_name, self._pdf_cable_sample(c.get("cable_id", ""), c["cable"]), c["type"], c["role"],
                         c.get("ap_device", ""), c.get("ap_device_color", ""),
                         c.get("ap_note", ""), c.get("cable_note", ""), f"{c['length_m']:.2f}",
                         c.get("laying_location_text", "–"),
@@ -8454,7 +8503,7 @@ class MainWindow(QMainWindow):
                 [
                     r.get("room", ""), r.get("ap", ""),
                     r.get("ap_device", ""), r.get("ap_device_color", ""), r.get("ap_note", ""),
-                    r.get("cable", ""), r.get("type", ""),
+                    self._pdf_cable_sample(r.get("cable_id", ""), r.get("cable", "")), r.get("type", ""),
                     r.get("cable_note", ""), r.get("target_ap", ""),
                     f"{r.get('length_m', 0.0):.2f}",
                     r.get("laying_location_text", "–"),
@@ -8485,14 +8534,14 @@ class MainWindow(QMainWindow):
             for uv in uv_data:
                 page = ctx.new_page(toc_title=f"{title} – UV: {uv.get('ap_name', '')}")
                 y_after = ctx.title(page, f"{title} – UV: {uv.get('ap_name', '')}")
-                y_after = ctx.draw_uv_schematic(page, y_after, uv)
+                y_after = ctx.draw_uv_schematic(page, y_after, self._pdf_uv_samples(uv))
                 assigned_rows = [row for row in uv_rows if row.get("ap_id") == uv.get("ap_id")]
                 if assigned_rows:
                     page = ctx.new_page(toc_title=f"{title} – UV-Kabelzuordnung")
                     y_after = ctx.title(page, title)
                     ctx.draw_table(page, y_after, ["UV", "Reihe", "TE", "Kabel/Stromkreis", "Verlegeort"], [
                         [row.get("ap", ""), str(row.get("row", "")), str(row.get("slot", "")),
-                         row.get("assignment", ""), row.get("laying_location_text", "–")]
+                         self._pdf_cable_sample(row.get("cable_id", ""), row.get("assignment", "")), row.get("laying_location_text", "–")]
                         for row in assigned_rows
                     ])
         elif "el_uv" in sections and uv_rows:
@@ -8509,7 +8558,7 @@ class MainWindow(QMainWindow):
                     r.get("device_type", ""),
                     r.get("spec", ""),
                     r.get("label", ""),
-                    r.get("assignment", ""),
+                    self._pdf_cable_sample(r.get("cable_id", ""), r.get("assignment", "")),
                     r.get("note", ""),
                     r.get("laying_location_text", "–"),
                 ]
@@ -8528,7 +8577,7 @@ class MainWindow(QMainWindow):
                 for uv in uv_data:
                     page = ctx.new_page(toc_title=f"Schaltplan UV: {uv.get('ap_name', '')}")
                     y_after = ctx.title(page, f"Schaltplan – UV: {uv.get('ap_name', '')}")
-                    y_after = ctx.draw_uv_schematic(page, y_after, uv)
+                    y_after = ctx.draw_uv_schematic(page, y_after, self._pdf_uv_samples(uv))
 
             if "schaltplan_stromkreise" in sections:
                 for uv in uv_data:
@@ -8553,7 +8602,7 @@ class MainWindow(QMainWindow):
                             str(c.get("device_type", "")),
                             str(c.get("spec", "")),
                             str(c.get("label", "")),
-                            str(c.get("cable_id", "")),
+                            self._pdf_cable_sample(c.get("cable_id", ""), str(c.get("cable_id", ""))),
                             str(c.get("end_ap_name", "")),
                             str(c.get("end_ap_room", "")),
                             str(c.get("note", "")),
@@ -8607,24 +8656,7 @@ class MainWindow(QMainWindow):
                 "Zuordn.-Notiz", "Verteilungs-Notiz",
                 "Verlegeort Zuleitung", "Verlegeort Abgänge", "Verlegeort Abgang",
             ]
-            rows = [
-                [
-                    r.get("ap", ""),
-                    r.get("room", ""),
-                    r.get("incoming_cable", ""),
-                    r.get("outgoing_cables", ""),
-                    r.get("from_conductor", ""),
-                    r.get("to_cable", ""),
-                    r.get("to_conductor", ""),
-                    r.get("mapping_note", ""),
-                    r.get("distribution_note", ""),
-                    r.get("incoming_laying_location_text", "–"),
-                    r.get("outgoing_laying_location_text", "–"),
-                    r.get("to_cable_laying_location_text", "–"),
-                ]
-                for r in up_distribution_rows
-            ]
-            ctx.draw_table(page, y_after, headers, rows)
+            ctx.draw_table(page, y_after, headers, self._pdf_up_rows(up_distribution_rows))
 
         if "el_bom" in sections:
             bom_rows = []
@@ -8924,6 +8956,7 @@ class _PdfContext:
                    col_widths: list[float] | None = None,
                    *, wrap_columns: set[int] | None = None) -> float:
         from PySide6.QtGui import QPen, QBrush, QTextLayout, QTextOption
+        from gui.cable_line_preview import CableLineSample, draw_cable_line_sample
         n_cols = len(headers)
         side_margin = self.mm(4)
         table_w = max(self.mm(40), page.width() - 2 * side_margin)
@@ -8940,6 +8973,22 @@ class _PdfContext:
             idx for idx, header in enumerate(headers) if "Verlegeort" in header
         }
         cell_pad = self.mm(0.8)
+        sample_columns = {
+            idx: max(72.0, max(value.stroke_width * 12.0 for row in rows
+                              for column, value in enumerate(row)
+                              if column == idx and isinstance(value, CableLineSample))) + 2 * cell_pad
+            for idx in range(n_cols)
+            if any(idx < len(row) and isinstance(row[idx], CableLineSample) for row in rows)
+        }
+        for idx, minimum in sample_columns.items():
+            if widths[idx] < minimum:
+                deficit = minimum - widths[idx]
+                donors = [column for column in range(n_cols) if column not in sample_columns]
+                total = sum(widths[column] for column in donors)
+                if total > deficit:
+                    for column in donors:
+                        widths[column] *= (total - deficit) / total
+                    widths[idx] = minimum
         top_margin = self.mm(6)
         bottom_margin = self.mm(6)
 
@@ -9025,10 +9074,11 @@ class _PdfContext:
         # Data rows
         self.painter.setFont(QFont("Arial", base_font_size))
         for ri, row in enumerate(rows):
-            row = [str(row[idx]) if idx < len(row) else "" for idx in range(n_cols)]
-            layouts = {idx: _text_lines(cell, idx) for idx, cell in enumerate(row)
-                       if not wide_table or idx in wrap_columns}
-            line_count = max(1, max((len(item[1]) for item in layouts.values()), default=1))
+            row = [row[idx] if idx < len(row) else "" for idx in range(n_cols)]
+            layouts = {idx: _text_lines(str(cell), idx) for idx, cell in enumerate(row)
+                       if not isinstance(cell, CableLineSample) and (not wide_table or idx in wrap_columns)}
+            line_count = max(2 if any(isinstance(cell, CableLineSample) for cell in row) else 1,
+                             max((len(item[1]) for item in layouts.values()), default=1))
             rh = max(min_row_h, line_count * line_h + 2 * cell_pad)
             if y + rh > _page_bottom() and rh <= page.height() - top_margin - bottom_margin - header_h:
                 page = _new_page()
@@ -9057,7 +9107,16 @@ class _PdfContext:
                 for j, cell in enumerate(row):
                     r = QRectF(cx, y, widths[j], fragment_h)
                     self.painter.drawRect(r)
-                    if j in layouts:
+                    if isinstance(cell, CableLineSample):
+                        if offset == 0:
+                            text_rect = QRectF(cx + cell_pad, y + cell_pad, widths[j] - 2 * cell_pad, line_h)
+                            self.painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine,
+                                                  fm.elidedText(str(cell), Qt.ElideRight, int(text_rect.width())))
+                        if offset <= 1 < offset + count:
+                            sample_rect = QRectF(cx + cell_pad, y + cell_pad + (1 - offset) * line_h,
+                                                 widths[j] - 2 * cell_pad, line_h)
+                            draw_cable_line_sample(self.painter, sample_rect, cell)
+                    elif j in layouts:
                         for local_idx, line in enumerate(layouts[j][1][offset:offset + count]):
                             line.draw(self.painter, QPointF(cx + cell_pad, y + cell_pad + local_idx * line_h))
                     elif offset == 0:
@@ -9476,51 +9535,9 @@ class _PdfContext:
 
             tbl_headers = ["TE", "Typ", "Kennz.", "Bezeichnung", "Kabel/Stromkreis", "Notiz"]
             col_w_rel = [0.6, 1.2, 1.4, 2.0, 2.0, 1.5]
-            total_rel = sum(col_w_rel)
-            col_ws = [r / total_rel * avail_w for r in col_w_rel]
 
-            self.painter.setFont(QFont("Arial", 9, QFont.Bold))
-            self.painter.setPen(QPen(Qt.black, max(1, self.mm(0.15))))
-            cx = x0
-            for hi, hdr in enumerate(tbl_headers):
-                r2 = QRectF(cx, y, col_ws[hi], tbl_header_h)
-                self.painter.fillRect(r2, QBrush(QColor("#e0e0e0")))
-                self.painter.drawRect(r2)
-                self.painter.drawText(
-                    r2.adjusted(self.mm(1), 0, -self.mm(1), 0),
-                    Qt.AlignCenter, hdr,
-                )
-                cx += col_ws[hi]
-            y += tbl_header_h
-
-            self.painter.setFont(QFont("Arial", 9))
-            for ri, s in enumerate(
-                sorted(occupied, key=lambda x: (x.get("row", 0), x.get("slot", 0)))
-            ):
-                if y + tbl_row_h > _page_bottom():
-                    cur_page = _new_page()
-                    y = cur_page.y() + self.mm(4)
-                    x0 = cur_page.x()
-                    self.painter.setFont(QFont("Arial", 9, QFont.Bold))
-                    cx2 = x0
-                    for hi2, hdr2 in enumerate(tbl_headers):
-                        r3 = QRectF(cx2, y, col_ws[hi2], tbl_header_h)
-                        self.painter.fillRect(r3, QBrush(QColor("#e0e0e0")))
-                        self.painter.drawRect(r3)
-                        self.painter.drawText(
-                            r3.adjusted(self.mm(1), 0, -self.mm(1), 0),
-                            Qt.AlignCenter, hdr2,
-                        )
-                        cx2 += col_ws[hi2]
-                    y += tbl_header_h
-                    self.painter.setFont(QFont("Arial", 9))
-
-                if ri % 2 == 1:
-                    self.painter.fillRect(
-                        QRectF(x0, y, avail_w, tbl_row_h),
-                        QBrush(QColor("#f5f5f5")),
-                    )
-
+            table_rows = []
+            for s in sorted(occupied, key=lambda slot: (slot.get("row", 0), slot.get("slot", 0))):
                 row_no_s = int(s.get("row", 0) or 0)
                 slot_no_s = int(s.get("slot", 0) or 0)
                 te_global_num = (row_no_s - 1) * mpr + slot_no_s
@@ -9533,20 +9550,11 @@ class _PdfContext:
                     str(s.get("device_type", "") or ""),
                     str(s.get("spec", "") or ""),
                     str(s.get("label", "") or ""),
-                    str(s.get("assignment", "") or ""),
+                    s.get("assignment", "") or "",
                     str(s.get("note", "") or ""),
                 ]
-                self.painter.setPen(QPen(Qt.black, max(1, self.mm(0.15))))
-                cx = x0
-                for ci, cell in enumerate(cells):
-                    r4 = QRectF(cx, y, col_ws[ci], tbl_row_h)
-                    self.painter.drawRect(r4)
-                    self.painter.drawText(
-                        r4.adjusted(self.mm(1), 0, -self.mm(1), 0),
-                        Qt.AlignVCenter | Qt.AlignLeft, cell,
-                    )
-                    cx += col_ws[ci]
-                y += tbl_row_h
+                table_rows.append(cells)
+            y = self.draw_table(cur_page, y, tbl_headers, table_rows, col_widths=col_w_rel)
 
         # ── Busbar legend ────────────────────────────────────────── #
         if busbars_list:

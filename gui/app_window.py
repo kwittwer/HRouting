@@ -6088,7 +6088,7 @@ class AppWindow(QMainWindow):
                 str(slot.get("device_type", "")),
                 str(slot.get("spec", "")),
                 str(slot.get("label", "")),
-                str(slot.get("assignment", "")),
+                self._pdf_cable_sample(slot.get("cable_id", ""), str(slot.get("assignment", ""))),
                 str(slot.get("note", "")),
                 str(slot.get("laying_location_text", "–")),
             ])
@@ -6305,6 +6305,20 @@ class AppWindow(QMainWindow):
                 getattr(text, "floor_plan_id", "") if text is not None else ""
             )
 
+    def _pdf_cable_sample(self, cable_id: str, text: str) -> str:
+        from gui.cable_line_preview import CableLineSample
+
+        cable = self._document.elements["elec_cables"].get(str(cable_id))
+        if cable is None:
+            return str(text)
+        return CableLineSample(str(text), cable.color, cable.data.get("stroke_width", 2.0),
+                               cable.data.get("line_style", "solid"))
+
+    def _pdf_up_rows(self, rows: list[dict]) -> list[list[str]]:
+        from gui.main_window import MainWindow
+
+        return MainWindow._pdf_up_rows(self, rows)
+
     def _collect_pdf_electro_rows(self) -> tuple[list[list[str]], list[list[str]]]:
         from model.computed import cable_length_details  # noqa: PLC0415
 
@@ -6327,7 +6341,7 @@ class AppWindow(QMainWindow):
             end_name = self._document.elements["elec_points"].get(end_id).name if end_id in self._document.elements["elec_points"] else (end_id or "")
             length_m = float(cable_length_details(self._document, cable)["length_m"])
             cable_rows.append([
-                str(cable.name or cid),
+                self._pdf_cable_sample(cid, cable.name or cid),
                 str(cable.cable_type or ""),
                 str(start_name or ""),
                 str(end_name or ""),
@@ -6365,7 +6379,7 @@ class AppWindow(QMainWindow):
             start_name = self._document.elements["elec_points"].get(start_id).name if start_id in self._document.elements["elec_points"] else (start_id or "")
             end_name = self._document.elements["elec_points"].get(end_id).name if end_id in self._document.elements["elec_points"] else (end_id or "")
             cable_rows.append([
-                str(cable.name or cable_id),
+                self._pdf_cable_sample(cable_id, cable.name or cable_id),
                 str(cable.cable_type or ""),
                 str(start_name or ""),
                 str(end_name or ""),
@@ -7456,6 +7470,7 @@ class AppWindow(QMainWindow):
         wrap_columns: set[int] | None = None,
     ) -> None:
         from PySide6.QtGui import QBrush, QFont, QFontMetricsF, QPen, QTextLayout, QTextOption  # noqa: PLC0415
+        from gui.cable_line_preview import CableLineSample, draw_cable_line_sample
 
         page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
         title_rect, content_rect = self._draw_pdf_title(painter, page_rect, title)
@@ -7478,6 +7493,23 @@ class AppWindow(QMainWindow):
             widths = [table_rect.width() * (w / total_w) for w in col_widths]
         else:
             widths = [table_rect.width() / n_cols] * n_cols
+
+        sample_columns = {
+            idx: max(72.0, max(value.stroke_width * 12.0 for row in rows
+                              for column, value in enumerate(row)
+                              if column == idx and isinstance(value, CableLineSample))) + 8.0
+            for idx in range(n_cols)
+            if any(idx < len(row) and isinstance(row[idx], CableLineSample) for row in rows)
+        }
+        for idx, minimum in sample_columns.items():
+            if widths[idx] < minimum:
+                deficit = minimum - widths[idx]
+                donors = [column for column in range(n_cols) if column not in sample_columns]
+                total = sum(widths[column] for column in donors)
+                if total > deficit:
+                    for column in donors:
+                        widths[column] *= (total - deficit) / total
+                    widths[idx] = minimum
 
         cell_pad = 4.0
         fm = QFontMetricsF(body_font, painter.device())
@@ -7557,12 +7589,14 @@ class AppWindow(QMainWindow):
         draw_header(y)
         y += header_h
         for row_index, row in enumerate(rows):
-            data_row = [str(row[idx]) if idx < len(row) else "" for idx in range(n_cols)]
+            data_row = [row[idx] if idx < len(row) else "" for idx in range(n_cols)]
             layouts = {
-                idx: text_lines(value, idx, body_font)
-                for idx, value in enumerate(data_row) if not wide_table or idx in wrap_columns
+                idx: text_lines(str(value), idx, body_font)
+                for idx, value in enumerate(data_row)
+                if not isinstance(value, CableLineSample) and (not wide_table or idx in wrap_columns)
             }
-            line_count = max(1, max((len(item[1]) for item in layouts.values()), default=1))
+            line_count = max(2 if any(isinstance(value, CableLineSample) for value in data_row) else 1,
+                             max((len(item[1]) for item in layouts.values()), default=1))
             rh = max(min_row_h, line_count * line_h + 2 * cell_pad)
             full_page_h = table_rect.height() - 12.0 - header_h
             if y + rh > table_rect.bottom() - bottom_margin and rh <= full_page_h:
@@ -7584,7 +7618,16 @@ class AppWindow(QMainWindow):
                 for idx, value in enumerate(data_row):
                     cell = QRectF(x, y, widths[idx], fragment_h)
                     painter.drawRect(cell)
-                    if idx in layouts:
+                    if isinstance(value, CableLineSample):
+                        if offset == 0:
+                            text_rect = QRectF(x + cell_pad, y + cell_pad, widths[idx] - 2 * cell_pad, line_h)
+                            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine,
+                                             fm.elidedText(str(value), Qt.ElideRight, int(text_rect.width())))
+                        if offset <= 1 < offset + count:
+                            sample_rect = QRectF(x + cell_pad, y + cell_pad + (1 - offset) * line_h,
+                                                 widths[idx] - 2 * cell_pad, line_h)
+                            draw_cable_line_sample(painter, sample_rect, value)
+                    elif idx in layouts:
                         for local_index, line in enumerate(layouts[idx][1][offset:offset + count]):
                             line.draw(painter, QPointF(x + cell_pad, y + cell_pad + local_index * line_h))
                     elif offset == 0:
@@ -7922,7 +7965,7 @@ class AppWindow(QMainWindow):
                             ap_rows_ext.append(
                                 [
                                     ap_name,
-                                    str(conn.get("cable", "")),
+                                    self._pdf_cable_sample(conn.get("cable_id", ""), str(conn.get("cable", ""))),
                                     str(conn.get("type", "")),
                                     str(conn.get("role", "")),
                                     str(conn.get("ap_device", "")),
@@ -7952,7 +7995,7 @@ class AppWindow(QMainWindow):
                             str(r.get("ap_device", "")),
                             str(r.get("ap_device_color", "")),
                             str(r.get("ap_note", "")),
-                            str(r.get("cable", "")),
+                            self._pdf_cable_sample(r.get("cable_id", ""), str(r.get("cable", ""))),
                             str(r.get("type", "")),
                             str(r.get("cable_note", "")),
                             str(r.get("target_ap", "")),
@@ -7983,7 +8026,7 @@ class AppWindow(QMainWindow):
                             str(r.get("device_type", "")),
                             str(r.get("spec", "")),
                             str(r.get("label", "")),
-                            str(r.get("assignment", "")),
+                            self._pdf_cable_sample(r.get("cable_id", ""), str(r.get("assignment", ""))),
                             str(r.get("note", "")),
                             str(r.get("laying_location_text", "–")),
                         ]
@@ -8001,29 +8044,12 @@ class AppWindow(QMainWindow):
 
                 if "el_up_distribution" in sections and export_data.get("up_distribution_rows"):
                     self._pdf_new_page(painter, writer)
-                    rows = [
-                        [
-                            str(r.get("ap", "")),
-                            str(r.get("room", "")),
-                            str(r.get("incoming_cable", "")),
-                            str(r.get("outgoing_cables", "")),
-                            str(r.get("from_conductor", "")),
-                            str(r.get("to_cable", "")),
-                            str(r.get("to_conductor", "")),
-                            str(r.get("mapping_note", "")),
-                            str(r.get("distribution_note", "")),
-                            str(r.get("incoming_laying_location_text", "–")),
-                            str(r.get("outgoing_cable_locations_text", "–")),
-                            str(r.get("to_cable_laying_location_text", "–")),
-                        ]
-                        for r in export_data.get("up_distribution_rows", [])
-                    ]
                     self._draw_pdf_table(
                         painter,
                         writer,
                         "Unterputz-Verteilungen",
                         ["AP", "Raum", "Zuleitung", "Abgänge", "Ader (Zul.)", "Abgehendes Kabel", "Ader (Abg.)", "Zuordn.-Notiz", "Verteilungs-Notiz", "Verlegeort Zuleitung", "Verlegeort Abgänge", "Verlegeort abgehendes Kabel"],
-                        rows,
+                        self._pdf_up_rows(export_data.get("up_distribution_rows", [])),
                         col_widths=[0.9, 0.9, 1.1, 1.2, 0.8, 1.1, 0.8, 1.2, 1.2, 1.5, 1.5, 1.5],
                         wrap_columns={9, 10, 11},
                     )
@@ -8131,7 +8157,7 @@ class AppWindow(QMainWindow):
                                         str(circuit.get("device_type", "")),
                                         str(circuit.get("spec", "")),
                                         str(circuit.get("label", "")),
-                                        str(circuit.get("cable_id", "")),
+                                        self._pdf_cable_sample(circuit.get("cable_id", ""), str(circuit.get("cable_id", ""))),
                                         str(circuit.get("end_ap_name", "")),
                                         str(circuit.get("end_ap_room", "")),
                                         str(circuit.get("note", "")),
