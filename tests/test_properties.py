@@ -697,6 +697,36 @@ def test_up_distribution_dialog_roundtrip_and_outgoing_dedup(app):
         up.deleteLater()
 
 
+def test_up_distribution_editor_retains_and_marks_disconnected_cable_ids(app):
+    from gui.parameter_panel import UpDistributionDialog  # noqa: PLC0415
+
+    up = UpDistributionDialog(
+        config={
+            "incoming_cable_id": "EK-9",
+            "mappings": [
+                {
+                    "from_conductor": "L1",
+                    "to_cable_id": "EK-8",
+                    "to_conductor": "L1",
+                }
+            ],
+        },
+        cable_choices=[("EK-1", "Angeschlossen")],
+        strict_cable_choices=True,
+        show_buttons=False,
+    )
+    try:
+        config = up.get_config()
+        assert config["incoming_cable_id"] == "EK-9"
+        assert config["mappings"][0]["to_cable_id"] == "EK-8"
+        assert "nicht mehr am AP angeschlossen" in up._validate_config()
+        assert up.cmb_incoming.currentText().startswith("⚠")
+        outgoing = up.tbl_map.cellWidget(0, 1)
+        assert outgoing.currentText().startswith("⚠")
+    finally:
+        up.deleteLater()
+
+
 def test_configs_persist_in_document(app, document, tmp_path):
     """AP-Konfigurationen müssen Speichern und Laden überstehen."""
     from storage.hrp_io import load_document, save_document  # noqa: PLC0415

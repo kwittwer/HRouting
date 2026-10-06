@@ -244,6 +244,52 @@ def test_distributor_rows_resolve_actual_input_output_and_mapping_ids(window):
     assert up["outgoing_laying_location_text"] == rows["EK-2"]["laying_location_text"]
 
 
+def test_room_up_distribution_tables_are_per_ap_and_use_cable_ids_for_duplicate_names(window):
+    document = _document()
+    document.get("AP-2").data["up_distribution_config"]["mappings"][1]["to_cable_id"] = "EK-2"
+    window._set_document(document)
+
+    tables = window._collect_pdf_room_up_distribution_tables(["ER-1"])
+
+    assert [table["ap_id"] for table in tables] == ["AP-2"]
+    assert tables[0]["ap_name"] == "Shared"
+    assert len(tables[0]["rows"]) == 2
+    assert str(tables[0]["rows"][0][0]).endswith("(EK-1)")
+    assert tables[0]["rows"][0][1] == "L1"
+    assert str(tables[0]["rows"][0][2]).endswith("(EK-2)")
+    assert tables[0]["rows"][0][3:] == ["L1", "Mapping note"]
+    assert window._collect_pdf_room_up_distribution_tables(["ER-2"]) == []
+
+
+def test_electro_room_pdf_renders_separate_up_distribution_table(window, tmp_path):
+    window._set_document(_document())
+    page = {
+        "id": "room-up-test",
+        "type": "elektro_room",
+        "title": "UP-Raumtest",
+        "room_ids": ["ER-1"],
+        "element_visibility": {
+            "background": True,
+            "furniture": True,
+            "hk": False,
+            "hkv": False,
+            "hkv_line": False,
+            "ap": True,
+            "room": True,
+            "kv": True,
+            "text": True,
+        },
+    }
+
+    pdf = _write_pdf(window, tmp_path / "room_up_distribution.pdf", page=page)
+    text = "\n".join(pdf_page.get_text() for pdf_page in pdf)
+    compact = _compact(text)
+
+    assert compact.count("Unterputz-Verteilung:Shared(AP-2)") == 1
+    assert "Mappingnote" in compact
+    assert "Secondmapping" not in compact
+
+
 def test_uv_name_compatibility_never_guesses_between_duplicate_names(window):
     window._set_document(_document())
     cable1, cable2 = window._document.get("EK-1"), window._document.get("EK-2")

@@ -4167,7 +4167,9 @@ def test_pdf_export_elektro_room_filters_aps_and_cables(app, monkeypatch):
         assert ap_ids == {"AP-1", "AP-2"}
         assert cable_ids == {"EK-1", "EK-2"}
         assert [row[0] for row in ap_rows] == ["Steckdose A", "Steckdose B"]
-        assert [row[0] for row in cable_rows] == ["Kabel intern", "Kabel ueber Raumgrenze"]
+        assert len(cable_rows) == 2
+        assert any("Steckdose A" in row[0] for row in cable_rows)
+        assert any("Steckdose C" in row[0] for row in cable_rows)
     finally:
         window.deleteLater()
 
@@ -7124,9 +7126,8 @@ def test_e3_configure_uv_action_persists_config(app, monkeypatch):
         window.deleteLater()
 
 
-def test_e4_configure_up_action_persists_config(app, monkeypatch):
+def test_e4_configure_up_action_opens_distribution_dock(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
-    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
 
     monkeypatch.setattr(
         QSettings, "value", lambda self, key, default=None, **kw: default
@@ -7134,33 +7135,7 @@ def test_e4_configure_up_action_persists_config(app, monkeypatch):
     monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
 
     from gui.app_window import AppWindow  # noqa: PLC0415
-    from gui import parameter_panel  # noqa: PLC0415
     from model.document import Document  # noqa: PLC0415
-
-    class _FakeUpDialog:
-        def __init__(self, config, cable_choices, parent=None):
-            self._config = dict(config or {})
-            self._choices = list(cable_choices or [])
-
-        def exec(self):
-            return QDialog.Accepted
-
-        def get_config(self):
-            return {
-                "incoming_cable_id": "EK-1",
-                "outgoing_cable_ids": ["EK-2"],
-                "mappings": [
-                    {
-                        "from_conductor": "L1",
-                        "to_cable_id": "EK-2",
-                        "to_conductor": "L1",
-                        "note": "Abgang Phase",
-                    }
-                ],
-                "note": "UP im Flur",
-            }
-
-    monkeypatch.setattr(parameter_panel, "UpDistributionDialog", _FakeUpDialog)
 
     document = Document.from_dict(
         {
@@ -7169,7 +7144,10 @@ def test_e4_configure_up_action_persists_config(app, monkeypatch):
                 "elec_cables": {
                     "EK-1": [[0.0, 0.0], [10.0, 0.0]],
                     "EK-2": [[10.0, 0.0], [20.0, 0.0]],
+                    "EK-3": [[30.0, 0.0], [40.0, 0.0]],
                 },
+                "cable_start_ap": {"EK-1": "AP-1", "EK-2": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-1", "EK-2": "AP-1", "EK-3": "AP-2"},
             },
             "params": {
                 "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
@@ -7180,7 +7158,20 @@ def test_e4_configure_up_action_persists_config(app, monkeypatch):
                         "name": "UP Flur",
                         "ap_type": "up_distribution",
                         "up_distribution_config": {},
-                    }
+                    },
+                    "AP-2": {
+                        "point_id": "AP-2",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Steckdose",
+                        "builtin_symbol": "Steckdose",
+                    },
+                    "AP-3": {
+                        "point_id": "AP-3",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "A UP",
+                        "ap_type": "up_distribution",
+                        "up_distribution_config": {},
+                    },
                 },
                 "elec_cables": {
                     "EK-1": {
@@ -7195,6 +7186,14 @@ def test_e4_configure_up_action_persists_config(app, monkeypatch):
                         "name": "Abgang",
                         "type": "NYM-J 3x1,5",
                     },
+                    "EK-3": {
+                        "cable_id": "EK-3",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "Fremdkabel",
+                        "type": "NYM-J 3x1,5",
+                        "start_ap": "AP-2",
+                        "end_ap": "AP-2",
+                    },
                 },
             },
         }
@@ -7203,14 +7202,87 @@ def test_e4_configure_up_action_persists_config(app, monkeypatch):
     window = AppWindow()
     try:
         window._set_document(document)
+        window._dirty = False
         window._action_configure_up("AP-1")
 
         point = document.elements["elec_points"]["AP-1"]
-        cfg = point.data["up_distribution_config"]
-        assert cfg["incoming_cable_id"] == "EK-1"
-        assert cfg["outgoing_cable_ids"] == ["EK-2"]
-        assert cfg["mappings"][0]["from_conductor"] == "L1"
-        assert cfg["note"] == "UP im Flur"
+        assert window.up_distribution.active_point_id() == "AP-1"
+        assert window.up_distribution.isVisible()
+        assert window.up_distribution._selector.count() == 2
+        assert point.data["up_distribution_config"] == {}
+        assert window._dirty is False
+        assert [cable_id for cable_id, _name in window.up_distribution._editor._cable_choices] == [
+            "EK-1",
+            "EK-2",
+        ]
+    finally:
+        window.deleteLater()
+
+
+def test_up_distribution_dock_saves_only_valid_configuration(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        QSettings, "value", lambda self, key, default=None, **kw: default
+    )
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    document = Document.from_dict(
+        {
+            "canvas": {
+                "floor_plans": [{"fp_id": "grundriss-1"}],
+                "elec_points": {"AP-1": [0.0, 0.0]},
+                "elec_cables": {
+                    "EK-1": [[0.0, 0.0], [10.0, 0.0]],
+                    "EK-2": [[0.0, 0.0], [20.0, 0.0]],
+                },
+                "cable_start_ap": {"EK-1": "AP-1", "EK-2": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-1", "EK-2": "AP-1"},
+            },
+            "params": {
+                "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
+                "elec_points": {
+                    "AP-1": {
+                        "point_id": "AP-1",
+                        "floor_plan_id": "grundriss-1",
+                        "name": "UP",
+                        "ap_type": "up_distribution",
+                        "up_distribution_config": {},
+                    }
+                },
+                "elec_cables": {
+                    "EK-1": {"cable_id": "EK-1", "floor_plan_id": "grundriss-1", "name": "Zuleitung"},
+                    "EK-2": {"cable_id": "EK-2", "floor_plan_id": "grundriss-1", "name": "Abgang"},
+                },
+            },
+        }
+    )
+    window = AppWindow()
+    try:
+        window._set_document(document)
+        window._dirty = False
+        window.up_distribution.select_point("AP-1")
+        editor = window.up_distribution._editor
+
+        editor.cmb_incoming.setCurrentIndex(editor.cmb_incoming.findData("EK-1"))
+        assert document.get("AP-1").data["up_distribution_config"]["incoming_cable_id"] == "EK-1"
+        saved_config = dict(document.get("AP-1").data["up_distribution_config"])
+
+        editor._add_mapping_row()
+        editor.tbl_map.cellWidget(0, 0).setCurrentText("L1")
+        editor.tbl_map.cellWidget(0, 1).setCurrentIndex(
+            editor.tbl_map.cellWidget(0, 1).findData("EK-2")
+        )
+        assert document.get("AP-1").data["up_distribution_config"] == saved_config
+
+        editor.tbl_map.cellWidget(0, 2).setCurrentText("L1")
+        mapping = document.get("AP-1").data["up_distribution_config"]["mappings"][0]
+        assert mapping["from_conductor"] == "L1"
+        assert mapping["to_cable_id"] == "EK-2"
+        assert mapping["to_conductor"] == "L1"
         assert window._dirty is True
     finally:
         window.deleteLater()
@@ -8933,40 +9005,14 @@ def test_all1_undo_redo_uv_config_action(app, monkeypatch):
 
 def test_all1_undo_redo_up_config_action(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
-    from PySide6.QtWidgets import QDialog  # noqa: PLC0415
 
     monkeypatch.setattr(
         QSettings, "value", lambda self, key, default=None, **kw: default
     )
     monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
 
-    import gui.parameter_panel as parameter_panel  # noqa: PLC0415
     from gui.app_window import AppWindow  # noqa: PLC0415
     from model.document import Document  # noqa: PLC0415
-
-    class _FakeUpDialog:
-        def __init__(self, config, cable_choices, parent=None):
-            self._config = config
-
-        def exec(self):
-            return QDialog.Accepted
-
-        def get_config(self):
-            return {
-                "incoming_cable_id": "EK-1",
-                "outgoing_cable_ids": ["EK-2"],
-                "mappings": [
-                    {
-                        "from_conductor": "L1",
-                        "to_cable_id": "EK-2",
-                        "to_conductor": "L1",
-                        "note": "Abgang Phase",
-                    }
-                ],
-                "note": "UP Flur",
-            }
-
-    monkeypatch.setattr(parameter_panel, "UpDistributionDialog", _FakeUpDialog)
 
     document = Document.from_dict(
         {
@@ -8976,6 +9022,8 @@ def test_all1_undo_redo_up_config_action(app, monkeypatch):
                     "EK-1": [[0.0, 0.0], [10.0, 0.0]],
                     "EK-2": [[10.0, 0.0], [20.0, 0.0]],
                 },
+                "cable_start_ap": {"EK-1": "AP-1", "EK-2": "AP-1"},
+                "cable_end_ap": {"EK-1": "AP-1", "EK-2": "AP-1"},
             },
             "params": {
                 "floorplans": {"grundriss-1": {"name": "EG", "visible": True}},
@@ -9009,11 +9057,28 @@ def test_all1_undo_redo_up_config_action(app, monkeypatch):
     window = AppWindow()
     try:
         window._set_document(document)
+        window._undo_group_timer.stop()
+        window._undo_stack.clear()
+        window._redo_stack.clear()
+        window._undo_group_open = False
+        window._last_document_snapshot = document.snapshot()
         window._on_property_action("AP-1", "configure_up")
+
+        editor = window.up_distribution._editor
+        editor.cmb_incoming.setCurrentIndex(editor.cmb_incoming.findData("EK-1"))
+        editor._add_mapping_row()
+        editor.tbl_map.cellWidget(0, 0).setCurrentText("L1")
+        editor.tbl_map.cellWidget(0, 1).setCurrentIndex(
+            editor.tbl_map.cellWidget(0, 1).findData("EK-2")
+        )
+        editor.tbl_map.cellWidget(0, 2).setCurrentText("L1")
+        window._undo_group_timer.stop()
+        window._finish_undo_group()
 
         point = document.elements["elec_points"]["AP-1"]
         applied_config = point.data["up_distribution_config"]
         assert applied_config["incoming_cable_id"] == "EK-1"
+        assert applied_config["mappings"][0]["to_cable_id"] == "EK-2"
         assert len(window._undo_stack) >= 1
 
         window._undo()

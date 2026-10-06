@@ -2216,6 +2216,9 @@ class BomMetadataDialog(QDialog):
 
 
 class UpDistributionDialog(QDialog):
+    config_changed = Signal()
+    validity_changed = Signal(bool, str)
+
     DEFAULT_CONDUCTORS: list[str] = [
         "L1", "L2", "L3", "N", "PE", "L", "S1", "S2",
     ]
@@ -2225,13 +2228,20 @@ class UpDistributionDialog(QDialog):
         config: dict | None = None,
         cable_choices: list[tuple[str, str]] | None = None,
         parent=None,
+        show_buttons: bool = True,
+        strict_cable_choices: bool = False,
     ):
         super().__init__(parent)
         self.setWindowTitle("Verteilung in Unterputzdose")
         self.resize(900, 560)
         self._cable_choices = list(cable_choices or [])
+        self._strict_cable_choices = bool(strict_cable_choices)
+        self._show_buttons = bool(show_buttons)
+        self._loading = True
         self._build_ui()
         self._load_config(config or {})
+        self._loading = False
+        self._update_validity()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -2240,13 +2250,13 @@ class UpDistributionDialog(QDialog):
         self.cmb_incoming = SafeComboBox()
         self.cmb_incoming.setEditable(False)
         self.cmb_incoming.addItem("", "")
-        for cable_id, cable_name in self._cable_choices:
-            text = cable_name if cable_name else cable_id
-            self.cmb_incoming.addItem(f"{text} ({cable_id})", cable_id)
+        self._populate_cable_combo(self.cmb_incoming, self._cable_choices, "")
+        self.cmb_incoming.currentIndexChanged.connect(self._on_incoming_changed)
         form.addRow("Zuleitung:", self.cmb_incoming)
 
         self.le_note = QLineEdit()
         self.le_note.setPlaceholderText("Optionale Notiz zur Verteilung")
+        self.le_note.textChanged.connect(self._emit_config_changed)
         form.addRow("Notiz:", self.le_note)
         root.addLayout(form)
 
@@ -2256,6 +2266,7 @@ class UpDistributionDialog(QDialog):
         )
         self.tbl_map.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tbl_map.verticalHeader().setVisible(False)
+        self.tbl_map.itemChanged.connect(self._emit_config_changed)
         root.addWidget(self.tbl_map, stretch=1)
 
         row_buttons = QHBoxLayout()
@@ -2268,10 +2279,103 @@ class UpDistributionDialog(QDialog):
         row_buttons.addStretch(1)
         root.addLayout(row_buttons)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        self._validity_label = QLabel(self)
+        self._validity_label.setWordWrap(True)
+        self._validity_label.setStyleSheet("color: #b54708; padding: 2px 4px;")
+        root.addWidget(self._validity_label)
+
+        self._button_box = None
+        if self._show_buttons:
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            root.addWidget(buttons)
+            self._button_box = buttons
+
+    @staticmethod
+    def _populate_cable_combo(combo: QComboBox, choices: list[tuple[str, str]], selected_id: str) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("", "")
+        found = False
+        for cable_id, cable_name in choices:
+            text = cable_name or cable_id
+            combo.addItem(f"{text} ({cable_id})", cable_id)
+            found = found or cable_id == selected_id
+        if selected_id and not found:
+            combo.addItem(f"⚠ Nicht am AP angeschlossen: {selected_id}", selected_id)
+        index = combo.findData(selected_id)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
+    def set_cable_choices(self, cable_choices: list[tuple[str, str]]) -> None:
+        """Refresh cable options while retaining saved IDs that became stale."""
+        self._cable_choices = list(cable_choices or [])
+        incoming_id = str(self.cmb_incoming.currentData() or "").strip()
+        self._populate_cable_combo(self.cmb_incoming, self._cable_choices, incoming_id)
+        for row_idx in range(self.tbl_map.rowCount()):
+            combo = self.tbl_map.cellWidget(row_idx, 1)
+            if not isinstance(combo, QComboBox):
+                continue
+            cable_id = str(combo.currentData() or "").strip()
+            choices = self._outgoing_choices()
+            self._populate_cable_combo(combo, choices, cable_id)
+        self._update_validity()
+
+    def _outgoing_choices(self) -> list[tuple[str, str]]:
+        incoming_id = str(self.cmb_incoming.currentData() or "").strip()
+        return [item for item in self._cable_choices if item[0] != incoming_id]
+
+    def _on_incoming_changed(self, _index: int) -> None:
+        for row_idx in range(self.tbl_map.rowCount()):
+            combo = self.tbl_map.cellWidget(row_idx, 1)
+            if isinstance(combo, QComboBox):
+                cable_id = str(combo.currentData() or "").strip()
+                self._populate_cable_combo(combo, self._outgoing_choices(), cable_id)
+        self._emit_config_changed()
+
+    def _emit_config_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        self._update_validity()
+        self.config_changed.emit()
+
+    def _validate_config(self) -> str:
+        incoming_id = str(self.cmb_incoming.currentData() or "").strip()
+        mappings = self._capture_mappings()
+        has_data = bool(mappings or self.le_note.text().strip())
+        cable_ids = {cable_id for cable_id, _name in self._cable_choices}
+        if has_data and not incoming_id:
+            return "Für Zuordnungen oder eine Verteilungsnotiz muss eine Zuleitung ausgewählt sein."
+        if self._strict_cable_choices and incoming_id and incoming_id not in cable_ids:
+            return f"Die Zuleitung {incoming_id} ist nicht mehr am AP angeschlossen."
+
+        seen: set[tuple[str, str, str]] = set()
+        for index, mapping in enumerate(mappings, start=1):
+            source = mapping["from_conductor"]
+            cable_id = mapping["to_cable_id"]
+            target = mapping["to_conductor"]
+            if not source or not cable_id or not target:
+                return f"Zuordnungszeile {index} ist unvollständig."
+            if cable_id == incoming_id:
+                return f"Zuordnungszeile {index}: Die Zuleitung kann kein Abgang sein."
+            if self._strict_cable_choices and cable_id not in cable_ids:
+                return f"Zuordnungszeile {index}: Kabel {cable_id} ist nicht mehr am AP angeschlossen."
+            key = (source, cable_id, target)
+            if key in seen:
+                return f"Zuordnungszeile {index} ist doppelt vorhanden."
+            seen.add(key)
+        return ""
+
+    def _update_validity(self) -> None:
+        error = self._validate_config()
+        self._validity_label.setText(error)
+        self._validity_label.setVisible(bool(error))
+        if self._button_box is not None:
+            ok_button = self._button_box.button(QDialogButtonBox.Ok)
+            if ok_button is not None:
+                ok_button.setEnabled(not error)
+        self.validity_changed.emit(not error, error)
 
     def _add_mapping_row(self, mapping: dict | None = None):
         mapping = mapping or {}
@@ -2282,34 +2386,34 @@ class UpDistributionDialog(QDialog):
         cmb_from.setEditable(True)
         cmb_from.addItems(self.DEFAULT_CONDUCTORS)
         cmb_from.setCurrentText(str(mapping.get("from_conductor", "") or "").strip())
+        cmb_from.currentTextChanged.connect(self._emit_config_changed)
         self.tbl_map.setCellWidget(row_idx, 0, cmb_from)
 
         cmb_cable = SafeComboBox()
         cmb_cable.setEditable(False)
-        cmb_cable.addItem("", "")
-        for cable_id, cable_name in self._cable_choices:
-            text = cable_name if cable_name else cable_id
-            cmb_cable.addItem(f"{text} ({cable_id})", cable_id)
         to_cable_id = str(mapping.get("to_cable_id", "") or "").strip()
-        if to_cable_id:
-            idx = cmb_cable.findData(to_cable_id)
-            if idx >= 0:
-                cmb_cable.setCurrentIndex(idx)
+        self._populate_cable_combo(cmb_cable, self._outgoing_choices(), to_cable_id)
+        cmb_cable.currentIndexChanged.connect(self._emit_config_changed)
         self.tbl_map.setCellWidget(row_idx, 1, cmb_cable)
 
         cmb_to = SafeComboBox()
         cmb_to.setEditable(True)
         cmb_to.addItems(self.DEFAULT_CONDUCTORS)
         cmb_to.setCurrentText(str(mapping.get("to_conductor", "") or "").strip())
+        cmb_to.currentTextChanged.connect(self._emit_config_changed)
         self.tbl_map.setCellWidget(row_idx, 2, cmb_to)
 
         note_item = QTableWidgetItem(str(mapping.get("note", "") or "").strip())
         self.tbl_map.setItem(row_idx, 3, note_item)
+        self._update_validity()
+        if not self._loading:
+            self.config_changed.emit()
 
     def _remove_selected_rows(self):
         rows = sorted({i.row() for i in self.tbl_map.selectedIndexes()}, reverse=True)
         for row_idx in rows:
             self.tbl_map.removeRow(row_idx)
+        self._emit_config_changed()
 
     def _capture_mappings(self) -> list[dict]:
         rows: list[dict] = []
@@ -2330,10 +2434,7 @@ class UpDistributionDialog(QDialog):
 
     def _load_config(self, config: dict):
         incoming = str(config.get("incoming_cable_id", "") or "").strip()
-        if incoming:
-            idx = self.cmb_incoming.findData(incoming)
-            if idx >= 0:
-                self.cmb_incoming.setCurrentIndex(idx)
+        self._populate_cable_combo(self.cmb_incoming, self._cable_choices, incoming)
         self.le_note.setText(str(config.get("note", "") or "").strip())
 
         mappings = config.get("mappings", [])

@@ -107,6 +107,7 @@ from . import layout_store
 from .canvas_widget import CanvasWidget, ToolMode
 from .docks import LogDock, NavigatorDock, PropertiesDock, ToolsDock
 from .docks import ProjectOverviewDock, TopologyDock, UvPlanningDock
+from .docks import UpDistributionDock
 from .workspaces import (
     DEFAULT_WORKSPACE_ID,
     DockId,
@@ -419,6 +420,11 @@ class AppWindow(QMainWindow):
         self.topology.visibilityChanged.connect(self._on_topology_visibility_changed)
         self.uv_planning = UvPlanningDock(self)
         self.uv_planning.config_saved.connect(lambda _point_id: self._mark_dirty())
+        self.up_distribution = UpDistributionDock(self)
+        self.up_distribution.config_about_to_save.connect(
+            lambda _point_id: self._record_canvas_change()
+        )
+        self.up_distribution.config_saved.connect(lambda _point_id: self._mark_dirty())
         # Backward compatibility for tests/extensions that still use `window.overview`.
         self.overview = self.overview_heating
 
@@ -434,6 +440,7 @@ class AppWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.overview_electro_cables)
         self.addDockWidget(Qt.RightDockWidgetArea, self.topology)
         self.addDockWidget(Qt.RightDockWidgetArea, self.uv_planning)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.up_distribution)
         self.log.hide()
         self.overview_general.hide()
         self.overview_heating.hide()
@@ -443,6 +450,7 @@ class AppWindow(QMainWindow):
         self.overview_electro_cables.hide()
         self.topology.hide()
         self.uv_planning.hide()
+        self.up_distribution.hide()
 
         self._docks = {
             DockId.NAVIGATOR: self.navigator,
@@ -457,6 +465,7 @@ class AppWindow(QMainWindow):
             DockId.OVERVIEW_ELECTRO_CABLES: self.overview_electro_cables,
             DockId.TOPOLOGY: self.topology,
             DockId.UV_PLANNING: self.uv_planning,
+            DockId.UP_DISTRIBUTION: self.up_distribution,
         }
 
         for dock in self._docks.values():
@@ -2041,6 +2050,7 @@ class AppWindow(QMainWindow):
         self.overview_electro_cables.set_document(document)
         self.topology.set_document(document)
         self.uv_planning.set_document(document)
+        self.up_distribution.set_document(document)
         self._normalize_loaded_cable_bindings(document)
 
         # Globale Ansichtsdaten (Zoom, Raster, Grundriss-Transformationen,
@@ -2152,7 +2162,7 @@ class AppWindow(QMainWindow):
             "draw_rectangle", "edit_rectangle", "draw_polyline", "edit_polyline",
             "draw_circle", "edit_circle", "draw_ellipse", "edit_ellipse",
             "draw_annotation_polygon", "edit_annotation_polygon",
-            "configure_uv", "configure_up", "configure_hak", "configure_zaehler",
+            "configure_uv", "configure_hak", "configure_zaehler",
             "move", "rotate", "choose_image", "recompute_scale",
         }
         if action_id in _UNDO_BEFORE:
@@ -2211,21 +2221,11 @@ class AppWindow(QMainWindow):
         self.log.info(f"Unterverteilung geöffnet: {element_id}")
 
     def _action_configure_up(self, element_id: str) -> None:
-        from gui.parameter_panel import UpDistributionDialog  # noqa: PLC0415
-
         element = self._document.get(element_id)
         if element is None:
             return
-        dialog = UpDistributionDialog(
-            config=element.data.get("up_distribution_config") or {},
-            cable_choices=self._cable_id_name_pairs(),
-            parent=self,
-        )
-        if dialog.exec() == QDialog.Accepted:
-            self._store_config(
-                element_id, "up_distribution_config", dialog.get_config()
-            )
-            self.log.info(f"Unterputz-Verteilung aktualisiert: {element_id}")
+        self.up_distribution.select_point(element_id)
+        self.log.info(f"Unterputz-Verteilung geöffnet: {element_id}")
 
     def _action_configure_hak(self, element_id: str) -> None:
         from gui.properties.config_dialogs import HakConfigDialog  # noqa: PLC0415
@@ -4262,12 +4262,11 @@ class AppWindow(QMainWindow):
             if self._document.get(element_id) is editor.element:
                 editor.commit_pending_edit()
         uv_planning = getattr(self, "uv_planning", None)
-        if uv_planning is None:
-            return
-        editor = getattr(uv_planning, "_editor", None)
-        save_editor = getattr(uv_planning, "_save_editor", None)
-        if editor is not None and callable(save_editor):
-            save_editor()
+        if uv_planning is not None:
+            editor = getattr(uv_planning, "_editor", None)
+            save_editor = getattr(uv_planning, "_save_editor", None)
+            if editor is not None and callable(save_editor):
+                save_editor()
 
     def _save_and_git_commit_push(self) -> None:
         if not self._save_project():
@@ -6481,6 +6480,80 @@ class AppWindow(QMainWindow):
         cable_rows.sort(key=lambda row: row[0].lower())
         return selected_ap_ids, selected_cable_ids, ap_rows, cable_rows
 
+    def _collect_pdf_room_up_distribution_tables(self, room_ids: list[str]) -> list[dict]:
+        selected_room_ids = {str(room_id).strip() for room_id in room_ids if str(room_id).strip()}
+        if not selected_room_ids:
+            return []
+
+        tables: list[dict] = []
+        cables = self._document.elements["elec_cables"]
+        cable_name_counts: dict[str, int] = defaultdict(int)
+        for cable_id, cable in cables.items():
+            cable_name_counts[str(cable.name or cable_id)] += 1
+
+        def cable_label(cable_id: str) -> str:
+            cable = cables.get(cable_id)
+            name = str(cable.name or cable_id) if cable is not None else cable_id
+            if cable_name_counts[name] > 1:
+                name = f"{name} ({cable_id})"
+            return self._pdf_cable_sample(cable_id, name)
+
+        def cable_is_connected(cable_id: str, point_id: str) -> bool:
+            cable = cables.get(cable_id)
+            if cable is None:
+                return False
+            start_ap = str(cable.start_ap or cable.geom.get("cable_start_ap") or "").strip()
+            end_ap = str(cable.end_ap or cable.geom.get("cable_end_ap") or "").strip()
+            return point_id in {start_ap, end_ap}
+
+        for point_id, point in self._document.elements["elec_points"].items():
+            if not self._is_up_distribution_type(point):
+                continue
+            if self._resolve_existing_ap_room_id(point) not in selected_room_ids:
+                continue
+            config = point.data.get("up_distribution_config") or {}
+            if not isinstance(config, dict):
+                continue
+
+            incoming_id = str(config.get("incoming_cable_id", "") or "").strip()
+            if not incoming_id or not cable_is_connected(incoming_id, point_id):
+                continue
+            incoming_name = cable_label(incoming_id)
+            rows: list[list[str]] = []
+            mappings = config.get("mappings", [])
+            if not isinstance(mappings, list):
+                continue
+            for mapping in mappings:
+                if not isinstance(mapping, dict):
+                    continue
+                from_conductor = str(mapping.get("from_conductor", "") or "").strip()
+                to_cable_id = str(mapping.get("to_cable_id", "") or "").strip()
+                to_conductor = str(mapping.get("to_conductor", "") or "").strip()
+                if not (
+                    from_conductor
+                    and to_cable_id
+                    and to_conductor
+                    and cable_is_connected(to_cable_id, point_id)
+                    and to_cable_id != incoming_id
+                ):
+                    continue
+                outgoing_name = cable_label(to_cable_id)
+                rows.append([
+                    incoming_name,
+                    from_conductor,
+                    outgoing_name,
+                    to_conductor,
+                    str(mapping.get("note", "") or "").strip(),
+                ])
+            if rows:
+                tables.append({
+                    "ap_id": point_id,
+                    "ap_name": str(point.name or point_id),
+                    "rows": rows,
+                })
+        tables.sort(key=lambda table: (table["ap_name"].casefold(), table["ap_id"]))
+        return tables
+
     def _collect_pdf_heating_circuit_rows(
         self,
         circuit_ids: list[str],
@@ -7968,6 +8041,17 @@ class AppWindow(QMainWindow):
                 col_widths=[1.6, 1.1, 1.2, 1.2, 0.8, 1.8],
                 wrap_columns={5},
             )
+            for table in self._collect_pdf_room_up_distribution_tables(room_ids):
+                self._pdf_new_page(painter, writer)
+                self._draw_pdf_table(
+                    painter,
+                    writer,
+                    f"{title} – Unterputz-Verteilung: {table['ap_name']} ({table['ap_id']})",
+                    ["Zuleitung", "Ader Zuleitung", "Abgehendes Kabel", "Ader Abgang", "Notiz"],
+                    table["rows"],
+                    col_widths=[1.6, 1.0, 1.6, 1.0, 1.8],
+                    wrap_columns={0, 2, 4},
+                )
             return
 
         if ptype == "heating_circuit":

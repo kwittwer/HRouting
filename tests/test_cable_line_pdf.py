@@ -87,7 +87,7 @@ def test_room_plan_labels_hidden_cables_with_leaders(window, tmp_path):
     original_labels = dict(window.canvas._label_visible)
     with _write_pdf(window, tmp_path / "room-labels.pdf",
                     page={"type": "elektro_room", "room_ids": ["ER-1"]}) as pdf:
-        assert len(pdf) == 3
+        assert len(pdf) == 4
         plan_text = pdf[0].get_text()
         assert "Duplicate (EK-1)" in plan_text
         assert "Duplicate (EK-2)" in plan_text
@@ -98,6 +98,8 @@ def test_room_plan_labels_hidden_cables_with_leaders(window, tmp_path):
         assert all(len(drawing["items"]) > 1 for drawing in leaders)
         assert "Duplicate (EK-1)" in pdf[2].get_text()
         assert "Duplicate (EK-2)" in pdf[2].get_text()
+        assert "Unterputz-Verteilung" in pdf[3].get_text()
+        assert "Second mapping" not in pdf[3].get_text()
     assert window.canvas._label_visible == original_labels
 
 
