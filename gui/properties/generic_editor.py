@@ -19,8 +19,9 @@ from PySide6.QtWidgets import (
 
 from model.computed import computed_values
 from model.document import Document
-from model.elements import Element, FloorPlan
+from model.elements import ElecPoint, Element, FloorPlan
 from model.field_access import apply_display_value, display_value, get_field
+from model.sensor_coverage import coverage_radius_mm, sensor_data_for_point, sensor_type
 from model.schema import ElementSchema, FieldSpec, GLOBAL_FIELDS, groups_of
 
 from .field_widgets import (
@@ -120,6 +121,7 @@ class GenericElementEditor(QWidget):
         self._widgets: dict[str, FieldWidget] = {}
         self._computed_labels: dict[str, QLabel] = {}
         self._header: QLabel | None = None
+        self._sensor_note: QLabel | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -205,7 +207,28 @@ class GenericElementEditor(QWidget):
                 field_widget = container
 
             form.addRow(f"{spec.label}:", field_widget)
+        if title == "Sensor" and isinstance(self._element, ElecPoint):
+            self._sensor_note = QLabel(box)
+            self._sensor_note.setWordWrap(True)
+            form.addRow(self._sensor_note)
         return box
+
+    def _update_sensor_note(self) -> None:
+        if self._sensor_note is None or not isinstance(self._element, ElecPoint):
+            return
+        data = sensor_data_for_point(self._element)
+        note = ""
+        if sensor_type(data) in {"pir", "radar"} and coverage_radius_mm(data) is None:
+            position = str(data.get("position") or "").strip().casefold()
+            if position == "decke":
+                if float(data.get("height_from_floor") or 0.0) < 1000.0:
+                    note = "Keine Bodenprojektion: Montagehöhe mindestens 1 m eingeben."
+                else:
+                    note = "Keine Bodenprojektion: Reichweite muss größer als Montagehöhe sein."
+            elif position != "wand":
+                note = "Keine Bodenprojektion für diese Montageposition."
+        self._sensor_note.setText(note)
+        self._sensor_note.setVisible(bool(note))
 
     def _build_computed_group(self) -> QGroupBox:
         box = QGroupBox("Berechnung", self)
@@ -291,6 +314,7 @@ class GenericElementEditor(QWidget):
         self.field_changed.emit(self._element.id, key, value)
         self.refresh_computed()
         self._update_action_visibility()
+        self._update_sensor_note()
 
     def has_pending_edit(self) -> bool:
         """Whether a compound/editable field still has an uncommitted input."""
@@ -317,6 +341,7 @@ class GenericElementEditor(QWidget):
                 widget.update_silently(display_value(self._element, spec))
         self.refresh_computed()
         self._update_action_visibility()
+        self._update_sensor_note()
 
     def refresh_computed(self) -> None:
         if not self._computed_labels:

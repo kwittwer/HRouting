@@ -512,8 +512,7 @@ def test_properties_dock_includes_height_from_floor_for_ap_multi_edit(app, docum
         assert editor is not None
         assert "height_from_floor" in editor._widgets
         
-        # Input value 50.0 cm gets scaled to 500.0 mm internally (scale=10.0)
-        editor._on_field_changed("height_from_floor", 50.0)
+        editor._on_field_changed("height_from_floor", 0.5)
         assert float(document.elements["elec_points"]["AP-1"].data.get("height_from_floor", 0.0)) == 500.0
         assert float(document.elements["elec_points"]["AP-2"].data.get("height_from_floor", 0.0)) == 500.0
     finally:

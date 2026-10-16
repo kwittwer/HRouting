@@ -2611,15 +2611,14 @@ class ElektroPointPanel(QWidget):
         pos_layout.addWidget(self.le_position_custom)
         form.addRow("Position:", pos_layout)
 
-        # H\u00f6he vom Boden in cm
         self.sb_height_from_floor = SafeDoubleSpinBox()
-        self.sb_height_from_floor.setRange(0.0, 999.9)
-        self.sb_height_from_floor.setSingleStep(1.0)
+        self.sb_height_from_floor.setRange(0.0, 9.999)
+        self.sb_height_from_floor.setSingleStep(0.1)
         self.sb_height_from_floor.setValue(0.0)
-        self.sb_height_from_floor.setDecimals(1)
-        self.sb_height_from_floor.setSuffix(" cm")
+        self.sb_height_from_floor.setDecimals(3)
+        self.sb_height_from_floor.setSuffix(" m")
         self.sb_height_from_floor.valueChanged.connect(
-            lambda v: self.height_changed.emit(self.point_id, v)
+            lambda v: self.height_changed.emit(self.point_id, v * 100.0)
         )
         form.addRow("H\u00f6he v. Boden:", self.sb_height_from_floor)
 
@@ -2895,7 +2894,7 @@ class ElektroPointPanel(QWidget):
             "label_size": self.sb_label_size.value(),
             "ap_type": self.get_ap_type(),
             "position":  position,
-            "height_from_floor": self.sb_height_from_floor.value(),
+            "height_from_floor": self.sb_height_from_floor.value() * 100.0,
             "smarthome_device": self.get_smarthome_device_text().strip(),
             "smarthome_device_color": self.get_smarthome_device_color_text().strip(),
             "note": self.te_note.toPlainText(),
@@ -2984,7 +2983,7 @@ class ElektroPointPanel(QWidget):
             self.cmb_position.setCurrentIndex(self.cmb_position.findText("Freitext"))
             self.le_position_custom.setText(position)
         
-        self.sb_height_from_floor.setValue(d.get("height_from_floor", 0.0))
+        self.sb_height_from_floor.setValue(float(d.get("height_from_floor", 0.0) or 0.0) / 100.0)
         self.set_smarthome_device_text(d.get("smarthome_device", ""))
         self.set_smarthome_device_color_text(d.get("smarthome_device_color", ""))
         self.te_note.setPlainText(d.get("note", ""))

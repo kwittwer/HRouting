@@ -33,6 +33,11 @@ from PySide6.QtWidgets import QWidget, QApplication, QToolTip
 
 from storage.asset_data_uri import is_data_uri, is_svg_asset_ref, parse_data_uri
 from gui.grid_renderer import GridLayerCache
+from gui.sensor_coverage import visible_room_path
+from model.sensor_coverage import (
+    ceiling_coverage_polygon_mm, coverage_radius_mm, effective_sensor_fields,
+    sensor_data_for_point, sensor_type,
+)
 
 Point = Tuple[float, float]
 
@@ -214,6 +219,8 @@ class CanvasWidget(QWidget):
 
         # Maßstab
         self._mm_per_px = 1.0
+        self._sensor_coverage_global_visible = True
+        self._sensor_coverage_path_cache = {}
 
         # Referenzlinie (canvas-Koordinaten)
         self._ref_p1: Optional[QPointF] = None
@@ -555,6 +562,10 @@ class CanvasWidget(QWidget):
 
     def set_grid_visible(self, visible: bool) -> None:
         self._grid_visible = bool(visible)
+        self.update()
+
+    def set_sensor_coverage_global_visible(self, visible: bool) -> None:
+        self._sensor_coverage_global_visible = bool(visible)
         self.update()
 
     def set_grid_spacing_mm(self, spacing_mm: float) -> None:
@@ -3455,6 +3466,7 @@ class CanvasWidget(QWidget):
         self._dirty_moved_hkvs.clear()
         self._grid_layer_cache.clear()
         self._document = document
+        self._sensor_coverage_path_cache.clear()
         bind_canvas(self, document, stages, on_change=self._on_document_data_changed)
         self._rebuild_label_map()
         
@@ -5108,6 +5120,7 @@ class CanvasWidget(QWidget):
             },
             "ref_line":  None,
             "mm_per_px": self._mm_per_px,
+            "sensor_coverage_global_visible": self._sensor_coverage_global_visible,
             "manual_routes": {
                 cid: [(p.x(), p.y()) for p in pts]
                 for cid, pts in self._manual_routes.items()
@@ -5309,6 +5322,7 @@ class CanvasWidget(QWidget):
             self._ref_p1 = QPointF(*ref[0])
             self._ref_p2 = QPointF(*ref[1])
         self._mm_per_px = d.get("mm_per_px", 1.0)
+        self._sensor_coverage_global_visible = bool(d.get("sensor_coverage_global_visible", True))
         legacy_measure_labels = list(self._measure_label_positions)
         self._measure_lines = []
         self._angle_measurements = []
@@ -9727,6 +9741,11 @@ class CanvasWidget(QWidget):
                 continue
             self._draw_elec_cable(painter, cid, pts)
 
+        if self._sensor_coverage_global_visible and self._mm_per_px > 0:
+            for point_id, position in self._elec_points.items():
+                if self._elec_visible.get(point_id, True):
+                    self._draw_sensor_coverage(painter, point_id, position, visible_rect)
+
         # Elektro: Anschlusspunkte immer oberhalb normaler Kabel
         for pid in self._elec_points:
             if self._elec_visible.get(pid, True):
@@ -11416,6 +11435,81 @@ class CanvasWidget(QWidget):
             painter.drawEllipse(p, r, r)
 
     # ── Elektro drawing ─────────────────────────────────────────────── #
+
+    def _draw_sensor_coverage(self, painter, point_id: str, center: QPointF,
+                              visible_rect: QRectF) -> None:
+        if self._document is None:
+            return
+        point = self._document.elements.get("elec_points", {}).get(point_id)
+        if point is None or sensor_type(point.data) not in {"pir", "radar"}:
+            return
+        data = sensor_data_for_point(point)
+        radius_mm = coverage_radius_mm(data)
+        if radius_mm is None:
+            return
+        radius = radius_mm / self._mm_per_px
+        bounds = QRectF(center.x() - radius, center.y() - radius, 2 * radius, 2 * radius)
+        if not self._bounds_visible_in_rect(bounds, visible_rect):
+            return
+
+        settings = effective_sensor_fields(data)
+        room_polygon = None
+        for room in self._document.elements.get("elec_rooms", {}).values():
+            if room.floor_plan_id != point.floor_plan_id:
+                continue
+            polygon = self._elec_room_polygons.get(room.id)
+            if polygon and len(polygon) >= 3 and (
+                self._point_in_polygon(center, polygon)
+                or self._min_dist_to_polygon_edge(center, polygon) <= 1e-6
+            ):
+                room_polygon = polygon
+                break
+
+        key = (center.x(), center.y(), radius,
+               str(data.get("position") or "").strip().casefold(),
+               float(settings["sensor_angle_deg"]), float(settings["sensor_direction_deg"]),
+               tuple((vertex.x(), vertex.y()) for vertex in room_polygon or []),
+               float(settings["sensor_tilt_deg"]), float(settings["sensor_cone_angle_deg"]),
+               float(data.get("height_from_floor") or 0.0), float(settings["sensor_range_mm"]))
+        cached = self._sensor_coverage_path_cache.get(point_id)
+        if cached is not None and cached[0] == key:
+            path = cached[1]
+            room_clip = cached[2]
+        else:
+            path = QPainterPath()
+            if key[3] == "decke" and float(settings["sensor_tilt_deg"]) != 0.0:
+                footprint = ceiling_coverage_polygon_mm(data)
+                if len(footprint) < 3:
+                    return
+                path.addPolygon(QPolygonF([
+                    QPointF(center.x() + offset_x / self._mm_per_px,
+                            center.y() + offset_y / self._mm_per_px)
+                    for offset_x, offset_y in footprint
+                ]))
+                path.closeSubpath()
+            elif key[3] == "decke" or float(settings["sensor_angle_deg"]) >= 360:
+                path.addEllipse(bounds)
+            else:
+                angle = float(settings["sensor_angle_deg"])
+                start = 90.0 - float(settings["sensor_direction_deg"]) + angle / 2.0
+                path.moveTo(center)
+                path.arcTo(bounds, start, -angle)
+                path.closeSubpath()
+            room_clip = visible_room_path(center, room_polygon) if room_polygon else None
+            self._sensor_coverage_path_cache[point_id] = (key, path, room_clip)
+
+        color = QColor("#e6a238" if sensor_type(data) == "pir" else "#20a5a4")
+        fill = QColor(color)
+        fill.setAlpha(55)
+        outline = QColor(color)
+        outline.setAlpha(190)
+        painter.save()
+        if room_clip is not None:
+            painter.setClipPath(room_clip, Qt.IntersectClip)
+        painter.setPen(QPen(outline, 1.5 / max(self._scale, 1e-9)))
+        painter.setBrush(QBrush(fill))
+        painter.drawPath(path)
+        painter.restore()
 
     def _draw_elec_point(self, painter, point_id: str):
         pos = self._elec_points.get(point_id)

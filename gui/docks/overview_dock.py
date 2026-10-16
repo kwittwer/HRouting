@@ -444,7 +444,7 @@ class ProjectOverviewDock(QDockWidget):
 
     def _build_elec_room_table(self) -> QTableWidget:
         tbl = QTableWidget(0, 6)
-        tbl.setHorizontalHeaderLabels(["Raum", "AP", "AP-Typ", "Höhe über FB [cm]", "Kabel", "Verlegeort"])
+        tbl.setHorizontalHeaderLabels(["Raum", "AP", "AP-Typ", "Höhe über FB [m]", "Kabel", "Verlegeort"])
         # Grouped rows should keep a deterministic room -> AP order.
         tbl.setSortingEnabled(False)
         tbl.setEditTriggers(
@@ -514,7 +514,7 @@ class ProjectOverviewDock(QDockWidget):
 
     @staticmethod
     def _parse_float_text(text: str) -> float | None:
-        raw = str(text or "").strip().replace("cm", "").strip().replace(",", ".")
+        raw = str(text or "").strip().removesuffix("m").strip().replace(",", ".")
         if not raw:
             return None
         try:
@@ -885,7 +885,7 @@ class ProjectOverviewDock(QDockWidget):
 
             ap_height = row.get("ap_height_cm")
             if isinstance(ap_height, (int, float)):
-                height_item = _num_item(float(ap_height), ".1f", "cm")
+                height_item = _num_item(float(ap_height) / 100.0, ".3f", "m")
                 self._set_item_editable(height_item, bool(point_id))
                 tbl.setItem(r, 3, height_item)
             else:
@@ -1019,12 +1019,12 @@ class ProjectOverviewDock(QDockWidget):
             self.element_field_changed.emit(point_id, "name", str(item.text() or "").strip())
             return
         if col == 3:
-            value_cm = self._parse_float_text(item.text())
-            if value_cm is None:
+            value_m = self._parse_float_text(item.text())
+            if value_m is None:
                 self._do_refresh()
                 return
             self.pre_change.emit()
-            self.element_field_changed.emit(point_id, "height_from_floor", float(value_cm))
+            self.element_field_changed.emit(point_id, "height_from_floor", float(value_m))
 
     def _on_elec_room_ap_type_changed(self, point_id: str, value: str) -> None:
         if self._updating_electro_tables:

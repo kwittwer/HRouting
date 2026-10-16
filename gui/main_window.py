@@ -6898,7 +6898,7 @@ class MainWindow(QMainWindow):
 
         tbl_ap_list = QTableWidget(len(ap_rows), 8)
         tbl_ap_list.setHorizontalHeaderLabels(
-            ["Name", "Art", "Raum", "Position", "Höhe (cm)", "Gerätefarbe", "Unterputz-Gerät", "Notiz"]
+            ["Name", "Art", "Raum", "Position", "Höhe (m)", "Gerätefarbe", "Unterputz-Gerät", "Notiz"]
         )
         tbl_ap_list.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         tbl_ap_list.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -6907,7 +6907,7 @@ class MainWindow(QMainWindow):
             tbl_ap_list.setItem(i, 1, QTableWidgetItem(r.get("type", "")))
             tbl_ap_list.setItem(i, 2, QTableWidgetItem(r.get("room", "")))
             tbl_ap_list.setItem(i, 3, QTableWidgetItem(r.get("position", "")))
-            item = QTableWidgetItem(f"{r.get('height_cm', 0.0):.1f}")
+            item = QTableWidgetItem(f"{r.get('height_cm', 0.0) / 100.0:.2f}")
             item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             tbl_ap_list.setItem(i, 4, item)
             tbl_ap_list.setItem(i, 5, QTableWidgetItem(r.get("device_color", "")))
@@ -7227,17 +7227,17 @@ class MainWindow(QMainWindow):
         # Elektro Einzellängen
         lines.append("Elektro - Kabelverbindungen")
         lines.append(csv_row(["Name", "Typ", "Start-AP", "Start-Position",
-                               "Start-Höhe (cm)", "Start-Gerät", "Start-Farbe", "Start-Notiz",
-                               "End-AP", "End-Position", "End-Höhe (cm)", "End-Gerät", "End-Farbe",
+                               "Start-Höhe (m)", "Start-Gerät", "Start-Farbe", "Start-Notiz",
+                               "End-AP", "End-Position", "End-Höhe (m)", "End-Gerät", "End-Farbe",
                                "End-Notiz", "Kabel-Notiz", "Länge (m)", "Verlegeort"]))
         for r in kv_rows:
             lines.append(csv_row([
                 r["name"], r["type"],
                 r.get("start_ap", ""), r.get("start_position", ""),
-                f"{r.get('start_height_cm', 0.0):.1f}",
+                f"{r.get('start_height_cm', 0.0) / 100.0:.2f}",
                 r.get("start_device", ""), r.get("start_device_color", ""), r.get("start_note", ""),
                 r.get("end_ap", ""), r.get("end_position", ""),
-                f"{r.get('end_height_cm', 0.0):.1f}",
+                f"{r.get('end_height_cm', 0.0) / 100.0:.2f}",
                 r.get("end_device", ""), r.get("end_device_color", ""), r.get("end_note", ""),
                 r.get("comment", ""),
                 f"{r['length_m']:.2f}",
@@ -8446,14 +8446,14 @@ class MainWindow(QMainWindow):
             y_after = ctx.section_heading(page, y_after, "Leitungen")
             headers = [
                 "Name", "Typ", "Kabel-Notiz",
-                "Start-AP", "Start-Gerät", "Start-Farbe", "Start-Notiz", "Start-H. (cm)",
-                "End-AP", "End-Gerät", "End-Farbe", "End-Notiz", "End-H. (cm)",
+                "Start-AP", "Start-Gerät", "Start-Farbe", "Start-Notiz", "Start-H. (m)",
+                "End-AP", "End-Gerät", "End-Farbe", "End-Notiz", "End-H. (m)",
                 "Länge (m)", "Verlegeort",
             ]
             rows = [[self._pdf_cable_sample(r.get("cable_id", r.get("id", "")), r["name"]), r["type"],
                      r.get("comment", ""),
-                     r.get("start_ap", ""), r.get("start_device", ""), r.get("start_device_color", ""), r.get("start_note", ""), f"{r.get('start_height_cm', 0.0):.1f}",
-                     r.get("end_ap", ""), r.get("end_device", ""), r.get("end_device_color", ""), r.get("end_note", ""), f"{r.get('end_height_cm', 0.0):.1f}",
+                     r.get("start_ap", ""), r.get("start_device", ""), r.get("start_device_color", ""), r.get("start_note", ""), f"{r.get('start_height_cm', 0.0) / 100.0:.2f}",
+                     r.get("end_ap", ""), r.get("end_device", ""), r.get("end_device_color", ""), r.get("end_note", ""), f"{r.get('end_height_cm', 0.0) / 100.0:.2f}",
                      f"{r['length_m']:.2f}", r.get("laying_location_text", "–")]
                     for r in data["kv_rows"]]
             col_w = [1.0, 0.9, 1.5, 0.9, 0.9, 0.8, 1.2, 0.7, 0.9, 0.9, 0.8, 1.2, 0.7, 0.8, 2.0]
@@ -8517,11 +8517,11 @@ class MainWindow(QMainWindow):
             page = ctx.new_page(toc_title=f"{title} – AP-Details")
             y_after = ctx.title(page, title)
             y_after = ctx.section_heading(page, y_after, "Anschlusspunkte – Details")
-            headers = ["Name", "Art", "Raum", "Position", "Höhe (cm)", "Gerätefarbe", "Unterputz-Gerät", "Notiz"]
+            headers = ["Name", "Art", "Raum", "Position", "Höhe (m)", "Gerätefarbe", "Unterputz-Gerät", "Notiz"]
             rows = [
                 [
                     r.get("name", ""), r.get("type", ""), r.get("room", ""),
-                    r.get("position", ""), f"{r.get('height_cm', 0.0):.1f}",
+                    r.get("position", ""), f"{r.get('height_cm', 0.0) / 100.0:.2f}",
                     r.get("device_color", ""), r.get("device", ""), r.get("note", ""),
                 ]
                 for r in ap_info_rows

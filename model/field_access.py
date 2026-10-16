@@ -24,6 +24,7 @@ from .elements import (
     TextAnnotation,
 )
 from .schema import FieldSpec
+from .sensor_coverage import SENSOR_FIELDS, effective_sensor_fields
 
 #: Felder von Grundrissen/Einrichtung, die im canvas-Layer liegen
 _LAYER_FIELDS = frozenset(
@@ -147,6 +148,9 @@ def _mirror_key(element: Element, key: str) -> str | None:
 def get_field(element: Element, spec: FieldSpec) -> Any:
     """Liest den gespeicherten Wert eines Feldes."""
     key = spec.key
+
+    if isinstance(element, ElecPoint) and key in SENSOR_FIELDS:
+        return effective_sensor_fields(element.data)[key]
 
     if isinstance(element, ElecCable) and key == "laying_location":
         return element.laying_location

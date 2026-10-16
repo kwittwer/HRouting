@@ -310,6 +310,7 @@
           "default": 1.0,
           "description": "Globaler Maßstab: Millimeter pro Pixel."
         },
+        "sensor_coverage_global_visible": { "type": "boolean", "default": true },
         "ref_line": {
           "oneOf": [
             { "$ref": "#/$defs/RefLine" },
@@ -949,7 +950,14 @@
           "default": "Wand",
           "description": "Einbauort: 'Wand', 'Decke', 'Boden' oder Freitext."
         },
-        "height_from_floor": { "type": "number", "minimum": 0, "default": 0.0, "description": "Einbauhöhe vom Boden in cm." },
+        "height_from_floor": { "type": "number", "minimum": 0, "default": 0.0, "description": "Einbauhöhe vom Boden in mm (Oberfläche: m)." },
+        "sensor_type": { "type": "string", "enum": ["auto", "pir", "radar", "none"], "default": "auto" },
+        "sensor_angle_deg": { "type": "number", "minimum": 1, "maximum": 360 },
+        "sensor_cone_angle_deg": { "type": "number", "minimum": 1, "maximum": 179 },
+        "sensor_range_mm": { "type": "number", "minimum": 100, "maximum": 100000 },
+        "sensor_direction_deg": { "type": "number", "minimum": 0, "maximum": 360 },
+        "sensor_tilt_deg": { "type": "number", "minimum": 0, "maximum": 90, "default": 0, "description": "Neigung bei Deckenmontage: 0 Grad senkrecht nach unten, 90 Grad horizontal; Richtung bestimmt die Kipprichtung." },
+        "sensor_coverage_visible": { "type": "boolean", "default": true },
         "smarthome_device": { "type": "string", "default": "" },
         "smarthome_device_color": { "type": "string", "default": "" },
         "note": { "type": "string", "default": "" },

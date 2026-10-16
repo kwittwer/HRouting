@@ -70,6 +70,7 @@ from model.elements import (
     TextAnnotation,
 )
 from model.schema import format_auto_cable_name, format_elec_point_choice_label, schema_for
+from model.sensor_coverage import SENSOR_FIELDS
 from storage.asset_data_uri import is_data_uri
 from storage.hrp_io import (
     create_hrp_backup,
@@ -556,6 +557,11 @@ class AppWindow(QMainWindow):
         view_menu.addSeparator()
         self._add_action(view_menu, "Elektro-Topologie anzeigen", self._show_topology_dock)
         self._add_action(view_menu, "Schaltplan…", self._open_schaltplan_window)
+        self._sensor_coverage_action = self._add_action(
+            view_menu, "Erfassungsbereiche anzeigen", self._on_sensor_coverage_toggled
+        )
+        self._sensor_coverage_action.setCheckable(True)
+        self._sensor_coverage_action.setChecked(True)
         view_menu.addSeparator()
         self._add_action(view_menu, "Layout zurücksetzen", self._reset_layout)
 
@@ -705,6 +711,17 @@ class AppWindow(QMainWindow):
         self.canvas.set_grid_visible(checked)
         self._mark_dirty()
 
+    def _on_sensor_coverage_toggled(self, checked: bool) -> None:
+        self._push_undo()
+        self.canvas.set_sensor_coverage_global_visible(checked)
+        self._document.view["sensor_coverage_global_visible"] = checked
+        self._mark_dirty()
+
+    def _sync_sensor_coverage_action(self) -> None:
+        self._sensor_coverage_action.blockSignals(True)
+        self._sensor_coverage_action.setChecked(self.canvas._sensor_coverage_global_visible)
+        self._sensor_coverage_action.blockSignals(False)
+
     def _on_grid_spacing_changed(self, value: float) -> None:
         self.canvas.set_grid_spacing_mm(value * 1000.0)
         self._mark_dirty()
@@ -807,6 +824,12 @@ class AppWindow(QMainWindow):
 
     def _on_property_changed(self, element_id: str, key: str, _value) -> None:
         """Ein Feld im Eigenschaften-Dock wurde geändert."""
+        if key in SENSOR_FIELDS and element_id in self._document.elements.get("elec_points", {}):
+            if key == "sensor_type":
+                self.properties.refresh_current()
+            self.canvas.update()
+            self._mark_dirty()
+            return
         effects = self._apply_property_side_effects(element_id, key)
         self._document.element_changed.emit(element_id)
         if key == "height_from_floor" and element_id in self._document.elements.get("elec_points", {}):
@@ -814,6 +837,8 @@ class AppWindow(QMainWindow):
                 self._document.element_changed.emit(cable_id)
         if effects.get("refresh_navigator"):
             self.navigator.set_document(self._document)
+        if key in {"builtin_symbol", "sensor_type", "position", "height_from_floor", "sensor_range_mm"}:
+            self.properties.refresh_current()
         self.canvas.update()
         self._refresh_schema_windows()
         self._mark_dirty()
@@ -1773,6 +1798,7 @@ class AppWindow(QMainWindow):
             if "snap_angle" in current_view:
                 self.canvas._snap_angle = float(current_view["snap_angle"])
             self._sync_grid_toolbar_from_canvas()
+            self._sync_sensor_coverage_action()
             self.canvas.update()
             self._load_floor_plan_images(self._document)
             load_done = time.perf_counter() if perf_mode else 0.0
@@ -2077,6 +2103,7 @@ class AppWindow(QMainWindow):
         )
         apply_custom_colors(document.settings.get(PARAMS_COLOR_DIALOG_CUSTOM_COLORS_KEY))
         self._sync_grid_toolbar_from_canvas()
+        self._sync_sensor_coverage_action()
         self._refresh_schema_windows()
         self._update_title()
         self._last_document_snapshot = self._document.snapshot()
@@ -6445,7 +6472,7 @@ class AppWindow(QMainWindow):
                 str(point.name or pid),
                 str(point.builtin_symbol or ""),
                 str(point.position or ""),
-                f"{float(point.height_from_floor or 0.0) / 10.0:.1f} cm",
+                f"{float(point.height_from_floor or 0.0) / 1000.0:.2f} m",
                 str(point.note or ""),
             ])
         ap_rows.sort(key=lambda row: row[0].lower())
@@ -6522,7 +6549,7 @@ class AppWindow(QMainWindow):
                 str(point.name or point_id),
                 self._describe_ap_type(point),
                 str(point.position or ""),
-                f"{float(point.height_from_floor or 0.0) / 10.0:.1f} cm",
+                f"{float(point.height_from_floor or 0.0) / 1000.0:.2f} m",
                 str(point.note or ""),
             ])
 

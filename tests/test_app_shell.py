@@ -3990,7 +3990,7 @@ def test_pdf_export_normalizes_elektro_topology_page(app, monkeypatch):
         window.deleteLater()
 
 
-def test_pdf_export_uses_ap_height_in_cm(app, monkeypatch):
+def test_pdf_export_uses_ap_height_in_meters(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
     monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
@@ -4060,7 +4060,7 @@ def test_pdf_export_uses_ap_height_in_cm(app, monkeypatch):
         window._set_document(document)
 
         ap_rows, _cable_rows = window._collect_pdf_electro_rows()
-        assert any(row[3] == "145.0 cm" for row in ap_rows)
+        assert any(row[3] == "1.45 m" for row in ap_rows)
 
         export_data = window._collect_export_data()
         heights = {row["name"]: row["height_cm"] for row in export_data.get("ap_info_rows", [])}
@@ -5895,7 +5895,7 @@ def test_project_overview_dock_set_document(app, monkeypatch):
             for r in range(room_table.rowCount())
             if room_table.item(r, 3) is not None
         ]
-        assert "145.0 cm" in height_values
+        assert "1.45 m" in height_values
     finally:
         window.deleteLater()
 
