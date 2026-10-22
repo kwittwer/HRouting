@@ -68,6 +68,22 @@ verwinkelten Räumen und APs direkt auf einer Raumkante. Ohne Raum-Polygon
 bleibt sie unbeschnitten. Zusätzliche Wände aus Grundrissbildern, Möbel und
 tatsächliche Sensoreigenschaften werden nicht simuliert.
 
+## AP-Aufkleber als PDF
+
+Im PDF-Exportdialog mit **AP-Aufkleberbogen einfügen** eine Aufkleberseite
+anlegen und unter **Aufkleber-Raum** einen Raum oder **Alle Räume** auswählen.
+Bei allen Räumen werden auch APs ohne Raumzuordnung berücksichtigt.
+
+Die Bögen sind A4 im Querformat mit einem Raster aus 4 × 3 Aufklebern,
+jeweils 60 × 60 mm. Zusätzliche Bögen werden automatisch erzeugt.
+Jeder Aufkleber enthält Mittellinien mit Mittelkreuz, einen Kreis mit 60 mm
+Durchmesser, das AP-Symbol, AP-Nummer und Namen, Raum, Montageposition,
+Montagehöhe sowie angeschlossene Kabel mit Nummer, Namen und Kabeltyp.
+Lange Beschriftungen werden umgebrochen und bei Bedarf verkleinert.
+
+Für maßhaltige Aufkleber im Druckdialog **Tatsächliche Größe / 100 %** wählen
+und die Option zur Anpassung an die Seitengröße deaktivieren.
+
 ## Projektformat (.hrp)
 
 HRouting speichert Projekte als JSON mit der Endung `.hrp`.

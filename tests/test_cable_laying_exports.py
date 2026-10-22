@@ -134,6 +134,191 @@ def _compact(text):
     return re.sub(r"\s+", "", text)
 
 
+def test_ap_sticker_collection_and_physical_sheet(window, tmp_path):
+    from gui.pdf_ap_stickers import collect_ap_stickers, draw_ap_sticker_sheet
+
+    window._set_document(_document())
+    stickers = collect_ap_stickers(window._document, window._resolve_existing_ap_room_id, "ER-1")
+    assert [sticker.point_id for sticker in stickers] == ["AP-1", "AP-2"]
+    assert stickers[0].room == "Near"
+    assert stickers[0].height_mm == 300
+    assert len(stickers[1].cables) == 2
+    assert "NYM-J 3x1,5" in stickers[1].cables[0]
+    all_stickers = collect_ap_stickers(window._document, window._resolve_existing_ap_room_id)
+    assert len(all_stickers) == 4
+    assert len(all_stickers[-1].cables) == 2
+    path = tmp_path / "stickers.pdf"
+    writer = QPdfWriter(str(path))
+    writer.setResolution(150)
+    writer.setPageSize(QPageSize(QPageSize.A4))
+    writer.setPageOrientation(QPageLayout.Landscape)
+    painter = QPainter(writer)
+    try:
+        draw_ap_sticker_sheet(painter, writer, stickers)
+    finally:
+        painter.end()
+    fitz = pytest.importorskip("fitz")
+    with fitz.open(path) as pdf:
+        text = _compact(pdf[0].get_text())
+        assert all(value in text for value in ("AP-1", "AP-2", "Near", "30cm", "NYM-J3x1,5"))
+        assert "AP-3" not in text
+        outlines = [drawing["rect"] for drawing in pdf[0].get_drawings()
+                    if abs(drawing["rect"].width - 60 * 72 / 25.4) < 0.5
+                    and abs(drawing["rect"].height - 60 * 72 / 25.4) < 0.5]
+        assert len(outlines) == 4
+        first_sticker = outlines[0]
+        center_x = (first_sticker.x0 + first_sticker.x1) / 2
+        center_y = (first_sticker.y0 + first_sticker.y1) / 2
+        image_rect = pdf[0].get_image_info()[0]["bbox"]
+        assert max(image_rect[2] - image_rect[0], image_rect[3] - image_rect[1]) == pytest.approx(18 * 72 / 25.4, abs=0.5)
+        assert (image_rect[0] + image_rect[2]) / 2 == pytest.approx(center_x, abs=0.5)
+        assert (image_rect[1] + image_rect[3]) / 2 == pytest.approx(center_y, abs=0.5)
+        heading_lines = [line for block in pdf[0].get_text("dict")["blocks"]
+                         if "lines" in block for line in block["lines"]
+                         if first_sticker.contains(fitz.Rect(line["bbox"]))
+                         and line["bbox"][3] < first_sticker.y0 + 15 * 72 / 25.4]
+        assert len(heading_lines) == 3
+        for line in heading_lines:
+            assert (line["bbox"][0] + line["bbox"][2]) / 2 == pytest.approx(center_x, abs=1)
+
+
+def _sticker_document(count):
+    data = _document().to_dict()
+    template = data["params"]["elec_points"]["AP-1"]
+    data["params"]["elec_points"] = {}
+    data["canvas"]["elec_points"] = {}
+    data["params"]["elec_cables"] = {}
+    data["canvas"]["elec_cables"] = {}
+    data["canvas"]["cable_start_ap"] = {}
+    data["canvas"]["cable_end_ap"] = {}
+    for number in range(1, count + 1):
+        point_id = f"AP-{number}"
+        point = copy.deepcopy(template)
+        point.update(point_id=point_id, name=f"Outlet {number}", ap_type="standard", room_id="ER-1")
+        data["params"]["elec_points"][point_id] = point
+        data["canvas"]["elec_points"][point_id] = [20, 50]
+    return Document.from_dict(data)
+
+
+@pytest.mark.parametrize("count", [0, 1, 12, 13, 24, 25])
+def test_ap_sticker_production_pagination_and_orientation(window, tmp_path, monkeypatch, count):
+    window._set_document(_sticker_document(count))
+    path = tmp_path / f"stickers-{count}.pdf"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(path), "PDF (*.pdf)"))
+    pages = window._normalize_pdf_export_pages([
+        {"id": "stickers", "type": "ap_stickers", "title": "Aufkleber", "room_id": "ER-1"},
+        {"id": "following", "type": "lengths", "title": "After stickers"},
+    ])
+    window._continue_export_pdf(pages, window._normalize_pdf_export_meta({}, pages))
+    fitz = pytest.importorskip("fitz")
+    with fitz.open(path) as pdf:
+        sheets = max(1, (count + 11) // 12)
+        assert pdf.page_count == sheets + 2
+        assert window._pdf_export_meta["page_count"] == str(pdf.page_count)
+        assert window._pdf_export_pages[0]["room_id"] == "ER-1"
+        cover = _compact(pdf[0].get_text())
+        assert f"Seitenanzahl:{pdf.page_count}" in cover
+        assert pdf[0].rect.width > pdf[0].rect.height
+        assert pdf[-1].rect.width > pdf[-1].rect.height
+        assert "Afterstickers" in _compact(pdf[-1].get_text())
+        actual_ids = []
+        for sheet_index in range(sheets):
+            sheet = pdf[sheet_index + 1]
+            assert sheet.rect.width == pytest.approx(297 * 72 / 25.4, abs=1)
+            assert sheet.rect.height == pytest.approx(210 * 72 / 25.4, abs=1)
+            ids = re.findall(r"AP-\d+", sheet.get_text())
+            assert len(ids) == min(12, max(0, count - sheet_index * 12))
+            actual_ids.extend(ids)
+        assert actual_ids == [f"AP-{number}" for number in range(1, count + 1)]
+        if count:
+            assert pdf[1].get_images()
+            outlines = [drawing["rect"] for drawing in pdf[1].get_drawings()
+                        if abs(drawing["rect"].width - 60 * 72 / 25.4) < 0.5
+                        and abs(drawing["rect"].height - 60 * 72 / 25.4) < 0.5]
+            assert len(outlines) == min(count, 12) * 2
+            if count >= 12:
+                assert max(rect.y1 for rect in outlines) - min(rect.y0 for rect in outlines) == pytest.approx(180 * 72 / 25.4, abs=0.5)
+                assert max(rect.x1 for rect in outlines) - min(rect.x0 for rect in outlines) == pytest.approx(240 * 72 / 25.4, abs=0.5)
+        else:
+            assert "KeineAnschlusspunkte" in _compact(pdf[1].get_text())
+
+
+def test_ap_sticker_dialog_room_selection_and_schema(window):
+    import json
+    from gui.pdf_export_dialog import PdfExportConfigDialog
+
+    dialog = PdfExportConfigDialog(
+        pages=[], floor_plans=[], svg_size=(0, 0),
+        elec_rooms=[("ER-1", "Near"), ("ER-2", "Far room")],
+        sticker_room_counts={"": 25, "ER-1": 13, "ER-2": 12},
+    )
+    try:
+        dialog.btn_add_ap_stickers.click()
+        assert dialog.get_pages()[0]["type"] == "ap_stickers"
+        assert dialog.get_pages()[0]["room_id"] == ""
+        assert dialog.le_page_count.text() == "4"
+        assert not dialog.cb_sticker_room.isHidden()
+        assert dialog.plan_group.isHidden()
+        dialog.cb_sticker_room.setCurrentIndex(dialog.cb_sticker_room.findData("ER-1"))
+        assert dialog.get_pages()[0]["room_id"] == "ER-1"
+        assert dialog.le_page_count.text() == "3"
+        dialog.cb_sticker_room.setCurrentIndex(dialog.cb_sticker_room.findData("ER-2"))
+        assert dialog.le_page_count.text() == "2"
+        normalized = window._normalize_pdf_export_pages(dialog.get_pages())
+        assert normalized[0]["type"] == "ap_stickers"
+        assert normalized[0]["room_id"] == "ER-2"
+        schema = json.loads((ROOT / "hrp_schema.json").read_text(encoding="utf-8"))
+        jsonschema = pytest.importorskip("jsonschema")
+        jsonschema.validate(normalized[0], schema["$defs"]["PdfExportPage"])
+    finally:
+        dialog.deleteLater()
+
+
+def test_ap_stickers_include_unassigned_and_fit_long_content(window, tmp_path):
+    from gui.pdf_ap_stickers import collect_ap_stickers, draw_ap_sticker_sheet
+
+    data = _document().to_dict()
+    point = data["params"]["elec_points"]["AP-4"]
+    point.update(room_id="", name="Very long outlet name " * 12, position="Wand", icon_path="missing-icon.png")
+    data["canvas"]["elec_points"]["AP-4"] = [2000, 2000]
+    for number in range(5, 15):
+        cable_id = f"EK-{number}"
+        data["params"]["elec_cables"][cable_id] = {
+            "cable_id": cable_id, "name": f"Long cable connection {number}",
+            "type": "NYM-J 5x2,5", "start_ap": "AP-4", "end_ap": "AP-4",
+        }
+        data["canvas"]["elec_cables"][cable_id] = [[2000, 2000], [2010, 2000]]
+    window._set_document(Document.from_dict(data))
+    stickers = collect_ap_stickers(window._document, window._resolve_existing_ap_room_id)
+    sticker = next(item for item in stickers if item.point_id == "AP-4")
+    assert sticker.room == "Ohne Raum"
+    assert len(sticker.cables) == 12
+    filtered = collect_ap_stickers(window._document, window._resolve_existing_ap_room_id, "ER-2")
+    assert [item.point_id for item in filtered] == ["AP-3"]
+    path = tmp_path / "long-sticker.pdf"
+    writer = QPdfWriter(str(path))
+    writer.setResolution(150)
+    writer.setPageSize(QPageSize(QPageSize.A4))
+    writer.setPageOrientation(QPageLayout.Landscape)
+    painter = QPainter(writer)
+    try:
+        draw_ap_sticker_sheet(painter, writer, [sticker])
+    finally:
+        painter.end()
+    fitz = pytest.importorskip("fitz")
+    with fitz.open(path) as pdf:
+        text = _compact(pdf[0].get_text())
+        assert text.count("Verylongoutletname") >= 12
+        assert all(f"EK-{number}:" in text for number in range(5, 15))
+        assert "OhneRaum" in text
+        assert pdf[0].get_images()
+        outlines = [drawing["rect"] for drawing in pdf[0].get_drawings()
+                    if abs(drawing["rect"].width - 60 * 72 / 25.4) < 0.5
+                    and abs(drawing["rect"].height - 60 * 72 / 25.4) < 0.5]
+        sticker_rect = outlines[0]
+        assert all(sticker_rect.contains(fitz.Rect(word[:4])) for word in pdf[0].get_text("words"))
+
+
 def _write_pdf(window, path, *, page=None, table=None, resolution=150):
     writer = QPdfWriter(str(path))
     writer.setResolution(resolution)

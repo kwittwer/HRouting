@@ -5725,6 +5725,7 @@ class AppWindow(QMainWindow):
                 "elektro_room",
                 "elektro_topology",
                 "uv",
+                "ap_stickers",
             ):
                 continue
             page = {
@@ -5735,6 +5736,8 @@ class AppWindow(QMainWindow):
             }
             if ptype == "elektro_topology":
                 page["root_ap_id"] = str(src.get("root_ap_id") or "").strip()
+            if ptype == "ap_stickers":
+                page["room_id"] = str(src.get("room_id") or "").strip()
             if ptype == "uv":
                 page["uv_ap_id"] = str(src.get("uv_ap_id") or "").strip()
                 page["table_sections"] = list(src.get("table_sections") or ["el_uv"])
@@ -6284,6 +6287,11 @@ class AppWindow(QMainWindow):
 
     def _open_pdf_export_config_dialog(self) -> tuple[list[dict], dict[str, str]] | None:
         pages = self._normalize_pdf_export_pages(self._pdf_export_pages)
+        sticker_room_counts = {"": len(self._document.elements["elec_points"])}
+        for point in self._document.elements["elec_points"].values():
+            room_id = self._resolve_existing_ap_room_id(point)
+            if room_id:
+                sticker_room_counts[room_id] = sticker_room_counts.get(room_id, 0) + 1
         dialog = PdfExportConfigDialog(
             pages=pages,
             floor_plans=self._current_floor_plans_for_export_dialog(),
@@ -6300,6 +6308,7 @@ class AppWindow(QMainWindow):
             ap_label_style=self._pdf_ap_label_style(),
             canvas=self.canvas,
             parent=self,
+            sticker_room_counts=sticker_room_counts,
         )
         if dialog.exec() != QDialog.Accepted:
             return None
@@ -7755,9 +7764,14 @@ class AppWindow(QMainWindow):
         )
         painter.restore()
 
-    def _pdf_new_page(self, painter, writer) -> None:
+    def _pdf_new_page(self, painter, writer, *, portrait: bool | None = None) -> None:
         if not bool(getattr(self, "_pdf_counting_only", False)):
             self._draw_pdf_footer(painter, writer)
+        if portrait is not None:
+            from PySide6.QtGui import QPageLayout
+
+            writer.setPageOrientation(QPageLayout.Portrait if portrait else QPageLayout.Landscape)
+        if not bool(getattr(self, "_pdf_counting_only", False)):
             writer.newPage()
         self._pdf_footer_page_no = int(getattr(self, "_pdf_footer_page_no", 1)) + 1
 
@@ -7844,7 +7858,7 @@ class AppWindow(QMainWindow):
                 return max(1, len(enabled_pages)) + 1
             for idx, page in enumerate(enabled_pages):
                 if idx > 0:
-                    self._pdf_new_page(painter, writer)
+                    self._pdf_new_page(painter, writer, portrait=False)
                 if str(page.get("type", "plan")).strip().lower() != "elektro_topology":
                     self._apply_page_visibility(page)
                 self._render_pdf_export_page(
@@ -8069,6 +8083,24 @@ class AppWindow(QMainWindow):
     ) -> None:
         ptype = str(page.get("type", "plan")).strip().lower()
         title = str(page.get("title") or "Seite").strip() or "Seite"
+
+        if ptype == "ap_stickers":
+            from gui.pdf_ap_stickers import collect_ap_stickers, draw_ap_sticker_sheet
+
+            stickers = collect_ap_stickers(
+                self._document, self._resolve_existing_ap_room_id, str(page.get("room_id") or "")
+            )
+            if not stickers:
+                self._draw_pdf_title(
+                    painter, QRectF(writer.pageLayout().paintRectPixels(writer.resolution())),
+                    f"{title}: Keine Anschlusspunkte vorhanden.",
+                )
+                return
+            for offset in range(0, len(stickers), 12):
+                if offset:
+                    self._pdf_new_page(painter, writer)
+                draw_ap_sticker_sheet(painter, writer, stickers[offset:offset + 12])
+            return
 
         if ptype == "lengths":
             rows = [
@@ -8695,13 +8727,21 @@ class AppWindow(QMainWindow):
             meta = self._normalize_pdf_export_meta(export_meta, pages)
             self._pdf_prepare_footer()
             # Avoid a full dry-run render pass before export; it makes large projects appear hung.
-            meta["page_count"] = str(max(1, len(enabled_pages) + 1))
+            from gui.pdf_ap_stickers import collect_ap_stickers
+
+            extra_sticker_pages = sum(
+                max(0, (len(collect_ap_stickers(
+                    self._document, self._resolve_existing_ap_room_id, str(page.get("room_id") or "")
+                )) + 11) // 12 - 1)
+                for page in enabled_pages if page.get("type") == "ap_stickers"
+            )
+            meta["page_count"] = str(max(1, len(enabled_pages) + extra_sticker_pages + 1))
             self._draw_pdf_cover_page(painter, writer, meta)
             for idx, page in enumerate(enabled_pages):
                 if progress.wasCanceled():
                     cancelled = True
                     break
-                self._pdf_new_page(painter, writer)
+                self._pdf_new_page(painter, writer, portrait=False)
                 if str(page.get("type", "plan")).strip().lower() != "elektro_topology":
                     self._apply_page_visibility(page)
                 self._render_pdf_export_page(

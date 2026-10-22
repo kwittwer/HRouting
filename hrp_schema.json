@@ -1133,7 +1133,7 @@
         "id": { "type": "string", "description": "Eindeutige Seiten-ID." },
         "type": {
           "type": "string",
-          "enum": ["plan", "heating", "heating_circuit", "elektro", "elektro_room", "lengths", "hydraulics"],
+          "enum": ["plan", "heating", "heating_circuit", "elektro", "elektro_room", "lengths", "hydraulics", "ap_stickers"],
           "description": "Seitentyp."
         },
         "title": { "type": "string" },
@@ -1174,6 +1174,11 @@
           "type": "array",
           "items": { "type": "string" },
           "default": []
+        },
+        "room_id": {
+          "type": "string",
+          "default": "",
+          "description": "Raumauswahl fuer AP-Aufkleber; leer bedeutet alle Raeume inklusive nicht zugeordneter APs."
         },
         "circuit_ids": {
           "type": "array",

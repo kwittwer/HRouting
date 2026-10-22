@@ -77,6 +77,7 @@ class PdfExportConfigDialog(QDialog):
         ap_label_style: dict | None = None,
         canvas=None,
         parent=None,
+        sticker_room_counts: dict[str, int] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("PDF-Export konfigurieren")
@@ -94,6 +95,7 @@ class PdfExportConfigDialog(QDialog):
         self._pages = copy.deepcopy(pages)
         self._floor_plans = list(floor_plans)
         self._elec_rooms = list(elec_rooms or [])
+        self._sticker_room_counts = dict(sticker_room_counts or {})
         self._heating_circuits = list(heating_circuits or [])
         self._topology_roots = list(topology_roots or [])
         self._uv_points = list(uv_points or [])
@@ -276,6 +278,10 @@ class PdfExportConfigDialog(QDialog):
         left_btns.addWidget(self.btn_remove)
         left.addLayout(left_btns)
 
+        self.btn_add_ap_stickers = QPushButton("AP-Aufkleberbogen einfügen")
+        self.btn_add_ap_stickers.clicked.connect(self._on_add_ap_stickers_page)
+        left.addWidget(self.btn_add_ap_stickers)
+
         self.form = QFormLayout()
         right.addLayout(self.form)
 
@@ -300,6 +306,13 @@ class PdfExportConfigDialog(QDialog):
             self.cb_uv_ap.addItem(label, point_id)
         self.cb_uv_ap.currentIndexChanged.connect(self._on_uv_ap_changed)
         self.form.addRow("UV-Anschluss", self.cb_uv_ap)
+
+        self.cb_sticker_room = QComboBox()
+        self.cb_sticker_room.addItem("Alle Räume (inkl. APs ohne Raum)", "")
+        for room_id, room_name in self._elec_rooms:
+            self.cb_sticker_room.addItem(room_name or room_id, room_id)
+        self.cb_sticker_room.currentIndexChanged.connect(self._on_sticker_room_changed)
+        self.form.addRow("Aufkleber-Raum", self.cb_sticker_room)
 
         self.plan_group = QGroupBox("Plan-Einstellungen")
         right.addWidget(self.plan_group)
@@ -522,7 +535,12 @@ class PdfExportConfigDialog(QDialog):
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
             if item is not None and item.checkState(0) == Qt.Checked:
-                enabled += 1
+                page = item.data(0, Qt.UserRole)
+                if isinstance(page, dict) and page.get("type") == "ap_stickers":
+                    count = self._sticker_room_counts.get(str(page.get("room_id") or ""), 0)
+                    enabled += max(1, (count + 11) // 12)
+                else:
+                    enabled += 1
         return enabled
 
     def _update_page_count_field(self):
@@ -544,6 +562,7 @@ class PdfExportConfigDialog(QDialog):
             "elektro_room": "Elektro-Raum",
             "elektro_topology": "Elektro-Topologie",
             "uv": "UV",
+            "ap_stickers": "AP-Aufkleber",
         }.get(ptype, ptype)
 
     @staticmethod
@@ -717,6 +736,11 @@ class PdfExportConfigDialog(QDialog):
             supports_circuit_selection = ptype == "heating_circuit"
             supports_topology_root = ptype == "elektro_topology"
             supports_uv_selection = ptype == "uv"
+            supports_sticker_selection = ptype == "ap_stickers"
+            self.cb_sticker_room.setVisible(supports_sticker_selection)
+            self.form.labelForField(self.cb_sticker_room).setVisible(supports_sticker_selection)
+            if supports_sticker_selection:
+                self.cb_sticker_room.setCurrentIndex(max(0, self.cb_sticker_room.findData(str(page.get("room_id") or ""))))
             self.plan_group.setVisible(is_plan_like)
             self.table_group.setVisible(supports_tables)
             self.room_group.setVisible(supports_room_selection)
@@ -731,7 +755,7 @@ class PdfExportConfigDialog(QDialog):
                 uv_label.setVisible(supports_uv_selection)
             self.lbl_no_rooms.setVisible(not bool(self._room_checks))
             self.lbl_no_circuits.setVisible(not bool(self._circuit_checks))
-            self.lbl_non_plan.setVisible((not is_plan_like) and (not supports_topology_root) and (not supports_uv_selection))
+            self.lbl_non_plan.setVisible((not is_plan_like) and (not supports_topology_root) and (not supports_uv_selection) and (not supports_sticker_selection))
 
             if is_plan_like:
                 floor_plan_id = page.get("floor_plan_id")
@@ -890,6 +914,30 @@ class PdfExportConfigDialog(QDialog):
             | Qt.ItemIsSelectable
             | Qt.ItemIsEnabled
         )
+        item.setCheckState(0, Qt.Checked)
+        item.setData(0, Qt.UserRole, page)
+        self.tree.setCurrentItem(item)
+        self._update_page_count_field()
+
+    def _on_sticker_room_changed(self, _index: int):
+        self._update_current_page(
+            lambda page: page.__setitem__("room_id", str(self.cb_sticker_room.currentData() or ""))
+        )
+        self._update_page_count_field()
+
+    def _on_add_ap_stickers_page(self):
+        page = {
+            "id": f"ap-stickers-{uuid.uuid4().hex[:8]}",
+            "type": "ap_stickers",
+            "title": "AP-Aufkleber",
+            "enabled": True,
+            "room_id": "",
+        }
+        item = QTreeWidgetItem(self.tree)
+        item.setText(0, page["title"])
+        item.setText(1, self._page_type_label(page))
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable
+                      | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
         item.setCheckState(0, Qt.Checked)
         item.setData(0, Qt.UserRole, page)
         self.tree.setCurrentItem(item)
