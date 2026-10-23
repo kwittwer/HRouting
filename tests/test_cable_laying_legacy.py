@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import csv
+import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -209,6 +211,38 @@ def _tool(mcp, name):
     return mcp._tool_manager.get_tool(name).fn
 
 
+def test_main_stdio_entrypoint_exchanges_mcp_messages():
+    pytest.importorskip("mcp")
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "hrouting-test", "version": "1"},
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ]
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "main.py"), "--mcpstdio"],
+        cwd=ROOT,
+        input="\n".join(json.dumps(message) for message in messages) + "\n",
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    responses = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+    assert result.returncode == 0, result.stderr
+    assert any(response.get("id") == 1 and "result" in response for response in responses)
+    tool_response = next(response for response in responses if response.get("id") == 2)
+    assert any(tool["name"] == "get_project_summary" for tool in tool_response["result"]["tools"])
+
+
 def test_http_mcp_registered_add_modify_lists_and_summary(window):
     pytest.importorskip("mcp")
     from mcp_server import _create_mcp
@@ -233,6 +267,45 @@ def test_http_mcp_registered_add_modify_lists_and_summary(window):
     assert _tool(server, "modify_elec_cable")(cid, laying_location={})["params"]["laying_location"] == normalize_cable_laying_location(None)
     empty = _tool(server, "add_elec_cable")("ignored", [[0, 0], [1000, 0]])
     assert empty["laying_location"] == normalize_cable_laying_location(None)
+
+
+def test_http_mcp_pdf_config_and_dialog_free_export(app, tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
+    from mcp_server import _create_mcp
+    from gui.app_window import AppWindow
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+    window = AppWindow()
+
+    try:
+        server = _create_mcp(window, SimpleNamespace(invoke=lambda fn: fn()))
+        assert _tool(server, "get_project_summary")()["circuit_count"] == 0
+        assert _tool(server, "list_circuits")() == []
+        assert _tool(server, "list_elec_points")() == []
+        original_config = _tool(server, "get_pdf_export_config")()
+        pages = [{"id": "mcp-lengths", "type": "lengths", "title": "MCP Längen", "enabled": True}]
+        configured = _tool(server, "set_pdf_export_config")(
+            pages=pages,
+            export_meta={"author": "MCP Test"},
+        )
+        assert configured["status"] == "updated"
+        assert configured["pages"] == pages
+        assert _tool(server, "get_pdf_export_config")()["export_meta"]["author"] == "MCP Test"
+        assert _tool(server, "get_project_json")()["pdf_export_meta"]["author"] == "MCP Test"
+
+        output_path = tmp_path / "mcp-export.pdf"
+        result = _tool(server, "export_pdf")(path=str(output_path))
+        assert result["status"] == "ok"
+        assert result["exported_page_count"] == 1
+        assert output_path.read_bytes().startswith(b"%PDF-")
+        assert _tool(server, "export_pdf")(path=str(output_path))["code"] == "FILE_EXISTS"
+        window._undo()
+        window._undo()
+        assert _tool(server, "get_pdf_export_config")()["pages"] == original_config["pages"]
+    finally:
+        window.deleteLater()
+        app.processEvents()
 
 
 def test_stdio_registered_lists_bom_union_without_new_write_tools(monkeypatch):

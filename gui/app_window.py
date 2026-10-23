@@ -1768,6 +1768,13 @@ class AppWindow(QMainWindow):
             restore_started = time.perf_counter() if perf_mode else 0.0
             self._document.restore(snapshot)
             restore_done = time.perf_counter() if perf_mode else 0.0
+            self._pdf_export_pages = self._normalize_pdf_export_pages(
+                self._document.pdf_export_pages
+            )
+            self._pdf_export_meta = self._normalize_pdf_export_meta(
+                self._document.pdf_export_meta,
+                self._pdf_export_pages,
+            )
             # Canvas: erst rohe Ansichtsdaten übertragen, dann Views neu binden.
             raw_canvas = snapshot.get("canvas", {})
             self.canvas.from_dict(raw_canvas)
@@ -8678,21 +8685,32 @@ class AppWindow(QMainWindow):
                             rows or [["", "Keine Hierarchie-Verbindungen vorhanden.", "", ""]],
                         )
 
-    def _continue_export_pdf(self, pages: list[dict], export_meta: dict[str, str]) -> None:
+    def _continue_export_pdf(
+        self,
+        pages: list[dict],
+        export_meta: dict[str, str],
+        *,
+        output_path: str | None = None,
+        show_progress: bool = True,
+    ) -> dict:
         enabled_pages = [p for p in pages if p.get("enabled", True)]
         if not enabled_pages:
-            QMessageBox.information(self, "PDF-Export", "Keine aktive Exportseite ausgewählt.")
-            return
+            if show_progress:
+                QMessageBox.information(self, "PDF-Export", "Keine aktive Exportseite ausgewählt.")
+            return {"status": "error", "code": "NO_ENABLED_PAGES"}
 
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Als PDF exportieren",
-            self._default_pdf_export_path(),
-            "PDF (*.pdf)",
-        )
+        path = output_path
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Als PDF exportieren",
+                self._default_pdf_export_path(),
+                "PDF (*.pdf)",
+            )
         if not path:
-            return
-        self._remember_pdf_export_path(Path(path))
+            return {"status": "cancelled"}
+        if show_progress:
+            self._remember_pdf_export_path(Path(path))
 
         from PySide6.QtGui import QPageLayout, QPageSize, QPainter, QPdfWriter  # noqa: PLC0415
 
@@ -8701,18 +8719,22 @@ class AppWindow(QMainWindow):
         writer.setPageSize(QPageSize(QPageSize.A4))
         writer.setPageOrientation(QPageLayout.Landscape)
 
-        progress = QProgressDialog("PDF wird exportiert…", "Abbrechen", 0, len(enabled_pages), self)
-        progress.setWindowTitle("PDF-Export")
-        progress.setMinimumDuration(0)
-        progress.setModal(True)
-        progress.setValue(0)
+        progress = None
+        if show_progress:
+            progress = QProgressDialog("PDF wird exportiert…", "Abbrechen", 0, len(enabled_pages), self)
+            progress.setWindowTitle("PDF-Export")
+            progress.setMinimumDuration(0)
+            progress.setModal(True)
+            progress.setValue(0)
         QApplication.processEvents()
 
         painter = QPainter()
         if not painter.begin(writer):
-            progress.close()
-            QMessageBox.critical(self, "PDF-Export", "PDF konnte nicht erstellt werden.")
-            return
+            if progress is not None:
+                progress.close()
+            if show_progress:
+                QMessageBox.critical(self, "PDF-Export", "PDF konnte nicht erstellt werden.")
+            return {"status": "error", "code": "PDF_WRITER_FAILED", "path": path}
 
         saved_vis = self._save_all_visibility()
         cancelled = False
@@ -8738,7 +8760,7 @@ class AppWindow(QMainWindow):
             meta["page_count"] = str(max(1, len(enabled_pages) + extra_sticker_pages + 1))
             self._draw_pdf_cover_page(painter, writer, meta)
             for idx, page in enumerate(enabled_pages):
-                if progress.wasCanceled():
+                if progress is not None and progress.wasCanceled():
                     cancelled = True
                     break
                 self._pdf_new_page(painter, writer, portrait=False)
@@ -8755,7 +8777,8 @@ class AppWindow(QMainWindow):
                     cable_rows,
                     export_data,
                 )
-                progress.setValue(idx + 1)
+                if progress is not None:
+                    progress.setValue(idx + 1)
                 QApplication.processEvents()
         finally:
             try:
@@ -8770,7 +8793,8 @@ class AppWindow(QMainWindow):
                 self._refresh_schema_windows()
                 self.topology.refresh_now()
                 QApplication.processEvents()
-                progress.close()
+                if progress is not None:
+                    progress.close()
 
         if cancelled:
             try:
@@ -8778,14 +8802,25 @@ class AppWindow(QMainWindow):
             except OSError:
                 pass
             self.statusBar().showMessage("PDF-Export abgebrochen.", 3000)
-            return
+            return {"status": "cancelled", "path": path}
 
-        self._pdf_export_pages = pages
-        self._pdf_export_meta = self._normalize_pdf_export_meta(export_meta, pages)
-        self._pdf_export_meta["page_count"] = str(int(getattr(self, "_pdf_footer_page_no", len(enabled_pages) + 1)))
-        self._mark_dirty()
+        next_pages = copy.deepcopy(pages)
+        next_meta = self._normalize_pdf_export_meta(export_meta, pages)
+        next_meta["page_count"] = str(int(getattr(self, "_pdf_footer_page_no", len(enabled_pages) + 1)))
+        if next_pages != self._pdf_export_pages or next_meta != self._pdf_export_meta:
+            self._sync_canvas_to_document()
+            self._push_undo()
+            self._pdf_export_pages = next_pages
+            self._pdf_export_meta = next_meta
+            self._mark_dirty()
         self.log.success(f"PDF exportiert: {path}")
         self.statusBar().showMessage(f"PDF exportiert: {path}", 4000)
+        return {
+            "status": "ok",
+            "path": str(Path(path).resolve()),
+            "page_count": int(getattr(self, "_pdf_footer_page_no", len(enabled_pages) + 1)),
+            "exported_page_count": len(enabled_pages),
+        }
 
     def _export_to_kicad(self) -> None:
         if self._project_path is None:

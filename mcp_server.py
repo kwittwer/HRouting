@@ -154,20 +154,10 @@ def _create_mcp(window: MainWindow, bridge):
             "Nutze get_project_summary() als Einstieg. Koordinaten sind in "
             "Canvas-Pixeln. Einheiten in params: mm (diameter, spacing, "
             "wall_dist, width, height). Nutze get_schema() für das "
-            "Dateiformat. Verfügbare Tools: Heizkreise (add/modify/delete/"
-            "list_circuits, set_circuit_polygon, set_circuit_route, "
-            "set_supply_line), Elektropunkte (add/modify/delete/"
-            "list_elec_points, configure_uv_distribution, "
-            "get_uv_config, set_uv_slot, delete_uv_slot, "
-            "clear_uv_distribution, configure_up_distribution, "
-            "clear_up_distribution), Elektro-Räume (add/modify/delete/"
-            "list_elec_rooms), Elektro-Kabel (add/modify/delete/"
-            "list_elec_cables), HKV (add/modify/delete/list_hkvs), "
-            "HKV-Leitungen (add/modify/delete/list_hkv_lines), "
-            "Texte (add/modify/delete/list_texts), Grundrisse "
-            "(add/modify/delete/list_floor_plans), Berechnungen "
-            "(calculate_heating, calculate_all_circuits, set_heating_params),"
-            " Projekt (save_project, validate_project, get_project_json)."
+            "Dateiformat. Die verfügbaren Werkzeuge werden über die MCP-"
+            "Werkzeugliste bereitgestellt; get_tool_overview() gruppiert sie "
+            "nach Kategorien. PDF-Seiten können über die PDF-Exportwerkzeuge "
+            "konfiguriert und ohne Dialog exportiert werden."
         ),
         host=MCP_HOST,
         port=MCP_PORT,
@@ -185,6 +175,10 @@ def _create_mcp(window: MainWindow, bridge):
         """
         if hasattr(w, "_record_mutation"):
             w._record_mutation(debounced=debounced)
+            return
+
+        if hasattr(w, "_document") and hasattr(w, "_mark_dirty"):
+            w._mark_dirty()
             return
 
         w._dirty = True
@@ -219,13 +213,26 @@ def _create_mcp(window: MainWindow, bridge):
     _source_disk_hash = ""
     _source_mtime_utc = ""
 
-    def _snapshot_project() -> dict:
-        return invoke(lambda: {
+    def _params_on_gui() -> dict:
+        if hasattr(window, "_document"):
+            window._sync_canvas_to_document()
+            return window._document.to_dict().get("params", {})
+        return window.param_panel.to_dict()
+
+    def _project_snapshot_on_gui() -> dict:
+        if hasattr(window, "_document"):
+            window._sync_canvas_to_document()
+            return window._document.to_dict()
+        return {
             "svg_path": getattr(window, "_svg_path", ""),
             "canvas": window.canvas.to_dict(),
-            "params": window.param_panel.to_dict(),
-            "pdf_export_pages": getattr(window, "_pdf_export_pages", []),
-        })
+            "params": _params_on_gui(),
+            "pdf_export_pages": copy.deepcopy(getattr(window, "_pdf_export_pages", [])),
+            "pdf_export_meta": copy.deepcopy(getattr(window, "_pdf_export_meta", {})),
+        }
+
+    def _snapshot_project() -> dict:
+        return invoke(_project_snapshot_on_gui)
 
     def _stable_hash(data: dict) -> str:
         canonical = json.dumps(
@@ -1450,7 +1457,9 @@ def _create_mcp(window: MainWindow, bridge):
         """Projektübersicht: Anzahl aller Elemente, globale Heizungsparameter,
         Maßstab. Nutze dieses Tool als Einstieg."""
         def _read():
-            p = window.param_panel.to_dict()
+            project = _project_snapshot_on_gui()
+            p = project.get("params", {})
+            c = project.get("canvas", {})
             locations = {}
             for cid, cable in p.get("elec_cables", {}).items():
                 cable_type = cable.get("type") or cable.get("cable_type") or cable.get("name", cid)
@@ -1471,7 +1480,7 @@ def _create_mcp(window: MainWindow, bridge):
                 "t_supply": p.get("t_supply", 35.0),
                 "t_return": p.get("t_return", 30.0),
                 "t_norm_outdoor": p.get("t_norm_outdoor", -12.0),
-                "mm_per_px": window.canvas.get_mm_per_px(),
+                "mm_per_px": c.get("mm_per_px", 1.0),
                 "has_project_file": window._project_path is not None,
             }
         return invoke(_read)
@@ -1480,8 +1489,9 @@ def _create_mcp(window: MainWindow, bridge):
     def list_circuits() -> list[dict]:
         """Liste aller Heizkreise mit Parametern und Geometrie-Info."""
         def _read():
-            p = window.param_panel.to_dict()
-            c = window.canvas.to_dict()
+            project = _project_snapshot_on_gui()
+            p = project.get("params", {})
+            c = project.get("canvas", {})
             result = []
             for cid, cdata in p.get("circuits", {}).items():
                 entry = dict(cdata)
@@ -1498,8 +1508,9 @@ def _create_mcp(window: MainWindow, bridge):
     def list_elec_points() -> list[dict]:
         """Liste aller Elektro-Anschlusspunkte mit Parametern und Position."""
         def _read():
-            p = window.param_panel.to_dict()
-            c = window.canvas.to_dict()
+            project = _project_snapshot_on_gui()
+            p = project.get("params", {})
+            c = project.get("canvas", {})
             result = []
             for pid, pdata in p.get("elec_points", {}).items():
                 entry = dict(pdata)
@@ -1513,8 +1524,9 @@ def _create_mcp(window: MainWindow, bridge):
     def list_hkvs() -> list[dict]:
         """Liste aller Heizkreisverteiler mit Parametern und Position."""
         def _read():
-            p = window.param_panel.to_dict()
-            c = window.canvas.to_dict()
+            project = _project_snapshot_on_gui()
+            p = project.get("params", {})
+            c = project.get("canvas", {})
             result = []
             for hid, hdata in p.get("hkv_points", {}).items():
                 entry = dict(hdata)
@@ -1529,13 +1541,7 @@ def _create_mcp(window: MainWindow, bridge):
         """Vollständiges Projekt als JSON-Objekt (canvas + params).
         Gibt die komplette Datenstruktur zurück, wie sie in einer
         .hrp-Datei gespeichert würde."""
-        def _read():
-            return {
-                "svg_path": getattr(window, "_svg_path", ""),
-                "canvas": window.canvas.to_dict(),
-                "params": window.param_panel.to_dict(),
-            }
-        return invoke(_read)
+        return _snapshot_project()
 
     # ── Heizkreis-Tools ────────────────────────────────────────────
 
@@ -2099,7 +2105,7 @@ def _create_mcp(window: MainWindow, bridge):
             point_id: ID des UV-Anschlusspunkts (z.B. 'AP-1')
         """
         def _get():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ep = p.get("elec_points", {}).get(point_id)
             if ep is None:
                 return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
@@ -2159,7 +2165,7 @@ def _create_mcp(window: MainWindow, bridge):
             if not panel:
                 return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
 
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ep = p.get("elec_points", {}).get(point_id, {})
             if ep.get("ap_type") != "uv":
                 return {
@@ -2241,7 +2247,7 @@ def _create_mcp(window: MainWindow, bridge):
             if not panel:
                 return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
 
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ep = p.get("elec_points", {}).get(point_id, {})
             if ep.get("ap_type") != "uv":
                 return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
@@ -2496,7 +2502,7 @@ def _create_mcp(window: MainWindow, bridge):
     def list_elec_rooms() -> list[dict]:
         """Liste aller Elektro-Räume mit Parametern und Polygon-Info."""
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
             result = []
             for rid, rdata in p.get("elec_rooms", {}).items():
@@ -2643,7 +2649,7 @@ def _create_mcp(window: MainWindow, bridge):
             from model.document import Document  # noqa: PLC0415
             from model.elements import ElecCable  # noqa: PLC0415
 
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
             doc = Document.from_dict({"params": p, "canvas": c})
             result = []
@@ -2929,7 +2935,7 @@ def _create_mcp(window: MainWindow, bridge):
                             0.0, float(end_length_surcharge_m or 0.0)
                         )
 
-            doc = Document.from_dict({"params": window.param_panel.to_dict(), "canvas": window.canvas.to_dict()})
+            doc = Document.from_dict({"params": _params_on_gui(), "canvas": window.canvas.to_dict()})
             cable = doc.elements.get("elec_cables", {}).get(cable_id)
             length_info = cable_length_details(doc, cable) if isinstance(cable, ElecCable) else {
                 "length_m": 0.0,
@@ -2970,7 +2976,7 @@ def _create_mcp(window: MainWindow, bridge):
     def list_hkv_lines() -> list[dict]:
         """Liste aller HKV-Verbindungsleitungen mit Parametern und Länge."""
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
             result = []
             for lid, ldata in p.get("hkv_lines", {}).items():
@@ -3163,7 +3169,7 @@ def _create_mcp(window: MainWindow, bridge):
     def list_texts() -> list[dict]:
         """Liste aller Text-Annotationen mit Inhalt und Position."""
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
             result = []
             for tid, tdata in p.get("text_annotations", {}).items():
@@ -3356,7 +3362,7 @@ def _create_mcp(window: MainWindow, bridge):
     def list_floor_plans() -> list[dict]:
         """Liste aller Grundriss-Layer mit Eigenschaften."""
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             result = []
             for fid, fdata in p.get("floorplans", {}).items():
                 entry = dict(fdata)
@@ -3803,6 +3809,136 @@ def _create_mcp(window: MainWindow, bridge):
             }
 
         return invoke(_set)
+
+    # ── PDF-Export-Tools ───────────────────────────────────────────
+
+    @mcp.tool()
+    def get_pdf_export_config() -> dict:
+        """PDF-Seitenkonfiguration und Export-Metadaten auslesen."""
+        def _read():
+            pages = window._normalize_pdf_export_pages(
+                getattr(window, "_pdf_export_pages", [])
+            )
+            export_meta = window._normalize_pdf_export_meta(
+                getattr(window, "_pdf_export_meta", {}), pages
+            )
+            return {
+                "pages": copy.deepcopy(pages),
+                "export_meta": copy.deepcopy(export_meta),
+                "supported_page_types": [
+                    "plan", "heating", "heating_circuit", "lengths",
+                    "hydraulics", "elektro", "elektro_room",
+                    "elektro_topology", "uv", "ap_stickers",
+                ],
+            }
+
+        return invoke(_read)
+
+    @mcp.tool()
+    def set_pdf_export_config(
+        pages: list[dict] | None = None,
+        export_meta: dict | None = None,
+    ) -> dict:
+        """PDF-Seiten ersetzen und Export-Metadaten aktualisieren.
+
+        `pages` wird vollständig ersetzt; leere oder fehlende Seiten verwenden
+        die Standardseiten. Angegebene Metadaten werden mit bestehenden Werten
+        zusammengeführt.
+        """
+        def _write():
+            current_pages = window._normalize_pdf_export_pages(
+                getattr(window, "_pdf_export_pages", [])
+            )
+            next_pages = window._normalize_pdf_export_pages(
+                pages if pages is not None else current_pages
+            )
+            current_meta = window._normalize_pdf_export_meta(
+                getattr(window, "_pdf_export_meta", {}), current_pages
+            )
+            merged_meta = copy.deepcopy(current_meta)
+            if isinstance(export_meta, dict):
+                merged_meta.update(export_meta)
+            next_meta = window._normalize_pdf_export_meta(merged_meta, next_pages)
+            changed = next_pages != current_pages or next_meta != current_meta
+            if changed and hasattr(window, "_document"):
+                window._sync_canvas_to_document()
+                window._push_undo()
+            window._pdf_export_pages = copy.deepcopy(next_pages)
+            window._pdf_export_meta = copy.deepcopy(next_meta)
+            if changed:
+                _record_mutation(window)
+            return {
+                "status": "updated" if changed else "unchanged",
+                "pages": copy.deepcopy(next_pages),
+                "export_meta": copy.deepcopy(next_meta),
+            }
+
+        return invoke(_write)
+
+    @mcp.tool()
+    def export_pdf(
+        path: str,
+        pages: list[dict] | None = None,
+        export_meta: dict | None = None,
+        overwrite: bool = False,
+    ) -> dict:
+        """PDF ohne Dialog exportieren.
+
+        Relative Pfade beziehen sich auf den Projektordner, falls ein Projekt
+        geöffnet ist, andernfalls auf das aktuelle Arbeitsverzeichnis. Eine
+        vorhandene Datei wird nur mit `overwrite=True` ersetzt.
+        """
+        raw_path = str(path or "").strip()
+        if not raw_path:
+            return {"status": "error", "code": "PATH_REQUIRED"}
+
+        target = Path(raw_path).expanduser()
+        if target.suffix.lower() != ".pdf":
+            return {"status": "error", "code": "PDF_EXTENSION_REQUIRED", "path": raw_path}
+        if not target.is_absolute():
+            project_path = _current_project_path()
+            base_path = Path(project_path).parent if project_path else Path.cwd()
+            target = base_path / target
+        target = target.resolve()
+        if not target.parent.is_dir():
+            return {"status": "error", "code": "OUTPUT_DIRECTORY_NOT_FOUND", "path": str(target)}
+        if target.exists() and not overwrite:
+            return {"status": "error", "code": "FILE_EXISTS", "path": str(target)}
+
+        def _export():
+            if target.exists() and not overwrite:
+                return {"status": "error", "code": "FILE_EXISTS", "path": str(target)}
+
+            current_pages = window._normalize_pdf_export_pages(
+                getattr(window, "_pdf_export_pages", [])
+            )
+            export_pages = window._normalize_pdf_export_pages(
+                pages if pages is not None else current_pages
+            )
+            current_meta = window._normalize_pdf_export_meta(
+                getattr(window, "_pdf_export_meta", {}), current_pages
+            )
+            merged_meta = copy.deepcopy(current_meta)
+            if isinstance(export_meta, dict):
+                merged_meta.update(export_meta)
+            normalized_meta = window._normalize_pdf_export_meta(merged_meta, export_pages)
+            config_changed = export_pages != current_pages or normalized_meta != current_meta
+            if config_changed:
+                if hasattr(window, "_document"):
+                    window._sync_canvas_to_document()
+                    window._push_undo()
+                window._pdf_export_pages = copy.deepcopy(export_pages)
+                window._pdf_export_meta = copy.deepcopy(normalized_meta)
+                _record_mutation(window)
+
+            return window._continue_export_pdf(
+                export_pages,
+                normalized_meta,
+                output_path=str(target),
+                show_progress=False,
+            )
+
+        return invoke(_export)
 
     # ── Projekt-Tools ──────────────────────────────────────────────
 
@@ -4477,7 +4613,7 @@ def _create_mcp(window: MainWindow, bridge):
             if not panel:
                 return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
 
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ep = p.get("elec_points", {}).get(point_id, {})
             if ep.get("ap_type") != "uv":
                 return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
@@ -4559,7 +4695,7 @@ def _create_mcp(window: MainWindow, bridge):
             free_runs (zusammenhängende freie Blöcke je Reihe).
         """
         def _find():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ep = p.get("elec_points", {}).get(point_id)
             if ep is None:
                 return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
@@ -4646,7 +4782,7 @@ def _create_mcp(window: MainWindow, bridge):
             phases (nach Phase gruppierte Übersicht mit te_ranges).
         """
         def _get():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ep = p.get("elec_points", {}).get(point_id)
             if ep is None:
                 return {"error": f"Anschlusspunkt '{point_id}' nicht gefunden."}
@@ -4756,7 +4892,7 @@ def _create_mcp(window: MainWindow, bridge):
                     "te_start": te_start, "te_end": te_end,
                 })
 
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ep = p.get("elec_points", {}).get(point_id, {})
             uv = dict(ep.get("uv_config") or {})
             existing_busbars = list(uv.get("busbars", []) or [])
@@ -4796,7 +4932,7 @@ def _create_mcp(window: MainWindow, bridge):
                 return {"error": f"AP '{point_id}' ist kein UV-Punkt."}
 
             phase_s = str(phase or "").strip()
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ep = p.get("elec_points", {}).get(point_id, {})
             uv = dict(ep.get("uv_config") or {})
             existing = list(uv.get("busbars", []) or [])
@@ -4863,7 +4999,7 @@ def _create_mcp(window: MainWindow, bridge):
             if not isinstance(busbars, list):
                 return {"error": "busbars muss eine Liste sein."}
 
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ep = p.get("elec_points", {}).get(point_id, {})
             uv = dict(ep.get("uv_config") or {})
             base_busbars = [] if replace_all else list(uv.get("busbars", []) or [])
@@ -4956,7 +5092,7 @@ def _create_mcp(window: MainWindow, bridge):
             Zusätzlich: unassigned_aps (APs ohne Raum).
         """
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
 
             # room_id → set of point_ids (from canvas room assignment)
@@ -5019,7 +5155,7 @@ def _create_mcp(window: MainWindow, bridge):
                 Leer = erster/einziger Grundriss.
         """
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             fps = p.get("floorplans", {})
             if not fps:
                 return {"error": "Keine Grundrisse im Projekt."}
@@ -5082,7 +5218,7 @@ def _create_mcp(window: MainWindow, bridge):
         """
         def _calc():
             from logic.heating_calc import calc_circuit, FLOOR_COVERINGS
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             t_supply = p.get("t_supply", 35.0)
             t_return = p.get("t_return", 30.0)
             t_norm = p.get("t_norm_outdoor", -12.0)
@@ -5180,7 +5316,7 @@ def _create_mcp(window: MainWindow, bridge):
         """
         def _calc():
             from math import hypot
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
             mpp = window.canvas.get_mm_per_px() or 1.0
 
@@ -5236,7 +5372,7 @@ def _create_mcp(window: MainWindow, bridge):
         def _read():
             if hasattr(window.param_panel, "get_bom_metadata"):
                 return _sanitize_bom_metadata(window.param_panel.get_bom_metadata())
-            params = window.param_panel.to_dict()
+            params = _params_on_gui()
             return _sanitize_bom_metadata(params.get("bom"))
 
         return invoke(_read)
@@ -5248,7 +5384,7 @@ def _create_mcp(window: MainWindow, bridge):
             current = (
                 window.param_panel.get_bom_metadata()
                 if hasattr(window.param_panel, "get_bom_metadata")
-                else window.param_panel.to_dict().get("bom", {})
+                else _params_on_gui().get("bom", {})
             )
             base = _sanitize_bom_metadata(current) if merge else _default_bom_metadata()
             if isinstance(metadata, dict):
@@ -5283,7 +5419,7 @@ def _create_mcp(window: MainWindow, bridge):
             metadata = (
                 window.param_panel.get_bom_metadata()
                 if hasattr(window.param_panel, "get_bom_metadata")
-                else window.param_panel.to_dict().get("bom", {})
+                else _params_on_gui().get("bom", {})
             )
             sanitized = _sanitize_bom_metadata(metadata)
             catalog = dict(sanitized.get("item_catalog", {}))
@@ -5321,7 +5457,7 @@ def _create_mcp(window: MainWindow, bridge):
             metadata = (
                 window.param_panel.get_bom_metadata()
                 if hasattr(window.param_panel, "get_bom_metadata")
-                else window.param_panel.to_dict().get("bom", {})
+                else _params_on_gui().get("bom", {})
             )
             sanitized = _sanitize_bom_metadata(metadata)
             items = list(sanitized.get("custom_items", []))
@@ -5368,7 +5504,7 @@ def _create_mcp(window: MainWindow, bridge):
             metadata = (
                 window.param_panel.get_bom_metadata()
                 if hasattr(window.param_panel, "get_bom_metadata")
-                else window.param_panel.to_dict().get("bom", {})
+                else _params_on_gui().get("bom", {})
             )
             sanitized = _sanitize_bom_metadata(metadata)
             items = list(sanitized.get("custom_items", []))
@@ -5393,7 +5529,7 @@ def _create_mcp(window: MainWindow, bridge):
         """Aggregierte Stückliste inkl. UV-Geräte und UV-Phasenschienen."""
         def _read():
             snapshot = {
-                "params": window.param_panel.to_dict(),
+                "params": _params_on_gui(),
                 "canvas": window.canvas.to_dict(),
             }
             mm_per_px = float(window.canvas.get_mm_per_px() or 1.0)
@@ -5480,7 +5616,7 @@ def _create_mcp(window: MainWindow, bridge):
             points_px (Liste von [x_px, y_px]).
         """
         def _conv():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             fps = p.get("floorplans", {})
 
             fp_id = floor_plan_id
@@ -5540,7 +5676,7 @@ def _create_mcp(window: MainWindow, bridge):
         import math
 
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
             mpp = window.canvas.get_mm_per_px() or 1.0
 
@@ -5654,7 +5790,7 @@ def _create_mcp(window: MainWindow, bridge):
             stats: Kennzahlen (Knoten, Kanten, Gesamtlänge, etc.)
         """
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
             mpp = window.canvas.get_mm_per_px() or 1.0
 
@@ -5752,7 +5888,7 @@ def _create_mcp(window: MainWindow, bridge):
             geometric_aps (geometrisch im Polygon), all_aps (Vereinigung).
         """
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
 
             rdata = p.get("elec_rooms", {}).get(room_id)
@@ -5882,7 +6018,7 @@ def _create_mcp(window: MainWindow, bridge):
                          vs. required.
         """
         def _read():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
 
             ctx = _get_canvas_dict_extra("_planning_context", {})
             if not ctx:
@@ -6189,7 +6325,7 @@ def _create_mcp(window: MainWindow, bridge):
             valid (bool), warnings[], issues[], stats.
         """
         def _check():
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
 
             issues = []
@@ -6330,7 +6466,7 @@ def _create_mcp(window: MainWindow, bridge):
         """
         def _calc():
             from logic.heating_calc import calc_circuit, FLOOR_COVERINGS
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             ts = t_supply if t_supply > 0 else p.get("t_supply", 35.0)
             tr = t_return if t_return > 0 else p.get("t_return", 30.0)
 
@@ -6414,7 +6550,7 @@ def _create_mcp(window: MainWindow, bridge):
         """
         def _calc():
             from logic.heating_calc import calc_circuit, FLOOR_COVERINGS
-            p = window.param_panel.to_dict()
+            p = _params_on_gui()
             c = window.canvas.to_dict()
             mpp = window.canvas._mm_per_px or 1.0
 
@@ -6665,6 +6801,10 @@ def _create_mcp(window: MainWindow, bridge):
                 "delete_uv_busbar           – Phasenschiene entfernen",
                 "bulk_set_uv_busbars        – Mehrere Phasenschienen auf einmal setzen (unterstützt te_ranges)",
             ],
+            "up_verteilung": [
+                "configure_up_distribution – UP-Verteilung in einer Dose konfigurieren",
+                "clear_up_distribution     – UP-Verteilung leeren",
+            ],
             "hkv": [
                 "add_hkv                 – Heizkreisverteiler platzieren",
                 "modify_hkv              – HKV-Parameter ändern",
@@ -6700,6 +6840,11 @@ def _create_mcp(window: MainWindow, bridge):
                 "add_text                – Text-Annotation hinzufügen",
                 "modify_text             – Text-Annotation ändern",
                 "delete_text             – Text-Annotation löschen",
+            ],
+            "pdf_export": [
+                "get_pdf_export_config  – Seiten und Metadaten lesen",
+                "set_pdf_export_config  – Seiten und Metadaten konfigurieren",
+                "export_pdf             – PDF ohne Dialog exportieren",
             ],
             "workflow_empfehlung": [
                 "1. get_tool_overview() oder get_project_summary() als Einstieg",

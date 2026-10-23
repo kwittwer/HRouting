@@ -162,6 +162,12 @@ def main():
         while _flag in sys.argv:
             sys.argv.remove(_flag)
 
+    if _enable_mcp_stdio:
+        from mcp_server_stdio import main as mcp_stdio_main
+
+        mcp_stdio_main()
+        return
+
     # --- Schnellstart: nur minimale Qt-Imports für Splash ---
     from PySide6.QtWidgets import QApplication, QSplashScreen
     from PySide6.QtGui import QPixmap, QIcon
@@ -291,8 +297,6 @@ def main():
 
     # --- MCP-Server starten (nur mit --mcp oder --mcpstdio) ---
     _mcp_log_window = None
-    _mcp_stdio_process = None
-    
     if _enable_mcp_http:
         _mcp_log_window = McpLogWindow()
         _mcp_log_window.show()
@@ -307,38 +311,11 @@ def main():
                 "ERROR",
             )
     
-    if _enable_mcp_stdio:
-        _mcp_log_window = McpLogWindow()
-        _mcp_log_window._append("Starten des MCP Stdio-Servers...", "INFO")
-        _mcp_log_window.show()
-        try:
-            import subprocess
-            server_path = BASE_DIR / "mcp_server_stdio.py"
-            _mcp_stdio_process = subprocess.Popen(
-                [str(Path(sys.executable)), str(server_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            _mcp_log_window._append(
-                f"MCP Stdio-Server läuft (PID: {_mcp_stdio_process.pid})",
-                "INFO",
-            )
-        except Exception as e:
-            import traceback
-            _mcp_log_window._append(
-                f"FEHLER beim Starten des MCP Stdio-Servers: {e}\n"
-                + traceback.format_exc(),
-                "ERROR",
-            )
-
     # Log-Fenster schließen wenn Hauptfenster geschlossen wird
     if _mcp_log_window:
         _orig_close = window.closeEvent
 
         def _close_with_log(event):
-            if _mcp_stdio_process:
-                _mcp_stdio_process.terminate()
             _mcp_log_window.close()
             _orig_close(event)
 
