@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from gui.cable_line_preview import CableLineSample, draw_cable_line_sample
 from gui.properties.field_widgets import ColorFieldWidget, NumberFieldWidget, ChoiceFieldWidget
 from gui.table_clipboard import copy_selected_table_rows, enable_table_row_copy
-from model.schema import ELEC_CABLE_SCHEMA
+from model.schema import CIRCUIT_SCHEMA, ELEC_CABLE_SCHEMA
 
 if TYPE_CHECKING:
     from model.document import Document
@@ -163,6 +163,7 @@ class ProjectOverviewDock(QDockWidget):
         self._elec_cable_row_ids: dict[int, str] = {}
         self._elec_cable_editors: dict[str, dict[int, QWidget]] = {}
         self._elec_cable_committed_types: dict[str, str] = {}
+        self._updating_hk_table = False
         if visible_electro_sections is None:
             self._visible_electro_sections = {"materials", "rooms", "cables"}
         else:
@@ -387,7 +388,7 @@ class ProjectOverviewDock(QDockWidget):
     def _build_hk_table(self) -> QTableWidget:
         columns = [
             "Name", "HKV", "Gesamt [m]", "Im Raum [m]", "Zuleitung [m]",
-            "T-Soll [°C]", "Spreizung [K]", "Durchfluss\n[l/min]",
+            "T-Soll [°C]", "Bodenbelag", "Spreizung [K]", "Durchfluss\n[l/min]",
             "Leistung [W]", "Druckverl.\n[mbar]", "Kv [m³/h]",
         ]
         tbl = QTableWidget(0, len(columns))
@@ -557,6 +558,7 @@ class ProjectOverviewDock(QDockWidget):
         if focus is None:
             return False
         for table in (
+            self._hk_table,
             getattr(self, "_elec_room_table", None),
             getattr(self, "_elec_cable_table", None),
         ):
@@ -646,7 +648,11 @@ class ProjectOverviewDock(QDockWidget):
     ) -> None:
         spreizung = t_supply - t_return
         tbl = self._hk_table
+        room_temp_spec = next(field for field in CIRCUIT_SCHEMA.fields if field.key == "room_temp")
+        floor_covering_spec = next(field for field in CIRCUIT_SCHEMA.fields if field.key == "floor_covering")
         tbl.setSortingEnabled(False)
+        tbl.blockSignals(True)
+        self._updating_hk_table = True
         tbl.setRowCount(len(rows))
         for r, row in enumerate(rows):
             tbl.setItem(r, 0, _str_item(row.get("name", "")))
@@ -654,14 +660,34 @@ class ProjectOverviewDock(QDockWidget):
             tbl.setItem(r, 2, _num_item(row.get("total_m", 0.0), ".2f", "m"))
             tbl.setItem(r, 3, _num_item(row.get("route_m", 0.0), ".2f", "m"))
             tbl.setItem(r, 4, _num_item(row.get("supply_m", 0.0), ".2f", "m"))
-            tbl.setItem(r, 5, _num_item(row.get("room_temp", 20.0), ".1f", "°C"))
-            tbl.setItem(r, 6, _num_item(spreizung, ".1f", "K"))
-            tbl.setItem(r, 7, _num_item(row.get("volume_flow_lmin", 0.0), ".2f", "l/min"))
-            tbl.setItem(r, 8, _num_item(row.get("power_w", 0.0), ".0f", "W"))
-            tbl.setItem(r, 9, _num_item(row.get("pressure_drop_mbar", 0.0), ".1f", "mbar"))
-            tbl.setItem(r, 10, _num_item(row.get("kv_value", 0.0), ".4f", "m³/h"))
+            circuit_id = str(row.get("id", "") or "")
+            room_temp_editor = NumberFieldWidget(room_temp_spec, parent=tbl)
+            room_temp_editor.update_silently(row.get("room_temp", 20.0))
+            room_temp_editor.value_changed.connect(
+                lambda key, value, cid=circuit_id: self._on_heating_field_changed(cid, key, value)
+            )
+            tbl.setCellWidget(r, 5, room_temp_editor)
+            floor_covering_editor = ChoiceFieldWidget(floor_covering_spec, parent=tbl)
+            floor_covering_editor.update_silently(row.get("floor_covering", "Fliesen / Keramik"))
+            floor_covering_editor.value_changed.connect(
+                lambda key, value, cid=circuit_id: self._on_heating_field_changed(cid, key, value)
+            )
+            tbl.setCellWidget(r, 6, floor_covering_editor)
+            tbl.setItem(r, 7, _num_item(spreizung, ".1f", "K"))
+            tbl.setItem(r, 8, _num_item(row.get("volume_flow_lmin", 0.0), ".2f", "l/min"))
+            tbl.setItem(r, 9, _num_item(row.get("power_w", 0.0), ".0f", "W"))
+            tbl.setItem(r, 10, _num_item(row.get("pressure_drop_mbar", 0.0), ".1f", "mbar"))
+            tbl.setItem(r, 11, _num_item(row.get("kv_value", 0.0), ".4f", "m³/h"))
+        self._updating_hk_table = False
+        tbl.blockSignals(False)
         tbl.setSortingEnabled(True)
         tbl.resizeColumnsToContents()
+
+    def _on_heating_field_changed(self, circuit_id: str, key: str, value: object) -> None:
+        if self._updating_hk_table or not circuit_id:
+            return
+        self.pre_change.emit()
+        self.element_field_changed.emit(circuit_id, key, value)
 
     # ── Tab Heizung: HKV-Tabelle ──────────────────────────────────────
 

@@ -143,6 +143,28 @@ def test_inplace_mutation_fires_change_signal(bound):
     assert seen == ["HK-1"]
 
 
+def test_context_polygon_point_actions_edit_bound_geometry_and_keep_three_points(bound):
+    canvas, document = bound
+    canvas._polygons["HK-1"] = [
+        QPointF(0.0, 0.0),
+        QPointF(200.0, 0.0),
+        QPointF(200.0, 200.0),
+        QPointF(0.0, 200.0),
+    ]
+    canvas.start_edit_polygon("HK-1")
+
+    assert canvas.context_insert_point("polygon", "HK-1", QPointF(100.0, 0.0))
+    assert len(canvas._polygons["HK-1"]) == 5
+    assert document.to_dict()["canvas"]["polygons"]["HK-1"][1] == [100.0, 0.0]
+
+    assert canvas.context_delete_point("polygon", "HK-1", QPointF(100.0, 0.0))
+    assert len(canvas._polygons["HK-1"]) == 4
+
+    canvas._polygons["HK-1"] = [QPointF(0.0, 0.0), QPointF(200.0, 0.0), QPointF(200.0, 200.0)]
+    assert not canvas.context_delete_point("polygon", "HK-1", QPointF(0.0, 0.0))
+    assert len(canvas._polygons["HK-1"]) == 3
+
+
 def test_inplace_mutation_works_for_all_point_maps(bound):
     """Alle sechs POINT_LIST-gebundenen Maps müssen In-Place schreiben."""
     canvas, document = bound

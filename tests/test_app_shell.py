@@ -2711,6 +2711,117 @@ def test_context_delete_point_on_cable_works_in_edit_mode(app, monkeypatch):
         window.deleteLater()
 
 
+def test_context_menu_and_point_actions_for_heating_polygon(app, monkeypatch):
+    from PySide6.QtCore import QSettings, QPointF  # noqa: PLC0415
+    from gui.canvas_widget import ToolMode  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "polygons": {"HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]]},
+                    "manual_routes": {"HK-1": [[0.0, 0.0], [200.0, 0.0]]},
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "spacing": 150.0,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window.canvas.start_edit_polygon("HK-1")
+        assert window.canvas.tool_mode() == ToolMode.EDIT_POLYGON
+        click_point = QPointF(100.0, 0.0)
+        hit = window.canvas._hit_context_menu_object(click_point)
+        assert hit == ("polygon", "HK-1")
+        window._context_menu_canvas_obj_type = hit[0]
+        window._context_menu_canvas_pt = click_point
+        actions = [entry[0] for entry in window._workspace_context_action_specs("HK-1", "element")]
+        assert "insert_point_ctx" in actions
+        assert "delete_point_ctx" in actions
+
+        window._run_context_action("insert_point_ctx", "HK-1", "element")
+        assert len(window.canvas._polygons["HK-1"]) == 5
+        assert document.to_dict()["canvas"]["polygons"]["HK-1"][1] == [100.0, 0.0]
+
+        window._context_menu_canvas_pt = QPointF(100.0, 0.0)
+        window._run_context_action("delete_point_ctx", "HK-1", "element")
+        assert len(window.canvas._polygons["HK-1"]) == 4
+    finally:
+        window.deleteLater()
+
+
+def test_route_context_menu_offers_point_insert_and_delete(app, monkeypatch):
+    from PySide6.QtCore import QSettings, QPointF  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "manual_routes": {"HK-1": [[0.0, 0.0], [100.0, 0.0], [200.0, 0.0]]},
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "spacing": 150.0,
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        window._apply_workspace("heating")
+        click_point = QPointF(100.0, 0.0)
+        hit = window.canvas._hit_context_menu_object(click_point)
+        assert hit == ("route", "HK-1")
+        window._context_menu_canvas_obj_type = hit[0]
+        window._context_menu_canvas_pt = click_point
+
+        action_specs = window._workspace_context_action_specs("HK-1", "element")
+        enabled_actions = {action_id: enabled for action_id, _label, enabled in action_specs}
+        assert enabled_actions["insert_point_ctx"] is True
+        assert enabled_actions["delete_point_ctx"] is True
+
+        window._run_context_action("insert_point_ctx", "HK-1", "element")
+        assert len(window.canvas._manual_routes["HK-1"]) == 4
+
+        window._context_menu_canvas_pt = QPointF(50.0, 0.0)
+        window._run_context_action("delete_point_ctx", "HK-1", "element")
+        assert len(window.canvas._manual_routes["HK-1"]) == 3
+        assert document.to_dict()["canvas"]["manual_routes"]["HK-1"] == [
+            [0.0, 0.0], [100.0, 0.0], [200.0, 0.0]
+        ]
+    finally:
+        window.deleteLater()
+
+
 def test_context_menu_includes_generic_actions(app, monkeypatch):
     from PySide6.QtCore import QSettings  # noqa: PLC0415
 
@@ -4653,7 +4764,111 @@ def test_pdf_export_heating_circuit_filters_rows(app, monkeypatch):
         assert selected_ids == {"HK-1"}
         assert [row[0] for row in detail_rows] == ["HK-1"]
         assert [row[1] for row in detail_rows] == ["Wohnzimmer"]
+        assert detail_rows[0][2] == "21.0 °C"
+        assert detail_rows[0][3] == "5.0 K"
+        assert detail_rows[0][6] == "150 mm"
         assert [row[0] for row in metric_rows] == ["HK-1"]
+    finally:
+        window.deleteLater()
+
+
+def test_heating_pdf_tables_include_spacing_target_and_spread(app, monkeypatch):
+    from PySide6.QtCore import QSettings, QRectF  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "polygons": {"HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]]},
+                },
+                "params": {
+                    "t_supply": 35.0,
+                    "t_return": 30.0,
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "spacing": 125.0,
+                            "room_temp": 23.0,
+                            "floor_covering": "Fliesen / Keramik",
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        captured = []
+        active_page_type = [""]
+        monkeypatch.setattr(
+            window,
+            "_draw_pdf_table",
+            lambda _painter, _writer, title, headers, rows, **_kwargs: captured.append(
+                (active_page_type[0], title, headers, rows)
+            ),
+        )
+
+        class _Layout:
+            @staticmethod
+            def paintRectPixels(_resolution):
+                return QRectF(0.0, 0.0, 100.0, 100.0)
+
+        class _Writer:
+            @staticmethod
+            def pageLayout():
+                return _Layout()
+
+            @staticmethod
+            def resolution():
+                return 72
+
+        class _Painter:
+            @staticmethod
+            def drawImage(*_args):
+                pass
+
+        monkeypatch.setattr(window, "_draw_pdf_title", lambda _p, rect, _title: (rect, rect))
+        monkeypatch.setattr(window, "_effective_pdf_source_rect", lambda _page: QRectF(0, 0, 100, 100))
+        monkeypatch.setattr(window, "_heating_circuit_focus_source_rect", lambda *_args: QRectF(0, 0, 100, 100))
+        monkeypatch.setattr(window, "_pdf_new_page", lambda *_args: None)
+        monkeypatch.setattr(window.canvas, "render_for_export", lambda **_kwargs: object())
+
+        for page in (
+            {"type": "lengths"},
+            {"type": "hydraulics"},
+            {"type": "heating", "table_sections": ["hk_lengths", "hk_hydraulics"]},
+            {"type": "heating_circuit", "circuit_ids": ["HK-1"]},
+        ):
+            active_page_type[0] = page["type"]
+            hk_rows, t_supply, t_return = window._collect_length_overview_rows()
+            window._render_pdf_export_page(
+                _Painter(), _Writer(), page, hk_rows, t_supply, t_return, [], [],
+            )
+
+        assert len(captured) == 6
+        for page_type in ("lengths", "hydraulics", "heating", "heating_circuit"):
+            page_tables = [entry for entry in captured if entry[0] == page_type]
+            assert page_tables
+            assert any(
+                {"Abstand", "T-Soll", "Spreizung"}.issubset(set(headers))
+                for _kind, _title, headers, _rows in page_tables
+            )
+        for _page_type, _title, headers, rows in captured:
+            if not {"Abstand", "T-Soll", "Spreizung"}.issubset(set(headers)):
+                continue
+            matching_row = next(row for row in rows if row[0] == "HK-1")
+            assert "125 mm" in matching_row
+            assert "23.0 °C" in matching_row
+            assert "5.0 K" in matching_row
     finally:
         window.deleteLater()
 
@@ -5900,6 +6115,60 @@ def test_project_overview_dock_set_document(app, monkeypatch):
         window.deleteLater()
 
 
+
+
+def test_project_overview_heating_parameters_are_editable(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtWidgets import QComboBox, QDoubleSpinBox  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {
+                "canvas": {
+                    "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
+                    "polygons": {"HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]]},
+                },
+                "params": {
+                    "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
+                    "circuits": {
+                        "HK-1": {
+                            "circuit_id": "HK-1",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Wohnzimmer",
+                            "room_temp": 20.0,
+                            "floor_covering": "Fliesen / Keramik",
+                        }
+                    },
+                },
+            }
+        )
+        window._set_document(document)
+        table = window.overview_heating._hk_table
+        room_temp_editor = table.cellWidget(0, 5)
+        room_temp_spin = room_temp_editor.findChild(QDoubleSpinBox)
+        assert room_temp_spin is not None
+        room_temp_spin.setValue(22.5)
+        assert document.elements["circuits"]["HK-1"].data["room_temp"] == 22.5
+
+        floor_covering_editor = table.cellWidget(0, 6)
+        floor_covering_combo = floor_covering_editor.findChild(QComboBox)
+        assert floor_covering_combo is not None
+        target_floor = "Parkett dick (> 10 mm)"
+        target_index = floor_covering_combo.findData(target_floor)
+        if target_index < 0:
+            target_index = floor_covering_combo.findText(target_floor)
+        assert target_index >= 0
+        floor_covering_combo.setCurrentIndex(target_index)
+        assert document.elements["circuits"]["HK-1"].data["floor_covering"] == target_floor
+    finally:
+        window.deleteLater()
 
 
 def test_project_overview_dock_planung_linda(app, monkeypatch):
@@ -8801,6 +9070,40 @@ def test_collect_project_dict_matches_document_shape(app):
         assert set(project_dict.keys()) >= {"svg_path", "canvas", "params", "pdf_export_pages"}
         assert "HK-1" in project_dict["canvas"]["polygons"]
         assert "AP-1" in project_dict["params"]["elec_points"]
+    finally:
+        window.deleteLater()
+
+
+def test_background_color_toolbar_updates_and_persists(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+    from PySide6.QtGui import QColor  # noqa: PLC0415
+    from PySide6.QtWidgets import QColorDialog  # noqa: PLC0415
+
+    _settings_noop(monkeypatch)
+    from gui.app_window import AppWindow  # noqa: PLC0415
+    from model.document import Document  # noqa: PLC0415
+
+    selected_color = QColor("#123456")
+    monkeypatch.setattr(
+        QColorDialog,
+        "getColor",
+        staticmethod(lambda *_args: selected_color),
+    )
+
+    window = AppWindow()
+    try:
+        document = Document.from_dict(
+            {"canvas": {"bg_color": "#abcdef"}, "params": {}}
+        )
+        window._set_document(document)
+        assert "rgb(171,205,239)" in window._bg_color_btn.styleSheet()
+
+        window._on_bg_color_pick()
+        assert window.canvas._bg_color == selected_color
+        assert "rgb(18,52,86)" in window._bg_color_btn.styleSheet()
+
+        window._sync_canvas_to_document()
+        assert document.view["bg_color"] == "#123456"
     finally:
         window.deleteLater()
 

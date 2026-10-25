@@ -606,6 +606,12 @@ class AppWindow(QMainWindow):
         self._grid_color_btn.clicked.connect(self._on_grid_color_pick)
         self._grid_toolbar.addWidget(self._grid_color_btn)
 
+        self._bg_color_btn = QPushButton("◼", self._grid_toolbar)
+        self._bg_color_btn.setToolTip("Hintergrundfarbe")
+        self._bg_color_btn.setFixedWidth(28)
+        self._bg_color_btn.clicked.connect(self._on_bg_color_pick)
+        self._grid_toolbar.addWidget(self._bg_color_btn)
+
         self._snap_combo = QComboBox(self._grid_toolbar)
         self._snap_combo.setToolTip("Winkelsnap")
         for label, angle in [("Aus", 0), ("15°", 15), ("30°", 30), ("45°", 45), ("90°", 90)]:
@@ -626,6 +632,7 @@ class AppWindow(QMainWindow):
         self._grid_spin.blockSignals(False)
 
         self._update_grid_color_btn(self.canvas.grid_color())
+        self._update_bg_color_btn(self.canvas._bg_color)
 
         angle = int(self.canvas.snap_angle())
         idx = self._snap_combo.findData(angle)
@@ -694,6 +701,8 @@ class AppWindow(QMainWindow):
         self.properties.pre_change.connect(self._push_undo)
         self.overview_electro.pre_change.connect(self._push_undo)
         self.overview_electro.element_field_changed.connect(self._on_overview_field_changed)
+        self.overview_heating.pre_change.connect(self._push_undo)
+        self.overview_heating.element_field_changed.connect(self._on_overview_field_changed)
         self.overview_electro_materials.pre_change.connect(self._push_undo)
         self.overview_electro_materials.element_field_changed.connect(self._on_overview_field_changed)
         self.overview_electro_rooms.pre_change.connect(self._push_undo)
@@ -705,6 +714,13 @@ class AppWindow(QMainWindow):
         r, g, b, a = color.red(), color.green(), color.blue(), color.alpha()
         self._grid_color_btn.setStyleSheet(
             f"background-color: rgba({r},{g},{b},{a}); border: 1px solid #888;"
+        )
+
+    def _update_bg_color_btn(self, color: QColor) -> None:
+        r, g, b = color.red(), color.green(), color.blue()
+        text_color = "#fff" if (r * 0.299 + g * 0.587 + b * 0.114) < 128 else "#000"
+        self._bg_color_btn.setStyleSheet(
+            f"background-color: rgb({r},{g},{b}); color: {text_color}; border: 1px solid #888;"
         )
 
     def _on_grid_toggled(self, checked: bool) -> None:
@@ -737,6 +753,15 @@ class AppWindow(QMainWindow):
             self.canvas.set_grid_color(color)
             self._update_grid_color_btn(color)
             self._mark_dirty()
+
+    def _on_bg_color_pick(self) -> None:
+        color = QColorDialog.getColor(self.canvas._bg_color, self, "Hintergrundfarbe wählen")
+        if not color.isValid():
+            return
+        self.canvas._bg_color = color
+        self._update_bg_color_btn(color)
+        self.canvas.update()
+        self._mark_dirty()
 
     def _on_snap_angle_changed(self, index: int) -> None:
         angle = self._snap_combo.itemData(index)
@@ -2910,6 +2935,36 @@ class AppWindow(QMainWindow):
                 specs.append(("insert_point_ctx", "Punkt hinzufügen", True))
                 specs.append(("delete_point_ctx", "Punkt löschen", True))
 
+            if (
+                element_id in self.canvas._polygons
+                and kind == "element"
+                and self._context_menu_canvas_obj_type == "polygon"
+                and self._context_menu_canvas_pt is not None
+                and self.canvas.tool_mode() == ToolMode.EDIT_POLYGON
+                and self.canvas._edit_polygon_cid == element_id
+            ):
+                specs.append(("insert_point_ctx", "Punkt hinzufügen", True))
+                specs.append(("delete_point_ctx", "Punkt löschen", True))
+
+            if (
+                element_id in self.canvas._manual_routes
+                and kind == "element"
+                and self._context_menu_canvas_obj_type == "route"
+                and self._context_menu_canvas_pt is not None
+                and (
+                    self.canvas.tool_mode() == ToolMode.NONE
+                    or (
+                        self.canvas.tool_mode() == ToolMode.EDIT_ROUTE
+                        and self.canvas._edit_route_cid == element_id
+                    )
+                )
+            ):
+                route_points = self.canvas._manual_routes.get(element_id, [])
+                edge_hit = self.canvas._hit_route_edge(self._context_menu_canvas_pt, element_id)
+                point_hit = self.canvas._hit_route_point_in_circuit(self._context_menu_canvas_pt, element_id)
+                specs.append(("insert_point_ctx", "Punkt hinzufügen", edge_hit is not None))
+                specs.append(("delete_point_ctx", "Punkt löschen", point_hit is not None and len(route_points) > 2))
+
             schema = schema_for(element)
             same_workspace = getattr(type(element), "LAYER", None) is self._workspace.layer
             if schema is not None and same_workspace:
@@ -3039,32 +3094,50 @@ class AppWindow(QMainWindow):
 
     def _action_insert_point_context(self, element_id: str) -> None:
         canvas_pt = self._context_menu_canvas_pt
-        if self._context_menu_canvas_obj_type != "elec_cable" or canvas_pt is None:
-            self.statusBar().showMessage("Punkt hinzufügen nur bei Klick auf ein Kabel möglich.", 2500)
+        obj_type = self._context_menu_canvas_obj_type
+        if canvas_pt is None or obj_type not in {"elec_cable", "polygon", "route"}:
+            self.statusBar().showMessage("Punkt hinzufügen nur an einer bearbeitbaren Linie oder Fläche möglich.", 2500)
             return
-        if self.canvas._hit_elec_cable_edge(canvas_pt, element_id) is None:
+        if obj_type == "elec_cable":
+            has_edge = self.canvas._hit_elec_cable_edge(canvas_pt, element_id) is not None
+        elif obj_type == "route":
+            has_edge = self.canvas._hit_route_edge(canvas_pt, element_id) is not None
+        else:
+            has_edge = self.canvas._hit_polygon_edge(canvas_pt, element_id) is not None
+        if not has_edge:
             self.statusBar().showMessage("Keine passende Kante für neuen Punkt gefunden.", 2500)
             return
 
         self._push_undo()
-        if self.canvas.context_insert_point("elec_cable", element_id, QPointF(canvas_pt)):
+        if self.canvas.context_insert_point(obj_type, element_id, QPointF(canvas_pt)):
             self.statusBar().showMessage("Punkt hinzugefügt.", 2000)
             return
         self.statusBar().showMessage("Keine passende Kante für neuen Punkt gefunden.", 2500)
 
     def _action_delete_point_context(self, element_id: str) -> None:
         canvas_pt = self._context_menu_canvas_pt
-        if self._context_menu_canvas_obj_type != "elec_cable" or canvas_pt is None:
-            self.statusBar().showMessage("Punkt löschen nur bei Klick auf ein Kabel möglich.", 2500)
+        obj_type = self._context_menu_canvas_obj_type
+        if canvas_pt is None or obj_type not in {"elec_cable", "polygon", "route"}:
+            self.statusBar().showMessage("Punkt löschen nur an einer bearbeitbaren Linie oder Fläche möglich.", 2500)
             return
-        hit = self.canvas._hit_elec_cable_point(canvas_pt, element_id)
-        pts = self.canvas._elec_cables.get(element_id, [])
-        if hit is None or len(pts) <= 2:
+        if obj_type == "elec_cable":
+            hit = self.canvas._hit_elec_cable_point(canvas_pt, element_id)
+            pts = self.canvas._elec_cables.get(element_id, [])
+            minimum_points = 2
+        elif obj_type == "route":
+            hit = self.canvas._hit_route_point_in_circuit(canvas_pt, element_id)
+            pts = self.canvas._manual_routes.get(element_id, [])
+            minimum_points = 2
+        else:
+            hit = self.canvas._hit_polygon_point(canvas_pt, element_id)
+            pts = self.canvas._polygons.get(element_id, [])
+            minimum_points = 3
+        if hit is None or len(pts) <= minimum_points:
             self.statusBar().showMessage("Kein löschbarer Punkt an dieser Stelle.", 2500)
             return
 
         self._push_undo()
-        if self.canvas.context_delete_point("elec_cable", element_id, QPointF(canvas_pt)):
+        if self.canvas.context_delete_point(obj_type, element_id, QPointF(canvas_pt)):
             self.statusBar().showMessage("Punkt gelöscht.", 2000)
             return
         self.statusBar().showMessage("Kein löschbarer Punkt an dieser Stelle.", 2500)
@@ -6655,7 +6728,7 @@ class AppWindow(QMainWindow):
         if not selected_circuit_ids:
             return set(), [], []
 
-        hk_rows, _t_supply, _t_return = self._collect_length_overview_rows()
+        hk_rows, t_supply, t_return = self._collect_length_overview_rows()
         rows_by_id = {str(row.get("id", "")): row for row in hk_rows}
 
         detail_rows: list[list[str]] = []
@@ -6669,6 +6742,7 @@ class AppWindow(QMainWindow):
                     circuit_id,
                     str(circuit.name or circuit_id),
                     f"{float(circuit.data.get('room_temp', 20.0) or 20.0):.1f} °C",
+                    f"{t_supply - t_return:.1f} K",
                     str(circuit.data.get("floor_covering", "") or ""),
                     f"{float(circuit.data.get('diameter', 16.0) or 16.0):.1f} mm",
                     f"{float(circuit.data.get('spacing', 150.0) or 150.0):.0f} mm",
@@ -8118,6 +8192,9 @@ class AppWindow(QMainWindow):
                     f"{float(r.get('route_m', 0.0)):.2f} m",
                     f"{float(r.get('supply_m', 0.0)):.2f} m",
                     f"{float(r.get('total_m', 0.0)):.2f} m",
+                    f"{float(r.get('spacing_mm', 150.0)):.0f} mm",
+                    f"{float(r.get('room_temp', 20.0)):.1f} °C",
+                    f"{t_supply - t_return:.1f} K",
                 ]
                 for r in hk_rows
             ]
@@ -8125,9 +8202,9 @@ class AppWindow(QMainWindow):
                 painter,
                 writer,
                 title,
-                ["ID", "Name", "Fläche", "Rohr", "Zuleitung", "Gesamt"],
+                ["ID", "Name", "Fläche", "Rohr", "Zuleitung", "Gesamt", "Abstand", "T-Soll", "Spreizung"],
                 rows,
-                col_widths=[0.8, 1.6, 1.0, 1.0, 1.0, 1.0],
+                col_widths=[0.7, 1.3, 0.8, 0.8, 0.8, 0.8, 0.7, 0.75, 0.75],
             )
             return
 
@@ -8139,6 +8216,9 @@ class AppWindow(QMainWindow):
                     f"{float(r.get('power_w', 0.0)):.0f} W",
                     f"{float(r.get('volume_flow_lmin', 0.0)):.2f} l/min",
                     f"{float(r.get('pressure_drop_mbar', 0.0)):.0f} mbar",
+                    f"{float(r.get('spacing_mm', 150.0)):.0f} mm",
+                    f"{float(r.get('room_temp', 20.0)):.1f} °C",
+                    f"{t_supply - t_return:.1f} K",
                 ]
                 for r in hk_rows
             ]
@@ -8146,9 +8226,9 @@ class AppWindow(QMainWindow):
                 painter,
                 writer,
                 f"{title} (Vorlauf {t_supply:.1f}°C / Rücklauf {t_return:.1f}°C)",
-                ["ID", "Name", "Leistung", "Volumenstrom", "Druckverlust"],
+                ["ID", "Name", "Leistung", "Volumenstrom", "Druckverlust", "Abstand", "T-Soll", "Spreizung"],
                 rows,
-                col_widths=[0.9, 1.6, 1.0, 1.1, 1.1],
+                col_widths=[0.7, 1.2, 0.9, 1.0, 0.95, 0.7, 0.75, 0.75],
             )
             return
 
@@ -8290,9 +8370,9 @@ class AppWindow(QMainWindow):
                 painter,
                 writer,
                 detail_title,
-                ["ID", "Name", "Raumtemp.", "Boden", "Ø", "Abstand", "Wandabst."],
+                ["ID", "Name", "T-Soll", "Spreizung", "Boden", "Ø", "Abstand", "Wandabst."],
                 detail_rows,
-                col_widths=[0.9, 1.5, 0.9, 1.2, 0.8, 0.9, 1.0],
+                col_widths=[0.7, 1.2, 0.75, 0.8, 1.0, 0.7, 0.75, 0.8],
             )
 
             self._pdf_new_page(painter, writer)
@@ -8365,10 +8445,17 @@ class AppWindow(QMainWindow):
                         str(r.get("id", "")),
                         str(r.get("name", "")),
                         f"{float(r.get('total_m', 0.0)):.2f} m",
+                        f"{float(r.get('spacing_mm', 150.0)):.0f} mm",
+                        f"{float(r.get('room_temp', 20.0)):.1f} °C",
+                        f"{t_supply - t_return:.1f} K",
                     ]
                     for r in hk_rows
                 ]
-                self._draw_pdf_table(painter, writer, "Heizkreise – Einzellängen", ["ID", "Name", "Gesamt"], rows)
+                self._draw_pdf_table(
+                    painter, writer, "Heizkreise – Einzellängen",
+                    ["ID", "Name", "Gesamt", "Abstand", "T-Soll", "Spreizung"], rows,
+                    col_widths=[0.7, 1.4, 0.8, 0.7, 0.75, 0.75],
+                )
             if "hk_hydraulics" in sections and hk_rows:
                 self._pdf_new_page(painter, writer)
                 rows = [
@@ -8378,10 +8465,17 @@ class AppWindow(QMainWindow):
                         f"{float(r.get('power_w', 0.0)):.0f} W",
                         f"{float(r.get('volume_flow_lmin', 0.0)):.2f} l/min",
                         f"{float(r.get('pressure_drop_mbar', 0.0)):.0f} mbar",
+                        f"{float(r.get('spacing_mm', 150.0)):.0f} mm",
+                        f"{float(r.get('room_temp', 20.0)):.1f} °C",
+                        f"{t_supply - t_return:.1f} K",
                     ]
                     for r in hk_rows
                 ]
-                self._draw_pdf_table(painter, writer, "Hydraulische Übersicht", ["ID", "Name", "Leistung", "Vol.-Strom", "Δp"], rows)
+                self._draw_pdf_table(
+                    painter, writer, "Hydraulische Übersicht",
+                    ["ID", "Name", "Leistung", "Vol.-Strom", "Δp", "Abstand", "T-Soll", "Spreizung"], rows,
+                    col_widths=[0.7, 1.2, 0.9, 1.0, 0.8, 0.7, 0.75, 0.75],
+                )
             if "hk_hkv_lines" in sections and export_data and export_data.get("hl_rows"):
                 self._pdf_new_page(painter, writer)
                 rows = [

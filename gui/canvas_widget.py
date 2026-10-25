@@ -2063,6 +2063,14 @@ class CanvasWidget(QWidget):
     def context_insert_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF) -> bool:
         if self._mode != ToolMode.NONE and not (
             obj_type == "elec_cable" and self._mode == ToolMode.EDIT_ELEC_CABLE
+        ) and not (
+            obj_type == "route"
+            and self._mode == ToolMode.EDIT_ROUTE
+            and self._edit_route_cid == obj_id
+        ) and not (
+            obj_type == "polygon"
+            and self._mode == ToolMode.EDIT_POLYGON
+            and self._edit_polygon_cid == obj_id
         ):
             return False
 
@@ -2152,6 +2160,14 @@ class CanvasWidget(QWidget):
     def context_delete_point(self, obj_type: str, obj_id: str, canvas_pt: QPointF) -> bool:
         if self._mode != ToolMode.NONE and not (
             obj_type == "elec_cable" and self._mode == ToolMode.EDIT_ELEC_CABLE
+        ) and not (
+            obj_type == "route"
+            and self._mode == ToolMode.EDIT_ROUTE
+            and self._edit_route_cid == obj_id
+        ) and not (
+            obj_type == "polygon"
+            and self._mode == ToolMode.EDIT_POLYGON
+            and self._edit_polygon_cid == obj_id
         ):
             return False
 
@@ -6613,6 +6629,23 @@ class CanvasWidget(QWidget):
                 self.object_double_clicked.emit("elec_room", rid)
                 return
 
+    def _hit_context_menu_object(self, canvas_pt: QPointF) -> Optional[Tuple[str, str]]:
+        route_id = self._edit_route_cid
+        if self._mode == ToolMode.EDIT_ROUTE and route_id:
+            if (
+                self._hit_route_point_in_circuit(canvas_pt, route_id) is not None
+                or self._hit_route_edge(canvas_pt, route_id) is not None
+            ):
+                return "route", route_id
+        polygon_id = self._edit_polygon_cid
+        if self._mode == ToolMode.EDIT_POLYGON and polygon_id:
+            if (
+                self._hit_polygon_point(canvas_pt, polygon_id) is not None
+                or self._hit_polygon_edge(canvas_pt, polygon_id) is not None
+            ):
+                return "polygon", polygon_id
+        return self._hit_any_object(canvas_pt)
+
     def mousePressEvent(self, event):
         pos       = QPointF(event.position())
         canvas_pt = self._to_canvas(pos)
@@ -6625,7 +6658,7 @@ class CanvasWidget(QWidget):
             return
 
         if event.button() == Qt.RightButton:
-            obj = self._hit_any_object(canvas_pt)
+            obj = self._hit_context_menu_object(canvas_pt)
             if not obj:
                 text_hit = self._hit_text_annotation(canvas_pt)
                 if text_hit:
