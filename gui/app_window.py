@@ -318,6 +318,7 @@ class AppWindow(QMainWindow):
         self._recent_menu: QMenu | None = None
         self._grid_toolbar: QToolBar | None = None
         self._schaltplan_window: SchaltplanWindow | None = None
+        self._heating_curve_window = None
         self._pdf_export_pages: list[dict] = []
         self._pdf_export_meta: dict[str, str] = {}
         self._annotation_live_value_cache: dict[str, tuple] = {}
@@ -557,6 +558,7 @@ class AppWindow(QMainWindow):
         view_menu.addSeparator()
         self._add_action(view_menu, "Elektro-Topologie anzeigen", self._show_topology_dock)
         self._add_action(view_menu, "Schaltplan…", self._open_schaltplan_window)
+        self._add_action(view_menu, "Heizkurvenanalyse…", self._open_heating_curve_window)
         self._sensor_coverage_action = self._add_action(
             view_menu, "Erfassungsbereiche anzeigen", self._on_sensor_coverage_toggled
         )
@@ -1436,6 +1438,8 @@ class AppWindow(QMainWindow):
         """Der Canvas hat Projektdaten geändert – Projekt gilt als bearbeitet."""
         if self._restoring_snapshot:
             return
+        if self._heating_curve_window is not None:
+            self._heating_curve_window.invalidate()
         self._record_canvas_change()
         # Proxy writes are immediate, even while dragging. Keep undo/dirty
         # tracking live, but do not rebuild the full topology for every pixel.
@@ -1728,6 +1732,8 @@ class AppWindow(QMainWindow):
         self._undo_group_timer.start(_UNDO_GROUP_IDLE_MS)
 
     def _undo(self) -> None:
+        if self._heating_curve_window is not None and not self._heating_curve_window.save_settings():
+            return
         if not self._undo_stack:
             self.statusBar().showMessage("Nichts zum Rückgängigmachen", 2000)
             return
@@ -1744,6 +1750,8 @@ class AppWindow(QMainWindow):
         self.log.info(f"Undo (Stack: {remaining})")
 
     def _redo(self) -> None:
+        if self._heating_curve_window is not None and not self._heating_curve_window.save_settings():
+            return
         if not self._redo_stack:
             self.statusBar().showMessage("Nichts zum Wiederherstellen", 2000)
             return
@@ -1850,6 +1858,8 @@ class AppWindow(QMainWindow):
             self._refresh_schema_windows()
             self._sync_measurements_to_elements()
             self._last_document_snapshot = self._document.snapshot()
+            if self._heating_curve_window is not None:
+                self._heating_curve_window.set_document(self._document)
             if perf_mode:
                 total_ms = (time.perf_counter() - perf_started) * 1000.0
                 self.log.info(
@@ -2139,6 +2149,8 @@ class AppWindow(QMainWindow):
         self._refresh_schema_windows()
         self._update_title()
         self._last_document_snapshot = self._document.snapshot()
+        if self._heating_curve_window is not None:
+            self._heating_curve_window.set_document(document)
 
     def _normalize_loaded_cable_bindings(self, document: Document) -> None:
         """Bring mirrored cable endpoint fields back into sync on load.
@@ -3814,12 +3826,26 @@ class AppWindow(QMainWindow):
         return ""
 
     def _mark_dirty(self) -> None:
+        if self._heating_curve_window is not None:
+            self._heating_curve_window.invalidate()
         self._dirty = True
         self._update_title()
 
     def _emit_structure_changed(self) -> None:
+        if self._heating_curve_window is not None:
+            if not self._heating_curve_window.save_settings():
+                self._heating_curve_window.invalidate()
+                self._document.structure_changed.emit()
+                self._refresh_schema_windows()
+                return
+        analysis = self._document.settings.get("heating_curve_analysis")
+        if isinstance(analysis, dict):
+            analysis["circuits"] = {key: value for key, value in analysis.get("circuits", {}).items()
+                                    if key in self._document.elements.get("circuits", {})}
         self._document.structure_changed.emit()
         self._refresh_schema_windows()
+        if self._heating_curve_window is not None:
+            self._heating_curve_window.set_document(self._document)
 
     def _add_floorplan(self) -> None:
         image_path, _ = QFileDialog.getOpenFileName(self, "Grundrissbild wählen", "", _IMAGE_FILTER)
@@ -4348,7 +4374,8 @@ class AppWindow(QMainWindow):
         if self._project_path is None:
             return self._save_project_as()
         self._sync_canvas_to_document()
-        self._flush_live_editor_state()
+        if self._flush_live_editor_state() is False:
+            return False
         try:
             save_document(self._document, self._project_path)
         except Exception as exc:  # noqa: BLE001
@@ -4362,8 +4389,12 @@ class AppWindow(QMainWindow):
         self.log.success(f"Gespeichert: {self._project_path}")
         return True
 
-    def _flush_live_editor_state(self) -> None:
+    def _flush_live_editor_state(self) -> bool:
         """Persist open non-modal editors before save/export reads the document."""
+        if self._heating_curve_window is not None and not self._heating_curve_window.save_settings():
+            self._heating_curve_window.show()
+            self._heating_curve_window.raise_()
+            return False
         properties = getattr(self, "properties", None)
         for element_id, editor in tuple(getattr(properties, "_editors", {}).items()):
             if self._document.get(element_id) is editor.element:
@@ -4374,6 +4405,7 @@ class AppWindow(QMainWindow):
             save_editor = getattr(uv_planning, "_save_editor", None)
             if editor is not None and callable(save_editor):
                 save_editor()
+        return True
 
     def _save_and_git_commit_push(self) -> None:
         if not self._save_project():
@@ -4995,6 +5027,10 @@ class AppWindow(QMainWindow):
         return valid_count, changed_count
 
     def _confirm_discard(self) -> bool:
+        if self._heating_curve_window is not None and not self._heating_curve_window.save_settings():
+            self._heating_curve_window.show()
+            self._heating_curve_window.raise_()
+            return False
         if not self._dirty:
             return True
         answer = QMessageBox.question(
@@ -5554,6 +5590,32 @@ class AppWindow(QMainWindow):
         self._schaltplan_window.raise_()
         self._schaltplan_window.activateWindow()
 
+    def _open_heating_curve_window(self) -> None:
+        if self._heating_curve_window is None:
+            from .heating_curve_analysis_window import HeatingCurveAnalysisWindow
+
+            self._heating_curve_window = HeatingCurveAnalysisWindow(self)
+            self._heating_curve_window.config_changed.connect(self._save_heating_curve_config)
+            self._heating_curve_window.set_document(self._document)
+        elif self._heating_curve_window.isHidden():
+            self._heating_curve_window.set_document(self._document)
+        self._heating_curve_window.show()
+        self._heating_curve_window.raise_()
+        self._heating_curve_window.activateWindow()
+
+    def _save_heating_curve_config(self, config: dict, norm_outdoor: float) -> None:
+        config = copy.deepcopy(config)
+        config["circuits"] = {key: value for key, value in config["circuits"].items()
+                               if key in self._document.elements.get("circuits", {})}
+        if (self._document.settings.get("heating_curve_analysis") == config
+                and self._document.settings.get("t_norm_outdoor", -12) == norm_outdoor):
+            return
+        self._push_undo()
+        self._document.settings["heating_curve_analysis"] = config
+        self._document.settings["t_norm_outdoor"] = norm_outdoor
+        self._mark_dirty()
+        self.properties.refresh_current()
+
     def _schema_consumers_visible(self) -> bool:
         """True, wenn Topologie-Dock oder Schaltplan die Schema-Daten anzeigen."""
         window = self._schaltplan_window
@@ -5589,6 +5651,8 @@ class AppWindow(QMainWindow):
         Synchronisiert den Canvas zuerst, damit auch Geometrieänderungen
         (Polygon-Editierung etc.) im Ergebnis enthalten sind.
         """
+        if self._heating_curve_window is not None and self._heating_curve_window._save_timer.isActive():
+            self._heating_curve_window.save_settings()
         self._sync_canvas_to_document()
         return self._document.to_dict()
 
@@ -10272,11 +10336,16 @@ class AppWindow(QMainWindow):
         self.statusBar().showMessage("Layout zurückgesetzt", 3000)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt-API
+        if self._heating_curve_window is not None and self._heating_curve_window._save_timer.isActive():
+            self._heating_curve_window.save_settings()
         if not self._confirm_discard():
             event.ignore()
             return
         layout_store.save_workspace_state(self, self._workspace.id)
         layout_store.save_geometry(self)
         layout_store.save_last_workspace(self._workspace.id)
+        if self._heating_curve_window is not None:
+            self._heating_curve_window.cancel_analysis()
+            self._heating_curve_window.hide()
         event.accept()
 

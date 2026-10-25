@@ -36,6 +36,48 @@
 
   "$defs": {
 
+    "HeatingAnalysisRange": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "Minimum, Maximum und positive Schrittweite."
+    },
+    "HeatingAnalysisLimit": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "HeatingCurveAnalysis": {
+      "type": "object",
+      "required": ["version", "supply", "spread", "outdoor", "heating_limit", "circuits"],
+      "properties": {
+        "version": { "const": 1 },
+        "supply": { "$ref": "#/$defs/HeatingAnalysisRange" },
+        "spread": { "$ref": "#/$defs/HeatingAnalysisRange" },
+        "outdoor": { "$ref": "#/$defs/HeatingAnalysisRange" },
+        "heating_limit": { "type": "number" },
+        "max_flow": { "$ref": "#/$defs/HeatingAnalysisLimit" },
+        "max_pressure": { "$ref": "#/$defs/HeatingAnalysisLimit" },
+        "circuits": {
+          "type": "object",
+          "propertyNames": { "pattern": "^HK-[1-9][0-9]*$" },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "heat_load_w": { "$ref": "#/$defs/HeatingAnalysisLimit" },
+              "load_mode": { "type": "string", "enum": ["design_watts", "reference_specific"] },
+              "specific_heat_load_wm2": { "$ref": "#/$defs/HeatingAnalysisLimit" },
+              "reference_room_temp": { "type": ["number", "null"] },
+              "reference_outdoor_temp": { "type": ["number", "null"] },
+              "reference_area_m2": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+              "max_flow": { "$ref": "#/$defs/HeatingAnalysisLimit" },
+              "max_pressure": { "$ref": "#/$defs/HeatingAnalysisLimit" }
+            }
+          }
+        }
+      }
+    },
+
     "Point2D": {
       "type": "array",
       "items": { "type": "number" },
@@ -758,6 +800,9 @@
           "maximum": 5,
           "default": -12.0,
           "description": "Normaußentemperatur in °C."
+        },
+        "heating_curve_analysis": {
+          "$ref": "#/$defs/HeatingCurveAnalysis"
         },
         "elec_cable_defaults": {
           "type": "object",

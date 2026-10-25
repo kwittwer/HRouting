@@ -631,6 +631,18 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
         _check_color(f"elec_points.{pid}.color", pdata.get("color", ""))
     _check_color("canvas.bg_color", canvas.get("bg_color", ""))
 
+    analysis = params.get("heating_curve_analysis")
+    if analysis is not None:
+        try:
+            from logic.heating_curve_analysis import validate_config
+
+            validate_config(analysis, params.get("t_norm_outdoor", -12.0))
+            for circuit_id in analysis.get("circuits", {}):
+                if circuit_id not in circuit_ids:
+                    errors.append(f"[Reference] heating_curve_analysis.circuits.{circuit_id} existiert nicht.")
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as error:
+            errors.append(f"[Value] heating_curve_analysis: {error}")
+
     return errors, warnings
 
 

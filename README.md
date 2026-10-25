@@ -38,6 +38,68 @@ python main.py --mcpstdio
 python main.py mein_projekt.hrp
 ```
 
+## Heizkurvenanalyse
+
+Unter **Ansicht → Heizkurvenanalyse** öffnet sich ein eigenständiges Fenster.
+
+1. Je Heizkreis genau drei Referenzwerte in die Tabelle eintragen:
+   **spezifische Heizlast in W/m²**, zugehörige **Innentemperatur** und
+   **Außentemperatur**. Doppelklick, F2 oder direktes Tippen bearbeitet die Zelle.
+2. Den Außentemperaturbereich mit Minimum, Maximum und Schrittweite einstellen
+   und **Berechnen** drücken.
+3. Unter der Tabelle den **Heizkreis auswählen**. Das Diagramm zeigt für diesen
+   Kreis die notwendige Vorlauftemperatur über der Außentemperatur. Ein Wechsel
+   der Auswahl zeigt die bereits berechnete Kurve ohne erneuten Rechenlauf.
+
+Mit **Alle Heizkreise** in derselben Auswahl werden sämtliche Kurven gemeinsam
+angezeigt. Jeder Kreis hat eine eigene, beim Wechsel zur Einzelansicht stabile
+Farbe; die Legende steht unter dem Diagramm. Nicht berechenbare Kreise werden
+im Status genannt. CSV exportiert bei dieser Auswahl alle Kreise, sonst nur
+den ausgewählten Kreis.
+
+Jeder Heizkreis wird **unabhängig** berechnet. Es gibt keine gemeinsame
+Anlagenkurve und keine Auswahl unterschiedlicher Lastmodi in diesem Fenster.
+Fehlende oder fehlerhafte Daten eines anderen Kreises verhindern nicht die Kurve
+eines korrekt ausgefüllten Kreises. Die drei Referenzfelder können jederzeit
+bearbeitet werden; eine leere Heizlast ist unbekannt, eine explizite Null bedeutet
+keinen Heizbedarf. Ungültige Eingaben müssen vor dem Projektspeichern korrigiert werden.
+
+Die **Spreizung stammt aus dem Projekt** (aktueller Vorlauf minus Rücklauf) und
+bleibt über die Kurve konstant. Sie muss positiv sein. Die gewünschte
+**Soll-Raumtemperatur stammt aus dem jeweiligen Heizkreis**. Die Referenz-
+Innentemperatur beschreibt ausschließlich den Berechnungspunkt des W/m²-Werts.
+Der spezifische Bedarf wird proportional zur Temperaturdifferenz umgerechnet:
+
+`Bedarf [W/m²] = Referenzlast × max(0, (Soll innen − außen) / (Referenz innen − Referenz außen))`
+
+Die Referenz-Innentemperatur muss über der Referenz-Außentemperatur liegen.
+Beispiel: 50 W/m² bei 20 °C innen und −13 °C außen ergeben bei gleicher
+Solltemperatur und 0 °C außen rund 30,30 W/m². Der Gesamtbedarf verwendet die
+aktuelle Heizkreisfläche. Alte Watt-Lasten, Flächenüberschreibungen und
+Hydrauliklimits werden als Projektdaten erhalten, aber für dieses neue
+Einzelkreisdiagramm nicht verwendet und nicht stillschweigend konvertiert.
+
+Die notwendige Vorlauftemperatur wird aus der vorhandenen vereinfachten
+stationären Heizleistungsformel bei fester Spreizung numerisch bestimmt und
+auf 0,1 °C nach oben gerundet. Berücksichtigt werden Verlegeabstand, Bodenbelag
+und Kreis-Solltemperatur. Ein gezeichneter Rohrverlauf ist für diese rein
+thermische Kurve nicht erforderlich; eine gültige Fläche ist erforderlich.
+Die Rechnung sucht bis zur **Modellobergrenze 90 °C**. Das ist keine zulässige
+Betriebstemperatur oder Freigabe für den Fußboden. Bei nicht erreichbarer Last
+wird keine Vorlauftemperatur erfunden. Ab der eingestellten **Heizgrenze** gilt
+**Heizung aus**; Nullbedarf und nicht berechenbare Punkte werden als Lücken
+statt als 0-°C-Vorlauf dargestellt. Der gesamte Außentemperaturbereich bleibt sichtbar.
+
+Die ausgewählte Kurve kann als CSV mit Temperaturen, Bedarf und Referenzwerten
+exportiert werden. Berechnungen sind abbrechbar. Eingaben werden nach gültigen
+Änderungen mit dem HRP-Projekt gespeichert und unterstützen Undo/Redo. Öffnen
+allein ändert das Projekt nicht. Ergebnisse werden nach Änderungen verworfen,
+nicht gespeichert. Projekt-Vorlauf, -Rücklauf und Raumtemperaturen bleiben unverändert.
+
+Die Analyse simuliert weder zeitliches Aufheizen noch hydraulische Ventilregelung,
+Pumpenförderhöhe, COP oder Stromersparnis und ersetzt keinen zertifizierten
+Heizlast- oder Sicherheitsnachweis.
+
 ## PIR- und Radarplanung
 
 Im Eigenschaften-Dock eines Anschlusspunkts unter **Sensor** Typ, Winkel,
