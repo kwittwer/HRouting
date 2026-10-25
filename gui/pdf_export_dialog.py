@@ -43,6 +43,7 @@ class PdfExportConfigDialog(QDialog):
     ]
 
     TABLE_LABELS: dict[str, str] = {
+        "hk_overview": "Heizkreisübersicht (Längen und Hydraulik)",
         "hk_lengths": "Heizkreise – Einzellängen",
         "hk_hydraulics": "Hydraulische Übersicht",
         "hk_hkv_lines": "HKV-Leitungen",
@@ -602,7 +603,7 @@ class PdfExportConfigDialog(QDialog):
     @staticmethod
     def _default_table_sections(ptype: str) -> list[str]:
         if ptype == "heating":
-            return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
+            return ["hk_overview", "hk_hkv_lines"]
         if ptype == "elektro":
             return [
                 "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",
@@ -620,7 +621,7 @@ class PdfExportConfigDialog(QDialog):
     @staticmethod
     def _allowed_table_sections(ptype: str) -> set[str]:
         if ptype == "heating":
-            return {"hk_lengths", "hk_hydraulics", "hk_hkv_lines"}
+            return {"hk_overview", "hk_hkv_lines"}
         if ptype == "elektro":
             return {
                 "el_kabel", "el_ap_types", "el_ap_connections", "el_rooms",

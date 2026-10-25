@@ -5645,7 +5645,7 @@ class AppWindow(QMainWindow):
     @staticmethod
     def _default_pdf_table_sections(ptype: str) -> list[str]:
         if ptype == "heating":
-            return ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]
+            return ["hk_overview", "hk_hkv_lines"]
         if ptype == "heating_circuit":
             return ["hk_lengths", "hk_hydraulics"]
         if ptype == "elektro":
@@ -5778,7 +5778,7 @@ class AppWindow(QMainWindow):
             "date": str(src.get("date", defaults["date"])).strip() or defaults["date"],
             "planning_status": str(src.get("planning_status", defaults["planning_status"])).strip().lower() or "entwurf",
             "page_count": str(src.get("page_count", defaults["page_count"])).strip() or defaults["page_count"],
-            "hrouting_version": str(src.get("hrouting_version", defaults["hrouting_version"])).strip() or defaults["hrouting_version"],
+            "hrouting_version": defaults["hrouting_version"],
             "notes": str(src.get("notes", defaults["notes"])).strip(),
         }
         if out["planning_status"] not in {"entwurf", "review", "final"}:
@@ -5855,7 +5855,16 @@ class AppWindow(QMainWindow):
                     vis["room"] = False
                     vis["kv"] = False
                 page["element_visibility"] = vis
-                page["table_sections"] = list(src.get("table_sections") or self._default_pdf_table_sections(ptype))
+                table_sections = list(src.get("table_sections") or self._default_pdf_table_sections(ptype))
+                if ptype == "heating" and any(
+                    section in table_sections for section in ("hk_lengths", "hk_hydraulics")
+                ):
+                    table_sections = [
+                        section for section in table_sections
+                        if section not in {"hk_lengths", "hk_hydraulics"}
+                    ]
+                    table_sections.insert(0, "hk_overview")
+                page["table_sections"] = table_sections
                 if ptype == "elektro_room":
                     room_ids_src = src.get("room_ids")
                     if isinstance(room_ids_src, list):
@@ -8438,43 +8447,33 @@ class AppWindow(QMainWindow):
 
         sections = set(page.get("table_sections") or [])
         if ptype == "heating":
-            if "hk_lengths" in sections and hk_rows:
+            if ("hk_overview" in sections or "hk_lengths" in sections or "hk_hydraulics" in sections) and hk_rows:
                 self._pdf_new_page(painter, writer)
                 rows = [
                     [
                         str(r.get("id", "")),
                         str(r.get("name", "")),
+                        f"{float(r.get('area_m2', 0.0)):.2f} m²",
+                        f"{float(r.get('route_m', 0.0)):.2f} m",
+                        f"{float(r.get('supply_m', 0.0)):.2f} m",
                         f"{float(r.get('total_m', 0.0)):.2f} m",
                         f"{float(r.get('spacing_mm', 150.0)):.0f} mm",
                         f"{float(r.get('room_temp', 20.0)):.1f} °C",
                         f"{t_supply - t_return:.1f} K",
-                    ]
-                    for r in hk_rows
-                ]
-                self._draw_pdf_table(
-                    painter, writer, "Heizkreise – Einzellängen",
-                    ["ID", "Name", "Gesamt", "Abstand", "T-Soll", "Spreizung"], rows,
-                    col_widths=[0.7, 1.4, 0.8, 0.7, 0.75, 0.75],
-                )
-            if "hk_hydraulics" in sections and hk_rows:
-                self._pdf_new_page(painter, writer)
-                rows = [
-                    [
-                        str(r.get("id", "")),
-                        str(r.get("name", "")),
                         f"{float(r.get('power_w', 0.0)):.0f} W",
                         f"{float(r.get('volume_flow_lmin', 0.0)):.2f} l/min",
                         f"{float(r.get('pressure_drop_mbar', 0.0)):.0f} mbar",
-                        f"{float(r.get('spacing_mm', 150.0)):.0f} mm",
-                        f"{float(r.get('room_temp', 20.0)):.1f} °C",
-                        f"{t_supply - t_return:.1f} K",
                     ]
                     for r in hk_rows
                 ]
                 self._draw_pdf_table(
-                    painter, writer, "Hydraulische Übersicht",
-                    ["ID", "Name", "Leistung", "Vol.-Strom", "Δp", "Abstand", "T-Soll", "Spreizung"], rows,
-                    col_widths=[0.7, 1.2, 0.9, 1.0, 0.8, 0.7, 0.75, 0.75],
+                    painter, writer, "Heizkreisübersicht",
+                    [
+                        "ID", "Name", "Fläche", "Rohr", "Zuleitung", "Gesamt",
+                        "Abstand", "T-Soll", "Spreizung", "Leistung", "Vol.-Strom", "Δp",
+                    ],
+                    rows,
+                    col_widths=[0.55, 1.0, 0.65, 0.65, 0.65, 0.65, 0.6, 0.6, 0.65, 0.65, 0.8, 0.65],
                 )
             if "hk_hkv_lines" in sections and export_data and export_data.get("hl_rows"):
                 self._pdf_new_page(painter, writer)

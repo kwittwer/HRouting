@@ -4772,6 +4772,27 @@ def test_pdf_export_heating_circuit_filters_rows(app, monkeypatch):
         window.deleteLater()
 
 
+def test_pdf_export_metadata_uses_current_hrouting_version(app, monkeypatch):
+    from PySide6.QtCore import QSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(QSettings, "value", lambda self, key, default=None, **kw: default)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, key, value: None)
+
+    from gui.app_window import AppWindow  # noqa: PLC0415
+
+    window = AppWindow()
+    try:
+        monkeypatch.setattr(window, "_hrouting_program_version", lambda: "0.2.28")
+        metadata = window._normalize_pdf_export_meta(
+            {"hrouting_version": "0.2.27", "project": "Projekt"}
+        )
+
+        assert metadata["hrouting_version"] == "0.2.28"
+        assert metadata["project"] == "Projekt"
+    finally:
+        window.deleteLater()
+
+
 def test_heating_pdf_tables_include_spacing_target_and_spread(app, monkeypatch):
     from PySide6.QtCore import QSettings, QRectF  # noqa: PLC0415
 
@@ -4854,7 +4875,7 @@ def test_heating_pdf_tables_include_spacing_target_and_spread(app, monkeypatch):
                 _Painter(), _Writer(), page, hk_rows, t_supply, t_return, [], [],
             )
 
-        assert len(captured) == 6
+        assert len(captured) == 5
         for page_type in ("lengths", "hydraulics", "heating", "heating_circuit"):
             page_tables = [entry for entry in captured if entry[0] == page_type]
             assert page_tables
@@ -4869,6 +4890,15 @@ def test_heating_pdf_tables_include_spacing_target_and_spread(app, monkeypatch):
             assert "125 mm" in matching_row
             assert "23.0 °C" in matching_row
             assert "5.0 K" in matching_row
+        heating_tables = [entry for entry in captured if entry[0] == "heating"]
+        assert len(heating_tables) == 1
+        heating_headers = set(heating_tables[0][2])
+        assert {"Rohr", "Zuleitung", "Leistung", "Vol.-Strom", "Δp"}.issubset(heating_headers)
+
+        migrated = window._normalize_pdf_export_pages(
+            [{"type": "heating", "table_sections": ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]}]
+        )
+        assert migrated[0]["table_sections"] == ["hk_overview", "hk_hkv_lines"]
     finally:
         window.deleteLater()
 
