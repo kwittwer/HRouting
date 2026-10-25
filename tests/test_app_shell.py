@@ -4808,7 +4808,10 @@ def test_heating_pdf_tables_include_spacing_target_and_spread(app, monkeypatch):
             {
                 "canvas": {
                     "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
-                    "polygons": {"HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]]},
+                    "polygons": {
+                        "HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]],
+                        "HK-2": [[300.0, 0.0], [500.0, 0.0], [500.0, 200.0], [300.0, 200.0]],
+                    },
                 },
                 "params": {
                     "t_supply": 35.0,
@@ -4822,6 +4825,14 @@ def test_heating_pdf_tables_include_spacing_target_and_spread(app, monkeypatch):
                             "spacing": 125.0,
                             "room_temp": 23.0,
                             "floor_covering": "Fliesen / Keramik",
+                        },
+                        "HK-2": {
+                            "circuit_id": "HK-2",
+                            "floor_plan_id": "grundriss-1",
+                            "name": "Arbeitszimmer",
+                            "spacing": 150.0,
+                            "room_temp": 20.0,
+                            "floor_covering": "Laminat",
                         }
                     },
                 },
@@ -4853,9 +4864,27 @@ def test_heating_pdf_tables_include_spacing_target_and_spread(app, monkeypatch):
                 return 72
 
         class _Painter:
+            texts = []
+
+            def save(self):
+                pass
+
+            def restore(self):
+                pass
+
+            def setPen(self, *_args):
+                pass
+
+            def setFont(self, *_args):
+                pass
+
             @staticmethod
             def drawImage(*_args):
                 pass
+
+            @classmethod
+            def drawText(cls, *_args):
+                cls.texts.append(str(_args[-1]))
 
         monkeypatch.setattr(window, "_draw_pdf_title", lambda _p, rect, _title: (rect, rect))
         monkeypatch.setattr(window, "_effective_pdf_source_rect", lambda _page: QRectF(0, 0, 100, 100))
@@ -4875,7 +4904,7 @@ def test_heating_pdf_tables_include_spacing_target_and_spread(app, monkeypatch):
                 _Painter(), _Writer(), page, hk_rows, t_supply, t_return, [], [],
             )
 
-        assert len(captured) == 5
+        assert len(captured) == 6
         for page_type in ("lengths", "hydraulics", "heating", "heating_circuit"):
             page_tables = [entry for entry in captured if entry[0] == page_type]
             assert page_tables
@@ -4894,6 +4923,11 @@ def test_heating_pdf_tables_include_spacing_target_and_spread(app, monkeypatch):
         assert len(heating_tables) == 1
         heating_headers = set(heating_tables[0][2])
         assert {"Rohr", "Zuleitung", "Leistung", "Vol.-Strom", "Δp"}.issubset(heating_headers)
+        detailed = next(entry for entry in captured if "Einzelberechnung je Raum" in entry[1])
+        assert detailed[2] == ["Heizkreis / Raum", "Eingangswerte", "Rechenweg und Ergebnisse"]
+        assert {row[0] for row in detailed[3]} == {"HK-1 – Wohnzimmer", "HK-2 – Arbeitszimmer"}
+        assert all("Δp_Rohr" in row[2] and "Kv =" in row[2] for row in detailed[3])
+        assert any("Darcy-Weisbach" in text and "Hydraulischer Abgleich" in text for text in _Painter.texts)
 
         migrated = window._normalize_pdf_export_pages(
             [{"type": "heating", "table_sections": ["hk_lengths", "hk_hydraulics", "hk_hkv_lines"]}]
@@ -6163,7 +6197,7 @@ def test_project_overview_heating_parameters_are_editable(app, monkeypatch):
             {
                 "canvas": {
                     "floor_plans": [{"fp_id": "grundriss-1", "visible": True}],
-                    "polygons": {"HK-1": [[0.0, 0.0], [200.0, 0.0], [200.0, 200.0], [0.0, 200.0]]},
+                    "polygons": {"HK-1": [[0.0, 0.0], [2000.0, 0.0], [2000.0, 2000.0], [0.0, 2000.0]]},
                 },
                 "params": {
                     "floorplans": {"grundriss-1": {"name": "EG", "visible": True, "file_path": ""}},
@@ -6184,8 +6218,12 @@ def test_project_overview_heating_parameters_are_editable(app, monkeypatch):
         room_temp_editor = table.cellWidget(0, 5)
         room_temp_spin = room_temp_editor.findChild(QDoubleSpinBox)
         assert room_temp_spin is not None
+        original_power = table.item(0, 9).text()
         room_temp_spin.setValue(22.5)
         assert document.elements["circuits"]["HK-1"].data["room_temp"] == 22.5
+        updated_power = table.item(0, 9).text()
+        assert updated_power != original_power
+        assert table.cellWidget(0, 5) is room_temp_editor
 
         floor_covering_editor = table.cellWidget(0, 6)
         floor_covering_combo = floor_covering_editor.findChild(QComboBox)

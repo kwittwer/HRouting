@@ -74,7 +74,12 @@ def _interp_kh_base(spacing_cm: float) -> float:
     return _KH_TABLE[-1][1]
 
 
-def _log_mean_temp_diff(t_supply: float, t_return: float, t_room: float) -> float:
+def get_kh_base(spacing_cm: float) -> float:
+    """K_H-Basiswert [W/(m²·K^n)] vor der Belagskorrektur."""
+    return _interp_kh_base(spacing_cm)
+
+
+def calc_log_mean_temp_diff(t_supply: float, t_return: float, t_room: float) -> float:
     """
     Logarithmische Übertemperatur ΔT_H nach DIN EN 1264.
 
@@ -98,7 +103,7 @@ def get_kh(spacing_cm: float, r_lambda_b: float) -> float:
     Die Belagskorrektur nach DIN EN 1264-2 reduziert K_H bei höherem
     Wärmeleitwiderstand des Bodenbelags.
     """
-    kh_base = _interp_kh_base(spacing_cm)
+    kh_base = get_kh_base(spacing_cm)
     # Belagskorrektur: K_H sinkt ca. 3–4 % pro 0.01 m²·K/W
     # Vereinfachte Formel: K_H = K_H,0 / (1 + R_λ,B / R_λ,0)
     # mit R_λ,0 ≈ 0.10 m²·K/W als Referenz
@@ -125,7 +130,7 @@ def calc_specific_heat_output(
     spacing_cm : Verlegeabstand [cm]
     r_lambda_b : Wärmeleitwiderstand des Fußbodenbelags [m²·K/W]
     """
-    delta_t_h = _log_mean_temp_diff(t_supply, t_return, t_room)
+    delta_t_h = calc_log_mean_temp_diff(t_supply, t_return, t_room)
     if delta_t_h <= 0:
         return 0.0
     kh = get_kh(spacing_cm, r_lambda_b)

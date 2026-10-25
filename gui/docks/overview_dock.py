@@ -656,6 +656,7 @@ class ProjectOverviewDock(QDockWidget):
         tbl.setRowCount(len(rows))
         for r, row in enumerate(rows):
             tbl.setItem(r, 0, _str_item(row.get("name", "")))
+            tbl.item(r, 0).setData(Qt.ItemDataRole.UserRole, str(row.get("id", "") or ""))
             tbl.setItem(r, 1, _str_item(row.get("distributor", "")))
             tbl.setItem(r, 2, _num_item(row.get("total_m", 0.0), ".2f", "m"))
             tbl.setItem(r, 3, _num_item(row.get("route_m", 0.0), ".2f", "m"))
@@ -688,6 +689,50 @@ class ProjectOverviewDock(QDockWidget):
             return
         self.pre_change.emit()
         self.element_field_changed.emit(circuit_id, key, value)
+        self._refresh_heating_results()
+
+    def _refresh_heating_results(self) -> None:
+        if self._document is None:
+            return
+        from logic.heating_calc import calc_balancing  # noqa: PLC0415
+        from model.computed import heating_length_overview  # noqa: PLC0415
+
+        rows, _t_supply, _t_return = heating_length_overview(self._document)
+        balancing = calc_balancing(rows)
+        for row, balance in zip(rows, balancing):
+            row["kv_value"] = float(balance.get("kv_value", 0.0) or 0.0)
+
+        table = self._hk_table
+        table.setSortingEnabled(False)
+        rows_by_id = {str(row.get("id", "")): row for row in rows}
+        for table_row in range(table.rowCount()):
+            id_item = table.item(table_row, 0)
+            circuit_id = str(id_item.data(Qt.ItemDataRole.UserRole) or "") if id_item else ""
+            result = rows_by_id.get(circuit_id)
+            if result is None:
+                continue
+            table.setItem(table_row, 8, _num_item(result.get("volume_flow_lmin", 0.0), ".2f", "l/min"))
+            table.setItem(table_row, 9, _num_item(result.get("power_w", 0.0), ".0f", "W"))
+            table.setItem(table_row, 10, _num_item(result.get("pressure_drop_mbar", 0.0), ".1f", "mbar"))
+            table.setItem(table_row, 11, _num_item(result.get("kv_value", 0.0), ".4f", "m³/h"))
+        table.setSortingEnabled(True)
+
+        hkv_aggregates: dict[str, dict] = {}
+        for row in rows:
+            distributor = str(row.get("distributor") or "") or "–"
+            aggregate = hkv_aggregates.setdefault(distributor, {
+                "name": distributor,
+                "total_flow_lmin": 0.0,
+                "total_power_w": 0.0,
+                "circuit_count": 0,
+            })
+            aggregate["total_flow_lmin"] += float(row.get("volume_flow_lmin", 0.0) or 0.0)
+            aggregate["total_power_w"] += float(row.get("power_w", 0.0) or 0.0)
+            aggregate["circuit_count"] += 1
+        self._fill_hkv_table(sorted(hkv_aggregates.values(), key=lambda item: item["name"]))
+
+        self._refresh_timer.stop()
+        self._last_document_revision = int(self._document.revision)
 
     # ── Tab Heizung: HKV-Tabelle ──────────────────────────────────────
 

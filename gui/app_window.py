@@ -8218,6 +8218,15 @@ class AppWindow(QMainWindow):
             return
 
         if ptype == "hydraulics":
+            from PySide6.QtGui import QFont  # noqa: PLC0415
+            from logic.heating_calc import (  # noqa: PLC0415
+                FLOOR_COVERINGS,
+                calc_balancing,
+                calc_log_mean_temp_diff,
+                get_kh,
+                get_kh_base,
+            )
+
             rows = [
                 [
                     str(r.get("id", "")),
@@ -8238,6 +8247,106 @@ class AppWindow(QMainWindow):
                 ["ID", "Name", "Leistung", "Volumenstrom", "Druckverlust", "Abstand", "T-Soll", "Spreizung"],
                 rows,
                 col_widths=[0.7, 1.2, 0.9, 1.0, 0.95, 0.7, 0.75, 0.75],
+            )
+
+            page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+            self._pdf_new_page(painter, writer)
+            _, content_rect = self._draw_pdf_title(
+                painter, page_rect, f"{title} – Berechnungsgrundlagen"
+            )
+            method_text = (
+                f"Temperaturen: Vorlauf T_V = {t_supply:.1f} °C, Rücklauf T_R = {t_return:.1f} °C; "
+                "die Raum-Solltemperatur T_Raum ist je Heizkreis hinterlegt.\n\n"
+                "1. Logarithmische mittlere Übertemperatur: "
+                "ΔT_H = (T_V − T_R) / ln((T_V − T_Raum) / (T_R − T_Raum)). "
+                "Bei nicht positiven Temperaturdifferenzen wird keine Heizleistung angesetzt.\n\n"
+                "2. Wärmeübergang: K_H,0 wird aus dem Verlegeabstand linear zwischen den "
+                "hinterlegten Tabellenwerten interpoliert. Der Bodenbelag wird mit "
+                "K_H = K_H,0 / (1 + R_λ,B / 0,10) berücksichtigt.\n\n"
+                "3. Spezifische und gesamte Heizleistung: q = K_H · ΔT_H^1,1 in W/m²; "
+                "Q = q · A mit der aus dem Heizkreis-Polygon ermittelten Fläche A.\n\n"
+                "4. Volumenstrom: V̇ = Q / (c_w · ρ · (T_V − T_R)); die Umrechnung erfolgt "
+                "in l/min. Verwendet werden c_w = 4182 J/(kg·K) und ρ = 994 kg/m³.\n\n"
+                "5. Rohrdruckverlust: Darcy-Weisbach mit glattem PE-X/PE-RT-Rohr, "
+                "2 mm Wandstärke und Blasius-Reibungsbeiwert im turbulenten Bereich. "
+                "Δp = λ · (L/D_i) · ρ · v²/2; D_i = D außen − 4 mm. "
+                "Für turbulente Strömung gilt λ = 0,3164/Re^0,25, laminar λ = 64/Re. "
+                "Die Rohrlänge umfasst Heizkreis und Vor-/Rücklauf-Zuleitung; Pa werden durch 100 in mbar umgerechnet.\n\n"
+                "6. Hydraulischer Abgleich: Als Referenz dient vereinfachend der größte "
+                "Rohrdruckverlust aller Heizkreise. Δp_Ventil = max(0, Δp_Referenz − Δp_Kreis); "
+                "Kv = V̇ / √(Δp_Ventil in bar), mit V̇ in m³/h."
+            )
+            painter.save()
+            painter.setFont(QFont("Arial", 10))
+            painter.setPen(Qt.black)
+            painter.drawText(
+                content_rect.adjusted(10.0, 8.0, -10.0, -8.0),
+                Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
+                method_text,
+            )
+            painter.restore()
+
+            balanced_rows = calc_balancing(hk_rows)
+            detailed_rows: list[list[str]] = []
+            for row, balance in zip(hk_rows, balanced_rows):
+                spacing_mm = float(row.get("spacing_mm", 150.0) or 150.0)
+                spacing_cm = spacing_mm / 10.0
+                covering = str(row.get("floor_covering", "Fliesen / Keramik") or "Fliesen / Keramik")
+                r_lambda = FLOOR_COVERINGS.get(covering, 0.01)
+                room_temp = float(row.get("room_temp", 20.0) or 20.0)
+                delta_t_h = calc_log_mean_temp_diff(t_supply, t_return, room_temp)
+                kh_base = get_kh_base(spacing_cm)
+                kh = get_kh(spacing_cm, r_lambda)
+                area_m2 = float(row.get("area_m2", 0.0) or 0.0)
+                q_wm2 = float(row.get("q_wm2", 0.0) or 0.0)
+                power_w = float(row.get("power_w", 0.0) or 0.0)
+                flow_lmin = float(row.get("volume_flow_lmin", 0.0) or 0.0)
+                total_length_m = float(row.get("total_m", 0.0) or 0.0)
+                diameter_mm = float(row.get("diameter_mm", 16.0) or 16.0)
+                inner_diameter_mm = max(0.0, diameter_mm - 4.0)
+                if delta_t_h > 0:
+                    delta_formula = (
+                        f"({t_supply:.1f}−{t_return:.1f}) / ln(({t_supply:.1f}−{room_temp:.1f}) / "
+                        f"({t_return:.1f}−{room_temp:.1f})) = {delta_t_h:.2f} K"
+                    )
+                else:
+                    delta_formula = "Temperaturdifferenz nicht positiv → 0 K"
+                dp_valve = float(balance.get("dp_valve_mbar", 0.0) or 0.0)
+                dp_reference = float(balance.get("dp_max_mbar", 0.0) or 0.0)
+                kv_value = float(balance.get("kv_value", 0.0) or 0.0)
+                input_text = (
+                    f"A = {area_m2:.2f} m²; Belag: {covering} (R_λ,B = {r_lambda:.2f} m²K/W); "
+                    f"Abstand = {spacing_mm:.0f} mm; T_Raum = {room_temp:.1f} °C"
+                )
+                thermal_text = (
+                    f"ΔT_H: {delta_formula}; K_H,0 = {kh_base:.2f}; "
+                    f"K_H = {kh_base:.2f} / (1 + {r_lambda:.2f}/0,10) = {kh:.2f}; "
+                    f"q = {kh:.2f} · {delta_t_h:.2f}^1,1 = {q_wm2:.1f} W/m²; "
+                    f"Q = q · A = {q_wm2:.1f} · {area_m2:.2f} = {power_w:.0f} W"
+                )
+                hydraulic_text = (
+                    f"V̇ = {power_w:.0f} / (4182 · 994 · ({t_supply:.1f}−{t_return:.1f})) · 60000 "
+                    f"= {flow_lmin:.2f} l/min; L_gesamt = {total_length_m:.2f} m; "
+                    f"D_i = {inner_diameter_mm:.1f} mm; D außen = {diameter_mm:.1f} mm; "
+                    f"Δp_Rohr = {float(row.get('pressure_drop_mbar', 0.0) or 0.0):.1f} mbar; "
+                    f"Δp_Referenz = {dp_reference:.1f} mbar; Δp_Ventil = {dp_valve:.1f} mbar; "
+                    f"Kv = {kv_value:.4f} m³/h"
+                )
+                detailed_rows.append([
+                    f"{row.get('id', '')} – {row.get('name', '')}",
+                    input_text,
+                    f"Wärme: {thermal_text}\nHydraulik: {hydraulic_text}",
+                ])
+
+            self._pdf_new_page(painter, writer)
+            self._draw_pdf_table(
+                painter,
+                writer,
+                f"{title} – Einzelberechnung je Raum",
+                ["Heizkreis / Raum", "Eingangswerte", "Rechenweg und Ergebnisse"],
+                detailed_rows,
+                col_widths=[1.1, 2.2, 5.5],
+                wrap_columns={0, 1, 2},
             )
             return
 

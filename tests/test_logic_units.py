@@ -29,8 +29,8 @@ def test_heating_specific_output_reference_range():
         r_lambda_b=r_lambda,
     )
 
-    # Reference run is around 46.1 W/m2 for this setup.
-    assert 40.0 <= q_wm2 <= 52.0
+    # q = 3.20 / 1.10 * (5 / ln(1.5)) ** 1.1 = about 46.2 W/m².
+    assert abs(q_wm2 - 46.2) < 0.2
 
 
 def test_calc_circuit_uses_total_pipe_length_for_pressure_drop():
