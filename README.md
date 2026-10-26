@@ -57,6 +57,22 @@ Farbe; die Legende steht unter dem Diagramm. Nicht berechenbare Kreise werden
 im Status genannt. CSV exportiert bei dieser Auswahl alle Kreise, sonst nur
 den ausgewählten Kreis.
 
+Im normalen **PDF-Export** kann über **Heizkurvenseite einfügen** eine eigene
+Diagrammseite angelegt werden. Die Heizkreise werden direkt im PDF-Dialog
+ausgewählt; neue Heizkurvenseiten wählen zunächst alle vorhandenen Kreise.
+Eine leere Auswahl bleibt leer und wird im PDF als Hinweis ausgegeben.
+Die Auswahl ist unabhängig von der aktuellen Diagrammansicht.
+
+Der PDF-Export berechnet die Kurven aus den gespeicherten Referenzwerten,
+dem eingestellten Außentemperaturbereich, der Heizgrenze und den aktuellen
+Projekt-/Raumtemperaturen neu. Das Analysefenster muss nicht geöffnet sein.
+Noch offene gültige Eingaben werden vor dem Export übernommen; ungültige
+offene Eingaben verhindern den Export statt still alte Werte zu verwenden.
+Fehlende Referenzwerte oder entfernte Heizkreise werden in der Legende benannt.
+Diagramm und Texte werden als Vektoren exportiert. Lange Legenden laufen auf
+Fortsetzungsseiten weiter, ohne die Schrift immer kleiner zu skalieren.
+Die Heizkreis-Detailseite mit Grundriss bleibt unverändert verfügbar.
+
 Jeder Heizkreis wird **unabhängig** berechnet. Es gibt keine gemeinsame
 Anlagenkurve und keine Auswahl unterschiedlicher Lastmodi in diesem Fenster.
 Fehlende oder fehlerhafte Daten eines anderen Kreises verhindern nicht die Kurve

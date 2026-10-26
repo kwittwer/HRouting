@@ -25,6 +25,10 @@ from model.computed import heating_length_overview
 REFERENCE_FIELDS = ("specific_heat_load_wm2", "reference_room_temp", "reference_outdoor_temp")
 
 
+def heating_curve_color(index):
+    return QColor.fromHsv((index * 137) % 360, 185, 180).name()
+
+
 class PlotView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,11 +42,11 @@ class PlotView(QGraphicsView):
         super().resizeEvent(event)
         self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
 
-    def set_series(self, series, x_label="Aussentemperatur [C]", y_label="Notwendiger Vorlauf [C]"):
+    def set_series(self, series, x_label="Aussentemperatur [C]", y_label="Notwendiger Vorlauf [C]", *, show_legend=True):
         self.series = series
         scene = self.scene()
         scene.clear()
-        legend_rows = (len(series) + 1) // 2 if len(series) > 1 else 0
+        legend_rows = (len(series) + 1) // 2 if show_legend and len(series) > 1 else 0
         self.setSceneRect(0, 0, 850, 350 + legend_rows * 24)
         valid = [(outside, supply) for _, _, points in series for outside, supply in points if supply is not None]
         outside_values = [outside for _, _, points in series for outside, _ in points]
@@ -86,6 +90,8 @@ class PlotView(QGraphicsView):
                 marker = scene.addEllipse(horizontal - 2, vertical - 2, 4, 4, pen)
                 marker.setToolTip(f"{name}: Aussen {outside:g} C, Vorlauf {supply:.1f} C")
             scene.addPath(path, pen).setToolTip(name)
+            if not show_legend:
+                continue
             if len(series) > 1:
                 horizontal, vertical = 90 + (index % 2) * 365, 350 + (index // 2) * 24
                 scene.addLine(horizontal, vertical + 10, horizontal + 20, vertical + 10, pen)
@@ -349,7 +355,7 @@ class HeatingCurveAnalysisWindow(QMainWindow):
         for index, (key, rows) in enumerate(self.result.items()):
             if key not in selected:
                 continue
-            color = QColor.fromHsv((index * 137) % 360, 185, 180).name()
+            color = heating_curve_color(index)
             name = f"{key} {rows[0]['name']}" if rows else key
             series.append((name, color, [(row["outdoor"], row["supply"]) for row in rows]))
         self.curve_plot.set_series(series)

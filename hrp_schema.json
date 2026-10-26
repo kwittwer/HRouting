@@ -1178,7 +1178,7 @@
         "id": { "type": "string", "description": "Eindeutige Seiten-ID." },
         "type": {
           "type": "string",
-          "enum": ["plan", "heating", "heating_circuit", "elektro", "elektro_room", "lengths", "hydraulics", "ap_stickers"],
+          "enum": ["plan", "heating", "heating_circuit", "heating_curve", "elektro", "elektro_room", "lengths", "hydraulics", "ap_stickers"],
           "description": "Seitentyp."
         },
         "title": { "type": "string" },

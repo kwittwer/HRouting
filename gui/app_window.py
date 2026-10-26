@@ -5863,6 +5863,7 @@ class AppWindow(QMainWindow):
                 "plan",
                 "heating",
                 "heating_circuit",
+                "heating_curve",
                 "lengths",
                 "hydraulics",
                 "elektro",
@@ -5878,6 +5879,11 @@ class AppWindow(QMainWindow):
                 "title": str(src.get("title") or "Seite"),
                 "enabled": bool(src.get("enabled", True)),
             }
+            if ptype == "heating_curve":
+                circuit_ids = src.get("circuit_ids")
+                page["circuit_ids"] = list(dict.fromkeys(
+                    str(value).strip() for value in circuit_ids if str(value).strip()
+                )) if isinstance(circuit_ids, list) else []
             if ptype == "elektro_topology":
                 page["root_ap_id"] = str(src.get("root_ap_id") or "").strip()
             if ptype == "ap_stickers":
@@ -6524,13 +6530,11 @@ class AppWindow(QMainWindow):
         }
 
     def _restore_all_visibility(self, saved: dict) -> None:
-        self.canvas._circuit_visible = dict(saved.get("circuit_visible", {}))
-        self.canvas._hkv_visible = dict(saved.get("hkv_visible", {}))
-        self.canvas._hkv_line_visible = dict(saved.get("hkv_line_visible", {}))
-        self.canvas._elec_visible = dict(saved.get("elec_visible", {}))
-        self.canvas._elec_room_visible = dict(saved.get("elec_room_visible", {}))
-        self.canvas._text_visible = dict(saved.get("text_visible", {}))
-        self.canvas._label_visible = dict(saved.get("label_visible", {}))
+        for key in ("circuit_visible", "hkv_visible", "hkv_line_visible", "elec_visible",
+                "elec_room_visible", "text_visible", "label_visible"):
+            mapping = getattr(self.canvas, f"_{key}")
+            mapping.clear()
+            mapping.update(saved.get(key, {}))
         for fid, vis in saved.get("floor_plan_visible", {}).items():
             layer = self.canvas._floor_plans.get(fid)
             if layer is not None:
@@ -8001,7 +8005,8 @@ class AppWindow(QMainWindow):
     ) -> int:
         from PySide6.QtGui import QPainter, QPicture  # noqa: PLC0415
 
-        saved_vis = self._save_all_visibility()
+        changes_visibility = any(page.get("type") not in ("heating_curve", "elektro_topology") for page in enabled_pages)
+        saved_vis = self._save_all_visibility() if changes_visibility else None
         self._pdf_prepare_footer()
         self._pdf_counting_only = True
         dummy = QPicture()
@@ -8013,7 +8018,7 @@ class AppWindow(QMainWindow):
             for idx, page in enumerate(enabled_pages):
                 if idx > 0:
                     self._pdf_new_page(painter, writer, portrait=False)
-                if str(page.get("type", "plan")).strip().lower() != "elektro_topology":
+                if str(page.get("type", "plan")).strip().lower() not in ("elektro_topology", "heating_curve"):
                     self._apply_page_visibility(page)
                 self._render_pdf_export_page(
                     painter,
@@ -8032,7 +8037,8 @@ class AppWindow(QMainWindow):
                 if painter.isActive():
                     painter.end()
             finally:
-                self._restore_all_visibility(saved_vis)
+                if saved_vis is not None:
+                    self._restore_all_visibility(saved_vis)
                 self._pdf_counting_only = False
                 self.canvas.update()
                 self._refresh_schema_windows()
@@ -8237,6 +8243,15 @@ class AppWindow(QMainWindow):
     ) -> None:
         ptype = str(page.get("type", "plan")).strip().lower()
         title = str(page.get("title") or "Seite").strip() or "Seite"
+
+        if ptype == "heating_curve":
+            from gui.pdf_heating_curve import prepare_heating_curve_pages
+
+            curves = (export_data or {}).get("heating_curve_pages")
+            if curves is None:
+                curves = prepare_heating_curve_pages(self._document, [page])
+            self._pdf_heating_curve_page(painter, writer, page, curves[page["id"]])
+            return
 
         if ptype == "ap_stickers":
             from gui.pdf_ap_stickers import collect_ap_stickers, draw_ap_sticker_sheet
@@ -8951,6 +8966,34 @@ class AppWindow(QMainWindow):
                             rows or [["", "Keine Hierarchie-Verbindungen vorhanden.", "", ""]],
                         )
 
+    def _heating_curve_pdf_layout(self, painter, writer, payload):
+        from gui.pdf_heating_curve import curve_page_layout
+
+        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        content_top = page_rect.y() + max(36.0, page_rect.height() * 0.06) + 8.0
+        content = QRectF(page_rect.x(), content_top, page_rect.width(),
+                         page_rect.bottom() - self._pdf_footer_reserved_height(page_rect) - content_top)
+        chart, chunks = curve_page_layout(painter, content, payload)
+        return content, chart, chunks
+
+    def _pdf_heating_curve_page(self, painter, writer, page, payload):
+        from gui.pdf_heating_curve import draw_heating_curve_sheet
+
+        content, chart, chunks = self._heating_curve_pdf_layout(painter, writer, payload)
+        for index, legend in enumerate(chunks):
+            if index:
+                self._pdf_new_page(painter, writer, portrait=False)
+            painter.save()
+            try:
+                page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+                title = str(page.get("title") or "Heizkurvenanalyse")
+                if len(chunks) > 1:
+                    title += f" ({index + 1}/{len(chunks)})"
+                self._draw_pdf_title(painter, page_rect, title)
+                draw_heating_curve_sheet(painter, content, payload, chart, legend)
+            finally:
+                painter.restore()
+
     def _continue_export_pdf(
         self,
         pages: list[dict],
@@ -8959,6 +9002,9 @@ class AppWindow(QMainWindow):
         output_path: str | None = None,
         show_progress: bool = True,
     ) -> dict:
+        if self._flush_live_editor_state() is False:
+            return {"status": "error", "code": "INVALID_EDITOR_INPUT"}
+        pages = copy.deepcopy(pages)
         enabled_pages = [p for p in pages if p.get("enabled", True)]
         if not enabled_pages:
             if show_progress:
@@ -8994,6 +9040,18 @@ class AppWindow(QMainWindow):
             progress.setValue(0)
         QApplication.processEvents()
 
+        from gui.pdf_heating_curve import prepare_heating_curve_pages
+
+        try:
+            curve_pages = prepare_heating_curve_pages(
+                self._document, enabled_pages,
+                cancelled=lambda: progress is not None and progress.wasCanceled(),
+            )
+        except InterruptedError:
+            if progress is not None:
+                progress.close()
+            return {"status": "cancelled"}
+
         painter = QPainter()
         if not painter.begin(writer):
             if progress is not None:
@@ -9002,11 +9060,13 @@ class AppWindow(QMainWindow):
                 QMessageBox.critical(self, "PDF-Export", "PDF konnte nicht erstellt werden.")
             return {"status": "error", "code": "PDF_WRITER_FAILED", "path": path}
 
-        saved_vis = self._save_all_visibility()
+        changes_visibility = any(page.get("type") not in ("heating_curve", "elektro_topology") for page in enabled_pages)
+        saved_vis = self._save_all_visibility() if changes_visibility else None
         cancelled = False
         self._pdf_prepare_footer()
         try:
             export_data = self._collect_export_data()
+            export_data["heating_curve_pages"] = curve_pages
             hk_rows = export_data.get("hk_rows", [])
             t_supply = float(export_data.get("t_supply", self._document.settings.get("t_supply", 35.0)))
             t_return = float(export_data.get("t_return", self._document.settings.get("t_return", 30.0)))
@@ -9023,14 +9083,18 @@ class AppWindow(QMainWindow):
                 )) + 11) // 12 - 1)
                 for page in enabled_pages if page.get("type") == "ap_stickers"
             )
-            meta["page_count"] = str(max(1, len(enabled_pages) + extra_sticker_pages + 1))
+            extra_curve_pages = sum(
+                len(self._heating_curve_pdf_layout(painter, writer, payload)[2]) - 1
+                for payload in curve_pages.values()
+            )
+            meta["page_count"] = str(max(1, len(enabled_pages) + extra_sticker_pages + extra_curve_pages + 1))
             self._draw_pdf_cover_page(painter, writer, meta)
             for idx, page in enumerate(enabled_pages):
                 if progress is not None and progress.wasCanceled():
                     cancelled = True
                     break
                 self._pdf_new_page(painter, writer, portrait=False)
-                if str(page.get("type", "plan")).strip().lower() != "elektro_topology":
+                if str(page.get("type", "plan")).strip().lower() not in ("elektro_topology", "heating_curve"):
                     self._apply_page_visibility(page)
                 self._render_pdf_export_page(
                     painter,
@@ -9054,7 +9118,8 @@ class AppWindow(QMainWindow):
             try:
                 painter.end()
             finally:
-                self._restore_all_visibility(saved_vis)
+                if saved_vis is not None:
+                    self._restore_all_visibility(saved_vis)
                 self.canvas.update()
                 self._refresh_schema_windows()
                 self.topology.refresh_now()

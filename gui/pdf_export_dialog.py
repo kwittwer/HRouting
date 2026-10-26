@@ -282,6 +282,9 @@ class PdfExportConfigDialog(QDialog):
         self.btn_add_ap_stickers = QPushButton("AP-Aufkleberbogen einfügen")
         self.btn_add_ap_stickers.clicked.connect(self._on_add_ap_stickers_page)
         left.addWidget(self.btn_add_ap_stickers)
+        self.btn_add_heating_curve = QPushButton("Heizkurvenseite einfügen")
+        self.btn_add_heating_curve.clicked.connect(self._on_add_heating_curve_page)
+        left.addWidget(self.btn_add_heating_curve)
 
         self.form = QFormLayout()
         right.addLayout(self.form)
@@ -557,6 +560,7 @@ class PdfExportConfigDialog(QDialog):
             "plan": "Plan",
             "heating": "Heizung",
             "heating_circuit": "Heizkreis-Detail",
+            "heating_curve": "Heizkurvenanalyse",
             "lengths": "Rohrlängen",
             "hydraulics": "Hydraulik",
             "elektro": "Elektro",
@@ -734,7 +738,7 @@ class PdfExportConfigDialog(QDialog):
             )
             supports_tables = ptype in ("heating", "elektro", "uv")
             supports_room_selection = ptype == "elektro_room"
-            supports_circuit_selection = ptype == "heating_circuit"
+            supports_circuit_selection = ptype in ("heating_circuit", "heating_curve")
             supports_topology_root = ptype == "elektro_topology"
             supports_uv_selection = ptype == "uv"
             supports_sticker_selection = ptype == "ap_stickers"
@@ -756,7 +760,7 @@ class PdfExportConfigDialog(QDialog):
                 uv_label.setVisible(supports_uv_selection)
             self.lbl_no_rooms.setVisible(not bool(self._room_checks))
             self.lbl_no_circuits.setVisible(not bool(self._circuit_checks))
-            self.lbl_non_plan.setVisible((not is_plan_like) and (not supports_topology_root) and (not supports_uv_selection) and (not supports_sticker_selection))
+            self.lbl_non_plan.setVisible((not is_plan_like) and (not supports_topology_root) and (not supports_uv_selection) and (not supports_sticker_selection) and (not supports_circuit_selection))
 
             if is_plan_like:
                 floor_plan_id = page.get("floor_plan_id")
@@ -1015,6 +1019,24 @@ class PdfExportConfigDialog(QDialog):
             | Qt.ItemIsSelectable
             | Qt.ItemIsEnabled
         )
+        item.setCheckState(0, Qt.Checked)
+        item.setData(0, Qt.UserRole, page)
+        self.tree.setCurrentItem(item)
+        self._update_page_count_field()
+
+    def _on_add_heating_curve_page(self):
+        page = {
+            "id": f"heating-curve-{uuid.uuid4().hex[:8]}",
+            "type": "heating_curve",
+            "title": "Heizkurvenanalyse",
+            "enabled": True,
+            "circuit_ids": [circuit_id for circuit_id, _ in self._heating_circuits],
+        }
+        item = QTreeWidgetItem(self.tree)
+        item.setText(0, page["title"])
+        item.setText(1, self._page_type_label(page))
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable
+                      | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
         item.setCheckState(0, Qt.Checked)
         item.setData(0, Qt.UserRole, page)
         self.tree.setCurrentItem(item)

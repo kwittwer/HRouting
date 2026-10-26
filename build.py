@@ -772,4 +772,3 @@ if __name__ == "__main__":
     
     # Only register filetype for the PyInstaller EXE, not the installer
     # (The installer handles file association via Registry integration)
-    # register_filetype(exe)
