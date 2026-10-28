@@ -1655,6 +1655,33 @@ def _create_mcp(window: MainWindow, bridge):
         def _modify():
             from PySide6.QtGui import QColor
 
+            if hasattr(window, "_document"):
+                from logic.heating_calc import FLOOR_COVERINGS
+
+                circuit = window._document.elements["circuits"].get(circuit_id)
+                if circuit is None:
+                    return {"error": f"Heizkreis '{circuit_id}' nicht gefunden."}
+                if floor_covering is not None and floor_covering not in FLOOR_COVERINGS:
+                    return {"error": f"Ungültiger Bodenbelag: '{floor_covering}'"}
+                changes = {
+                    key: value for key, value in {
+                        "name": name, "spacing": spacing, "diameter": diameter,
+                        "wall_dist": wall_dist, "room_temp": room_temp,
+                        "floor_covering": floor_covering, "color": color,
+                        "visible": visible,
+                    }.items() if value is not None
+                }
+                if changes:
+                    window._push_undo()
+                    circuit.data.update(changes)
+                    for key, value in changes.items():
+                        window._on_property_changed(circuit_id, key, value)
+                    window.properties.refresh_element(circuit_id)
+                return {
+                    "circuit_id": circuit_id, "status": "modified",
+                    "params": circuit.to_params(),
+                }
+
             panel = window.param_panel.circuit_panels.get(circuit_id)
             if not panel:
                 return {
@@ -3698,26 +3725,35 @@ def _create_mcp(window: MainWindow, bridge):
         def _calc():
             from logic.heating_calc import calc_circuit, FLOOR_COVERINGS
 
-            panel = window.param_panel.circuit_panels.get(circuit_id)
-            if not panel:
-                return {
-                    "error": f"Heizkreis '{circuit_id}' nicht gefunden."}
+            if hasattr(window, "_document"):
+                from model.computed import mm_per_px_for, polygon_area_px2, polyline_length_px
 
-            params = panel.get_parameters()
-            heat = window.param_panel.get_heating_params()
-            scale = window.canvas.get_mm_per_px()
+                document = window._document
+                circuit = document.elements["circuits"].get(circuit_id)
+                if circuit is None:
+                    return {"error": f"Heizkreis '{circuit_id}' nicht gefunden."}
+                params = circuit.to_params()
+                heat = {
+                    "t_supply": document.settings.get("t_supply", 35.0),
+                    "t_return": document.settings.get("t_return", 30.0),
+                }
+                scale = mm_per_px_for(document, circuit)
+                area_m2 = polygon_area_px2(circuit.polygon or []) * scale**2 / 1_000_000.0
+                route_oneway_m = polyline_length_px(circuit.route or []) * scale / 1000.0
+                supply_oneway_m = polyline_length_px(circuit.supply_line or []) * scale / 1000.0
+            else:
+                panel = window.param_panel.circuit_panels.get(circuit_id)
+                if not panel:
+                    return {"error": f"Heizkreis '{circuit_id}' nicht gefunden."}
+                params = panel.get_parameters()
+                heat = window.param_panel.get_heating_params()
+                scale = window.canvas.get_mm_per_px()
+                polygon = window.canvas._polygons.get(circuit_id, [])
+                from model.computed import polygon_area_px2
 
-            # Fläche
-            area_mm2 = window._compute_polygon_area_mm2(circuit_id)
-            area_m2 = (area_mm2 or 0.0) / 1_000_000.0
-
-            # Rohrlängen
-            route_oneway_m = (
-                window.canvas.get_manual_route_length_px(circuit_id)
-                * scale / 1000.0)
-            supply_oneway_m = (
-                window.canvas.get_supply_line_length_px(circuit_id)
-                * scale / 1000.0)
+                area_m2 = polygon_area_px2([(point.x(), point.y()) for point in polygon]) * scale**2 / 1_000_000.0
+                route_oneway_m = window.canvas.get_manual_route_length_px(circuit_id) * scale / 1000.0
+                supply_oneway_m = window.canvas.get_supply_line_length_px(circuit_id) * scale / 1000.0
             route_m = route_oneway_m * 2.0
             supply_m = supply_oneway_m * 2.0
             total_m = route_m + supply_m
@@ -3770,8 +3806,9 @@ def _create_mcp(window: MainWindow, bridge):
         Returns:
             Liste von Berechnungsergebnissen (wie calculate_heating).
         """
-        ids = invoke(
-            lambda: list(window.param_panel.circuit_panels.keys()))
+        ids = invoke(lambda: list(window._document.elements["circuits"])
+                 if hasattr(window, "_document")
+                 else list(window.param_panel.circuit_panels))
         return [calculate_heating(cid) for cid in ids]
 
     # ── Globale Parameter ──────────────────────────────────────────
@@ -5218,7 +5255,10 @@ def _create_mcp(window: MainWindow, bridge):
         """
         def _calc():
             from logic.heating_calc import calc_circuit, FLOOR_COVERINGS
-            p = _params_on_gui()
+            from model.computed import mm_per_px_for, polygon_area_px2, polyline_length_px
+
+            document = getattr(window, "_document", None)
+            p = document.to_dict()["params"] if document is not None else _params_on_gui()
             t_supply = p.get("t_supply", 35.0)
             t_return = p.get("t_return", 30.0)
             t_norm = p.get("t_norm_outdoor", -12.0)
@@ -5231,8 +5271,17 @@ def _create_mcp(window: MainWindow, bridge):
 
             for cid, cdata in p.get("circuits", {}).items():
                 try:
-                    area_mm2 = window._compute_polygon_area_mm2(cid)
-                    area_m2 = (area_mm2 or 0.0) / 1_000_000.0
+                    if document is not None:
+                        circuit = document.elements["circuits"][cid]
+                        scale = mm_per_px_for(document, circuit)
+                        area_m2 = polygon_area_px2(circuit.polygon or []) * scale**2 / 1_000_000.0
+                        route_oneway_m = polyline_length_px(circuit.route or []) * scale / 1000.0
+                        supply_oneway_m = polyline_length_px(circuit.supply_line or []) * scale / 1000.0
+                    else:
+                        polygon = window.canvas._polygons.get(cid, [])
+                        area_m2 = polygon_area_px2([(point.x(), point.y()) for point in polygon]) * mpp**2 / 1_000_000.0
+                        route_oneway_m = window.canvas.get_manual_route_length_px(cid) * mpp / 1000.0
+                        supply_oneway_m = window.canvas.get_supply_line_length_px(cid) * mpp / 1000.0
                     if area_m2 <= 0:
                         circuits_summary.append({
                             "circuit_id": cid,
@@ -5241,14 +5290,6 @@ def _create_mcp(window: MainWindow, bridge):
                         })
                         continue
 
-                    route_oneway_m = (
-                        window.canvas.get_manual_route_length_px(cid)
-                        * mpp / 1000.0
-                    )
-                    supply_oneway_m = (
-                        window.canvas.get_supply_line_length_px(cid)
-                        * mpp / 1000.0
-                    )
                     route_m = route_oneway_m * 2.0
                     supply_m = supply_oneway_m * 2.0
                     total_m = route_m + supply_m
@@ -6550,9 +6591,17 @@ def _create_mcp(window: MainWindow, bridge):
         """
         def _calc():
             from logic.heating_calc import calc_circuit, FLOOR_COVERINGS
-            p = _params_on_gui()
-            c = window.canvas.to_dict()
-            mpp = window.canvas._mm_per_px or 1.0
+            from model.computed import mm_per_px_for, polygon_area_px2, polyline_length_px
+
+            document = getattr(window, "_document", None)
+            if document is not None:
+                snapshot = document.to_dict()
+                p = snapshot["params"]
+                c = snapshot["canvas"]
+            else:
+                p = _params_on_gui()
+                c = window.canvas.to_dict()
+            mpp = window.canvas.get_mm_per_px() or 1.0
 
             hkv_data = p.get("hkv_points", {}).get(hkv_id)
             if not hkv_data:
@@ -6584,14 +6633,24 @@ def _create_mcp(window: MainWindow, bridge):
             max_pressure = 0.0
             for cid in connected_circuits:
                 cdata = p.get("circuits", {}).get(cid, {})
-                area_mm2 = window._compute_polygon_area_mm2(cid)
-                area_m2 = (area_mm2 or 0.0) / 1_000_000.0
-                route_m = (
-                    window.canvas.get_manual_route_length_px(cid) * mpp / 1000.0
-                )
-                supply_m = (
-                    window.canvas.get_supply_line_length_px(cid) * mpp / 1000.0
-                )
+                if document is not None:
+                    circuit = document.elements["circuits"].get(cid)
+                    if circuit is None:
+                        results.append({"circuit_id": cid, "error": "Heizkreis nicht gefunden."})
+                        continue
+                    scale = mm_per_px_for(document, circuit)
+                    polygon = circuit.polygon or []
+                    route = circuit.route or []
+                    supply = circuit.supply_line or []
+                else:
+                    scale = mpp
+                    polygon = c.get("polygons", {}).get(cid, [])
+                    route = c.get("manual_routes", {}).get(cid, [])
+                    supply = c.get("supply_lines", {}).get(cid, [])
+                area_m2 = polygon_area_px2(polygon) * scale**2 / 1_000_000.0
+                route_oneway_m = polyline_length_px(route) * scale / 1000.0
+                route_m = route_oneway_m * 2.0
+                supply_m = polyline_length_px(supply) * scale / 1000.0 * 2.0
                 if area_m2 <= 0:
                     results.append({"circuit_id": cid, "name": cdata.get("name", cid), "error": "Kein Polygon."})
                     continue
@@ -6606,7 +6665,7 @@ def _create_mcp(window: MainWindow, bridge):
                         spacing_cm=spacing_cm,
                         r_lambda_b=r_lambda_b,
                         area_m2=area_m2,
-                        pipe_length_m=route_m,
+                        pipe_length_m=route_oneway_m,
                         outer_diameter_mm=cdata.get("diameter", 16.0),
                         total_pipe_length_m=route_m + supply_m,
                     )
@@ -6618,7 +6677,9 @@ def _create_mcp(window: MainWindow, bridge):
                         "power_w": round(res.get("power_w", 0), 1),
                         "volume_flow_lmin": round(res.get("volume_flow_lmin", 0), 3),
                         "pressure_drop_mbar": round(pd_mbar, 1),
-                        "pipe_length_m": round(route_m, 1),
+                        "pipe_length_m": round(route_m, 2),
+                        "supply_length_m": round(supply_m, 2),
+                        "total_pipe_length_m": round(route_m + supply_m, 2),
                         "area_m2": round(area_m2, 2),
                     })
                 except Exception as e:
@@ -6629,8 +6690,8 @@ def _create_mcp(window: MainWindow, bridge):
                     excess = max_pressure - r["pressure_drop_mbar"]
                     r["throttle_mbar"] = round(excess, 1)
                     r["throttle_note"] = (
-                        "kein Drosselventil nötig" if excess <= 5
-                        else f"Strangregulierventil um {excess:.0f} mbar drosseln"
+                        "keine zusätzliche rechnerische Drosselung" if excess <= 5
+                        else f"zusätzlicher rechnerischer Druckverlust: {excess:.0f} mbar"
                     )
 
             total_flow = sum(r.get("volume_flow_lmin", 0) for r in results if "volume_flow_lmin" in r)
@@ -6643,6 +6704,11 @@ def _create_mcp(window: MainWindow, bridge):
                 "max_pressure_drop_mbar": round(max_pressure, 1),
                 "total_volume_flow_lmin": round(total_flow, 3),
                 "circuits": results,
+                "note": (
+                    "Rechnerische Druckdifferenzen der Rohrkreise, keine Ventilvoreinstellungen. "
+                    "Ventilkennlinien, Verteiler- und Zuleitungsverluste sowie verfügbarer "
+                    "Differenzdruck müssen für den hydraulischen Abgleich zusätzlich geprüft werden."
+                ),
             }
 
         return invoke(_calc)
