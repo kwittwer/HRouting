@@ -95,7 +95,7 @@ def _validate_schema_basic(data: dict) -> list[str]:
     params = data.get("params", {})
     if isinstance(params, dict):
         for field in ["circuits", "elec_points", "elec_rooms", "elec_cables",
-                       "hkv_points", "hkv_lines", "floorplans", "text_annotations",
+                       "hkv_points", "hkv_lines", "floorplans", "text_annotations", "photo_documentation",
                        "annotation_lines", "annotation_rectangles",
                        "annotation_polylines", "annotation_polygons", "annotation_circles",
                        "annotation_ellipses"]:
@@ -642,6 +642,45 @@ def validate_semantic(data: dict) -> tuple[list[str], list[str]]:
                     errors.append(f"[Reference] heating_curve_analysis.circuits.{circuit_id} existiert nicht.")
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as error:
             errors.append(f"[Value] heating_curve_analysis: {error}")
+
+    if "photo_documentation" in params:
+        photo_config = params["photo_documentation"]
+        try:
+            from model.photo_documentation import validate_config as validate_photo_config
+
+            issues = validate_photo_config(photo_config)
+            surfaces = photo_config.get("surfaces", {}) if isinstance(photo_config, dict) else {}
+            surfaces = surfaces if isinstance(surfaces, dict) else {}
+            assignments = photo_config.get("assignments", {}) if isinstance(photo_config, dict) else {}
+            assignments = assignments if isinstance(assignments, dict) else {}
+            regions = photo_config.get("regions", {}) if isinstance(photo_config, dict) else {}
+            regions = regions if isinstance(regions, dict) else {}
+            for issue in issues:
+                stale = "stale" in issue.casefold()
+                if "missing/stale surface" in issue:
+                    element_id = issue.split(":", 1)[0]
+                    region = regions.get(element_id, {})
+                    surface_id = (region.get("surface_id") if isinstance(region, dict) else None)
+                    surface_id = assignments.get(element_id, surface_id)
+                    if not isinstance(surface_id, str) or surface_id not in surfaces:
+                        stale = False
+                        issue = issue.replace("missing/stale surface", "missing surface")
+                (warnings if stale else errors).append(f"[Photo] {issue}")
+            for point_id in assignments:
+                if point_id not in ap_ids:
+                    warnings.append(f"[Photo] assignments.{point_id}: deleted AP; historical assignment retained.")
+            for surface_id, surface in surfaces.items():
+                if not isinstance(surface, dict):
+                    continue
+                if surface.get("room_id") not in er_ids:
+                    target = warnings if surface.get("status") == "stale" else errors
+                    target.append(f"[Photo] {surface_id}: unknown source room {surface.get('room_id')!r}.")
+                floor_plan_id = surface.get("floor_plan_id", "")
+                if isinstance(floor_plan_id, str) and floor_plan_id and floor_plan_id not in all_layer_ids:
+                    target = warnings if surface.get("status") == "stale" else errors
+                    target.append(f"[Photo] {surface_id}: unknown source floor plan {floor_plan_id!r}.")
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError, ImportError) as error:
+            errors.append(f"[Photo] photo_documentation: {error}")
 
     return errors, warnings
 

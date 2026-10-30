@@ -319,6 +319,7 @@ class AppWindow(QMainWindow):
         self._grid_toolbar: QToolBar | None = None
         self._schaltplan_window: SchaltplanWindow | None = None
         self._heating_curve_window = None
+        self._photo_documentation_window = None
         self._pdf_export_pages: list[dict] = []
         self._pdf_export_meta: dict[str, str] = {}
         self._annotation_live_value_cache: dict[str, tuple] = {}
@@ -559,6 +560,7 @@ class AppWindow(QMainWindow):
         self._add_action(view_menu, "Elektro-Topologie anzeigen", self._show_topology_dock)
         self._add_action(view_menu, "Schaltplan…", self._open_schaltplan_window)
         self._add_action(view_menu, "Heizkurvenanalyse…", self._open_heating_curve_window)
+        self._add_action(view_menu, "Fotodokumentation…", self._open_photo_documentation_window)
         self._sensor_coverage_action = self._add_action(
             view_menu, "Erfassungsbereiche anzeigen", self._on_sensor_coverage_toggled
         )
@@ -1799,6 +1801,7 @@ class AppWindow(QMainWindow):
         self._restoring_snapshot = True
         try:
             restore_started = time.perf_counter() if perf_mode else 0.0
+            snapshot = self._retain_issued_photo_markers(snapshot)
             self._document.restore(snapshot)
             restore_done = time.perf_counter() if perf_mode else 0.0
             self._pdf_export_pages = self._normalize_pdf_export_pages(
@@ -1860,6 +1863,8 @@ class AppWindow(QMainWindow):
             self._last_document_snapshot = self._document.snapshot()
             if self._heating_curve_window is not None:
                 self._heating_curve_window.set_document(self._document)
+            if self._photo_documentation_window is not None:
+                self._photo_documentation_window.set_document(self._document, self._project_path)
             if perf_mode:
                 total_ms = (time.perf_counter() - perf_started) * 1000.0
                 self.log.info(
@@ -2151,6 +2156,9 @@ class AppWindow(QMainWindow):
         self._last_document_snapshot = self._document.snapshot()
         if self._heating_curve_window is not None:
             self._heating_curve_window.set_document(document)
+
+        if self._photo_documentation_window is not None:
+            self._photo_documentation_window.set_document(document, self._project_path)
 
     def _normalize_loaded_cable_bindings(self, document: Document) -> None:
         """Bring mirrored cable endpoint fields back into sync on load.
@@ -4383,6 +4391,8 @@ class AppWindow(QMainWindow):
             self.log.error(f"Speichern fehlgeschlagen: {exc}")
             return False
         self._dirty = False
+        if self._photo_documentation_window is not None:
+            self._photo_documentation_window.project_path = self._project_path
         self._remember_project_path(self._project_path)
         self._update_title()
         self._update_git_action_state()
@@ -4391,6 +4401,8 @@ class AppWindow(QMainWindow):
 
     def _flush_live_editor_state(self) -> bool:
         """Persist open non-modal editors before save/export reads the document."""
+        if self._photo_documentation_window is not None and not self._photo_documentation_window.save_settings():
+            return False
         if self._heating_curve_window is not None and not self._heating_curve_window.save_settings():
             self._heating_curve_window.show()
             self._heating_curve_window.raise_()
@@ -4903,8 +4915,14 @@ class AppWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Projekt speichern", "", _FILE_FILTER)
         if not path:
             return False
+        if self._photo_documentation_window is not None:
+            self._photo_documentation_window.cancel_import()
+        previous_path = self._project_path
         self._project_path = Path(path)
-        return self._save_project()
+        if self._save_project():
+            return True
+        self._project_path = previous_path
+        return False
 
     def _repair_project(self) -> bool:
         if self._project_path is None:
@@ -5603,6 +5621,94 @@ class AppWindow(QMainWindow):
         self._heating_curve_window.raise_()
         self._heating_curve_window.activateWindow()
 
+    def _open_photo_documentation_window(self) -> None:
+        if self._project_path is None and not self._save_project_as():
+            return
+        if self._photo_documentation_window is None:
+            from .photo_documentation_window import PhotoDocumentationWindow
+
+            self._photo_documentation_window = PhotoDocumentationWindow(self)
+            self._photo_documentation_window.config_changed.connect(self._save_photo_documentation)
+            self._photo_documentation_window.save_requested.connect(self._save_project)
+            self._photo_documentation_window.markers_requested.connect(self._export_photo_markers)
+            self._photo_documentation_window.set_document(self._document, self._project_path)
+        elif self._photo_documentation_window.isHidden():
+            self._photo_documentation_window.set_document(self._document, self._project_path)
+        self._photo_documentation_window.show()
+        self._photo_documentation_window.raise_()
+        self._photo_documentation_window.activateWindow()
+
+    def _save_photo_documentation(self, config: dict) -> None:
+        if self._document.settings.get("photo_documentation") == config:
+            return
+        self._push_undo()
+        self._document.settings["photo_documentation"] = copy.deepcopy(config)
+        self._mark_dirty()
+
+    def _export_photo_markers(self) -> None:
+        self._continue_export_pdf(
+            [{"id": "photo-markers", "type": "ap_stickers", "title": "Dokumentationsaufkleber",
+              "enabled": True, "documentation_mode": True, "include_references": True}],
+            self._pdf_export_meta,
+        )
+
+    def _retain_issued_photo_markers(self, snapshot: dict) -> dict:
+        current = self._document.settings.get("photo_documentation", {})
+        issued = {key: value for key, value in current.get("markers", {}).items() if value.get("issued")}
+        if not issued:
+            return snapshot
+        from model.photo_documentation import default_config, ensure_surfaces
+
+        snapshot = copy.deepcopy(snapshot)
+        restored = snapshot.setdefault("params", {}).setdefault("photo_documentation", default_config())
+        restored["project_uuid"] = current["project_uuid"]
+        restored["dictionary"] = copy.deepcopy(current["dictionary"])
+        registry = restored.setdefault("markers", {})
+        for marker_id, record in issued.items():
+            if marker_id not in registry:
+                registry[marker_id] = copy.deepcopy(record)
+            registry[marker_id]["issued"] = True
+            surface_id = record.get("surface_id")
+            if surface_id and surface_id not in restored.setdefault("surfaces", {}):
+                restored["surfaces"][surface_id] = copy.deepcopy(current["surfaces"][surface_id])
+        ensure_surfaces(Document.from_dict(snapshot), restored)
+        return snapshot
+
+    def _prepare_documentation_export(self, pages: list[dict]) -> dict:
+        from gui.pdf_ap_stickers import documentation_sticker_pages, prepare_documentation_stickers
+        from logic.photo_markers import add_reference_marker, ensure_markers
+        from model.photo_documentation import ensure_surfaces, get_config
+
+        selected = [page for page in pages if page.get("type") == "ap_stickers" and page.get("documentation_mode")]
+        if not selected:
+            return {}
+        if self._photo_documentation_window is not None:
+            self._photo_documentation_window.cancel_import()
+        config = ensure_surfaces(self._document, get_config(self._document))
+        point_ids = {point.id for point in self._document.elements["elec_points"].values()
+                     if any(not page.get("room_id") or page["room_id"] == self._resolve_existing_ap_room_id(point)
+                            for page in selected)}
+        ensure_markers(self._document, config, sorted(point_ids))
+        for surface_id, surface in config["surfaces"].items():
+            if (surface.get("status") == "current"
+                    and any(page.get("include_references", True)
+                            and (not page.get("room_id") or page["room_id"] == surface.get("room_id"))
+                            for page in selected)
+                    and not any(marker.get("surface_id") == surface_id and not marker.get("point_id")
+                                for marker in config["markers"].values())):
+                add_reference_marker(config, surface_id)
+        for marker in config["markers"].values():
+            marker["issued"] = True
+        self._save_photo_documentation(config)
+        if self._photo_documentation_window is not None:
+            self._photo_documentation_window.set_document(self._document, self._project_path)
+        if not self._save_project():
+            raise InterruptedError("Markerregister wurde nicht gespeichert.")
+        return {page["id"]: documentation_sticker_pages(prepare_documentation_stickers(
+            self._document, self._resolve_existing_ap_room_id, str(page.get("room_id") or ""),
+            page.get("include_references", True),
+        )) for page in selected}
+
     def _save_heating_curve_config(self, config: dict, norm_outdoor: float) -> None:
         config = copy.deepcopy(config)
         config["circuits"] = {key: value for key, value in config["circuits"].items()
@@ -5888,6 +5994,9 @@ class AppWindow(QMainWindow):
                 page["root_ap_id"] = str(src.get("root_ap_id") or "").strip()
             if ptype == "ap_stickers":
                 page["room_id"] = str(src.get("room_id") or "").strip()
+                if "documentation_mode" in src:
+                    page["documentation_mode"] = bool(src["documentation_mode"])
+                    page["include_references"] = bool(src.get("include_references", True))
             if ptype == "uv":
                 page["uv_ap_id"] = str(src.get("uv_ap_id") or "").strip()
                 page["table_sections"] = list(src.get("table_sections") or ["el_uv"])
@@ -6451,6 +6560,16 @@ class AppWindow(QMainWindow):
             room_id = self._resolve_existing_ap_room_id(point)
             if room_id:
                 sticker_room_counts[room_id] = sticker_room_counts.get(room_id, 0) + 1
+        from model.photo_documentation import ensure_surfaces, get_config
+
+        photo_config = ensure_surfaces(self._document, get_config(self._document))
+        sticker_reference_counts = {"": 0}
+        for surface in photo_config["surfaces"].values():
+            if surface.get("status") == "current":
+                room_id = surface.get("room_id", "")
+                sticker_reference_counts[""] += 1
+                if room_id:
+                    sticker_reference_counts[room_id] = sticker_reference_counts.get(room_id, 0) + 1
         dialog = PdfExportConfigDialog(
             pages=pages,
             floor_plans=self._current_floor_plans_for_export_dialog(),
@@ -6468,6 +6587,7 @@ class AppWindow(QMainWindow):
             canvas=self.canvas,
             parent=self,
             sticker_room_counts=sticker_room_counts,
+            sticker_reference_counts=sticker_reference_counts,
         )
         if dialog.exec() != QDialog.Accepted:
             return None
@@ -8256,6 +8376,24 @@ class AppWindow(QMainWindow):
         if ptype == "ap_stickers":
             from gui.pdf_ap_stickers import collect_ap_stickers, draw_ap_sticker_sheet
 
+            if page.get("documentation_mode"):
+                from gui.pdf_ap_stickers import (
+                    documentation_sticker_pages, draw_documentation_sticker_sheet, prepare_documentation_stickers,
+                )
+
+                sheets = (export_data or {}).get("documentation_sticker_pages", {}).get(page["id"])
+                if sheets is None:
+                    sheets = documentation_sticker_pages(prepare_documentation_stickers(
+                        self._document, self._resolve_existing_ap_room_id, str(page.get("room_id") or ""),
+                        page.get("include_references", True),
+                    ))
+                for sheet_index, sheet in enumerate(sheets):
+                    if sheet_index:
+                        self._pdf_new_page(painter, writer)
+                    draw_documentation_sticker_sheet(
+                        painter, writer, sheet, self._document.settings.get("photo_documentation", {}),
+                    )
+                return
             stickers = collect_ap_stickers(
                 self._document, self._resolve_existing_ap_room_id, str(page.get("room_id") or "")
             )
@@ -9021,6 +9159,14 @@ class AppWindow(QMainWindow):
             )
         if not path:
             return {"status": "cancelled"}
+        try:
+            documentation_pages = self._prepare_documentation_export(enabled_pages)
+        except InterruptedError:
+            return {"status": "cancelled"}
+        except Exception as exc:
+            if show_progress:
+                QMessageBox.critical(self, "Dokumentationsaufkleber", str(exc))
+            return {"status": "error", "code": "MARKER_PREPARATION_FAILED", "message": str(exc)}
         if show_progress:
             self._remember_pdf_export_path(Path(path))
 
@@ -9060,13 +9206,14 @@ class AppWindow(QMainWindow):
                 QMessageBox.critical(self, "PDF-Export", "PDF konnte nicht erstellt werden.")
             return {"status": "error", "code": "PDF_WRITER_FAILED", "path": path}
 
-        changes_visibility = any(page.get("type") not in ("heating_curve", "elektro_topology") for page in enabled_pages)
+        changes_visibility = any(page.get("type") not in ("heating_curve", "elektro_topology", "ap_stickers") for page in enabled_pages)
         saved_vis = self._save_all_visibility() if changes_visibility else None
         cancelled = False
         self._pdf_prepare_footer()
         try:
             export_data = self._collect_export_data()
             export_data["heating_curve_pages"] = curve_pages
+            export_data["documentation_sticker_pages"] = documentation_pages
             hk_rows = export_data.get("hk_rows", [])
             t_supply = float(export_data.get("t_supply", self._document.settings.get("t_supply", 35.0)))
             t_return = float(export_data.get("t_return", self._document.settings.get("t_return", 30.0)))
@@ -9078,6 +9225,7 @@ class AppWindow(QMainWindow):
             from gui.pdf_ap_stickers import collect_ap_stickers
 
             extra_sticker_pages = sum(
+                (len(documentation_pages[page["id"]]) - 1) if page.get("documentation_mode") else
                 max(0, (len(collect_ap_stickers(
                     self._document, self._resolve_existing_ap_room_id, str(page.get("room_id") or "")
                 )) + 11) // 12 - 1)
@@ -9094,7 +9242,7 @@ class AppWindow(QMainWindow):
                     cancelled = True
                     break
                 self._pdf_new_page(painter, writer, portrait=False)
-                if str(page.get("type", "plan")).strip().lower() not in ("elektro_topology", "heating_curve"):
+                if str(page.get("type", "plan")).strip().lower() not in ("elektro_topology", "heating_curve", "ap_stickers"):
                     self._apply_page_visibility(page)
                 self._render_pdf_export_page(
                     painter,
@@ -10412,5 +10560,8 @@ class AppWindow(QMainWindow):
         if self._heating_curve_window is not None:
             self._heating_curve_window.cancel_analysis()
             self._heating_curve_window.hide()
+        if self._photo_documentation_window is not None:
+            self._photo_documentation_window.cancel_import()
+            self._photo_documentation_window.hide()
         event.accept()
 

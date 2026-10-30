@@ -79,6 +79,7 @@ class PdfExportConfigDialog(QDialog):
         canvas=None,
         parent=None,
         sticker_room_counts: dict[str, int] | None = None,
+        sticker_reference_counts: dict[str, int] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("PDF-Export konfigurieren")
@@ -97,6 +98,7 @@ class PdfExportConfigDialog(QDialog):
         self._floor_plans = list(floor_plans)
         self._elec_rooms = list(elec_rooms or [])
         self._sticker_room_counts = dict(sticker_room_counts or {})
+        self._sticker_reference_counts = dict(sticker_reference_counts or {})
         self._heating_circuits = list(heating_circuits or [])
         self._topology_roots = list(topology_roots or [])
         self._uv_points = list(uv_points or [])
@@ -317,6 +319,14 @@ class PdfExportConfigDialog(QDialog):
             self.cb_sticker_room.addItem(room_name or room_id, room_id)
         self.cb_sticker_room.currentIndexChanged.connect(self._on_sticker_room_changed)
         self.form.addRow("Aufkleber-Raum", self.cb_sticker_room)
+
+        self.cb_documentation_mode = QCheckBox("Messmarker / Fotodokumentation")
+        self.cb_documentation_mode.toggled.connect(self._on_documentation_mode_changed)
+        self.form.addRow(self.cb_documentation_mode)
+        self.cb_include_references = QCheckBox("Flächenreferenzen mitdrucken")
+        self.cb_include_references.setChecked(True)
+        self.cb_include_references.toggled.connect(self._on_include_references_changed)
+        self.form.addRow(self.cb_include_references)
 
         self.plan_group = QGroupBox("Plan-Einstellungen")
         right.addWidget(self.plan_group)
@@ -541,8 +551,14 @@ class PdfExportConfigDialog(QDialog):
             if item is not None and item.checkState(0) == Qt.Checked:
                 page = item.data(0, Qt.UserRole)
                 if isinstance(page, dict) and page.get("type") == "ap_stickers":
-                    count = self._sticker_room_counts.get(str(page.get("room_id") or ""), 0)
-                    enabled += max(1, (count + 11) // 12)
+                    room_id = str(page.get("room_id") or "")
+                    count = self._sticker_room_counts.get(room_id, 0)
+                    if page.get("documentation_mode", False):
+                        if page.get("include_references", True):
+                            count += self._sticker_reference_counts.get(room_id, 0)
+                        enabled += max(1, count)
+                    else:
+                        enabled += max(1, (count + 11) // 12)
                 else:
                     enabled += 1
         return enabled
@@ -662,6 +678,8 @@ class PdfExportConfigDialog(QDialog):
     def _select_first_item(self):
         if self.tree.topLevelItemCount() > 0:
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        else:
+            self._load_editor_from_current()
 
     def _current_item(self) -> QTreeWidgetItem | None:
         return self.tree.currentItem()
@@ -719,6 +737,10 @@ class PdfExportConfigDialog(QDialog):
             if not has_item:
                 self.le_title.clear()
                 self.cb_enabled.setChecked(False)
+                self.cb_sticker_room.setVisible(False)
+                self.form.labelForField(self.cb_sticker_room).setVisible(False)
+                self.cb_documentation_mode.setVisible(False)
+                self.cb_include_references.setVisible(False)
                 self.plan_group.setVisible(False)
                 self.lbl_non_plan.setVisible(True)
                 self.btn_remove.setEnabled(False)
@@ -744,6 +766,11 @@ class PdfExportConfigDialog(QDialog):
             supports_sticker_selection = ptype == "ap_stickers"
             self.cb_sticker_room.setVisible(supports_sticker_selection)
             self.form.labelForField(self.cb_sticker_room).setVisible(supports_sticker_selection)
+            self.cb_documentation_mode.setVisible(supports_sticker_selection)
+            self.cb_include_references.setVisible(supports_sticker_selection)
+            self.cb_documentation_mode.setChecked(bool(page.get("documentation_mode", False)))
+            self.cb_include_references.setChecked(bool(page.get("include_references", True)))
+            self.cb_include_references.setEnabled(bool(page.get("documentation_mode", False)))
             if supports_sticker_selection:
                 self.cb_sticker_room.setCurrentIndex(max(0, self.cb_sticker_room.findData(str(page.get("room_id") or ""))))
             self.plan_group.setVisible(is_plan_like)
@@ -937,6 +964,8 @@ class PdfExportConfigDialog(QDialog):
             "title": "AP-Aufkleber",
             "enabled": True,
             "room_id": "",
+            "documentation_mode": False,
+            "include_references": True,
         }
         item = QTreeWidgetItem(self.tree)
         item.setText(0, page["title"])
@@ -946,6 +975,15 @@ class PdfExportConfigDialog(QDialog):
         item.setCheckState(0, Qt.Checked)
         item.setData(0, Qt.UserRole, page)
         self.tree.setCurrentItem(item)
+        self._update_page_count_field()
+
+    def _on_documentation_mode_changed(self, checked: bool):
+        self._update_current_page(lambda page: page.__setitem__("documentation_mode", bool(checked)))
+        self.cb_include_references.setEnabled(checked)
+        self._update_page_count_field()
+
+    def _on_include_references_changed(self, checked: bool):
+        self._update_current_page(lambda page: page.__setitem__("include_references", bool(checked)))
         self._update_page_count_field()
 
     def _on_add_elektro_room_page(self):

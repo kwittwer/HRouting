@@ -299,6 +299,8 @@ def build_exe(version: str) -> Path:
         "--hidden-import", "logic.heating_calc",
         "--hidden-import", "mcp_server",
         "--hidden-import", "validate_hrp",
+        "--hidden-import", "cv2",
+        "--hidden-import", "PIL.ImageOps",
         # MCP-Server-Abhängigkeiten – collect-submodules für dynamische Pakete
         "--collect-submodules", "mcp",
         "--collect-submodules", "uvicorn",

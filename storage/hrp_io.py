@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 from model.document import Document
@@ -12,6 +14,7 @@ from .asset_data_uri import encode_file_to_data_uri, is_data_uri
 from .migration import CURRENT_HRP_FORMAT_VERSION, FORMAT_VERSION_KEY
 from .migration import migrate_raw
 from .hrp_repair import repair_hrp_data
+from .photo_assets import copy_project_photos
 
 
 def load_raw(path: str | Path) -> dict:
@@ -34,8 +37,20 @@ def save_raw(raw: dict, path: str | Path) -> None:
     raw[FORMAT_VERSION_KEY] = CURRENT_HRP_FORMAT_VERSION
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(raw, handle, indent=2, ensure_ascii=False)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(raw, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def load_document(path: str | Path) -> Document:
@@ -52,7 +67,10 @@ def load_document_with_migration_info(path: str | Path) -> tuple[Document, bool]
 
 def save_document(doc: Document, path: str | Path) -> None:
     target = Path(path)
-    raw = _embed_assets_for_save(doc.to_dict(), target, doc)
+    raw = doc.to_dict()
+    source = getattr(doc, "source_path", None) or target
+    copy_project_photos(raw, source, target)
+    raw = _embed_assets_for_save(raw, target, doc)
     save_raw(raw, target)
     doc.source_path = Path(path)  # type: ignore[attr-defined]
 

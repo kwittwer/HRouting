@@ -162,6 +162,71 @@ Lange Beschriftungen werden umgebrochen und bei Bedarf verkleinert.
 Für maßhaltige Aufkleber im Druckdialog **Tatsächliche Größe / 100 %** wählen
 und die Option zur Anpassung an die Seitengröße deaktivieren.
 
+## Fotodokumentation und Messung
+
+Unter **Ansicht → Fotodokumentation** öffnet sich ein eigenes Fenster. Das
+Projekt muss zuerst gespeichert werden. Die Verarbeitung erfolgt lokal.
+
+1. Über **Flächen vorbereiten** die Wandseiten, Boden- und Deckenflächen aus
+   den Elektro-Raumpolygonen anlegen. Unter **APs den Flächen zuordnen** die
+   vorgeschlagene Wand oder Fläche bestätigen; Raumecken bleiben bewusst unklar.
+   In der Grundrissübersicht bezeichnet **A** den Ursprung und **B** die positive
+   horizontale Richtung der gewählten Fläche.
+2. **Messmarker registrieren und exportieren** erzeugt Dokumentationsaufkleber
+   für APs und zusätzliche Flächenreferenzen. Alternativ im PDF-Export einen
+   AP-Aufkleberbogen anlegen und **Messmarker / Fotodokumentation** aktivieren.
+   Die Kennungen werden vor der PDF-Ausgabe mit dem Projekt gespeichert.
+   AP-Muster haben 80 mm, zusätzliche Referenzmuster 120 mm schwarze Kantenlänge.
+   Zunächst steht jeweils ein Marker auf einer A4-Seite, mit Beschriftung,
+   Ausrichtung und einer 100-mm-Kontrollstrecke. Die bisherigen 60-mm-Bögen
+   bleiben unverändert verfügbar.
+3. Bei **100 % / Originalgröße** drucken und die Kontrollstrecke nachmessen.
+   Den Marker flach und unverdeckt auf dieselbe Ebene kleben, die später
+   gemessen werden soll. Bezug zum AP ist die **Markermitte**, nicht ein
+   versetzter Geräte- oder Bohrmittelpunkt. Für große Bildbereiche zusätzliche
+   Referenzen verteilen. Marker nicht über Kanten kleben.
+4. Für absolute Abstände unter **Gemessene Markerreferenz / FFB** die tatsächlich
+   gemessene Markermitte und Ausrichtung eintragen. An Wänden ist `u` der Abstand
+   ab A und `v` die Höhe über Fertigfußboden. Bei Bezug zum Rohboden wird der
+   erfasste Bodenaufbau abgezogen. Diese Ist-Referenzen werden nicht aus
+   geplanten AP-Höhen erfunden. Ohne eingemessene Referenz sind lokale Strecken
+   möglich, aber keine absoluten FFB- oder Eckabstände.
+5. JPG-/JPEG-/PNG-Fotos importieren. Erkannte Marker, APs und zugehörige Flächen
+   werden automatisch ausgewertet. Jede im Foto erkannte Ebene bekommt ihre
+   eigene Kalibrierung. Unbekannte oder nicht zugeordnete Bilder bleiben als
+   Dokumentation erhalten; Zuordnungen lassen sich korrigieren und Fotos erneut
+   analysieren. Import und Analyse sind abbrechbar.
+6. Im Foto eine kalibrierte Fläche auswählen und über **Messbereich: vier
+   Eckpunkte** ihren sichtbaren ebenen Bereich abgrenzen. Innerhalb dieses
+   Bereichs stehen Strecke, Horizontal-/Vertikalabstand, FFB, Wandursprung A und
+   Abstand zur AP-Markermitte zur Verfügung. Original- und entzerrte Ansicht
+   verwenden dieselben Messkoordinaten. Ein unabhängig gemessenes **Kontrollmaß**
+   zeigt die Abweichung der Kalibrierung; eine Abweichung bis 20 mm wird als
+   geprüft gekennzeichnet, ist aber keine Genauigkeitsgarantie für andere Punkte.
+
+Fotos können mit Notiz und Bauzustand versehen werden. Messungen lassen sich
+benennen, löschen und per Undo/Redo zurücknehmen. Änderungen an Raumgeometrie,
+Flächenzuordnung oder Referenzen sperren veraltete Kalibrierungen, statt alte
+Messwerte still an neue Planmaße anzupassen. Bereits ausgegebene Markerkennungen
+werden auch beim Rückgängigmachen nicht an andere APs vergeben.
+
+Die HRP-Datei enthält Zuordnungen, Markerregister, Kalibrierungen und Messungen.
+Originalfotos liegen unverändert unter `photos/<Projektkennung>/` neben dem
+Projekt. **HRP-Datei und Fotoordner gemeinsam weitergeben.** Beim Speichern unter
+einem anderen Ordner werden benötigte Fotos mitkopiert. Datei-Hashes erkennen
+ersetzte Originale; fehlende Fotos können mit dem identischen Original neu
+verknüpft werden. Gelöschte Fotos werden nicht sofort physisch entfernt, damit
+Undo weiterhin funktioniert.
+
+**Grenzen der ersten Version:** Perspektiventzerrung gilt nur für die gewählte
+Ebene, nicht für Tiefen oder Messungen um Raumecken. Vor- oder zurückliegende
+Leitungen verursachen Parallaxe. Kleine, unscharfe oder stark schräg aufgenommene
+Marker sind keine verlässliche Referenz für eine ganze Wand. Objektivverzeichnung
+ist noch ungeprüft; insbesondere Ultraweitwinkel vermeiden. Das Ziel von etwa
+1–2 cm muss mit echten Aufnahmen und Kontrollmaßen überprüft werden. Die Funktion
+liefert keine Bohrfreigabe. Panoramen, HEIC/RAW, 3D-Rekonstruktion und automatische
+Kamerakalibrierung sind nicht enthalten.
+
 ## Projektformat (.hrp)
 
 HRouting speichert Projekte als JSON mit der Endung `.hrp`.

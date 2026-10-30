@@ -7,6 +7,9 @@ markdown>=3.5
 jsonschema>=4.20
 pytest>=7.0
 pytest-timeout>=2.1
+numpy>=1.26,<3
+opencv-python-headless>=4.10,<5
+Pillow>=10.0
 
 # MCP-Server (optional – App läuft auch ohne)
 mcp[cli]>=1.0
