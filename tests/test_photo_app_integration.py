@@ -151,7 +151,7 @@ def test_real_png_marker_import_measure_save_reload(window, tmp_path):
     assert editor.set_region_mask([[50, 50], [950, 50], [950, 750], [50, 750]])
     measurement_id = editor.create_measurement([[350, 350], [600, 350]])
     value = editor.config["measurements"][measurement_id]["value_mm"]
-    assert value == pytest.approx(50, abs=1)
+    assert value == pytest.approx(250 * config["markers"]["MARK-1"]["side_mm"] / 400, abs=1)
     assert validate_config(editor.config) == []
     assert window._save_project()
     reloaded = load_document(window._project_path)

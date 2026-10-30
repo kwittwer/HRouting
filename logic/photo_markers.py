@@ -14,6 +14,21 @@ from model.photo_documentation import _next_id
 MAX_PHOTO_PIXELS = 80_000_000
 MAX_PHOTO_BYTES = 256 * 1024 * 1024
 MAX_DICTIONARY_MARKERS = 2048
+# Print layout: four AP stickers with a 68 mm box template or two references per A4 landscape sheet.
+AP_MARKER_SIDE_MM = 56.0
+REFERENCE_MARKER_SIDE_MM = 100.0
+TEMPLATE_DIAMETER_MM = 68.0
+TEMPLATE_MARGIN_MM = 1.0
+
+
+def quiet_zone_mm(side_mm: float, marker_size: int = 5) -> float:
+    return max(5.0, float(side_mm) / (int(marker_size) + 2))
+
+
+def template_anchor_offset_mm(side_mm: float, marker_size: int = 5) -> list:
+    """Vector from the marker centre to the drilling centre, marker frame x-right/y-up."""
+    side = _side(side_mm)
+    return [side / 2 + quiet_zone_mm(side, marker_size) + TEMPLATE_MARGIN_MM + TEMPLATE_DIAMETER_MM / 2, 0.0]
 
 
 def _aruco():
@@ -89,7 +104,7 @@ def _side(value: object) -> float:
     return side
 
 
-def _new_marker(config: dict, side_mm: float, surface_id: str, point_id: str = "") -> dict:
+def _new_marker(config: dict, side_mm: float, surface_id: str, point_id: str = "", template: bool = False) -> dict:
     registry = config.setdefault("markers", {})
     aruco_ids = [marker.get("aruco_id") for marker in registry.values()]
     if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in aruco_ids):
@@ -101,20 +116,24 @@ def _new_marker(config: dict, side_mm: float, surface_id: str, point_id: str = "
     marker_id = _next_id(registry, "MARK")
     marker = {
         "id": marker_id, "aruco_id": aruco_id, "surface_id": surface_id,
-        "side_mm": side_mm, "print_version": 1,
+        "side_mm": side_mm, "print_version": 2 if template else 1,
     }
     if point_id:
         marker["point_id"] = point_id
+    if template:
+        marker["template"] = {"diameter_mm": TEMPLATE_DIAMETER_MM}
+        marker["anchor_offset_mm"] = template_anchor_offset_mm(side_mm, config["dictionary"]["marker_size"])
     registry[marker_id] = marker
     return marker
 
 
-def ensure_markers(document: Document, config: dict, point_ids=None, side_mm=80.0) -> dict:
+def ensure_markers(document: Document, config: dict, point_ids=None, side_mm=AP_MARKER_SIDE_MM, template=True) -> dict:
     """Append AP registrations on demand; return the mutated config.
 
     AP IDs do not determine ArUco IDs. Deleted APs retain their registrations;
-    a changed physical side length creates a new registration, not a rewrite.
-    No plan position, installation height or wall suggestion becomes a reference.
+    a changed physical side length or sticker layout creates a new registration,
+    not a rewrite. No plan position, installation height or wall suggestion
+    becomes a reference. Template stickers carry the drilling centre as AP anchor.
     """
     side = _side(side_mm)
     selected = ([point.id for point in document.elements_of(ElecPoint)] if point_ids is None
@@ -124,7 +143,8 @@ def ensure_markers(document: Document, config: dict, point_ids=None, side_mm=80.
     registry = config.setdefault("markers", {})
     for point_id in dict.fromkeys(selected):
         matching = [marker for marker in registry.values()
-                    if marker.get("point_id") == point_id and marker.get("side_mm") == side]
+                    if marker.get("point_id") == point_id and marker.get("side_mm") == side
+                    and bool(marker.get("template")) == bool(template)]
         if matching:
             continue
         surface_id = config.get("assignments", {}).get(point_id, "")
@@ -132,11 +152,11 @@ def ensure_markers(document: Document, config: dict, point_ids=None, side_mm=80.
             surface = config.get("surfaces", {}).get(surface_id)
             if not isinstance(surface, dict) or surface.get("status") != "current":
                 raise ValueError(f"{point_id} is assigned to a missing/stale surface")
-        _new_marker(config, side, surface_id, point_id)
+        _new_marker(config, side, surface_id, point_id, bool(template))
     return config
 
 
-def add_reference_marker(config: dict, surface_id: str, side_mm=120.0) -> dict:
+def add_reference_marker(config: dict, surface_id: str, side_mm=REFERENCE_MARKER_SIDE_MM) -> dict:
     """Return a new marker record; its measured reference must be entered later."""
     side = _side(side_mm)
     surface = config.get("surfaces", {}).get(surface_id)

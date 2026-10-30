@@ -554,9 +554,12 @@ class PdfExportConfigDialog(QDialog):
                     room_id = str(page.get("room_id") or "")
                     count = self._sticker_room_counts.get(room_id, 0)
                     if page.get("documentation_mode", False):
+                        from gui.pdf_ap_stickers import estimate_documentation_pages
+
+                        references = 0
                         if page.get("include_references", True):
-                            count += self._sticker_reference_counts.get(room_id, 0)
-                        enabled += max(1, count)
+                            references = self._sticker_reference_counts.get(room_id, 0)
+                        enabled += estimate_documentation_pages(count, references)
                     else:
                         enabled += max(1, (count + 11) // 12)
                 else:

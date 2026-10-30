@@ -123,8 +123,20 @@ def test_reference_marker_has_no_invented_measured_position(registered):
     config["surfaces"]["SURF-1"] = {"status": "current"}
     marker = add_reference_marker(config, "SURF-1")
     assert marker["surface_id"] == "SURF-1"
-    assert marker["side_mm"] == 120
+    assert marker["side_mm"] == 100
     assert "reference" not in marker
+    assert "template" not in marker and "anchor_offset_mm" not in marker
+
+
+def test_ap_marker_registers_template_anchor(registered):
+    from logic.photo_markers import quiet_zone_mm
+
+    _document, config = registered
+    marker = config["markers"]["MARK-1"]
+    assert marker["side_mm"] == 56
+    assert marker["template"] == {"diameter_mm": 68}
+    assert marker["anchor_offset_mm"] == [28 + quiet_zone_mm(56) + 1 + 34, 0]
+    assert marker["print_version"] == 2
 
 
 def test_read_photo_returns_bgr_and_transposes_exif(tmp_path):
@@ -176,7 +188,8 @@ def test_perspective_detection_to_metric_measurement(registered):
     regions = analyze_photo(photo, config, "PHOTO-1")["regions"]
     assert len(regions) == 1
     points = transform_points([[80, 140], [200, 140]], matrix)
-    assert measurement(regions[0], points)["distance_mm"] == pytest.approx(80 * 120 / 279, abs=1.0)
+    side = config["markers"]["MARK-1"]["side_mm"]
+    assert measurement(regions[0], points)["distance_mm"] == pytest.approx(120 * side / 279, abs=1.0)
     assert not regions[0]["absolute_reference"]
 
 

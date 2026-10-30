@@ -425,7 +425,27 @@ def test_ap_anchor_is_projective_marker_center(photo_window):
     record = window.config["measurements"][measurement_id]
     assert record["value_mm"] == pytest.approx(500)
     assert record["points"][1] == pytest.approx([100, 100])
-    assert record["name"] == "AP-Markermitte"
+    assert record["name"] == "AP-Bezugspunkt"
+
+
+def test_ap_anchor_follows_template_drilling_centre(photo_window):
+    window, document, source = photo_window
+    window.config["markers"]["MARK-1"] = {
+        "id": "MARK-1", "point_id": "AP-1", "surface_id": "SURF-1", "side_mm": 20,
+        "template": {"diameter_mm": 68}, "anchor_offset_mm": [50, 0],
+    }
+    # Marker printed rotated: its local x-axis (TL -> TR) points down in the photo.
+    window.config["photos"]["PHOTO-1"]["detections"] = [{
+        "marker_id": "MARK-1", "corners": [[110, 90], [110, 110], [90, 110], [90, 90]], "warnings": [],
+    }]
+    window.set_region_mask([[0, 0], [399, 0], [399, 299], [0, 299]])
+    measurement_id = window.create_measurement([[100, 100]], "ap", marker_id="MARK-1")
+    record = window.config["measurements"][measurement_id]
+    assert record["points"][1] == pytest.approx([100, 150])
+    assert record["value_mm"] == pytest.approx(500)
+    window.set_reference("MARK-1", 30, 40, 90, True)
+    assert window.config["markers"]["MARK-1"]["reference"]["origin_mm"] == pytest.approx([300, 350])
+    assert window.config["markers"]["MARK-1"]["reference"]["u_input_mm"] == 300
 
 
 def test_analysis_failure_still_imports_documentation(photo_window, monkeypatch):

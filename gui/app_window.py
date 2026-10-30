@@ -5676,7 +5676,7 @@ class AppWindow(QMainWindow):
 
     def _prepare_documentation_export(self, pages: list[dict]) -> dict:
         from gui.pdf_ap_stickers import documentation_sticker_pages, prepare_documentation_stickers
-        from logic.photo_markers import add_reference_marker, ensure_markers
+        from logic.photo_markers import REFERENCE_MARKER_SIDE_MM, add_reference_marker, ensure_markers
         from model.photo_documentation import ensure_surfaces, get_config
 
         selected = [page for page in pages if page.get("type") == "ap_stickers" and page.get("documentation_mode")]
@@ -5695,6 +5695,7 @@ class AppWindow(QMainWindow):
                             and (not page.get("room_id") or page["room_id"] == surface.get("room_id"))
                             for page in selected)
                     and not any(marker.get("surface_id") == surface_id and not marker.get("point_id")
+                                and marker.get("side_mm") == REFERENCE_MARKER_SIDE_MM
                                 for marker in config["markers"].values())):
                 add_reference_marker(config, surface_id)
         for marker in config["markers"].values():

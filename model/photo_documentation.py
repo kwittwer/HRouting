@@ -189,6 +189,14 @@ def validate_config(config: dict) -> list[str]:
             used_ids.add(aruco_id)
         if not positive(marker.get("side_mm")):
             issues.append(f"{marker_id}: side_mm must be positive and finite")
+        if marker.get("anchor_offset_mm") is not None:
+            try:
+                _points_array([marker["anchor_offset_mm"]])
+            except (TypeError, ValueError):
+                issues.append(f"{marker_id}: anchor_offset_mm must be a finite [dx, dy] pair")
+        template = marker.get("template")
+        if template is not None and (not isinstance(template, dict) or not positive(template.get("diameter_mm"))):
+            issues.append(f"{marker_id}: template.diameter_mm must be positive and finite")
         surface_id = marker.get("surface_id", "")
         if not isinstance(surface_id, str) or (surface_id and not known(surface_id, surfaces)):
             issues.append(f"{marker_id}: unknown surface")

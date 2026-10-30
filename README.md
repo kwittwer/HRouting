@@ -176,21 +176,28 @@ Projekt muss zuerst gespeichert werden. Die Verarbeitung erfolgt lokal.
    für APs und zusätzliche Flächenreferenzen. Alternativ im PDF-Export einen
    AP-Aufkleberbogen anlegen und **Messmarker / Fotodokumentation** aktivieren.
    Die Kennungen werden vor der PDF-Ausgabe mit dem Projekt gespeichert.
-   AP-Muster haben 80 mm, zusätzliche Referenzmuster 120 mm schwarze Kantenlänge.
-   Zunächst steht jeweils ein Marker auf einer A4-Seite, mit Beschriftung,
-   Ausrichtung und einer 100-mm-Kontrollstrecke. Die bisherigen 60-mm-Bögen
-   bleiben unverändert verfügbar.
+   AP-Aufkleber sind zugleich **Bohrschablone**: links der ArUco-Marker mit
+   56 mm schwarzer Kantenlänge, rechts daneben die Dosenschablone mit Ø68-mm-
+   Kreis, Ø60-mm-Hilfskreis, Fadenkreuz und Körnerpunkt. Die **Bohrmitte ist der
+   AP-Bezugspunkt**; ihr Abstand zur Markermitte (71 mm) ist im Register
+   gespeichert. Auf eine A4-Querseite passen **vier AP-Aufkleber** (142 × 95 mm)
+   oder zwei Flächenreferenzen (100 mm Marker). Sechs pro Seite sind mit einer
+   echten Ø68-Schablone nicht möglich, ohne den Marker unter eine sinnvoll
+   erkennbare Größe zu verkleinern. Jede Seite trägt eine 100-mm-Kontrollstrecke.
+   Die bisherigen 60-mm-Bögen bleiben unverändert verfügbar.
 3. Bei **100 % / Originalgröße** drucken und die Kontrollstrecke nachmessen.
-   Den Marker flach und unverdeckt auf dieselbe Ebene kleben, die später
-   gemessen werden soll. Bezug zum AP ist die **Markermitte**, nicht ein
-   versetzter Geräte- oder Bohrmittelpunkt. Für große Bildbereiche zusätzliche
-   Referenzen verteilen. Marker nicht über Kanten kleben.
+   Den Aufkleber so kleben, dass die Bohrmitte auf dem Montageort liegt; der
+   Marker bleibt nach dem Bohren der Dose erhalten. Die Ausrichtung ist frei,
+   die Fotoauswertung folgt der erkannten Markerlage. Den Marker flach und
+   unverdeckt auf dieselbe Ebene kleben, die später gemessen werden soll, nicht
+   über Kanten. Für große Bildbereiche zusätzliche Referenzen verteilen.
 4. Für absolute Abstände unter **Gemessene Markerreferenz / FFB** die tatsächlich
-   gemessene Markermitte und Ausrichtung eintragen. An Wänden ist `u` der Abstand
-   ab A und `v` die Höhe über Fertigfußboden. Bei Bezug zum Rohboden wird der
-   erfasste Bodenaufbau abgezogen. Diese Ist-Referenzen werden nicht aus
-   geplanten AP-Höhen erfunden. Ohne eingemessene Referenz sind lokale Strecken
-   möglich, aber keine absoluten FFB- oder Eckabstände.
+   gemessene Lage des **Bezugspunkts** eintragen: bei AP-Aufklebern die Bohrmitte,
+   bei Flächenreferenzen die Markermitte. An Wänden ist `u` der Abstand ab A und
+   `v` die Höhe über Fertigfußboden. Bei Bezug zum Rohboden wird der erfasste
+   Bodenaufbau abgezogen. Diese Ist-Referenzen werden nicht aus geplanten
+   AP-Höhen erfunden. Ohne eingemessene Referenz sind lokale Strecken möglich,
+   aber keine absoluten FFB- oder Eckabstände.
 5. JPG-/JPEG-/PNG-Fotos importieren. Erkannte Marker, APs und zugehörige Flächen
    werden automatisch ausgewertet. Jede im Foto erkannte Ebene bekommt ihre
    eigene Kalibrierung. Unbekannte oder nicht zugeordnete Bilder bleiben als
@@ -199,7 +206,7 @@ Projekt muss zuerst gespeichert werden. Die Verarbeitung erfolgt lokal.
 6. Im Foto eine kalibrierte Fläche auswählen und über **Messbereich: vier
    Eckpunkte** ihren sichtbaren ebenen Bereich abgrenzen. Innerhalb dieses
    Bereichs stehen Strecke, Horizontal-/Vertikalabstand, FFB, Wandursprung A und
-   Abstand zur AP-Markermitte zur Verfügung. Original- und entzerrte Ansicht
+   Abstand zum AP-Bezugspunkt (Bohrmitte bzw. Markermitte) zur Verfügung. Original- und entzerrte Ansicht
    verwenden dieselben Messkoordinaten. Ein unabhängig gemessenes **Kontrollmaß**
    zeigt die Abweichung der Kalibrierung; eine Abweichung bis 20 mm wird als
    geprüft gekennzeichnet, ist aber keine Genauigkeitsgarantie für andere Punkte.

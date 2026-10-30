@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (
 
 from gui.photo_measure_view import PhotoMeasureView
 from logic.photo_geometry import (
-    _contains, _polygon_points, _quad, analyze_photo, measurement, nearest_surface,
-    transform_points,
+    _contains, _polygon_points, _quad, analyze_photo, marker_anchor_px, marker_center_from_anchor,
+    measurement, nearest_surface, transform_points,
 )
 from logic.photo_markers import add_reference_marker, ensure_markers, read_photo
 from model.elements import ElecPoint
@@ -181,11 +181,13 @@ class ReferenceDialog(QDialog):
         self.offset = self._spin(-10000, 10000, " mm")
         self.source = QComboBox()
         self.source.addItems(["Fertigfussboden", "Rohboden"])
-        self.measured = QCheckBox("Tatsaechliche Markermitte und Ausrichtung gemessen")
-        form.addRow("Markermitte u ab A", self.u)
+        self.measured = QCheckBox("Tatsaechliche Lage und Ausrichtung gemessen")
+        self.u_label = QLabel("Bezugspunkt u ab A")
+        form.addRow(self.u_label, self.u)
         surface = window.config["surfaces"][surface_id]
         self.is_wall = surface.get("kind") == "wall"
-        form.addRow("Markermitte v ueber Bezug" if self.is_wall else "Markermitte v ab Ursprung A", self.v)
+        self.v_label = QLabel("Bezugspunkt v ueber Bezug" if self.is_wall else "Bezugspunkt v ab Ursprung A")
+        form.addRow(self.v_label, self.v)
         form.addRow("Hoehenbezug", self.source)
         self.source.setEnabled(self.is_wall)
         form.addRow("Rohboden bis FFB", self.offset)
@@ -226,7 +228,10 @@ class ReferenceDialog(QDialog):
         record = self.window.config.get("markers", {}).get(self.marker.currentData(), {})
         reference = record.get("reference")
         origin = (reference or {}).get("origin_mm", [0, 0])
-        self.u.setValue(origin[0] / 10)
+        anchor = "Bohrmitte" if record.get("template") else "Markermitte"
+        self.u_label.setText(f"{anchor} u ab A")
+        self.v_label.setText(f"{anchor} v ueber Bezug" if self.is_wall else f"{anchor} v ab Ursprung A")
+        self.u.setValue((reference or {}).get("u_input_mm", origin[0]) / 10)
         self.v.setValue((reference or {}).get("v_input_mm", origin[1]) / 10)
         self.rotation.setValue((reference or {}).get("rotation_deg", 0))
         room_id = self.window.config["surfaces"][self.surface_id]["room_id"]
@@ -345,12 +350,12 @@ class PhotoDocumentationWindow(QMainWindow):
         self.mode_choice = QComboBox()
         for label, mode in (("Verschieben", "pan"), ("Strecke", "distance"), ("Horizontal", "horizontal"),
                             ("Vertikal", "vertical"), ("Boden / FFB", "floor"),
-                            ("Wandursprung A", "origin"), ("AP (Markermitte)", "ap")):
+                            ("Wandursprung A", "origin"), ("AP-Bezugspunkt", "ap")):
             self.mode_choice.addItem(label, mode)
         self.mode_choice.currentIndexChanged.connect(self._mode_changed)
         row.addWidget(self.mode_choice)
         self.ap_choice = QComboBox()
-        self.ap_choice.setToolTip("Bezug ist die erkannte Markermitte, nicht eine versetzte Installation")
+        self.ap_choice.setToolTip("Bezug ist die Bohrmitte der Schablone bzw. die Markermitte, nicht eine versetzte Installation")
         self.ap_choice.setMinimumContentsLength(10)
         self.ap_choice.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         row.addWidget(self.ap_choice)
@@ -744,6 +749,7 @@ class PhotoDocumentationWindow(QMainWindow):
 
     def set_reference(self, marker_id, u_cm, v_cm, rotation_deg=0, measured=False,
                       ffb_offset_mm=0, v_source="Fertigfussboden"):
+        """Store a surveyed reference; u/v describe the marker's anchor (drilling centre or centre)."""
         import math
 
         if not all(math.isfinite(float(value)) for value in (u_cm, v_cm, rotation_deg, ffb_offset_mm)):
@@ -758,9 +764,10 @@ class PhotoDocumentationWindow(QMainWindow):
         vertical = float(v_cm) * 10
         if surface.get("kind") == "wall" and v_source == "Rohboden":
             vertical -= offset
-        reference = {"origin_mm": [float(u_cm) * 10, vertical], "rotation_deg": float(rotation_deg),
+        reference = {"origin_mm": marker_center_from_anchor(marker, [float(u_cm) * 10, vertical], rotation_deg),
+                 "rotation_deg": float(rotation_deg),
                  "v_source": v_source if surface.get("kind") == "wall" else "Flaechenursprung",
-                 "v_input_mm": float(v_cm) * 10} if measured else None
+                 "u_input_mm": float(u_cm) * 10, "v_input_mm": float(v_cm) * 10} if measured else None
         changed = marker.get("reference") != reference or old_offset != offset
         if not changed:
             return
@@ -776,7 +783,10 @@ class PhotoDocumentationWindow(QMainWindow):
                 other_reference = other.get("reference")
                 if (other is not marker and other.get("surface_id") in affected and other_reference
                         and other_reference.get("v_source") == "Rohboden"):
-                    other_reference["origin_mm"][1] = other_reference["v_input_mm"] - offset
+                    other_reference["origin_mm"] = marker_center_from_anchor(
+                        other, [other_reference.get("u_input_mm", other_reference["origin_mm"][0]),
+                                other_reference["v_input_mm"] - offset],
+                        other_reference.get("rotation_deg", 0))
         self._stale_surfaces(affected)
         self._commit()
 
@@ -1122,21 +1132,18 @@ class PhotoDocumentationWindow(QMainWindow):
             photo = self.config["photos"][self._photo_id]
             marker = self.config["markers"].get(marker_id, {})
             if not marker.get("point_id") or marker.get("surface_id") != region["surface_id"]:
-                raise ValueError("AP-Markermitte muss zur selben Flaeche gehoeren")
+                raise ValueError("AP-Bezugspunkt muss zur selben Flaeche gehoeren")
             candidates = [value for value in photo.get("detections", []) if value.get("marker_id") == marker_id]
             if len(candidates) != 1 or candidates[0].get("warnings"):
                 raise ValueError("AP-Marker nicht eindeutig erkannt")
-            corners = transform_points(candidates[0]["corners"], region["H"])
-            center = np.mean(corners, axis=0).tolist()
-            inverse = np.linalg.inv(np.asarray(region["H"], dtype=float)).tolist()
-            return [points[0], transform_points([center], inverse)[0]]
+            return [points[0], marker_anchor_px(candidates[0]["corners"], marker)]
         if len(points) != 2:
             raise ValueError("Zwei Bildpunkte erforderlich")
         return points
 
     def create_measurement(self, points, mode="distance", name="", marker_id=""):
         labels = {"distance": "Strecke", "horizontal": "Horizontal", "vertical": "Vertikal",
-                  "floor": "Boden / FFB", "origin": "Wandursprung A", "ap": "AP-Markermitte"}
+                  "floor": "Boden / FFB", "origin": "Wandursprung A", "ap": "AP-Bezugspunkt"}
         if mode not in labels:
             raise ValueError("Unbekannte Messart")
         error = self.region_error()

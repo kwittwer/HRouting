@@ -237,6 +237,37 @@ def _marker_surface_corners(marker: dict, absolute: bool) -> list:
                                          (half_side, -half_side), (-half_side, -half_side))]
 
 
+def anchor_offset_mm(marker: dict) -> list:
+    """Marker-frame vector (x right, y up) from the marker centre to its AP anchor."""
+    offset = marker.get("anchor_offset_mm")
+    if offset is None:
+        return [0.0, 0.0]
+    return _points_array([offset])[0]
+
+
+def marker_center_from_anchor(marker: dict, anchor_mm: list, rotation_deg: float) -> list:
+    """Surface position of the marker centre when the anchor was surveyed instead."""
+    anchor = _points_array([anchor_mm])[0]
+    angle = math.radians(float(rotation_deg))
+    if not math.isfinite(angle):
+        raise ValueError("rotation_deg must be finite")
+    offset = anchor_offset_mm(marker)
+    cosine, sine = math.cos(angle), math.sin(angle)
+    return [anchor[0] - (cosine * offset[0] - sine * offset[1]),
+            anchor[1] - (sine * offset[0] + cosine * offset[1])]
+
+
+def marker_anchor_px(corners: object, marker: dict) -> list:
+    """Canonical photo pixel of the marker's AP anchor, projected through its own square."""
+    import cv2
+    import numpy as np
+
+    quad = _quad(corners)
+    local = _marker_surface_corners(marker, absolute=False)
+    matrix = _matrix(cv2.getPerspectiveTransform(np.float32(local), np.float32(quad)))
+    return transform_points([anchor_offset_mm(marker)], matrix)[0]
+
+
 def _quad(corners: object) -> list:
     polygon = _polygon_points(corners)
     if len(polygon) != 4:

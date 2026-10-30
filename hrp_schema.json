@@ -103,6 +103,15 @@
         "surface_id": { "type": "string", "pattern": "^(SURF-[1-9][0-9]*)?$" },
         "side_mm": { "$ref": "#/$defs/PhotoPositiveNumber" },
         "print_version": { "type": "integer", "minimum": 1 },
+        "anchor_offset_mm": { "$ref": "#/$defs/PhotoPoint" },
+        "template": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["diameter_mm"],
+          "properties": {
+            "diameter_mm": { "$ref": "#/$defs/PhotoPositiveNumber" }
+          }
+        },
         "reference": {
           "type": "object",
           "additionalProperties": true,
