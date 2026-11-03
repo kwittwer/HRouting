@@ -446,8 +446,12 @@ class ProjectOverviewDock(QDockWidget):
     def _build_elec_room_table(self) -> QTableWidget:
         tbl = QTableWidget(0, 6)
         tbl.setHorizontalHeaderLabels(["Raum", "AP", "AP-Typ", "Höhe über FB [m]", "Kabel", "Verlegeort"])
-        # Grouped rows should keep a deterministic room -> AP order.
         tbl.setSortingEnabled(False)
+        header = tbl.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        header.sortIndicatorChanged.connect(self._on_elec_room_sort_changed)
         tbl.setEditTriggers(
             QAbstractItemView.DoubleClicked
             | QAbstractItemView.EditKeyPressed
@@ -835,15 +839,29 @@ class ProjectOverviewDock(QDockWidget):
         self._updating_electro_tables = True
         rows: list[dict] = []
         self._elec_room_row_ap_ids = {}
+        header = self._elec_room_table.horizontalHeader()
+        sort_column = header.sortIndicatorSection()
+        descending = header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+
+        def ap_sort_key(ap: dict):
+            if sort_column == 3:
+                return float(ap.get("height_from_floor_cm") or 0.0)
+            if sort_column == 4:
+                return self._format_cable_refs(ap.get("cables", []) or []).casefold()
+            key = {1: "name", 2: "ap_type", 5: "position"}.get(sort_column, "name")
+            return str(ap.get(key) or "").casefold()
+
         sorted_rooms = sorted(
             rooms or [],
             key=lambda room: str(room.get("room_name") or "Ohne Raum").lower(),
+            reverse=descending if sort_column == 0 else False,
         )
         for room in sorted_rooms:
             room_name = str(room.get("room_name") or "Ohne Raum")
             aps = sorted(
                 room.get("aps", []) or [],
-                key=lambda ap: str(ap.get("name") or ap.get("point_id") or "").lower(),
+                key=ap_sort_key,
+                reverse=descending if sort_column != 0 else False,
             )
             if self._elec_room_grouped:
                 rows.append(
@@ -904,6 +922,13 @@ class ProjectOverviewDock(QDockWidget):
                         "is_group": False,
                     }
                 )
+
+        if not self._elec_room_grouped and sort_column != 0:
+            ap_by_id = {
+                str(ap.get("point_id") or ""): ap
+                for room in rooms or [] for ap in room.get("aps", [])
+            }
+            rows.sort(key=lambda row: ap_sort_key(ap_by_id.get(row["point_id"], {})), reverse=descending)
 
         def _style_group_row(row_index: int) -> None:
             for col in range(tbl.columnCount()):
@@ -968,7 +993,7 @@ class ProjectOverviewDock(QDockWidget):
             cable_item.setToolTip(str(row.get("full_cables", "")))
             tbl.setItem(r, 4, cable_item)
             ap_data = ap_locations.get(point_id, {})
-            location_item = _str_item(ap_data.get("laying_location_text", "–") if point_id else "")
+            location_item = _str_item((ap_data.get("position") or "–") if point_id else "")
             self._set_item_editable(location_item, False)
             detail_text = "\n".join(
                 f"{cable['name']} [{cable['id']}]: {cable['laying_location_text']}"
@@ -1076,6 +1101,10 @@ class ProjectOverviewDock(QDockWidget):
         self._updating_electro_tables = False
         tbl.setSortingEnabled(True)
         tbl.resizeColumnsToContents()
+
+    def _on_elec_room_sort_changed(self, _column: int, _order: Qt.SortOrder) -> None:
+        electro = getattr(self, "_last_electro_data", {})
+        self._fill_elec_room_table(electro.get("rooms", []))
 
     def _on_elec_room_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating_electro_tables or item is None:

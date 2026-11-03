@@ -455,6 +455,8 @@ class GenericMultiElementEditor(QWidget):
                 idx = 0
             combo.setCurrentIndex(idx)
             combo.blockSignals(False)
+            if combo.isEditable():
+                widget.update_silently(self._MIXED_CHOICE)
             return
         if isinstance(widget, NumberFieldWidget):
             line_edit = widget._spin.lineEdit()

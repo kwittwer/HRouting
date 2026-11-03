@@ -46,8 +46,8 @@ def _document():
         },
         "params": {
             "floorplans": {"grundriss-1": {"name": "EG"}},
-            "elec_points": {"AP-1": {"point_id": "AP-1", "name": "UV"},
-                            "AP-2": {"point_id": "AP-2", "name": "Dose"}},
+            "elec_points": {"AP-1": {"point_id": "AP-1", "name": "UV", "position": "Wand"},
+                            "AP-2": {"point_id": "AP-2", "name": "Dose", "position": "Decke"}},
             "elec_cables": {
                 "EK-1": {"cable_id": "EK-1", "floor_plan_id": "grundriss-1", "name": "Same", "type": "5x1,5",
                          "laying_location": {"locations": ["floor"], "custom_enabled": False,
@@ -73,10 +73,12 @@ def test_overview_model_union_does_not_duplicate_length():
     assert all("HIDDEN" not in row["laying_location_text"] for row in data["cables"])
 
 
-def test_overview_tables_locations_and_refresh(app):
+@pytest.mark.parametrize("grouped", [True, False])
+def test_overview_tables_locations_and_refresh(app, grouped):
     doc = _document()
     dock = ProjectOverviewDock()
     try:
+        dock._elec_room_grouped_checkbox.setChecked(grouped)
         dock.set_document(doc)
         table = dock._elec_cable_table
         assert table.horizontalHeaderItem(5).text() == "Verlegeort"
@@ -92,10 +94,21 @@ def test_overview_tables_locations_and_refresh(app):
         assert materials.item(row, 2).text() == 'Auf dem Boden, In der Wand, In der Decke, Kanal; "Süd"'
         rooms = dock._elec_room_table
         for r in range(rooms.rowCount()):
-            if dock._elec_room_row_ap_ids.get(r):
+            point_id = dock._elec_room_row_ap_ids.get(r)
+            if point_id:
+                location_item = rooms.item(r, 5)
+                assert location_item is not None
+                assert location_item.text() == doc.elements["elec_points"][point_id].data["position"]
                 assert "EK-1" in rooms.item(r, 5).toolTip()
                 assert "EK-2" in rooms.item(r, 5).toolTip()
                 assert "Verlegeort" == rooms.horizontalHeaderItem(5).text()
+        doc.elements["elec_points"]["AP-2"].data["position"] = "Boden"
+        doc.element_changed.emit("AP-2")
+        dock.refresh_now()
+        ap_row = next(row for row, point_id in dock._elec_room_row_ap_ids.items() if point_id == "AP-2")
+        location_item = rooms.item(ap_row, 5)
+        assert location_item is not None
+        assert location_item.text() == "Boden"
         doc.get("EK-1").laying_location = {}
         doc.element_changed.emit("EK-1")
         dock.refresh_now()
@@ -150,6 +163,92 @@ def test_cable_style_editors_keep_identity_after_sorting(app):
             ("EK-2", "line_style", "dashdot"),
         ]
         assert len(undo_events) == 3
+    finally:
+        dock.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("grouped", [True, False])
+@pytest.mark.parametrize("column,flat_ids,group_ids", [
+    (0, ["AP-3", "AP-2", "AP-1"], ["AP-3", "AP-2", "AP-1"]),
+    (1, ["AP-2", "AP-3", "AP-1"], ["AP-3", "AP-2", "AP-1"]),
+    (2, ["AP-2", "AP-1", "AP-3"], ["AP-3", "AP-2", "AP-1"]),
+    (3, ["AP-1", "AP-3", "AP-2"], ["AP-3", "AP-1", "AP-2"]),
+    (4, ["AP-2", "AP-3", "AP-1"], ["AP-3", "AP-2", "AP-1"]),
+    (5, ["AP-2", "AP-3", "AP-1"], ["AP-3", "AP-2", "AP-1"]),
+])
+def test_room_columns_sort_and_keep_edit_identity(app, grouped, column, flat_ids, group_ids):
+    dock = ProjectOverviewDock()
+    rooms = [
+        {"room_name": "B", "aps": [
+            {"point_id": "AP-1", "name": "Zulu", "ap_type": "Steckdose",
+             "height_from_floor_cm": 20, "cables": ["Zulu"], "position": "Wand"},
+            {"point_id": "AP-2", "name": "Alpha", "ap_type": "Licht",
+             "height_from_floor_cm": 300, "cables": ["Alpha"], "position": "Boden"},
+        ]},
+        {"room_name": "A", "aps": [
+            {"point_id": "AP-3", "name": "Mitte", "ap_type": "Taster",
+             "height_from_floor_cm": 100, "cables": ["Mitte"], "position": "Decke"},
+        ]},
+    ]
+    changes = []
+    dock.element_field_changed.connect(lambda *args: changes.append(args))
+    try:
+        dock._fill_electro({"rooms": rooms})
+        dock._elec_room_grouped_checkbox.setChecked(grouped)
+        dock._fill_elec_room_table(rooms)
+        table = dock._elec_room_table
+        header = table.horizontalHeader()
+        expected = group_ids if grouped else flat_ids
+        for order in [Qt.SortOrder.AscendingOrder, Qt.SortOrder.DescendingOrder]:
+            header.setSortIndicator(column, order)
+            actual = [point_id for point_id in dock._elec_room_row_ap_ids.values() if point_id]
+            if order == Qt.SortOrder.AscendingOrder:
+                assert actual == expected
+            elif grouped and column != 0:
+                assert actual == [expected[0], *reversed(expected[1:])]
+            elif column == 0:
+                assert actual == ["AP-2", "AP-1", "AP-3"]
+            else:
+                assert actual == list(reversed(expected))
+            dock._fill_elec_room_table(rooms)
+            assert [point_id for point_id in dock._elec_room_row_ap_ids.values() if point_id] == actual
+        assert changes == []
+        row = next(row for row, point_id in dock._elec_room_row_ap_ids.items() if point_id == "AP-1")
+        name_item = table.item(row, 1)
+        assert name_item is not None
+        name_item.setText("Renamed")
+        assert changes == [("AP-1", "name", "Renamed")]
+        changes.clear()
+        combo = table.cellWidget(row, 2)
+        combo.setCurrentText("Licht")
+        assert changes == [("AP-1", "builtin_symbol", "Licht")]
+    finally:
+        dock.deleteLater()
+        app.processEvents()
+
+
+def test_room_header_click_toggles_sort_order(app):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    dock = ProjectOverviewDock()
+    try:
+        dock.set_document(_document())
+        dock._elec_room_grouped_checkbox.setChecked(False)
+        dock.resize(1200, 900)
+        dock.show()
+        dock._tabs.setCurrentIndex(2)
+        app.processEvents()
+        header = dock._elec_room_table.horizontalHeader()
+        position = QPoint(header.sectionViewportPosition(1) + header.sectionSize(1) // 2, header.height() // 2)
+        QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        assert header.sortIndicatorSection() == 1
+        first_order = header.sortIndicatorOrder()
+        first_ids = list(dock._elec_room_row_ap_ids.values())
+        QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        assert header.sortIndicatorOrder() != first_order
+        assert list(dock._elec_room_row_ap_ids.values()) == list(reversed(first_ids))
     finally:
         dock.deleteLater()
         app.processEvents()

@@ -483,6 +483,7 @@ def test_properties_dock_shows_shared_fields_for_mixed_selection(app, document):
         assert "builtin_symbol" not in widget_keys
         assert "ap_type" not in widget_keys
         assert "width" not in widget_keys
+        assert "position" not in widget_keys
     finally:
         dock.deleteLater()
 
@@ -515,6 +516,41 @@ def test_properties_dock_includes_height_from_floor_for_ap_multi_edit(app, docum
         editor._on_field_changed("height_from_floor", 0.5)
         assert float(document.elements["elec_points"]["AP-1"].data.get("height_from_floor", 0.0)) == 500.0
         assert float(document.elements["elec_points"]["AP-2"].data.get("height_from_floor", 0.0)) == 500.0
+    finally:
+        dock.deleteLater()
+
+
+@pytest.mark.parametrize("position", ["Wand", "Decke", "Boden", "Installationsschacht"])
+def test_properties_dock_ap_multi_edit_position(app, document, position):
+    from gui.docks.properties_dock import PropertiesDock
+
+    document.get("AP-1").position = "Wand"
+    document.get("AP-2").position = "Decke"
+    before = document.to_dict()
+    dock = PropertiesDock()
+    changes = []
+    undo_positions = []
+    dock.batch_field_changed.connect(lambda *args: changes.append(args))
+    dock.pre_change.connect(
+        lambda: undo_positions.append([document.get(point_id).position for point_id in ["AP-1", "AP-2"]])
+    )
+    try:
+        dock.set_document(document)
+        dock.show_elements(["AP-1", "AP-2"])
+        editor = dock._multi_editor
+        assert editor is not None
+        widget = editor._widgets["position"]
+        assert widget._combo.isEditable()
+        assert widget._combo.currentText() == editor._MIXED_CHOICE
+        assert document.to_dict() == before
+        widget._combo.setCurrentText(position)
+        widget._combo.lineEdit().editingFinished.emit()
+        assert [document.get(point_id).position for point_id in ["AP-1", "AP-2"]] == [position, position]
+        assert changes == [(["AP-1", "AP-2"], "position", position)]
+        assert undo_positions == [["Wand", "Decke"]]
+        assert widget._combo.currentText() == position
+        saved = document.to_dict()["params"]["elec_points"]
+        assert saved["AP-1"]["position"] == saved["AP-2"]["position"] == position
     finally:
         dock.deleteLater()
 
