@@ -151,12 +151,13 @@ class ProjectOverviewDock(QDockWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(250)
-        self._refresh_timer.timeout.connect(self._do_refresh)
+        self._refresh_timer.timeout.connect(self._on_refresh_timeout)
 
         # ── Tab-Widget ──────────────────────────────────────────────
         self._tabs = QTabWidget()
         self.setWidget(self._tabs)
         self._tab_names: list[str] = []
+        self._present_tabs: set[str] = {"Allgemein", "Heizung", "Elektro"}
         self._last_electro_data: dict = {}
         self._updating_electro_tables = False
         self._elec_room_row_ap_ids: dict[int, str] = {}
@@ -316,6 +317,7 @@ class ProjectOverviewDock(QDockWidget):
             label = self._tabs.tabText(idx)
             if label not in visible:
                 self._tabs.removeTab(idx)
+        self._present_tabs = {self._tabs.tabText(idx) for idx in range(self._tabs.count())}
         if self._tabs.count() <= 1:
             self._tabs.tabBar().hide()
 
@@ -556,6 +558,18 @@ class ProjectOverviewDock(QDockWidget):
     def _schedule_refresh(self, *_args) -> None:
         self._refresh_timer.start()
 
+    def _on_refresh_timeout(self) -> None:
+        if self.isHidden():
+            # Unsichtbar: Neuaufbau bis zum Einblenden aufschieben.
+            return
+        self._do_refresh()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt-API
+        super().showEvent(event)
+        # Aufgelaufene Änderungen nachholen; bei unverändertem Dokument
+        # bricht _do_refresh am Revisionscheck sofort ab.
+        self.refresh_now()
+
     def _electro_edit_in_progress(self) -> bool:
         """True, wenn der Nutzer gerade in einer Elektro-Tabelle editiert."""
         focus = QApplication.focusWidget()
@@ -595,14 +609,17 @@ class ProjectOverviewDock(QDockWidget):
 
         self._last_document_revision = current_revision
 
-        self._fill_general(data.get("general", {}))
-        heating_rows = data.get("heating_rows", [])
-        t_supply = data.get("t_supply", 35.0)
-        t_return = data.get("t_return", 30.0)
-        self._fill_hk_table(heating_rows, t_supply, t_return)
-        self._fill_hkv_table(data.get("hkv_rows", []))
-        self._fill_materials(data.get("materials", {}))
-        self._fill_electro(data.get("electro", {}))
+        if "Allgemein" in self._present_tabs:
+            self._fill_general(data.get("general", {}))
+        if "Heizung" in self._present_tabs:
+            heating_rows = data.get("heating_rows", [])
+            t_supply = data.get("t_supply", 35.0)
+            t_return = data.get("t_return", 30.0)
+            self._fill_hk_table(heating_rows, t_supply, t_return)
+            self._fill_hkv_table(data.get("hkv_rows", []))
+            self._fill_materials(data.get("materials", {}))
+        if "Elektro" in self._present_tabs:
+            self._fill_electro(data.get("electro", {}))
 
     def _clear_all(self) -> None:
         self._hk_table.setRowCount(0)
@@ -779,9 +796,12 @@ class ProjectOverviewDock(QDockWidget):
     def _fill_electro(self, electro: dict) -> None:
         self._last_electro_data = electro if isinstance(electro, dict) else {}
         materials = electro.get("materials", {}) if isinstance(electro, dict) else {}
-        self._fill_elec_material_tables(materials)
-        self._fill_elec_room_table(electro.get("rooms", []))
-        self._fill_elec_cable_table(electro.get("cables", []))
+        if "materials" in self._visible_electro_sections:
+            self._fill_elec_material_tables(materials)
+        if "rooms" in self._visible_electro_sections:
+            self._fill_elec_room_table(electro.get("rooms", []))
+        if "cables" in self._visible_electro_sections:
+            self._fill_elec_cable_table(electro.get("cables", []))
 
     def _on_elec_room_grouped_toggled(self, checked: bool) -> None:
         self._elec_room_grouped = bool(checked)

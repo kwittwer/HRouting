@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QSettings  # noqa: E402
+from PySide6.QtCore import QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from gui import app_window, layout_store  # noqa: E402
@@ -139,6 +139,72 @@ def test_unchanged_style_propagation_emits_no_element_signals(window):
     assert changed == []
     assert seen == []
     assert len(cables) == CABLE_COUNT
+
+
+def test_restricted_overview_docks_fill_only_their_own_tables(window):
+    rooms_dock = window.overview_electro_rooms
+    cables_dock = window.overview_electro_cables
+    heating_dock = window.overview_heating
+
+    assert rooms_dock._elec_room_table.rowCount() > 0
+    assert rooms_dock._elec_cable_table.rowCount() == 0
+    assert rooms_dock._elec_cable_mat_table.rowCount() == 0
+    assert rooms_dock._hk_table.rowCount() == 0
+
+    assert cables_dock._elec_cable_table.rowCount() == CABLE_COUNT
+    assert cables_dock._elec_room_table.rowCount() == 0
+
+    assert heating_dock._elec_cable_table.rowCount() == 0
+    assert heating_dock._elec_room_table.rowCount() == 0
+
+
+def test_hidden_overview_dock_skips_timer_refresh_and_catches_up_on_show(window, monkeypatch):
+    dock = window.overview_electro_cables
+    dock.hide()
+    assert dock.isHidden()
+
+    fill = Mock(wraps=dock._fill_elec_cable_table)
+    monkeypatch.setattr(dock, "_fill_elec_cable_table", fill)
+    window._document.elements["elec_cables"]["EK-1"].data["type"] = "5x2,5"
+    window._document.element_changed.emit("EK-1")
+    assert dock._refresh_timer.isActive()
+    dock._refresh_timer.stop()
+    dock._on_refresh_timeout()
+    fill.assert_not_called()
+
+    dock.show()
+    fill.assert_called_once()
+    row = next(index for index in range(dock._elec_cable_table.rowCount())
+               if dock._elec_cable_table.item(index, 0).data(Qt.ItemDataRole.UserRole) == "EK-1")
+    assert dock._elec_cable_editors["EK-1"][1].currentText() == "5x2,5"
+    assert row >= 0
+
+    # Erneutes Einblenden ohne Dokumentänderung bleibt ein No-Op.
+    dock.hide()
+    dock.show()
+    fill.assert_called_once()
+
+
+def test_visible_schema_consumers_refresh_after_event_loop_not_in_handler(window, monkeypatch):
+    window._show_topology_dock()
+    assert not window.topology.isHidden()
+
+    build = Mock(wraps=window._build_schema_data)
+    monkeypatch.setattr(window, "_build_schema_data", build)
+    window._document.elements["elec_cables"]["EK-1"].data["type"] = "5x2,5"
+    window._on_property_changed("EK-1", "type", "5x2,5")
+
+    # Der Eingabe-Handler selbst baut keine Schemadaten auf.
+    build.assert_not_called()
+    assert window._schema_refresh_timer.isActive()
+    assert not window._schema_refresh_pending
+
+    QApplication.processEvents()
+    assert build.call_count >= 1
+    assert not window._schema_refresh_timer.isActive()
+    edge = next(e for e in window.topology._cable_edges if e.cable_id == "EK-1")
+    assert edge.cable_type == "5x2,5"
+
 
 
 @pytest.mark.parametrize("key,value,column", [

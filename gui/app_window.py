@@ -309,6 +309,10 @@ class AppWindow(QMainWindow):
         self._canvas_refresh_timer.setSingleShot(True)
         self._canvas_refresh_timer.timeout.connect(self._flush_pending_canvas_refresh)
         self._schema_refresh_pending = False
+        self._schema_refresh_timer = QTimer(self)
+        self._schema_refresh_timer.setSingleShot(True)
+        self._schema_refresh_timer.setInterval(0)
+        self._schema_refresh_timer.timeout.connect(self._refresh_schema_windows)
         self._schema_room_map_cache: tuple[int, dict[str, str]] | None = None
         self._undo_action: QAction | None = None
         self._redo_action: QAction | None = None
@@ -869,7 +873,7 @@ class AppWindow(QMainWindow):
         if key in {"builtin_symbol", "sensor_type", "position", "height_from_floor", "sensor_range_mm"}:
             self.properties.refresh_current()
         self.canvas.update()
-        self._refresh_schema_windows()
+        self._schedule_schema_refresh()
         self._mark_dirty()
 
     def _on_overview_field_changed(self, element_id: str, key: str, value) -> None:
@@ -969,7 +973,7 @@ class AppWindow(QMainWindow):
                         continue
                     self._document.element_changed.emit(element_id)
                 self.canvas.update()
-                self._refresh_schema_windows()
+                self._schedule_schema_refresh()
                 self._mark_dirty()
                 return
 
@@ -993,7 +997,7 @@ class AppWindow(QMainWindow):
             if refresh_navigator:
                 self.navigator.set_document(self._document)
             self.canvas.update()
-            self._refresh_schema_windows()
+            self._schedule_schema_refresh()
             self._mark_dirty()
 
     def _connected_cable_ids_for_ap(self, ap_id: str) -> list[str]:
@@ -5646,10 +5650,12 @@ class AppWindow(QMainWindow):
         self._mark_dirty()
 
     def _export_photo_markers(self) -> None:
+        """Ad-hoc sticker export; the project's PDF report configuration stays untouched."""
         self._continue_export_pdf(
             [{"id": "photo-markers", "type": "ap_stickers", "title": "Dokumentationsaufkleber",
-              "enabled": True, "documentation_mode": True, "include_references": True}],
+              "enabled": True, "documentation_mode": True, "include_references": False}],
             self._pdf_export_meta,
+            persist_config=False,
         )
 
     def _retain_issued_photo_markers(self, snapshot: dict) -> dict:
@@ -5734,7 +5740,16 @@ class AppWindow(QMainWindow):
         if visible and self._schema_refresh_pending:
             self._refresh_schema_windows()
 
+    def _schedule_schema_refresh(self) -> None:
+        """Bündelt Schema-Neuaufbauten außerhalb des Eingabe-Handlers."""
+        if not self._schema_consumers_visible():
+            # Billiger Synchronpfad: merkt nur den ausstehenden Neuaufbau vor.
+            self._schema_refresh_pending = True
+            return
+        self._schema_refresh_timer.start()
+
     def _refresh_schema_windows(self) -> None:
+        self._schema_refresh_timer.stop()
         if not self._schema_consumers_visible():
             # Niemand zeigt die Daten an - Neuaufbau bis zum Einblenden aufschieben.
             self._schema_refresh_pending = True
@@ -9140,6 +9155,7 @@ class AppWindow(QMainWindow):
         *,
         output_path: str | None = None,
         show_progress: bool = True,
+        persist_config: bool = True,
     ) -> dict:
         if self._flush_live_editor_state() is False:
             return {"status": "error", "code": "INVALID_EDITOR_INPUT"}
@@ -9287,7 +9303,7 @@ class AppWindow(QMainWindow):
         next_pages = copy.deepcopy(pages)
         next_meta = self._normalize_pdf_export_meta(export_meta, pages)
         next_meta["page_count"] = str(int(getattr(self, "_pdf_footer_page_no", len(enabled_pages) + 1)))
-        if next_pages != self._pdf_export_pages or next_meta != self._pdf_export_meta:
+        if persist_config and (next_pages != self._pdf_export_pages or next_meta != self._pdf_export_meta):
             self._sync_canvas_to_document()
             self._push_undo()
             self._pdf_export_pages = next_pages

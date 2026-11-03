@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 from gui.app_window import AppWindow
 from model.document import Document
 from model.photo_documentation import default_config
+from storage.hrp_io import load_document
 
 
 @pytest.fixture
@@ -91,6 +92,26 @@ def test_documentation_export_registered_saved_and_detectable(window, tmp_path):
     retained = window._document.settings["photo_documentation"]
     assert retained["markers"]["MARK-1"]["issued"]
     assert retained["dictionary"] == saved["dictionary"]
+
+
+def test_marker_export_keeps_project_pdf_configuration(window, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QFileDialog
+
+    window._set_document(Document.from_dict({
+        "canvas": {"elec_points": {"AP-1": [10, 10]}},
+        "params": {"elec_points": {"AP-1": {"name": "Socket"}}},
+    }))
+    configured = window._normalize_pdf_export_pages([
+        {"id": "plan", "type": "plan", "title": "Mein Plan", "enabled": True},
+        {"id": "lengths", "type": "lengths", "title": "Längen", "enabled": False},
+    ])
+    window._pdf_export_pages = deepcopy(configured)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(tmp_path / "markers.pdf"), ""))
+    window._open_photo_documentation_window()
+    window._export_photo_markers()
+    assert (tmp_path / "markers.pdf").exists()
+    assert window._pdf_export_pages == configured
+    assert load_document(window._project_path).pdf_export_pages == configured
 
 
 def test_save_as_cancels_import_before_project_path_changes(window, monkeypatch, tmp_path):
